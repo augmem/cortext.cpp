@@ -6,11 +6,18 @@
 #include <any>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <map>
+#include <sstream>
+#include <string>
 
 namespace cortext::operations::constructive_recall
 {
+
+template <typename Executor>
+std::optional<ReconstructionRecord>
+LoadLatestReconstructionImpl (Executor &executor, long long memory_id);
 
 namespace
 {
@@ -36,6 +43,120 @@ EnvFlag (const char *name)
   return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
+bool
+CurrentSurfaceWritesDisabled ()
+{
+  return EnvFlag ("CORTEXT_DISABLE_CURRENT_MEMORY_SURFACE_WRITES");
+}
+
+std::optional<int>
+EnvInt (const char *name)
+{
+  const char *value = std::getenv (name);
+  if (!value || *value == '\0')
+    {
+      return std::nullopt;
+    }
+  char *end = nullptr;
+  const long parsed = std::strtol (value, &end, 10);
+  if (end == value)
+    {
+      return std::nullopt;
+    }
+  return static_cast<int> (parsed);
+}
+
+std::optional<long long>
+EnvInt64 (const char *name)
+{
+  const char *value = std::getenv (name);
+  if (!value || *value == '\0')
+    {
+      return std::nullopt;
+    }
+  char *end = nullptr;
+  const long long parsed = std::strtoll (value, &end, 10);
+  if (end == value)
+    {
+      return std::nullopt;
+    }
+  return parsed;
+}
+
+long long
+AnyToInt64 (const std::any &value)
+{
+  if (!value.has_value ())
+    {
+      return 0;
+    }
+  if (value.type () == typeid (long long))
+    {
+      return std::any_cast<long long> (value);
+    }
+  if (value.type () == typeid (int))
+    {
+      return static_cast<long long> (std::any_cast<int> (value));
+    }
+  return 0;
+}
+
+int
+ResolveHistoryLimit (ReconstructionUpdatePolicy policy)
+{
+  if (const auto env = EnvInt ("CORTEXT_RECONSTRUCTION_HISTORY_LIMIT"))
+    {
+      if (*env > 0)
+        {
+          return *env;
+        }
+    }
+  return policy.history_limit;
+}
+
+int
+ResolvePruneBatchLimit (ReconstructionUpdatePolicy policy,
+                        int history_limit)
+{
+  if (const auto env = EnvInt ("CORTEXT_RECONSTRUCTION_PRUNE_BATCH_LIMIT"))
+    {
+      if (*env > 0)
+        {
+          return *env;
+        }
+    }
+  if (policy.prune_batch_limit > 0)
+    {
+      return policy.prune_batch_limit;
+    }
+  return history_limit;
+}
+
+long long
+ResolveMinUpdateIntervalMs (ReconstructionUpdatePolicy policy)
+{
+  if (const auto env = EnvInt64 ("CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS"))
+    {
+      return *env;
+    }
+  return policy.min_update_interval_ms;
+}
+
+std::string
+Placeholders (size_t count)
+{
+  std::string out;
+  for (size_t i = 0; i < count; ++i)
+    {
+      if (i > 0)
+        {
+          out += ",";
+        }
+      out += "?";
+    }
+  return out;
+}
+
 std::vector<float>
 ToFloatVector (const Eigen::VectorXf &v)
 {
@@ -46,6 +167,15 @@ ToFloatVector (const Eigen::VectorXf &v)
       out[static_cast<size_t> (i)] = v[i];
     }
   return out;
+}
+
+double
+ElapsedMs (std::chrono::steady_clock::time_point start,
+           std::chrono::steady_clock::time_point end)
+{
+  return std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (
+             end - start)
+      .count ();
 }
 
 long long
@@ -72,6 +202,158 @@ ExtractInsertedId (const std::vector<std::map<std::string, std::any>> &rows)
 }
 
 template <typename Executor>
+bool
+IsCurrentSurfaceMemoryKind (Executor &executor, long long memory_id)
+{
+  auto rows = Exec (executor, "SELECT kind FROM memories WHERE memory_id = ?",
+                    { memory_id });
+  if (rows.empty ())
+    {
+      return false;
+    }
+  auto it = rows[0].find ("kind");
+  if (it == rows[0].end () || !it->second.has_value ()
+      || it->second.type () != typeid (std::string))
+    {
+      return false;
+    }
+  const auto kind = std::any_cast<std::string> (it->second);
+  return kind != "WORKING" && kind != "LABEL";
+}
+
+template <typename Executor>
+bool
+ShouldSkipReconstructionUpdateImpl (Executor &executor, long long memory_id,
+                                    long long created_at,
+                                    std::string_view trigger,
+                                    ReconstructionUpdatePolicy policy)
+{
+  if (memory_id <= 0 || trigger == "initial")
+    {
+      return false;
+    }
+  const long long min_interval_ms = ResolveMinUpdateIntervalMs (policy);
+  if (min_interval_ms <= 0)
+    {
+      return false;
+    }
+
+  long long latest_created_at = 0;
+  auto current_rows = Exec (
+      executor,
+      "SELECT created_at FROM current_memory_embeddings WHERE memory_id = ?",
+      { memory_id });
+  if (!current_rows.empty ())
+    {
+      const auto it = current_rows[0].find ("created_at");
+      if (it != current_rows[0].end ())
+        {
+          latest_created_at = AnyToInt64 (it->second);
+        }
+    }
+  const auto latest = LoadLatestReconstructionImpl (executor, memory_id);
+  if (latest.has_value ())
+    {
+      latest_created_at = std::max (latest_created_at, latest->created_at);
+    }
+  if (latest_created_at <= 0 || created_at <= 0)
+    {
+      return false;
+    }
+  if (created_at <= latest_created_at)
+    {
+      return true;
+    }
+  return (created_at - latest_created_at) < min_interval_ms;
+}
+
+template <typename Executor>
+void
+PruneReconstructionHistory (Executor &executor, long long memory_id,
+                            ReconstructionUpdatePolicy policy)
+{
+  const int history_limit = ResolveHistoryLimit (policy);
+  if (memory_id <= 0 || history_limit <= 0)
+    {
+      return;
+    }
+  const int batch_limit = std::max (
+      0, ResolvePruneBatchLimit (policy, history_limit));
+  if (batch_limit <= 0)
+    {
+      return;
+    }
+
+  auto rows = Exec (
+      executor,
+      "SELECT reconstruction_id, embedding_id "
+      "FROM memory_reconstructions "
+      "WHERE memory_id = ? "
+      "ORDER BY reconstruction_id DESC "
+      "LIMIT ? OFFSET ?",
+      { memory_id, static_cast<long long> (batch_limit),
+        static_cast<long long> (history_limit) });
+  if (rows.empty ())
+    {
+      return;
+    }
+
+  std::vector<std::any> reconstruction_ids;
+  std::vector<std::any> embedding_ids;
+  reconstruction_ids.reserve (rows.size ());
+  embedding_ids.reserve (rows.size ());
+  std::vector<long long> seen_embeddings;
+  seen_embeddings.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      const long long reconstruction_id = AnyToInt64 (
+          row.at ("reconstruction_id"));
+      const long long embedding_id = AnyToInt64 (row.at ("embedding_id"));
+      if (reconstruction_id > 0)
+        {
+          reconstruction_ids.push_back (reconstruction_id);
+        }
+      if (embedding_id > 0
+          && std::find (seen_embeddings.begin (), seen_embeddings.end (),
+                        embedding_id)
+                 == seen_embeddings.end ())
+        {
+          seen_embeddings.push_back (embedding_id);
+          embedding_ids.push_back (embedding_id);
+        }
+    }
+  if (reconstruction_ids.empty ())
+    {
+      return;
+    }
+
+  Exec (executor,
+        std::string ("DELETE FROM memory_reconstructions "
+                     "WHERE reconstruction_id IN (")
+            + Placeholders (reconstruction_ids.size ()) + ")",
+        reconstruction_ids);
+
+  if (!policy.delete_orphan_embeddings || embedding_ids.empty ())
+    {
+      return;
+    }
+  Exec (executor,
+        std::string ("DELETE FROM embeddings "
+                     "WHERE embedding_id IN (")
+            + Placeholders (embedding_ids.size ())
+            + ") "
+              "  AND NOT EXISTS ("
+              "    SELECT 1 FROM memories m "
+              "    WHERE m.embedding_id = embeddings.embedding_id"
+              "  ) "
+              "  AND NOT EXISTS ("
+              "    SELECT 1 FROM memory_reconstructions mr "
+              "    WHERE mr.embedding_id = embeddings.embedding_id"
+              "  )",
+        embedding_ids);
+}
+
+template <typename Executor>
 void
 StoreCurrentEmbeddingSurface (Executor &executor, long long memory_id,
                               long long embedding_id,
@@ -80,6 +362,17 @@ StoreCurrentEmbeddingSurface (Executor &executor, long long memory_id,
 {
   if (memory_id <= 0 || embedding_id <= 0 || !embedding.has_value ())
     {
+      return;
+    }
+  if (CurrentSurfaceWritesDisabled ())
+    {
+      return;
+    }
+  if (!IsCurrentSurfaceMemoryKind (executor, memory_id))
+    {
+      Exec (executor,
+            "DELETE FROM current_memory_embeddings WHERE memory_id = ?",
+            { memory_id });
       return;
     }
 
@@ -100,6 +393,10 @@ UpdateCurrentEmbeddingSurface (Executor &executor, long long memory_id,
                                long long embedding_id, long long created_at)
 {
   if (memory_id <= 0 || embedding_id <= 0)
+    {
+      return;
+    }
+  if (CurrentSurfaceWritesDisabled ())
     {
       return;
     }
@@ -246,9 +543,40 @@ LoadCurrentEmbeddingImpl (Executor &executor, long long memory_id,
     {
       return std::nullopt;
     }
+
+  const auto latest = LoadLatestReconstructionImpl (executor, memory_id);
+
+  if (!Disabled ())
+    {
+      auto current_rows = Exec (
+          executor,
+          "SELECT embedding, embedding_id, created_at "
+          "FROM current_memory_embeddings WHERE memory_id = ?",
+          { memory_id });
+      if (!current_rows.empty ())
+        {
+          const long long current_embedding_id = AnyToInt64 (
+              current_rows[0].at ("embedding_id"));
+          const long long current_created_at = AnyToInt64 (
+              current_rows[0].at ("created_at"));
+          const bool current_surface_fresh =
+              !latest.has_value ()
+              || current_embedding_id == latest->embedding_id
+              || current_created_at > latest->created_at;
+          auto it = current_rows[0].find ("embedding");
+          if (current_surface_fresh && it != current_rows[0].end ())
+            {
+              Eigen::VectorXf current;
+              if (core::DecodeFloatBlob (it->second, expected_dim, current))
+                {
+                  return current;
+                }
+            }
+        }
+    }
+
   long long embedding_id = base_embedding_id;
-  if (const auto latest = LoadLatestReconstructionImpl (executor, memory_id);
-      latest.has_value ())
+  if (latest.has_value ())
     {
       embedding_id = latest->embedding_id;
     }
@@ -291,6 +619,16 @@ std::optional<ReconstructionRecord>
 LoadLatestReconstruction (Transaction &tx, long long memory_id)
 {
   return LoadLatestReconstructionImpl (tx, memory_id);
+}
+
+bool
+ShouldSkipReconstructionUpdate (Transaction &tx, long long memory_id,
+                                long long created_at,
+                                std::string_view trigger,
+                                ReconstructionUpdatePolicy policy)
+{
+  return ShouldSkipReconstructionUpdateImpl (tx, memory_id, created_at,
+                                             trigger, policy);
 }
 
 std::vector<unsigned char>
@@ -336,50 +674,15 @@ AppendReconstructionWithEmbeddingId (Transaction &tx, long long memory_id,
                                      long long created_at, double uncertainty,
                                      std::string_view trigger,
                                      double source_confidence,
-                                     double context_similarity)
+                                     double context_similarity,
+                                     ReconstructionUpdatePolicy policy)
 {
   if (memory_id <= 0 || embedding_id <= 0)
     {
       return 0;
     }
-
-  tx.Execute (
-      "INSERT INTO memory_reconstructions("
-      "memory_id, embedding_id, blob_id, created_at, uncertainty, trigger, "
-      "source_confidence, context_similarity"
-      ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      { memory_id, embedding_id,
-        blob_id.empty () ? std::any () : std::any (blob_id), created_at,
-        uncertainty, std::string (trigger), source_confidence,
-        context_similarity });
-
-  UpdateCurrentEmbeddingSurface (tx, memory_id, embedding_id, created_at);
-
-  return ExtractInsertedId (
-      tx.Execute ("SELECT last_insert_rowid() AS id", {}));
-}
-
-long long
-AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,
-                                   const Eigen::VectorXf &embedding,
-                                   const std::vector<unsigned char> &blob_id,
-                                   long long created_at, double uncertainty,
-                                   std::string_view trigger,
-                                   double source_confidence,
-                                   double context_similarity)
-{
-  if (memory_id <= 0 || embedding.size () == 0)
-    {
-      return 0;
-    }
-
-  const auto embedding_values = ToFloatVector (embedding);
-  tx.Execute (
-      "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
-      { embedding_values, created_at });
-  const long long embedding_id
-      = ExtractInsertedId (tx.Execute ("SELECT last_insert_rowid() AS id", {}));
-  if (embedding_id <= 0)
+  if (ShouldSkipReconstructionUpdateImpl (tx, memory_id, created_at, trigger,
+                                          policy))
     {
       return 0;
     }
@@ -396,8 +699,118 @@ AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,
   const long long reconstruction_id
       = ExtractInsertedId (tx.Execute ("SELECT last_insert_rowid() AS id", {}));
 
-  StoreCurrentEmbeddingSurface (tx, memory_id, embedding_id,
-                                std::any (embedding_values), created_at);
+  if (policy.update_current_surface)
+    {
+      UpdateCurrentEmbeddingSurface (tx, memory_id, embedding_id, created_at);
+    }
+  PruneReconstructionHistory (tx, memory_id, policy);
+
+  return reconstruction_id;
+}
+
+long long
+AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,
+                                   const Eigen::VectorXf &embedding,
+                                   const std::vector<unsigned char> &blob_id,
+                                   long long created_at, double uncertainty,
+                                   std::string_view trigger,
+                                   double source_confidence,
+                                   double context_similarity,
+                                   ReconstructionUpdatePolicy policy)
+{
+  if (memory_id <= 0 || embedding.size () == 0)
+    {
+      return 0;
+    }
+  if (ShouldSkipReconstructionUpdateImpl (tx, memory_id, created_at, trigger,
+                                          policy))
+    {
+      return 0;
+    }
+
+  return AppendReconstructionWithEmbeddingUnchecked (
+      tx, memory_id, embedding, blob_id, created_at, uncertainty, trigger,
+      source_confidence, context_similarity, policy);
+}
+
+long long
+AppendReconstructionWithEmbeddingUnchecked (
+    Transaction &tx, long long memory_id, const Eigen::VectorXf &embedding,
+    const std::vector<unsigned char> &blob_id, long long created_at,
+    double uncertainty, std::string_view trigger, double source_confidence,
+    double context_similarity, ReconstructionUpdatePolicy policy)
+{
+  return AppendReconstructionWithEmbeddingUnchecked (
+      tx, memory_id, embedding, blob_id, created_at, uncertainty, trigger,
+      source_confidence, context_similarity, policy, nullptr);
+}
+
+long long
+AppendReconstructionWithEmbeddingUnchecked (
+    Transaction &tx, long long memory_id, const Eigen::VectorXf &embedding,
+    const std::vector<unsigned char> &blob_id, long long created_at,
+    double uncertainty, std::string_view trigger, double source_confidence,
+    double context_similarity, ReconstructionUpdatePolicy policy,
+    ReconstructionAppendTimings *timings)
+{
+  if (memory_id <= 0 || embedding.size () == 0)
+    {
+      return 0;
+    }
+
+  const auto embedding_values = ToFloatVector (embedding);
+  auto t_start = std::chrono::steady_clock::now ();
+  tx.Execute (
+      "INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+      { embedding_values, created_at });
+  const long long embedding_id
+      = ExtractInsertedId (tx.Execute ("SELECT last_insert_rowid() AS id", {}));
+  if (timings)
+    {
+      timings->insert_embedding_ms += ElapsedMs (
+          t_start, std::chrono::steady_clock::now ());
+    }
+  if (embedding_id <= 0)
+    {
+      return 0;
+    }
+
+  t_start = std::chrono::steady_clock::now ();
+  tx.Execute (
+      "INSERT INTO memory_reconstructions("
+      "memory_id, embedding_id, blob_id, created_at, uncertainty, trigger, "
+      "source_confidence, context_similarity"
+      ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      { memory_id, embedding_id,
+        blob_id.empty () ? std::any () : std::any (blob_id), created_at,
+        uncertainty, std::string (trigger), source_confidence,
+        context_similarity });
+  const long long reconstruction_id
+      = ExtractInsertedId (tx.Execute ("SELECT last_insert_rowid() AS id", {}));
+  if (timings)
+    {
+      timings->insert_reconstruction_ms += ElapsedMs (
+          t_start, std::chrono::steady_clock::now ());
+    }
+
+  if (policy.update_current_surface)
+    {
+      t_start = std::chrono::steady_clock::now ();
+      StoreCurrentEmbeddingSurface (tx, memory_id, embedding_id,
+                                    std::any (embedding_values), created_at);
+      if (timings)
+        {
+          timings->current_surface_ms += ElapsedMs (
+              t_start, std::chrono::steady_clock::now ());
+        }
+    }
+  t_start = std::chrono::steady_clock::now ();
+  PruneReconstructionHistory (tx, memory_id, policy);
+  if (timings)
+    {
+      timings->prune_ms += ElapsedMs (
+          t_start, std::chrono::steady_clock::now ());
+    }
 
   return reconstruction_id;
 }

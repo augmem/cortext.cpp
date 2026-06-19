@@ -339,6 +339,10 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
           merged.serial_position = rec.serial_position + old_n;
           slot.signal_records.push_back (std::move (merged));
         }
+      slot.metadata_dirty = true;
+      slot.embedding_dirty = true;
+      slot.signal_records_dirty = true;
+      p_ctx.wm_slots_dirty = true;
 
       p_ctx.wm_last_accepted = true;
       p_ctx.wm_last_chunked = true;
@@ -384,6 +388,8 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                                cfg.focus, cfg.sensitivity, cfg.stability);
       slot.strength = std::min (wm_strength_max, slot.strength + boost);
       slot.last_ts = now_s;
+      slot.metadata_dirty = true;
+      p_ctx.wm_slots_dirty = true;
       // Continue to insert logic - rehearsal doesn't prevent new slot creation
     }
 
@@ -411,6 +417,8 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                   slot.strength
                       = std::min (wm_strength_max, slot.strength + boost);
                   slot.last_ts = now_s;
+                  slot.metadata_dirty = true;
+                  p_ctx.wm_slots_dirty = true;
                   break; // Only boost once per slot per memory
                 }
             }
@@ -482,6 +490,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
         {
           p_ctx.wm_slots.erase (p_ctx.wm_slots.begin ()
                                 + static_cast<long> (evict_idx));
+          p_ctx.wm_slots_dirty = true;
         }
     }
 
@@ -540,6 +549,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     }
 
   p_ctx.wm_slots.push_back (std::move (slot));
+  p_ctx.wm_slots_dirty = true;
   p_ctx.wm_last_accepted = true;
   p_ctx.wm_last_chunked = false;
 

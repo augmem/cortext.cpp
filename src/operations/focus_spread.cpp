@@ -50,9 +50,13 @@ ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
+  const int stream_window = std::max (
+      k, static_cast<int> (core::NCtx (cfg.stability))
+             + core::KCtx (cfg.stability));
+  const int stream_start = std::max (0, n - stream_window);
   std::vector<double> sims;
-  sims.reserve (static_cast<size_t> (n));
-  for (int i = 0; i < n; ++i)
+  sims.reserve (static_cast<size_t> (n - stream_start));
+  for (int i = stream_start; i < n; ++i)
     {
       const auto &emb
           = stream[static_cast<size_t> (i)];
@@ -119,6 +123,7 @@ ComputeFocusSpread::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Double("attention_width", attention_width),
     telemetry::Attribute::Double("width_scale", width_scale),
     telemetry::Attribute::Int64("stream_size", static_cast<int64_t> (n)),
+    telemetry::Attribute::Int64("stream_scanned", static_cast<int64_t> (n - stream_start)),
     telemetry::Attribute::Int64("k_neighbors", static_cast<int64_t> (k)),
     telemetry::Attribute::Int64("k_eff", static_cast<int64_t> (k_eff)),
     telemetry::Attribute::Double("max_s", max_s),

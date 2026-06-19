@@ -3808,7 +3808,9 @@ capacity 21 and then declines at 42, which pays 1.5 times the context
 tokens for less sufficiency. The curve is unimodal with its peak at 21,
 so the doubling search stops there: capacity 21 is the operating point,
 and the remaining mechanism ablations run at it. A three-repetition
-judge pass over the capacity-21 arm confirms the screen.
+judge pass over the capacity-21 arm confirms the screen. After the
+long-horizon restart described below, this operating point is the code
+default at neutral F/S knobs rather than a launch-script-only override.
 
 ### Mechanism Ablations at Capacity 21 (June 12, 2026)
 
@@ -4141,6 +4143,204 @@ component. Instead, it is the full-stack release stress verdict: at a
 horizon where windowed strategies compact or discard old context,
 Cortext remains competitive with the full-history upper bound while
 spending roughly two orders of magnitude less context than chat RAG.
+
+### Full-Corpus Strip Ablation Sentinel (June 14-15, 2026)
+
+The next stripping question is deliberately harsher than the
+1,200-message release slice: can we remove a bundled set of mechanisms
+and still preserve long-horizon retrieval quality over the complete
+six-year Julie message corpus? The full run is a sequential two-arm
+replay over 104,799 parsed messages, not a four-arm judge comparison.
+The first arm is the capacity-21 baseline with media, deep processing,
+and daily consolidation enabled. The second arm replays the same corpus
+after disabling the candidate mechanisms:
+
+``` bash
+CORTEXT_DISABLE_METACOG_TOT_RECOVERY=1
+CORTEXT_DISABLE_METACOG_UNKNOWN_CAUTION=1
+CORTEXT_DISABLE_FACTS=1
+CORTEXT_DISABLE_PROCEDURAL_PROACTIVE_RETRIEVAL=1
+CORTEXT_STM_SHADOW_DISABLE=1
+CORTEXT_DISABLE_STM_LABEL_HANDOFF=1
+```
+
+Because that full replay takes many hours, we also ran a text-only
+sentinel with the same baseline/stripped contrast. The sentinel
+processed 12,000 text messages, emitted 10 identical probe points at
+event indices 2,000 through 11,000, and completed both arms
+successfully. The monitoring table reports 24,000 stored rows because
+long-term and working-memory rows are both materialized; the summary
+denominator for the sentinel is `processed_text_messages = 12000`.
+
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>metric</th>
+<th style="text-align: right;">baseline text sentinel</th>
+<th style="text-align: right;">stripped text sentinel</th>
+<th>reading</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>processed text messages</td>
+<td style="text-align: right;">12,000</td>
+<td style="text-align: right;">12,000</td>
+<td>matched</td>
+</tr>
+<tr>
+<td>probes judged</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">10</td>
+<td>matched</td>
+</tr>
+<tr>
+<td>Cortext composite</td>
+<td style="text-align: right;">3.23</td>
+<td style="text-align: right;">2.04</td>
+<td>quality drop</td>
+</tr>
+<tr>
+<td>relevance</td>
+<td style="text-align: right;">1.65</td>
+<td style="text-align: right;">0.85</td>
+<td>worse</td>
+</tr>
+<tr>
+<td>sufficiency</td>
+<td style="text-align: right;">1.69</td>
+<td style="text-align: right;">1.27</td>
+<td>worse</td>
+</tr>
+<tr>
+<td>noise</td>
+<td style="text-align: right;">0.43</td>
+<td style="text-align: right;">0.32</td>
+<td>cleaner but less useful</td>
+</tr>
+<tr>
+<td>temporal correctness</td>
+<td style="text-align: right;">0.72</td>
+<td style="text-align: right;">0.63</td>
+<td>slightly worse</td>
+</tr>
+<tr>
+<td>source grounding</td>
+<td style="text-align: right;">0.13</td>
+<td style="text-align: right;">0.00</td>
+<td>no gain</td>
+</tr>
+<tr>
+<td>mean Cortext context tokens</td>
+<td style="text-align: right;">106.6</td>
+<td style="text-align: right;">107.0</td>
+<td>no token saving</td>
+</tr>
+<tr>
+<td>token savings vs chat RAG</td>
+<td style="text-align: right;">98.67%</td>
+<td style="text-align: right;">98.67%</td>
+<td>unchanged</td>
+</tr>
+<tr>
+<td>association rows</td>
+<td style="text-align: right;">1,545</td>
+<td style="text-align: right;">1,230</td>
+<td>less graph structure</td>
+</tr>
+<tr>
+<td>retrieval items during ingest</td>
+<td style="text-align: right;">71,303</td>
+<td style="text-align: right;">61,785</td>
+<td>less retrieval activity</td>
+</tr>
+<tr>
+<td>mean total latency</td>
+<td style="text-align: right;">1,395.6 ms</td>
+<td style="text-align: right;">1,410.6 ms</td>
+<td>no speed win</td>
+</tr>
+<tr>
+<td>fact assertions / evidence rows</td>
+<td style="text-align: right;">0 / 0</td>
+<td style="text-align: right;">0 / 0</td>
+<td>facts do not explain this sentinel</td>
+</tr>
+</tbody>
+</table>
+
+The composite is the streaming judge’s packet-quality summary,
+`relevance + sufficiency - 0.25 * noise`. On this early slice, the
+stripped bundle does not buy context-budget, latency, or memory-quality
+savings; it mostly removes useful evidence. The sharper five-probe delta
+judge over the late sentinel probes points the same way: baseline
+Cortext relevance and sufficiency are 1.88 and 2.32, while stripped
+falls to 1.04 and 1.10.
+
+This is an early-warning result, not the final six-year verdict and not
+a single-mechanism attribution. The stripped arm changes several
+mechanisms at once, so the sentinel cannot say whether the loss comes
+from metacognitive recovery, procedural proactive retrieval, STM
+shadowing, STM-label handoff, or an interaction among them. It also does
+not answer the independent `source_id` question: both arms use the same
+source-id policy, and media is not encoded into `source_id`.
+
+The first full six-year restart on June 15, 2026 was invalidated
+operationally: the baseline arm launched without
+`CORTEXT_WM_CAPACITY_OVERRIDE`, while the code default still followed
+the old 7-ish formula. It was abandoned at 24,893 / 104,799 signals
+(23.75%), with `cortext_working_items=7` in the probe stream. Those
+partial results are diagnostics only. To prevent recurrence, the neutral
+working-memory default was changed to 21 in `WMBaseCapacity` itself,
+preserving the old seven-slot maintenance-cost budget so the wider
+window does not also tighten gates. The full replay was then restarted
+from scratch with baseline and stripped arms both inheriting the WM21
+default; live 12B judging and the 15-minute status monitor were
+reattached to the replacement run.
+
+A second restart on June 16, 2026 corrected the consolidation timing
+contract. The replay was intended to model human nightly consolidation,
+but the existing `--daily-consolidation` path fired when source
+timestamps crossed a calendar-day bucket and recorded the first event of
+the new day as the consolidation time. That is a poor proxy for sleep:
+it can consolidate at midnight or at the next message rather than at a
+stable off-hours checkpoint. The live replay runner now supports
+`--daily-consolidation-hour` and `--replay-timezone`; the replacement
+run sets them to local 02:00 and `America/Los_Angeles`, respectively.
+Daily consolidation compares source-time sleep buckets, records the
+consolidation at the configured local sleep checkpoint, and labels the
+trigger `daily_sleep_checkpoint`. The replacement full-corpus run
+(`eval_runs/full6y_strip_ablation_20260616T070310Z_ollama_e2b_wm21_sleep0200_pacific_gpu2`)
+therefore keeps the same two-arm WM21 stripping contrast and live judge
+setup, but treats consolidation as a source-time nightly sleep event
+rather than a host-time calendar boundary.
+
+A live-judge alignment defect was found during that replacement run on
+June 16, 2026. The streamed probe row carries the true query metadata
+(`timestamp`, `source_id`, `modality`, and token count), but the live
+judge was using `probe.event_index` as a positional index into a
+separately rebuilt timeline. Because the materialized judge timeline can
+differ from the native replay timeline, especially when replay timezone
+and media rows are involved, late probes were judged against an earlier
+current turn. The prior-only fairness filter then treated valid Cortext
+working-memory rows as future rows and removed most or all of the
+working packet. A spot check at `probe_event_index=39000` resolved to
+the true `query_event_index=39167`; under the corrected alignment,
+Cortext retained 510 context tokens, including 291 working-memory
+tokens, and the one-row blind judge winner flipped to `cortext_native`.
+Pre-fix live-judge artifacts from this run are therefore diagnostics
+only. The judge now resolves probes by query metadata first, records
+both declared and resolved event indices, propagates the replay timezone
+through partial materialization, and the live watchers were restarted
+into `*_fixed_queryalign` output directories. Only regenerated
+fixed-query-alignment judge artifacts should support the final
+full-corpus verdict.
 
 ## ACT-R-Inspired Retrieval Gate Ablations
 
@@ -5137,9 +5337,9 @@ events/s** over **474** events.
 The following 200- and 500-message runs are superseded for release
 quality and mixed-media temporal claims, but retained here because they
 verify the single-durable probe policy and rough token behavior. The
-corrected harness now reuses the single durable public Cortext call for
-both chat ingest and probe measurement, and every probe records the
-`single_durable_chat_turn_reused_for_probe_and_ingest` policy. The
+corrected harness now reuses the same durable timestamped Cortext replay
+turn for both chat ingest and probe measurement, and every probe records
+the `single_durable_chat_turn_reused_for_probe_and_ingest` policy. The
 corrected 200-message mixed-media replay
 (`build/chat_replay_mixed_media_native_200_singlepass/summary.json`,
 `build/chat_replay_mixed_media_native_200_singlepass/nemotron_judge.json`)
@@ -5284,6 +5484,76 @@ cap, so high-degree memories cannot force unbounded association work
 before result compaction. The week-run numbers above remain historical
 diagnostics from the superseded query plan; fresh latency and throughput
 numbers must come from a rerun of the current branch.
+
+**Full-six-year checkpoint profiling follow-up (Jun 16, 2026):**
+
+While the full six-year four-arm run was still executing, we copied the
+live baseline replay database into a checkpoint-local profiling
+snapshot:
+`eval_runs/full6y_strip_ablation_20260615T114853Z_ollama_e2b_wm21_default_gpu2/perf_opt/current_surface_snapshot_20260616T020805Z`.
+The snapshot contained **35,319** memories, **17,580** long-term
+memories, **17,320** working memories, and more than **2.36M**
+reconstruction rows in the source run. The profiling harness used three
+source-time future probes through
+`cortext_chat_replay_live_run --checkpoint-eval-only`; it records
+aggregate operation timings only and does not expose message text.
+
+The first live/probe profile on the old binary had already made the
+scaling failure concrete: a retrieved probe around event 17,000 spent
+**4,585 ms** in processing, with `GraphAugmentedRetrieveCandidates` at
+**2,750 ms**, `GraphRetrieve.seed_sql` at **1,792 ms**,
+`UpdateMemoryStrength` at **848 ms**, `GraphRetrieve.fact_seed_sql` at
+**778 ms**, and `ComputeMniGateDecision` at **768 ms**. These costs were
+not model inference; they were database surfaces that scaled with
+historical reconstruction/fact rows rather than current retrievable
+state.
+
+The optimization pass replaced the hot global surfaces with bounded
+current or indexed surfaces:
+
+-   `current_memory_embeddings` is now a sqlite-vec current-memory
+    surface keyed by `memory_id`; graph seed search and expanded-memory
+    embedding fetch use it instead of joining the global `embeddings`
+    table through latest reconstruction state.
+-   fact vector seeding now filters eligible `fact_cache` /
+    `fact_assertions` rows first, scores their direct embedding lookups
+    in C++, and keeps the top fact seeds, avoiding a global vector
+    search over all embedding kinds.
+-   memory eviction materializes evictable memory and embedding ids
+    once, deletes vector rows by direct key, and uses a partial
+    long-term strength index for the eviction frontier.
+-   write-exclusion metadata now reads `memories(embedding_id)` instead
+    of the global vector table.
+-   stability retention now uses a SQL aggregate over a covering
+    strength index instead of materializing all active memories into C++
+    row maps.
+-   synaptic tagging uses a `created_at DESC` memory index instead of
+    sorting the full memory table on each trigger.
+
+Checkpoint profiling after these changes shows the intended shape. On
+the retrieved probe in `checkpoint_eval_stability_covering_index`,
+`GraphRetrieve.seed_sql` was **9.94 ms**, `GraphRetrieve.fact_seed_sql`
+was previously reduced to about **1.15 ms**,
+`GraphRetrieve.fetch_embeddings_sql` was **13.11 ms** after the
+current-surface fetch change, `MemoryStrength.eviction_select_ids_sql`
+was **2.29 ms**, `UpdateMemoryStrength` was **2.79 ms**,
+`UpdateStability` was **1.82 ms**, and synaptic tagging was below **0.2
+ms** on the same profiled path. No-retrieval probes fell to roughly
+**26-29 ms** processing time, with hydration around **211-213 ms**.
+
+The remaining large costs are now algorithmic or packet-facing rather
+than the original unbounded SQL surfaces. Retrieved probes still spend
+about **127-151 ms** in `GraphAugmentedRetrieveCandidates` on this
+snapshot, with about **33 ms** in preconsolidated label-graph scoring
+and **17-29 ms** in source-backed text/temporal expansion.
+Reconsolidation can spike when ripple propagation writes many neighbor
+reconstructions; instrumentation attributes those spikes to
+`Reconsolidation.neighbor_query`, `neighbor_load`, and `neighbor_write`,
+not to primary reconstruction append. Hydration remains a separate
+**350-370 ms** packet assembly cost on retrieved probes. These are the
+next optimization targets; the historical multi-second failure was the
+global embedding/reconstruction/fact surface, and that specific scaling
+problem is now removed for newly started runs.
 
 Historical OpenAI-judged validation on the then-current branch reran
 after the generic-fragment label filters and durable-source promotion
@@ -42774,11 +43044,14 @@ benchmark binaries, not from profiler estimates.
 computations, and graph algorithms
 (<a href="#sec-core-adaptation" class="quarto-xref">Section 4</a>
 through <a href="#sec-interrupt" class="quarto-xref">Section 10</a>).
-The generative consolidation paths (LLM label extraction and
-summarization,
-<a href="#sec-implementation" class="quarto-xref">Section 12</a>) are
-out of scope: their cost is dominated by model inference, not by the
-algorithms specified here.
+Most rounds exclude the generative consolidation paths (LLM label
+extraction and summarization,
+<a href="#sec-implementation" class="quarto-xref">Section 12</a>)
+because their cost is dominated by model inference rather than by the
+algorithms specified here. The June 17 long-horizon profiling pass below
+extends the scope to consolidation orchestration and provider wiring
+after those paths became the dominant observed wall-time bursts in the
+six-year replay.
 
 **Workloads.** We profile deterministic, model-free benchmarks from
 `examples/benchmark` that drive the production `Processor` pipeline with
@@ -43174,6 +43447,4066 @@ output contract is the cheapest verification instrument available: it
 reduced “did the optimization change behavior” to a checksum comparison,
 and it caught a pre-existing memory-safety bug that several thousand
 prior test executions had missed.
+
+## Full-Corpus Live Replay Addendum (June 16, 2026)
+
+The four-round pass above was deliberately model-free and deterministic.
+A later optimization pass targeted a different workload: the live
+full-six-year personal-corpus replay used for the stripping ablation in
+<a href="#sec-experimental" class="quarto-xref">Section 11</a>. That run
+exercises the production chat-replay binary, deep daily consolidation,
+Gemma 4 E2B summarization through Ollama, attached-media ingestion,
+streaming probe generation, and a live local Gemma 4 12B judge. It is
+therefore noisier than the synthetic steady-state benchmark, but it
+exposes the long-horizon surfaces the smaller harnesses miss.
+
+The run was already in progress when profiling began, so the first
+requirement was operational rather than algorithmic: avoid throwing away
+the partial six-year replay. We added an explicit benchmark-only resume
+mode to `cortext_chat_replay_live_run`:
+
+-   `--resume-from-existing` requires an existing SQLite database and
+    fails closed if no durable signal checkpoint exists.
+-   The runner derives the checkpoint from the maximum durable
+    `User`/`Contact` signal timestamp, not from raw signal counts. This
+    distinction matters because text events can produce multiple signal
+    rows and maintenance rows are not replay events.
+-   Before replaying new events, it rebuilds the comparator-only prior
+    history from the transcript and media timeline up to the checkpoint
+    timestamp without ingesting those events into Cortext again. This
+    preserves the rolling-history, raw-chat RAG, and full-history
+    comparator packets.
+-   It preserves the existing probe JSONL stream, carries the previous
+    probe-row count forward, and emits `CHAT_REPLAY_RESUME` plus
+    periodic `CHAT_REPLAY_PROGRESS` aggregate lines. The progress lines
+    contain counters and latency aggregates only; they do not expose
+    message text.
+
+A disposable smoke test caught a resume bug before the live run
+restarted: after five messages the database contained ten text signal
+rows, so using `COUNT(signals)` as the event offset would have skipped
+too far. The fixed resume path rebuilt an offset of five replay events,
+appended the resumed probe rows to the same stream, and then processed
+the remaining three messages in an eight-message window. The live
+baseline was then restarted from the checkpoint with:
+
+    event_count_offset = 18,199
+    text_count_offset  = 17,519
+    media_count_offset = 680
+    probe_count_offset = 14
+    db_signal_count    = 36,407
+
+The checkpoint-local profiler snapshot identified a separate scaling
+failure from the earlier deterministic benchmark. On the old binary, a
+retrieved probe around event 17,000 spent about **4.6 s** in processor
+time, dominated by database surfaces that grew with historical
+reconstruction and fact rows: `GraphRetrieve.seed_sql` was **1,792 ms**,
+`UpdateMemoryStrength` was **848 ms**, `GraphRetrieve.fact_seed_sql` was
+**778 ms**, and `ComputeMniGateDecision` was **768 ms**. These costs
+were not encoder or LLM inference.
+
+The implementation changes replaced those global surfaces with bounded
+current or indexed surfaces:
+
+<table>
+<colgroup>
+<col style="width: 30%" />
+<col style="width: 30%" />
+<col style="width: 40%" />
+</colgroup>
+<thead>
+<tr>
+<th>Hot path</th>
+<th>Implementation change</th>
+<th style="text-align: right;">Checkpoint timing after change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>graph seed search over latest reconstruction state</td>
+<td>add/use <code>current_memory_embeddings</code> keyed by
+<code>memory_id</code></td>
+<td style="text-align: right;"><code>GraphRetrieve.seed_sql</code>:
+<strong>9.94 ms</strong></td>
+</tr>
+<tr>
+<td>fact vector seeding over all embedding kinds</td>
+<td>prefilter eligible fact rows and score direct embedding lookups in
+C++</td>
+<td style="text-align: right;"><code>GraphRetrieve.fact_seed_sql</code>:
+<strong>~1.15 ms</strong></td>
+</tr>
+<tr>
+<td>expanded-memory embedding fetch</td>
+<td>fetch from the current-memory surface rather than the global
+embedding table</td>
+<td
+style="text-align: right;"><code>GraphRetrieve.fetch_embeddings_sql</code>:
+<strong>13.11 ms</strong></td>
+</tr>
+<tr>
+<td>memory-strength eviction frontier</td>
+<td>materialize evictable memory/embedding ids and delete vector rows by
+direct key</td>
+<td
+style="text-align: right;"><code>MemoryStrength.eviction_select_ids_sql</code>:
+<strong>2.29 ms</strong></td>
+</tr>
+<tr>
+<td>global memory-strength update</td>
+<td>use bounded indexed current-state lookups</td>
+<td style="text-align: right;"><code>UpdateMemoryStrength</code>:
+<strong>2.79 ms</strong></td>
+</tr>
+<tr>
+<td>stability retention scan</td>
+<td>replace C++ row-map materialization with a SQL aggregate over a
+covering index</td>
+<td style="text-align: right;"><code>UpdateStability</code>:
+<strong>1.82 ms</strong></td>
+</tr>
+<tr>
+<td>synaptic-tagging recency scan</td>
+<td>use a <code>created_at DESC</code> memory index</td>
+<td style="text-align: right;"><code>&lt; 0.2 ms</code> on the profiled
+path</td>
+</tr>
+</tbody>
+</table>
+
+After restart, live progress lines show the intended order-of-magnitude
+change in the measured per-event path. The last pre-restart sparse probe
+at event 18,000 recorded **5,210 ms** total Cortext time, with **4,866
+ms** in processing and **342 ms** in hydration. In the resumed run,
+aggregate progress through events 19,000 to 24,000 reported mean total
+time rising from **709 ms** to **775 ms** per text event, with mean
+process time rising from **343 ms** to **399 ms** and mean hydration
+around **363-374 ms**. In other words, the hot SQL/retrieval path moved
+from multi-second to sub-second scale on the same growing database.
+
+End-to-end throughput improved less than the per-event timings because
+the live replay includes media, object-store writes, daily deep
+consolidation, and judge backpressure. The baseline had reached
+**36,407** signal rows after roughly 15.5 hours from a cold start, about
+**39 signal rows/minute**. After the resume restart it reached
+**47,929** signal rows by 05:08 UTC, adding **11,522** rows at roughly
+**120 signal rows/minute**. That is about a **3x** live-throughput
+improvement while preserving the same database and probe stream, versus
+a roughly **6-7x** improvement in the measured event processing path.
+
+The new bottleneck is also visible. The replay process is frequently
+observed in `jbd2_log_wait_commit`, the WAL grows in tens of MiB, and
+`iostat` shows bursts of thousands of small writes. This points at
+SQLite/object-store write amplification, WAL checkpoint behavior, or
+consolidation write bursts as the next long-horizon scaling target. We
+therefore do not claim the full-corpus run is now linear over six years.
+The specific conclusion is narrower and more useful: the unbounded
+retrieval/reconstruction/fact surfaces that caused the multi-second
+probe failure have been removed for newly started or resumed runs; the
+remaining long-horizon performance work has moved to the write and
+consolidation path.
+
+A later watch point on the same full-corpus run reinforces that caveat.
+The status monitor’s percentage denominator was wrong for this
+multimodal replay: it compared `COUNT(signals)` against a parsed-message
+estimate, while each text message can create multiple signal rows and
+media adds further rows. The useful progress counter is the runner’s
+`processed_text_messages`, not the SQLite signal count. Around the late
+baseline phase, runner checkpoints showed
+`processed_text_messages=55,191` at `event_index=56,999`, while the
+database already held more than 109k signal rows. Recent monitor
+intervals corresponded to only about **35-38 text messages/minute** even
+though signal rows advanced at **65-75 rows/minute**, and the runner’s
+mean total event latency crept from about **800 ms** near event 43k to
+**875 ms** near event 57k. This is not a run-stopping regression, but it
+is a follow-up item: profile the late-run slowdown using the
+text-message counter, per-operation progress telemetry, WAL checkpoint
+stats, and consolidation/write burst timing before claiming realtime or
+linear full-corpus scaling.
+
+That follow-up profiling pass found one remaining benchmark-amplified
+cost that was not part of the memory algorithm itself: the replay runner
+hydrated a full application context after every durable text event, even
+though only probe turns used the hydrated packet. On a late full-corpus
+snapshot this meant constructing working-memory and retrieved-memory
+payloads 999 times out of 1000 just to discard them. The fix keeps
+public `Cortext::ProcessTextAt` unchanged, but adds internal timestamped
+text replay ingress with an explicit `hydrate_context` switch. Normal
+replay still runs the full processor and still stores durable memories;
+non-probe text turns skip working-memory/retrieved packet hydration,
+while probe turns request the hydrated packet before writing the probe
+JSONL row. The same pass also removed redundant object-store
+write-amplification in `MemoryStorage`: a single-signal memory now
+reuses the already-written signal content object id instead of reading
+that object back and writing the same bytes again as a separate
+memory-level blob. Hydration of active working-memory slots now reads
+the current reconstruction or memory blob directly and only falls back
+to per-signal blob scans for older databases.
+
+A capped validation replay on a copied late baseline database
+(`eval_runs/profile_linear_opt_20260617T040800Z`) resumed from
+`event_count_offset=62,109`, `text_count_offset=59,877`, and
+`db_signal_count=118,349`. It processed the next 51 text messages and
+one image with the optimized binary. Excluding consolidation, wall time
+was **33.75 s**, or about **1.51 text messages/s**. Mean text-event
+latency was **636.35 ms**: **632.10 ms** process time, **4.25 ms**
+encode time, and only **0.010 ms** hydrate time. The corresponding
+late-run monitor before this change showed hydration around hundreds of
+milliseconds per text event, so the replay ingest path now tracks
+processor cost rather than processor cost plus discarded packet
+construction.
+
+This does not remove the remaining processor-side long-horizon slope.
+The validated late-snapshot process time is still roughly **0.6
+s/message**, and probe-time hydrated packets, media rows, daily
+consolidation, and judge evaluation still pay their real costs. The
+result is therefore a narrower but important claim: non-probe replay
+ingest is now near-linear in packet hydration cost, and the next
+optimization frontier is the process-side graph/strength work plus
+consolidation/object-store write bursts, not context serialization.
+
+## Late-Snapshot Linearity Pass (June 17, 2026)
+
+The next profiling pass used the same copied late baseline database
+rather than a fresh synthetic store. At the start of this pass the
+validation database held about **120k** memory rows and had replayed
+roughly **60k** text messages. This made the workload a direct test of
+the full-corpus slowdown observed in the live ablation, while still
+avoiding risk to the live run.
+
+The first late-snapshot slice after the hydration and object-store fixes
+still showed processor-side growth. A 50-message slice ending at
+`processed_text_messages=60,430` averaged **672.5 ms** process time. The
+top operations were graph retrieval (**460.2 ms** when visible), vector
+seed SQL (**220.1 ms**), expanded embedding fetch SQL (**140.1 ms**),
+retrieval competition (**140.3 ms**), and memory-strength eviction scans
+(**77.4 ms** on the four turns where they ran). Predictive
+pre-activation and eviction had already been bounded, so graph retrieval
+was the next target.
+
+The implementation changes in this pass were:
+
+-   Load a restart-time retrieval surface cache from
+    `current_memory_embeddings`, keyed by memory id and embedding id.
+    Vector seed candidates are tagged separately from fetch candidates
+    so seed search keeps the old filters (`WORKING`/`LABEL` excluded;
+    non-derived associations excluded) while graph-expanded labels and
+    association nodes remain retrievable.
+-   Keep labels as fetch-only fallback rows through
+    `memories.embedding_id`, so constructive recall can prune them from
+    the current vector surface without changing graph-label retrieval
+    semantics.
+-   Replace global predictive pre-activation decay with an active
+    embedding-id set loaded at processor startup and maintained as
+    memories are boosted or decay to zero.
+-   Throttle memory-strength eviction frontier scans. The scan now runs
+    after consolidation, on the first pass, under active storage
+    pressure, or at a bounded interval; skipped turns record an explicit
+    timing marker.
+-   Replace reconsolidation’s per-frontier BFS queries with one bounded
+    recursive SQL traversal per primary memory. The recursive query
+    preserves depth and edge-type semantics, but caps ripple fanout at
+    the implementation boundary.
+-   Replace retrieval-induced forgetting recovery’s
+    `UPDATE memories WHERE   suppression > 0` table scan with an active
+    suppressed-embedding set. Losers enter the set when suppression is
+    applied; recovery updates and prunes that set in chunks.
+
+The focused regression gates after these changes were:
+
+<table>
+<thead>
+<tr>
+<th>Test filter</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[graph][operations]</code></td>
+<td style="text-align: right;">376 assertions / 52 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][competition]</code></td>
+<td style="text-align: right;">19 assertions / 4 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][recon]</code></td>
+<td style="text-align: right;">47 assertions / 9 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][constructive_recall]</code></td>
+<td style="text-align: right;">29 assertions / 3 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][predictive]</code></td>
+<td style="text-align: right;">38 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[memory_strength]</code></td>
+<td style="text-align: right;">22 assertions / 6 cases passed</td>
+</tr>
+<tr>
+<td><code>[migration]</code></td>
+<td style="text-align: right;">29 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[cortext][replay]</code></td>
+<td style="text-align: right;">70 assertions / 6 cases passed</td>
+</tr>
+</tbody>
+</table>
+
+The first validation slice after the active-set fixes resumed from the
+same late database and processed 60 additional text messages, ending at
+`processed_text_messages=60,880`. Mean process time was **193.1
+ms/message**, median **187.8 ms**, p90 **233.5 ms**, and max **321.5
+ms**. This is a **3.48x** reduction from the 672.5 ms late-snapshot
+slice before this pass. The top visible operations were graph retrieval
+(**88.9 ms** when visible), source-seed temporal expansion (**22.7
+ms**), preconsolidated label graph scoring (**24.4 ms**), accumulator
+update (**19.9 ms**), reconsolidation (**20.5 ms**), and memory-strength
+updates (**22.2 ms**). Retrieval competition no longer appeared among
+the top operations after active RIF recovery.
+
+We then continued the recursive profile-and-optimize loop until the
+remaining gains fragmented. Three smaller graph-retrieval changes
+followed:
+
+-   Ranked query labels are now computed once per retrieval pass and
+    reused by both the label-seed expansion and candidate label-graph
+    scoring paths. This removes duplicate label-bank/vector/text-route
+    work without changing the candidate set.
+-   Source-temporal expansion now uses the in-memory retrieval-surface
+    cache. The cache is additionally indexed by `(source_id, start_ts)`
+    so same-source nearest-neighbor expansion is a bounded
+    binary-search/merge over current retrieval candidates instead of a
+    SQLite query for every seed and working memory anchor. The SQL
+    implementation remains as the fallback when the cache is disabled.
+-   Preconsolidated label-graph scoring now evaluates the existing
+    structural edge contract (`has_label`, `derived_from`) and the
+    current relation-edge vocabulary (`co_occurs`, `implies`,
+    `contradicts`, `reinforces`, `causes`, `similar_to`) in C++ over a
+    small association snapshot. Unknown future edge types are
+    intentionally ignored until the extraction/retrieval contract is
+    expanded.
+
+The focused regression gates after the additional graph changes were
+`[graph][operations]` (376 assertions / 52 cases passed) and
+`[cortext][replay]` (70 assertions / 6 cases passed). A later 60-message
+slice ending at `processed_text_messages=61,000` averaged **171.4
+ms/message** process time, median **166.0 ms**, p90 **213.3 ms**, and
+max **281.9 ms**. In that slice, source-temporal expansion appeared in
+only nine top-operation rows and averaged **1.9 ms** when visible, down
+from **22.0 ms/message** in the previous slice; total graph retrieval
+fell to **68.9 ms/message**. The following slice, ending at
+`processed_text_messages=61,060`, averaged **176.4 ms/message** process
+time with median **154.6 ms** and p90 **270.7 ms**. Label-graph scoring
+fell from roughly **24 ms** when visible to **4.7 ms**, and total graph
+retrieval fell again to **54.7 ms/message**. The total mean did not
+improve in that particular window because accumulator, reconsolidation,
+and memory-strength maintenance spikes dominated the residual variance.
+
+The intermediate slices make the causal attribution clear:
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 13%" />
+</colgroup>
+<thead>
+<tr>
+<th>Slice</th>
+<th style="text-align: right;">Text messages</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">Median</th>
+<th style="text-align: right;">p90</th>
+<th>Main observation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>surface-pruned baseline</td>
+<td style="text-align: right;">50</td>
+<td style="text-align: right;">753.8 ms</td>
+<td style="text-align: right;">647.7 ms</td>
+<td style="text-align: right;">1131.5 ms</td>
+<td>graph seed/fetch SQL, eviction, predictive decay still scale</td>
+</tr>
+<tr>
+<td>eviction interval</td>
+<td style="text-align: right;">50</td>
+<td style="text-align: right;">672.5 ms</td>
+<td style="text-align: right;">548.2 ms</td>
+<td style="text-align: right;">909.9 ms</td>
+<td>maintenance scans bounded; graph retrieval dominates</td>
+</tr>
+<tr>
+<td>retrieval surface cache</td>
+<td style="text-align: right;">58</td>
+<td style="text-align: right;">352.7 ms</td>
+<td style="text-align: right;">352.5 ms</td>
+<td style="text-align: right;">438.2 ms</td>
+<td>seed/fetch SQL removed; reconsolidation becomes visible</td>
+</tr>
+<tr>
+<td>recursive reconsolidation</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">508.9 ms</td>
+<td style="text-align: right;">556.1 ms</td>
+<td style="text-align: right;">715.9 ms</td>
+<td>reconsolidation cheaper, but this message window has heavier
+graph/competition work</td>
+</tr>
+<tr>
+<td>active RIF recovery</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">193.1 ms</td>
+<td style="text-align: right;">187.8 ms</td>
+<td style="text-align: right;">233.5 ms</td>
+<td>competition table scan removed; late-run processor path is sub-250
+ms p90</td>
+</tr>
+<tr>
+<td>label-query/source-temporal cache</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">171.4 ms</td>
+<td style="text-align: right;">166.0 ms</td>
+<td style="text-align: right;">213.3 ms</td>
+<td>source-temporal expansion moves from per-anchor SQL to the
+retrieval-surface index</td>
+</tr>
+<tr>
+<td>C++ label-graph scoring</td>
+<td style="text-align: right;">60</td>
+<td style="text-align: right;">176.4 ms</td>
+<td style="text-align: right;">154.6 ms</td>
+<td style="text-align: right;">270.7 ms</td>
+<td>label-graph CTE cost removed; residual variance shifts to
+accumulator/recon/strength</td>
+</tr>
+</tbody>
+</table>
+
+This still is not a proof that all six years are realtime-linear. The
+remaining graph retrieval cache performs an in-process scan over the
+current retrieval surface, so it is much cheaper than the previous
+SQLite vector surface at this size but still grows with the active
+surface unless eviction or future indexing bounds it. Daily
+consolidation, media ingest, object-store writes, WAL checkpointing, and
+the judge also remain outside this processor slice. The stronger
+conclusion is that the observed late-run multi-second slowdown was not
+inherent to Cortext’s memory model: it came from several unbounded
+implementation surfaces, and those surfaces have now been replaced by
+current-surface caches, active sets, bounded scans, indexed recursive
+queries, or small graph snapshots. After those replacements, the
+remaining squeeze is no longer one runaway retrieval surface; it is
+distributed across accumulator updates, reconsolidation, periodic
+memory-strength maintenance, consolidation, and write bursts.
+
+## Consolidation Provider and Batch Profiling (June 17, 2026)
+
+After the graph/retrieval pass, a recursive consolidation profile used
+the same late copied database
+(`eval_runs/profile_linear_opt_20260617T040800Z`) and recorded operation
+timings inside each consolidation event. The first result corrected a
+false attribution: Ollama summarization was visible, but it was not the
+runaway cost. In a 60-message slice ending at
+`processed_text_messages=61,180`, total consolidation time was **11.34
+s**. The top operations were `ConsolidationGate` (**6.28 s**),
+`ScoreConsolidation.fallback_query_sql` (**5.92 s**),
+`ProcessExtractionResults.extractor_call` (**3.81 s**), and
+`ConsolidationSummarize.summarizer_call` (**0.68 s**). The fallback
+query was sorting eligible memories while carrying embedding blobs
+through the sort. The fix ranks only `(embedding_id, computed_score)`,
+applies the knob-derived fallback limit, and then fetches embeddings for
+the limited set.
+
+The next slice verified that change: the fallback query fell from **5.92
+s** to **80 ms**, and `ConsolidationGate` fell from **6.28 s** to **0.44
+s**. That exposed a second, larger bug in extraction orchestration.
+`EnqueueExtractionJobs` computed the extraction batch cap, but the cap
+only applied to the external callback path. When an in-process extractor
+was present, `ProcessExtractionResults` still consumed the full request
+vector. The fix makes the enqueue operation the downstream gate: when
+extraction is suppressed by mode, interval, or gate state it clears the
+request vector, and when extraction runs it truncates the vector to
+`min(requests, ExtractionBatchSize(T), MaxExtractionsPerCycle(T))`. A
+focused regression now checks that the internal extractor path sees the
+capped request vector.
+
+The consolidation slices before and after these fixes were:
+
+<table>
+<colgroup>
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 16%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th>Slice</th>
+<th>Provider wiring</th>
+<th style="text-align: right;">Consolidation</th>
+<th style="text-align: right;">Gate/fallback</th>
+<th style="text-align: right;">Extractor call</th>
+<th style="text-align: right;">Summarizer call</th>
+<th>Main observation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>gate profile at 61,180 texts</td>
+<td>Ollama summarizer, local LiteRT extractor</td>
+<td style="text-align: right;">11.34 s</td>
+<td style="text-align: right;">6.28 s / 5.92 s</td>
+<td style="text-align: right;">3.81 s</td>
+<td style="text-align: right;">0.68 s</td>
+<td>fallback query dominated by blob-heavy sort</td>
+</tr>
+<tr>
+<td>fallback-rewritten at 61,240 texts</td>
+<td>Ollama summarizer, local LiteRT extractor</td>
+<td style="text-align: right;">43.43 s</td>
+<td style="text-align: right;">0.44 s / 0.08 s</td>
+<td style="text-align: right;">41.46 s</td>
+<td style="text-align: right;">1.04 s</td>
+<td>SQL fixed; uncapped internal extraction dominates</td>
+</tr>
+<tr>
+<td>batch-capped at 61,300 texts</td>
+<td>Ollama summarizer, local LiteRT extractor</td>
+<td style="text-align: right;">4.97 s</td>
+<td style="text-align: right;">0.43 s / 0.08 s</td>
+<td style="text-align: right;">2.98 s</td>
+<td style="text-align: right;">1.00 s</td>
+<td>one bounded extraction cycle</td>
+</tr>
+<tr>
+<td>batch-capped at 61,360 texts</td>
+<td>Ollama summarizer, local LiteRT extractor</td>
+<td style="text-align: right;">43.46 s</td>
+<td style="text-align: right;">0.44 s / 0.08 s</td>
+<td style="text-align: right;">41.55 s</td>
+<td style="text-align: right;">0.92 s</td>
+<td>cap still allows 13 jobs at neutral stability</td>
+</tr>
+<tr>
+<td>external extractor at 61,420 texts</td>
+<td>Ollama summarizer and extractor</td>
+<td style="text-align: right;">5.41 s</td>
+<td style="text-align: right;">0.61 s / 0.08 s</td>
+<td style="text-align: right;">3.44 s</td>
+<td style="text-align: right;">0.64 s</td>
+<td>same provider seam works for labeling/extraction</td>
+</tr>
+</tbody>
+</table>
+
+This also exposed a configuration error in the live six-year ablation
+run: the controller used
+`--summarizer-provider ollama://127.0.0.1:11435/gemma4:e2b` but did not
+pass `--extractor-provider`, so labeling, relation extraction, and fact
+extraction fell back to the local LiteRT Gemma extractor. That made the
+live baseline a mixed-provider run rather than the intended
+external-provider baseline. The corrected run records both provider URIs
+and starts from a clean database:
+`eval_runs/full6y_strip_ablation_20260617T064718Z_ollama_e2b_bothproviders_wm21_sleep0200_pacific_gpu2`.
+
+The current provider model has two deep-LLM roles, not three: the
+extractor role is also the label provider. `ConsolidationSummarize`
+creates summaries and queues extraction requests;
+`ProcessExtractionResults` uses the configured `Extractor` to refine
+labels, relations, and facts. Therefore a clean external-provider run
+must set both `--summarizer-provider` and `--extractor-provider`. There
+is no separate `--label-provider` in the current API.
+
+The remaining consolidation optimization frontier is no longer the
+fallback SQL or an uncapped internal request vector. It is the
+model-inference shape of deep extraction itself: at neutral stability
+the cap permits up to **13** extraction requests per cycle, so a cycle
+can still take tens of seconds if each request is served synchronously
+at roughly three seconds. Further engine work should focus on the
+extractor/label role first. vLLM is only a fair same-model comparison if
+the exact Gemma 4 E2B weights are available in a vLLM-compatible format;
+the current local hot path was LiteRT CPU extraction, while the
+corrected external run uses the already-running Ollama Gemma 4 E2B
+endpoint for both deep roles.
+
+A follow-up late sparse-window profile clarified why the corrected run
+still felt slow even after the SQL and request-cap fixes. We copied the
+same late snapshot, resumed after `processed_text_messages=61,420`, and
+replayed the next 60 text messages with daily sleep consolidation
+enabled. That small window crossed six local sleep checkpoints, so the
+run spent **38.23 s** in consolidation and only **12.55 s** in ordinary
+ingest. Per-message write-tail instrumentation showed visible but
+secondary write cost: `SignalProcessor.commit_transaction` averaged
+**27.4 ms/message** with an **88.1 ms** max, while `persist_state`
+averaged **0.02 ms**, `persist_working_memory` **0.86 ms**, and object
+transaction commit was effectively zero. The larger ordinary-ingest
+costs were graph retrieval (**91.1 ms/message**) and accumulator update
+(**28.7 ms/message**). The kernel `jbd2_log_wait_commit` observations
+were therefore real, but not the dominant late sparse-window term once
+measured inside the process.
+
+The dominant consolidation term remained extraction generation. The
+first attempt at “batching” used one large structured prompt containing
+multiple items. That was the wrong abstraction: it reduced extractor
+time only slightly and made one summarizer call spike, raising total
+wall time from **50.78 s** to **62.37 s** on the same 60-message window.
+The implementation was replaced with first-class engine-level batching
+instead:
+
+-   `Extractor` now exposes `ExtractBatchFromTexts`, with a default
+    sequential implementation so existing extractors preserve behavior.
+-   `ProviderExtractor` overrides that method and sends independent
+    `GenerateRequest` objects through
+    `InferenceProvider::GenerateBatch`.
+-   `InferenceProvider::GenerateBatch` has a sequential default;
+    providers with true native batching can override it without changing
+    the extraction operation.
+-   The Ollama provider exposes an experimental transport-parallel
+    override controlled by `CORTEXT_OLLAMA_BATCH_PARALLELISM`. It
+    defaults to 1 so normal runs keep the old deterministic request
+    shape.
+
+On the same copied snapshot, the engine-level batching sweep was:
+
+<table>
+<colgroup>
+<col style="width: 9%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th>Slice</th>
+<th style="text-align: right;">Ollama batch parallelism</th>
+<th style="text-align: right;">Wall</th>
+<th style="text-align: right;">Ingest excluding consolidation</th>
+<th style="text-align: right;">Consolidation</th>
+<th style="text-align: right;">Extractor calls inside consolidation</th>
+<th style="text-align: right;">Summarizer calls inside
+consolidation</th>
+<th style="text-align: right;">Mean text process</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>sequential extractor baseline</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">50.78 s</td>
+<td style="text-align: right;">12.55 s</td>
+<td style="text-align: right;">38.23 s</td>
+<td style="text-align: right;">24.00 s</td>
+<td style="text-align: right;">4.83 s</td>
+<td style="text-align: right;">206.2 ms</td>
+</tr>
+<tr>
+<td>prompt-level batch attempt</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">62.37 s</td>
+<td style="text-align: right;">12.46 s</td>
+<td style="text-align: right;">49.91 s</td>
+<td style="text-align: right;">23.19 s</td>
+<td style="text-align: right;">19.47 s</td>
+<td style="text-align: right;">204.8 ms</td>
+</tr>
+<tr>
+<td>engine batch, parallel 2</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">46.67 s</td>
+<td style="text-align: right;">11.52 s</td>
+<td style="text-align: right;">35.15 s</td>
+<td style="text-align: right;">22.81 s</td>
+<td style="text-align: right;">5.75 s</td>
+<td style="text-align: right;">189.1 ms</td>
+</tr>
+<tr>
+<td>engine batch, parallel 4</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">47.65 s</td>
+<td style="text-align: right;">13.14 s</td>
+<td style="text-align: right;">34.51 s</td>
+<td style="text-align: right;">23.03 s</td>
+<td style="text-align: right;">4.44 s</td>
+<td style="text-align: right;">216.1 ms</td>
+</tr>
+</tbody>
+</table>
+
+The practical conclusion is that batching is now a first-class provider
+contract, but the currently available Ollama Gemma 4 E2B endpoint only
+benefits modestly from concurrent independent requests. Parallelism 2
+was the best observed setting in this slice, improving wall time by
+about **8%** and consolidation time by about **8%** versus the
+sequential extractor baseline. Parallelism 4 reduced consolidation
+slightly more but hurt ordinary ingest and lost on total wall time. The
+next larger gain requires an engine with real continuous batching for
+the same Gemma 4 E2B weights, not prompt packing.
+
+The same first-class batching contract was then extended to summary
+generation. `Summarizer` now exposes `SummarizeTextBatches`, with a
+default sequential implementation through `SummarizeTextsLimited`.
+`ProviderSummarizer` forwards independent summary requests through
+`InferenceProvider::GenerateBatch`, and `ConsolidationSummarize` flushes
+independent cluster summaries in bounded batches controlled by
+`CORTEXT_CONSOLIDATION_SUMMARY_BATCH_SIZE`.
+
+On the same late sparse-window slice with
+`CORTEXT_OLLAMA_BATCH_PARALLELISM=2`, the summary-batch control was:
+
+<table>
+<colgroup>
+<col style="width: 9%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th>Slice</th>
+<th style="text-align: right;">Summary batch size</th>
+<th style="text-align: right;">Wall</th>
+<th style="text-align: right;">Ingest excluding consolidation</th>
+<th style="text-align: right;">Consolidation</th>
+<th style="text-align: right;">Extractor calls inside consolidation</th>
+<th style="text-align: right;">Summarizer calls inside
+consolidation</th>
+<th style="text-align: right;">Mean text process</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>engine extractor batch, earlier p2 run</td>
+<td style="text-align: right;">old sequential summary path</td>
+<td style="text-align: right;">46.67 s</td>
+<td style="text-align: right;">11.52 s</td>
+<td style="text-align: right;">35.15 s</td>
+<td style="text-align: right;">22.81 s</td>
+<td style="text-align: right;">5.75 s</td>
+<td style="text-align: right;">189.1 ms</td>
+</tr>
+<tr>
+<td>current summary-batch path, size 1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">49.29 s</td>
+<td style="text-align: right;">11.01 s</td>
+<td style="text-align: right;">38.28 s</td>
+<td style="text-align: right;">25.44 s</td>
+<td style="text-align: right;">5.89 s</td>
+<td style="text-align: right;">180.6 ms</td>
+</tr>
+<tr>
+<td>current summary-batch path, size 8</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">51.47 s</td>
+<td style="text-align: right;">14.14 s</td>
+<td style="text-align: right;">37.33 s</td>
+<td style="text-align: right;">25.02 s</td>
+<td style="text-align: right;">4.38 s</td>
+<td style="text-align: right;">232.5 ms</td>
+</tr>
+</tbody>
+</table>
+
+This confirms the summary batching mechanism but does not justify
+enabling larger summary batches as a universal Ollama default. Size 8
+reduced measured summary generation by **1.51 s** versus the size-1
+control and reduced total consolidation by **0.95 s**, but total wall
+time was worse because ordinary ingest and commit time were noisier in
+that run. The safe interpretation is that summary batching is now
+available for engines that can exploit it; for the current Ollama
+endpoint, extraction generation remains the dominant consolidation cost
+and `CORTEXT_CONSOLIDATION_SUMMARY_BATCH_SIZE` should be swept with the
+target deployment rather than assumed.
+
+The provider work therefore changes the next engine experiment from a
+Cortext code change into an engine deployment choice. We added a
+text-only OpenAI-compatible provider so consolidation can target servers
+that expose the standard `/chat/completions` surface:
+
+``` bash
+CORTEXT_OPENAI_BATCH_PARALLELISM=4 \
+CORTEXT_CONSOLIDATION_SUMMARY_BATCH_SIZE=8 \
+cortext_chat_replay_live_run \
+  --summarizer-provider openai://127.0.0.1:8000/v1/gemma4-e2b \
+  --extractor-provider openai://127.0.0.1:8000/v1/gemma4-e2b
+```
+
+This is the right seam for vLLM-style continuous batching, but we did
+not record a vLLM timing in this pass because the local machine did not
+have a same-model vLLM deployment available: `vllm`, PyTorch, and
+Transformers were not installed, and the local Gemma 4 E2B assets were
+LiteRT plus Ollama GGUF, not Hugging Face/safetensors weights. vLLM’s
+OpenAI-compatible server is the right interface shape for this
+comparison, but its GGUF path is documented as experimental and not yet
+optimized. A fair same-model measurement therefore requires either
+obtaining the same Gemma 4 E2B weights in a vLLM-native format or
+standing up another OpenAI-compatible server around the exact GGUF
+artifact and then running the same provider URI through the benchmark.
+Until that is done, the measured local result is only the Ollama
+endpoint with client-side parallel independent requests, not a verdict
+on continuous batching engines.
+
+## Reconstruction Ledger Bounded-History Pass (June 17, 2026)
+
+A later live full-corpus profile isolated a separate scaling surface in
+constructive recall and reconsolidation. The active baseline database at
+the profile point contained **119,470** signal rows, **121,628** memory
+rows, and **2,406,172** `memory_reconstructions` rows. The hottest
+individual memories had thousands of historical reconstructions: the
+largest held **8,340** rows, and a cap of 10 rows per memory would have
+made about **2.18M** rows eligible for pruning in that database. Trigger
+counts also identified the dominant source of write amplification:
+**1,655,210** rows were `reconsolidation`, **689,474** were `retrieval`,
+and **62,708** were `initial`.
+
+The profile distinguished two effects. First, retrieval seed SQL was
+already using the current-memory vector surface, so the remaining
+late-run degradation was no longer caused by scanning all reconstruction
+rows for seed search. Second, the reconstruction ledger itself had
+become an unbounded write and storage surface. Repeated
+retrieval/reconsolidation of the same durable memory kept appending new
+vector rows even when the previous reconstructed surface was only
+minutes or seconds old. The current surface only needs the latest
+reconstruction for online recall, while the full historical ledger is
+useful only up to a bounded audit/debug horizon.
+
+The mitigation adds an internal `ReconstructionUpdatePolicy` applied by
+graph retrieval and reconsolidation:
+
+-   `ReconstructionHistoryLimit(F,S,T)` bounds retained reconstruction
+    history per memory. At neutral knobs the limit is about 10 rows,
+    with a bounded range of 4 to 24.
+-   `ReconstructionPruneBatchLimit(F,S,T)` deletes old rows
+    incrementally after appends so resumed runs can converge without a
+    single large blocking prune.
+-   `ReconstructionMinUpdateIntervalMs(F,S,T)` rate-limits dense
+    non-initial reconstruction updates. At neutral knobs the interval is
+    roughly 12 minutes.
+-   Environment overrides (`CORTEXT_RECONSTRUCTION_HISTORY_LIMIT`,
+    `CORTEXT_RECONSTRUCTION_PRUNE_BATCH_LIMIT`,
+    `CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS`) exist for ablation and
+    operational rollback.
+
+The append path now updates `current_memory_embeddings`, prunes older
+`memory_reconstructions` rows beyond the policy horizon, and removes
+orphaned reconstruction embeddings when they are no longer referenced by
+base memories, the retained ledger, or the current surface. The current
+surface remains the online recall source. `LoadCurrentEmbedding()` now
+reads `current_memory_embeddings` first and falls back to the historical
+ledger only for older or incomplete databases; the cooldown gate
+similarly reads the current surface timestamp before falling back to the
+ledger. These fast paths keep ordinary reconstruction reads independent
+of total historical ledger size.
+
+The acceptance gates for this pass were:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>constructive recall focused tests</td>
+<td style="text-align: right;">26 assertions / 3 cases passed</td>
+</tr>
+<tr>
+<td>graph + reconsolidation + constructive recall subset</td>
+<td style="text-align: right;">465 assertions / 73 cases passed</td>
+</tr>
+<tr>
+<td>full direct test binary</td>
+<td style="text-align: right;">10,521 assertions / 609 cases passed</td>
+</tr>
+</tbody>
+</table>
+
+This change affects newly started or resumed processes only. The live
+process observed during the profile was still an old binary, so its
+throughput and DB growth do not measure this mitigation until the run is
+restarted from the existing checkpoint. The expected effect is not an
+immediate shrink of an old database without maintenance; it is to
+prevent further unbounded reconstruction-history growth and to
+incrementally prune hot memories as they are touched again.
+
+## Twenty-Thousand-Signal Recursive Profile Pass (June 17, 2026)
+
+After the reconstruction-history pass, the full-six-year ablation was
+restarted from a clean database with corrected provider wiring and
+nightly consolidation. A later live checkpoint again showed processor
+latency creeping up, so the run was stopped and copied for another
+recursive profile loop rather than continuing an increasingly expensive
+evaluation. The checkpoint database held **20,118** signal rows,
+**20,604** memory rows, and **7,066** association rows, with replay
+positioned at **9,724** text messages. All measurements below use copied
+databases under `eval_runs/recursive_profile_20260617T2310Z`, resuming
+from that exact checkpoint with the same replay command, daily
+consolidation enabled, and full per-operation timing.
+
+The baseline 500-text-message pressure slice averaged **253.7
+ms/message** process time, median **142.5 ms**, p90 **371.0 ms**, p99
+**5.66 s**, and max **5.88 s**. The dominant operation surfaces were
+graph retrieval (**144.0 ms**), reconsolidation neighbor query (**104.4
+ms**), durable-source text seeding (**67.5 ms**), full reconsolidation
+(**61.0 ms**), accumulator update (**17.6 ms**), transaction commit
+(**16.2 ms**), and preconsolidated label-graph scoring (**14.7 ms**).
+
+The first issue was the reconsolidation ripple query. The previous
+recursive expansion joined associations with an `OR` over source and
+target memory ids, which let SQLite choose an edge-type index and rescan
+the `co_occurs` and `reinforces` edge sets for each frontier step. The
+replacement keeps the same undirected depth semantics but splits the
+recursive term into source-indexed and target-indexed branches using
+`idx_associations_source` and `idx_associations_target`, with the
+existing bounded ripple fanout. On the same 500-message slice,
+`Reconsolidation.neighbor_query` fell from **104.4 ms** to **4.0 ms**,
+full reconsolidation fell from **61.0 ms** to **6.1 ms**, and mean
+process time fell to **199.6 ms/message**.
+
+The next hotspot was repeated object-store payload reads inside
+durable-source text seeding. Six cache refreshes in the slice each spent
+roughly **2.3-2.5 s** in `objstore_get`, while metadata lookup was only
+**5-10 ms** and tokenization was about **1 ms**. Splitting the refresh
+into metadata, payload-fetch, and tokenization phases first made the
+cost visible. A bounded, parameter-sensitive token cache keyed by
+immutable blob id then made refreshes reuse already-tokenized source
+text across graph-cache invalidations. This reduced repeated refresh
+cost while preserving the same token-overlap scoring. The durable-source
+path still pays one cold-cache object-store spike after a mid-run
+resume, but subsequent refreshes reuse the cache. Mean process time fell
+from **199.6 ms** to **137.3 ms/message**, and
+`GraphRetrieve.durable_source_text_seed` fell from **67.6 ms** to **5.5
+ms** mean over all text rows.
+
+The third issue was preconsolidated label-graph scoring. The scorer
+rebuilt the same `has_label`, `derived_from`, and label-to-label
+relation maps on every signal by reading the full relation-edge surface
+from SQLite. A first cache attempt invalidated every turn because its
+fingerprint included ordinary memory-memory `co_occurs` and `reinforces`
+edges, which are irrelevant to label scoring but mutate frequently. The
+corrected cache fingerprints and reads only the edge subset used by the
+scorer: `has_label` edges to labels, all `derived_from` edges, and
+relation edges whose source and target are both labels. With that
+exact-surface fingerprint, `GraphRetrieve.label_graph_edges_sql` ran
+**6** times in the 500-message slice instead of **500** times, and
+`GraphRetrieve.preconsolidated_label_graph` fell from **14.6 ms** to
+**6.8 ms**. Mean process time fell to **128.1 ms/message**.
+
+The final low-risk change in this loop added explicit source/target
+association index hints to the source-seed label-relation expansion
+query. This preserves the same CTE and score computation but prevents
+the planner from using broad edge-type scans in the related-label joins.
+That reduced `GraphRetrieve.source_seed_label_relation_expansion` from
+**11.1 ms** to **8.1 ms**, and the 500-message slice reached **125.0
+ms/message** mean process time, median **115.6 ms**, p90 **144.3 ms**,
+and p99 **189.6 ms**.
+
+The cumulative short-slice progression was:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>Slice</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">Median</th>
+<th style="text-align: right;">p90</th>
+<th>Main change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>checkpoint baseline</td>
+<td style="text-align: right;">253.7 ms</td>
+<td style="text-align: right;">142.5 ms</td>
+<td style="text-align: right;">371.0 ms</td>
+<td>recon query and object-store spikes dominate</td>
+</tr>
+<tr>
+<td>split indexed recon query</td>
+<td style="text-align: right;">199.6 ms</td>
+<td style="text-align: right;">127.6 ms</td>
+<td style="text-align: right;">158.4 ms</td>
+<td>recon neighbor query bounded by source/target indexes</td>
+</tr>
+<tr>
+<td>persistent durable-source token cache</td>
+<td style="text-align: right;">137.3 ms</td>
+<td style="text-align: right;">128.4 ms</td>
+<td style="text-align: right;">156.7 ms</td>
+<td>repeated object-store payload fetches removed</td>
+</tr>
+<tr>
+<td>filtered label-graph relation cache</td>
+<td style="text-align: right;">128.1 ms</td>
+<td style="text-align: right;">119.2 ms</td>
+<td style="text-align: right;">148.9 ms</td>
+<td>label graph SQL cache misses drop from 500 to 6</td>
+</tr>
+<tr>
+<td>source-seed relation index hints</td>
+<td style="text-align: right;">125.0 ms</td>
+<td style="text-align: right;">115.6 ms</td>
+<td style="text-align: right;">144.3 ms</td>
+<td>related-label CTE uses source/target indexes</td>
+</tr>
+</tbody>
+</table>
+
+A longer 2,000-text-message validation slice then checked whether the
+optimized path stayed bounded beyond the short window. It averaged
+**132.8 ms/message** process time, median **125.0 ms**, p90 **165.2
+ms**, p99 **254.0 ms**, and max **2.58 s**. The max was the single cold
+durable-source token-cache fill after resume. The 500-row process-time
+bins were **124.6 ms**, **132.8 ms**, **139.7 ms**, and **134.2 ms**;
+the fourth bin falling back down is evidence against a monotonic local
+slope in this slice. The window crossed several media rows and corrupt
+HEIC files, so total wall time and hydration outliers are not used as
+the processor-linearity metric here.
+
+The remaining processor costs are distributed rather than one runaway
+surface: on the 2,000-message validation slice, graph retrieval averaged
+**70.9 ms**, accumulator update **17.3 ms**, transaction commit **15.4
+ms**, reconsolidation **10.2 ms**, source-seed label-relation expansion
+**10.2 ms**, graph expansion SQL **8.3 ms**, and preconsolidated label
+graph **7.6 ms**. This is still not a proof that the full six-year
+replay is realtime-linear. It is a narrower result: at the 20k-signal
+checkpoint that was showing renewed latency growth, the runaway
+reconsolidation, object-store, and repeated label-graph SQL surfaces
+were removed, and a 2,000-message continuation stayed in the same
+bounded processor-latency band.
+
+Verification after this pass included the focused graph and
+reconstruction tests plus the full direct test binary:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>[graph][operations]</code></td>
+<td style="text-align: right;">376 assertions / 52 cases passed</td>
+</tr>
+<tr>
+<td><code>[constructive_recall][operations]</code></td>
+<td style="text-align: right;">46 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[constructive_recall][operations][recon]</code></td>
+<td style="text-align: right;">13 assertions / 1 case passed</td>
+</tr>
+<tr>
+<td>full <code>cortext_tests</code> binary</td>
+<td style="text-align: right;">10,521 assertions / 609 cases passed</td>
+</tr>
+</tbody>
+</table>
+
+## Mature Reconstruction and Reconsolidation Follow-Up (June 18, 2026)
+
+A later full-six-year run reached a much larger mature state before
+being stopped for another recursive profile loop. The copied checkpoint
+used here came from
+`eval_runs/full6y_strip_ablation_20260618T001710Z_qat_e2b_cached_source_seed_wm21_sleep0200_pacific_gpu2/baseline_full.sqlite`
+and resumed replay at `--skip-messages 38649`. It contained about
+**75k** memories and **607k** reconstruction rows, with some hot
+memories still holding more than **1,400** historical reconstructions.
+We deliberately kept `CORTEXT_RECONSTRUCTION_PRUNE_BATCH_LIMIT=0` in the
+probe environment to verify that non-positive overrides no longer
+disable the knob-derived pruning policy.
+
+The first mature probe showed that the residual slowdown had moved
+inside graph retrieval’s reconstruction update path. On the event-30
+probe, `GraphAugmentedRetrieveCandidates` took **690.4 ms**, of which
+`GraphRetrieve.reconstruction_versions` accounted for **640.4 ms**. The
+fix was twofold: graph retrieval now updates only a knob-derived number
+of selected memories per signal
+(`RetrievalReconstructionUpdateCount(F,S,T)`, neutral value **1**), and
+non-positive reconstruction history/prune environment overrides are
+ignored in favor of the knob-derived defaults. On the same copied
+checkpoint, graph retrieval fell to **51.0 ms** and graph reconstruction
+writes to about **0.1 ms**.
+
+That exposed the next write-amplification surface: online
+reconsolidation was still allowed to append vector reconstructions for
+many primary and ripple neighbors during a single signal. In the same
+event-30 probe, full reconsolidation then cost **1,870.7 ms**, almost
+entirely `Reconsolidation.neighbor_write` (**1,861.0 ms**). A first cap
+reduced ripple vector writes but still allowed one expensive burst:
+reconsolidation fell to **669.4 ms**, with **511.6 ms** in neighbor
+writes and **153.6 ms** in primary appends. Skipping
+`current_memory_embeddings` updates for reconsolidation did not
+materially change that profile, showing that the dominant cost was the
+append of new vector rows and reconstruction ledger rows, not just the
+current surface update.
+
+The final online policy separates fast lability propagation from
+expensive vector rewriting. Reconsolidation always updates lability
+state and timestamps, but primary vector rewrites are limited by
+`ReconsolidationPrimaryReconstructionLimit(F,S,T)` and ripple vector
+rewrites by `ReconsolidationRippleReconstructionLimit(F,S,T)`. At
+neutral knobs the budgets are **1** primary vector rewrite and **0**
+ripple vector rewrites per signal; low-stability/high-sensitivity
+settings widen the budgets. Reconsolidation also uses
+`ReconstructionUpdatePolicy::update_current_surface=false`, and
+`LoadCurrentEmbedding()` now checks whether a current-surface row is
+stale before trusting it, falling back to the indexed reconstruction
+ledger when needed.
+
+The mature checkpoint progression for the event-30 probe was:
+
+<table>
+<colgroup>
+<col style="width: 9%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th>Pass</th>
+<th style="text-align: right;">Total</th>
+<th style="text-align: right;">Process</th>
+<th style="text-align: right;">Graph retrieval</th>
+<th style="text-align: right;">Graph reconstruction</th>
+<th style="text-align: right;">Reconsolidation</th>
+<th style="text-align: right;">Neighbor write</th>
+<th style="text-align: right;">Primary append</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>post-prune-policy, before fanout cap</td>
+<td style="text-align: right;">2,892.2 ms</td>
+<td style="text-align: right;">788.9 ms</td>
+<td style="text-align: right;">690.4 ms</td>
+<td style="text-align: right;">640.4 ms</td>
+<td style="text-align: right;">13.9 ms</td>
+<td style="text-align: right;">5.1 ms</td>
+<td style="text-align: right;">1.9 ms</td>
+</tr>
+<tr>
+<td>graph reconstruction fanout capped</td>
+<td style="text-align: right;">4,226.3 ms</td>
+<td style="text-align: right;">2,043.2 ms</td>
+<td style="text-align: right;">51.0 ms</td>
+<td style="text-align: right;">0.1 ms</td>
+<td style="text-align: right;">1,870.7 ms</td>
+<td style="text-align: right;">1,861.0 ms</td>
+<td style="text-align: right;">2.6 ms</td>
+</tr>
+<tr>
+<td>ripple reconstruction partially capped</td>
+<td style="text-align: right;">1,146.2 ms</td>
+<td style="text-align: right;">806.1 ms</td>
+<td style="text-align: right;">41.8 ms</td>
+<td style="text-align: right;">0.1 ms</td>
+<td style="text-align: right;">669.4 ms</td>
+<td style="text-align: right;">511.6 ms</td>
+<td style="text-align: right;">153.6 ms</td>
+</tr>
+<tr>
+<td>skip reconsolidation current-surface writes</td>
+<td style="text-align: right;">1,155.4 ms</td>
+<td style="text-align: right;">802.9 ms</td>
+<td style="text-align: right;">43.3 ms</td>
+<td style="text-align: right;">0.1 ms</td>
+<td style="text-align: right;">663.1 ms</td>
+<td style="text-align: right;">505.4 ms</td>
+<td style="text-align: right;">153.2 ms</td>
+</tr>
+<tr>
+<td>final online reconsolidation budget</td>
+<td style="text-align: right;"><strong>459.3 ms</strong></td>
+<td style="text-align: right;"><strong>121.7 ms</strong></td>
+<td style="text-align: right;"><strong>41.7 ms</strong></td>
+<td style="text-align: right;"><strong>0.1 ms</strong></td>
+<td style="text-align: right;"><strong>2.7 ms</strong></td>
+<td style="text-align: right;"><strong>0.0 ms</strong></td>
+<td style="text-align: right;"><strong>0.3 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+Across the six-probe mature slice after the final budget, process time
+averaged **108.2 ms** with max **143.9 ms**; graph retrieval averaged
+**45.3 ms**, graph reconstruction **0.1 ms**, reconsolidation **0.8
+ms**, and transaction commit **13.4 ms**. Total latency remained higher
+because probe hydration still materializes the retrieved and
+working-memory context snapshot, averaging **377.0 ms** with one **550.8
+ms** hydration outlier. That hydration cost affects the offline
+reporting harness more than the processor path and is tracked separately
+from the realtime processor-linearity metric.
+
+A longer 300-message mature smoke test then found one remaining cleanup
+cost in the reconstruction path. With the environment override removed,
+the knob-derived ledger prune was active, and
+`GraphRetrieve.reconstruction_versions` again appeared in five of seven
+probes at **160-177 ms**. The cap was working: neutral retrieval
+performs only one reconstruction update per signal. The remaining cost
+was synchronous deletion of stale orphan embeddings from the
+`embeddings` `vec0` table while pruning historical reconstruction rows.
+Those orphan vectors are not on the hot retrieval surface because
+current retrieval uses `current_memory_embeddings`; they are storage
+cleanup, not live behavior. `ReconstructionUpdatePolicy` therefore now
+separates ledger pruning from orphan vector cleanup. The production
+default prunes `memory_reconstructions` online but does not delete
+orphan `vec0` rows inside the message transaction; tests can still opt
+into `delete_orphan_embeddings=true` to verify the cleanup path.
+
+On the identical 300-message copied-checkpoint smoke, mean process time
+fell from **235.8 ms** to **114.6 ms**, graph retrieval from **162.2
+ms** to **43.5 ms**, and `GraphRetrieve.reconstruction_versions`
+disappeared from the top-operation list. The reconstruction ledger still
+pruned during the run: `memory_reconstructions` dropped from **606,929**
+rows to **606,634** rows. Total probe latency averaged **508.3 ms**
+because probe hydration still averaged **390.9 ms** and had one **673.8
+ms** packet-materialization spike; the processor path stayed bounded
+with max **152.0 ms**.
+
+Verification after this follow-up included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>focused constructive recall, retrieval knobs, reconsolidation, and
+graph tests</td>
+<td style="text-align: right;">596 assertions / 71 cases passed</td>
+</tr>
+<tr>
+<td>mature 60-message copied-checkpoint profile</td>
+<td style="text-align: right;">process mean <strong>108.2 ms</strong>,
+max <strong>143.9 ms</strong></td>
+</tr>
+<tr>
+<td>mature 300-message copied-checkpoint profile after orphan cleanup
+deferral</td>
+<td style="text-align: right;">process mean <strong>114.6 ms</strong>,
+max <strong>152.0 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Durable-Source Text Cache Refresh
+
+After the reconstruction and reconsolidation fixes, a fresh
+full-six-year run showed a different latency pattern: ordinary
+steady-state rows were bounded, but copied-checkpoint restarts could pay
+a large first-message spike in durable-source text seeding. A copied
+live checkpoint at `eval_runs/perf_probe_20260618T043500Z_skip6699`
+isolated the cold row: `GraphAugmentedRetrieveCandidates` took **2,136.0
+ms**, with `GraphRetrieve.durable_source_text_seed_payload_fetch`
+accounting for **2,065.4 ms**. Once that cache was warm, the same
+750-message copied profile was much lower: excluding the first row,
+process mean was **109.8 ms**, p90 **135.7 ms**, and max **230.3 ms**.
+The problem was therefore not a persistent reconstruction regression; it
+was an eager cache-fill path hidden by the restart boundary.
+
+The first fix made durable-source token hydration incremental: metadata
+is still loaded in one SQL query, but object-store payload fetches and
+tokenization are limited by
+`RetrievalDurableSourceTextRefreshBatch(F,S,T)` per signal. This reduced
+the first cold row from multi-second scale to hundreds of milliseconds,
+but a 300-event validation showed that the cache fingerprint was still
+too sensitive. The fingerprint included `derived_from` and `has_label`
+association sums, so normal association writes invalidated the metadata
+cursor repeatedly and stretched object-store reads across ordinary
+messages.
+
+The final policy separates graph freshness from payload hydration:
+
+-   metadata refresh is throttled by
+    `RetrievalDurableSourceTextRefreshInterval(F,S,T)`;
+-   refreshed metadata immediately reuses already-tokenized blob entries
+    instead of clearing the scored durable-source entry set;
+-   only missing blob payloads remain in the warm queue, and that queue
+    is still bounded by the refresh-batch knob.
+
+On a copied checkpoint from the restarted run at
+`eval_runs/perf_probe_20260618T045900Z_skip14507_durable_refresh_throttle`,
+a 300-event validation profile on a **160 MiB** database reported
+process mean **119.0 ms**, p90 **142.7 ms**, p99 **177.9 ms**, and max
+**188.3 ms**. Metadata refresh occurred at events 0, 120, and 233;
+metadata itself was only about **5 ms**. A longer 1,000-event copied
+profile at
+`eval_runs/perf_probe_20260618T050500Z_skip14507_durable_refresh_throttle_1000`
+reported process mean **125.7 ms**, median **123.1 ms**, p90 **154.9
+ms**, p99 **186.0 ms**, and max **309.9 ms**. The max row was the first
+cold row and included **69.4 ms** of payload fetch plus **52.2 ms**
+transaction commit; excluding that cold row, the profile stayed below
+**228.1 ms**. The last-quarter mean was higher (**139.3 ms**) than the
+middle windows (**116.0-118.8 ms**), but operation attribution no longer
+showed a single unbounded retrieval surface: the increase was
+distributed across commit, accumulator, graph SQL, and occasional
+reconsolidation neighbor queries.
+
+Verification after this cache-refresh pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>focused constructive recall, retrieval knobs, reconsolidation, and
+graph tests</td>
+<td style="text-align: right;">601 assertions / 71 cases passed</td>
+</tr>
+<tr>
+<td>300-event copied checkpoint after refresh throttling</td>
+<td style="text-align: right;">process mean <strong>119.0 ms</strong>,
+p99 <strong>177.9 ms</strong>, max <strong>188.3 ms</strong></td>
+</tr>
+<tr>
+<td>1,000-event copied checkpoint after refresh throttling</td>
+<td style="text-align: right;">process mean <strong>125.7 ms</strong>,
+p99 <strong>186.0 ms</strong>, max <strong>309.9 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Graph Candidate Prefetch Cap (June 18, 2026)
+
+After the object-store write fast path, association fanout indexes,
+in-memory label-relation cache, pointer-based selection, and replay
+debug-capture gating, the same 1,000-event copied profile was down to
+roughly **58 ms** mean process time. The remaining graph-retrieval slope
+was no longer a single unbounded SQL query. The final selected set
+stayed fixed at **11** memories, but probe debug showed the candidate
+pool growing with replay history: rejected candidates rose from **240**
+at event 250 to **449**, **552**, and **661** at events 500, 750, and
+1000. That growth inflated the late scoring pass even though top-k
+output was bounded.
+
+The cause was an implementation-level oversubscription surface. Each
+route into retrieval was locally bounded (semantic seed search, temporal
+source-neighbor expansion, durable-source text routing, label-relation
+routing, fact evidence, and recursive graph expansion), but the union of
+all route outputs was not bounded before embedding fetch and candidate
+scoring. The fix adds a prefetch route-score ledger and prunes
+`expanded_memory_ids` twice: once before recursive graph expansion and
+once before fetching candidate embeddings. The cap is derived from
+existing retrieval knobs:
+`max(graph_expansion_row_limit, seed_k + 2 * graph_expansion_row_limit)`.
+Semantic seeds, fact-linked candidates, and procedural seeds are
+protected; other candidates compete by their route evidence from
+temporal, label, fact, durable-text, recursive-graph, and
+summary-association paths. This keeps the behavior tied to the existing
+F/S/T-derived retrieval budget rather than to historical corpus size.
+
+Two variants were explicitly rejected. Ordering recursive expansion by
+`MIN(depth)` made the candidate set more deterministic, but it forced a
+`GROUP BY`/`ORDER BY` over the recursive CTE and raised late
+`GraphRetrieve.expand_sql` from **1.38 ms** to **4.43 ms**; mean process
+time worsened to **58.8 ms**. Removing protection from fact-linked
+candidates did not reduce the observed rejected-candidate plateau and
+also worsened mean process time to **57.2 ms**, so the fact-protection
+policy was restored.
+
+On the accepted no-order cap profile
+(`eval_runs/perf_probe_20260618T062848Z_skip17358_prefetch_cap_no_order`),
+the late probe rejected-candidate count flattened at **334** after event
+500 instead of continuing to **661**. The accepted profile improved both
+average and tail latency relative to the prior best same-checkpoint run
+(`eval_runs/perf_probe_20260618T061414Z_skip17358_debug_gate_activation_cache`):
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>Profile</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">p95 process</th>
+<th style="text-align: right;">900-999 process</th>
+<th style="text-align: right;">900-999 graph</th>
+<th style="text-align: right;">900-999 score</th>
+<th style="text-align: right;">Event-1000 rejected</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>debug-gated baseline</td>
+<td style="text-align: right;">57.8 ms</td>
+<td style="text-align: right;">77.8 ms</td>
+<td style="text-align: right;">60.9 ms</td>
+<td style="text-align: right;">27.5 ms</td>
+<td style="text-align: right;">2.74 ms</td>
+<td style="text-align: right;">661</td>
+</tr>
+<tr>
+<td>ordered recursive cap (rejected)</td>
+<td style="text-align: right;">58.8 ms</td>
+<td style="text-align: right;">79.3 ms</td>
+<td style="text-align: right;">63.7 ms</td>
+<td style="text-align: right;">29.7 ms</td>
+<td style="text-align: right;">1.26 ms</td>
+<td style="text-align: right;">334</td>
+</tr>
+<tr>
+<td>no-order prefetch cap</td>
+<td style="text-align: right;"><strong>56.6 ms</strong></td>
+<td style="text-align: right;"><strong>75.0 ms</strong></td>
+<td style="text-align: right;"><strong>58.4 ms</strong></td>
+<td style="text-align: right;"><strong>25.7 ms</strong></td>
+<td style="text-align: right;"><strong>1.25 ms</strong></td>
+<td style="text-align: right;"><strong>334</strong></td>
+</tr>
+</tbody>
+</table>
+
+The late-minus-early graph-retrieval slope fell from **+7.06 ms** to
+**+5.00 ms**, and late score time fell from **2.74 ms** to **1.25 ms**.
+This does not make the entire run perfectly flat: commit, label-relation
+expansion, label-graph scoring, and reconsolidation neighbor queries
+still contribute roughly **6-7 ms** of residual late-window drift. It
+does, however, remove the largest remaining candidate-set growth
+mechanism in graph retrieval without restarting the full six-year run.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>Graph retrieval*</code></td>
+<td style="text-align: right;">124 assertions / 28 cases passed</td>
+</tr>
+<tr>
+<td><code>*reconsolidation*</code></td>
+<td style="text-align: right;">61 assertions / 8 cases passed</td>
+</tr>
+<tr>
+<td><code>[schema],[migration],[object_store]</code></td>
+<td style="text-align: right;">50 assertions / 9 cases passed</td>
+</tr>
+<tr>
+<td>1,000-event copied checkpoint</td>
+<td style="text-align: right;">process mean <strong>56.6 ms</strong>,
+p95 <strong>75.0 ms</strong>, event-1000 rejected candidates
+<strong>334</strong></td>
+</tr>
+</tbody>
+</table>
+
+### WAL Commit and Predictive Decay Flattening (June 18, 2026)
+
+A longer 2,000-message probe on the same copied skip point showed that
+the prefetch cap removed candidate growth but did not fully flatten
+per-message latency. In
+`eval_runs/perf_probe_20260618T063958Z_skip17358_current_2000`, mean
+process time was **61.1 ms** and the late-window residual was
+distributed across graph retrieval, reconsolidation, predictive decay,
+and transaction commit. The most actionable non-algorithmic spike was
+`SignalProcessor.commit_transaction`: event 1750 spent **22.7 ms** in
+commit while neighboring probes were near **10-14 ms**. A label-relation
+prefix-cap experiment reduced some graph work but did not address that
+spike; its event-1750 commit rose to **28.9 ms**, so commit behavior had
+to be treated as a separate storage problem.
+
+The storage cause was SQLite’s default WAL auto-checkpoint policy. The
+store already used WAL mode with normal synchronous settings, but it
+left `wal_autocheckpoint` at SQLite’s default **1000** pages. That lets
+arbitrary foreground commits inherit checkpoint work. The accepted fix
+disables automatic WAL checkpoints on Cortext-managed WAL connections
+with `PRAGMA wal_autocheckpoint = 0`; explicit
+`SQLiteStore::Checkpoint()` remains available for controlled
+checkpointing at application or consolidation boundaries.
+
+The same pass removed an avoidable predictive-decay readback. Predictive
+pre-activation decay already tracks active embedding ids and updates the
+retrieval-surface cache in memory. The old implementation still ran a
+post-update SQL `SELECT` over every active chunk to determine which ids
+remained above the activity floor. The accepted implementation prunes
+cache-resident ids from the in-memory pre-activation value and only
+falls back to the SQL readback for cache misses. This preserves database
+semantics for edge cases while removing the common growing read pass.
+
+One reconsolidation variant was explicitly rejected. Replacing the
+recursive neighbor query with a bounded C++ BFS over top weighted
+incoming/outgoing edges passed tests but did not improve the measured
+spike: the event-1250 `Reconsolidation.neighbor_query` remained about
+**11-12 ms**. That change was reverted; reconsolidation remains a
+follow-up optimization surface rather than part of the accepted fix.
+
+The accepted WAL and predictive changes were validated with the same
+2,000-message copied checkpoint and provider setup
+(`/shared/Memory/Julie`, `--skip-messages 17358`, deep daily
+consolidation at 02:00 America/Los_Angeles, Gemma e2b QAT Ollama
+summarizer/extractor):
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>Profile</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">Probe process max</th>
+<th style="text-align: right;">Event-1750 commit</th>
+<th style="text-align: right;">Event-1750 predictive</th>
+<th style="text-align: right;">Wall time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>pre-WAL current</td>
+<td style="text-align: right;">61.1 ms</td>
+<td style="text-align: right;">75.1 ms</td>
+<td style="text-align: right;">22.7 ms</td>
+<td style="text-align: right;">0.705 ms</td>
+<td style="text-align: right;">304.8 s</td>
+</tr>
+<tr>
+<td>label-prefix only</td>
+<td style="text-align: right;">60.3 ms</td>
+<td style="text-align: right;">78.5 ms</td>
+<td style="text-align: right;">28.9 ms</td>
+<td style="text-align: right;">0.887 ms</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>WAL auto-checkpoint disabled</td>
+<td style="text-align: right;">56.5 ms</td>
+<td style="text-align: right;">70.3 ms</td>
+<td style="text-align: right;">11.0 ms</td>
+<td style="text-align: right;">1.060 ms</td>
+<td style="text-align: right;">192.6 s</td>
+</tr>
+<tr>
+<td>WAL + predictive readback removal</td>
+<td style="text-align: right;"><strong>55.9 ms</strong></td>
+<td style="text-align: right;"><strong>67.1 ms</strong></td>
+<td style="text-align: right;"><strong>10.9 ms</strong></td>
+<td style="text-align: right;"><strong>0.934 ms</strong></td>
+<td style="text-align: right;"><strong>191.3 s</strong></td>
+</tr>
+</tbody>
+</table>
+
+The warm-to-late commit slope became effectively flat: from event 1000
+to event 1750, commit changed by **-0.06 ms** in the WAL+predictive
+profile. The process path still has data-dependent graph and
+reconsolidation variance, but the storage-layer checkpoint leak that
+made latency appear to degrade with replay age was removed.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>Predictive*</code></td>
+<td style="text-align: right;">26 assertions / 2 cases passed</td>
+</tr>
+<tr>
+<td><code>Graph retrieval*</code></td>
+<td style="text-align: right;">124 assertions / 28 cases passed</td>
+</tr>
+<tr>
+<td><code>*reconsolidation*</code></td>
+<td style="text-align: right;">61 assertions / 8 cases passed</td>
+</tr>
+<tr>
+<td><code>[schema],[migration],[object_store]</code></td>
+<td style="text-align: right;">50 assertions / 9 cases passed</td>
+</tr>
+<tr>
+<td>2,000-message copied checkpoint</td>
+<td style="text-align: right;">process mean <strong>55.9 ms</strong>,
+event-1750 commit <strong>10.9 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Recursive Traversal and Cache-Freshness Flattening (June 18, 2026)
+
+A later 4,000-message copied-checkpoint probe showed that the WAL and
+predictive pass removed checkpoint spikes but not all growth with replay
+age. The remaining large terms were graph label-route freshness checks,
+reconsolidation neighbor traversal, and the generic association
+expansion CTE. These costs were corpus-size terms in normal replay, not
+LLM-provider costs.
+
+The accepted follow-up changes were:
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Hot path</th>
+<th>Implementation change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>normal-message eviction scans</td>
+<td>defer corpus-size eviction selection unless consolidation advanced,
+storage pressure is active, or the consolidation gate is disabled</td>
+</tr>
+<tr>
+<td>reconsolidation fanout</td>
+<td>add edge-filtered association fanout indexes and then replace
+recursive neighbor traversal with a bounded in-memory association fanout
+cache</td>
+</tr>
+<tr>
+<td>graph expansion</td>
+<td>use the same association fanout cache for depth/fanout-limited
+expansion, preserving the SQL path as fallback</td>
+</tr>
+<tr>
+<td>label-relation route cache</td>
+<td>stop fingerprinting all label/derived/relation associations every
+signal; refresh immediately on consolidation advance and otherwise on a
+periodic safety interval</td>
+</tr>
+<tr>
+<td>durable-source text route cache</td>
+<td>avoid full derived/label fingerprint checks unless route parameters
+changed or the metadata refresh interval elapsed</td>
+</tr>
+<tr>
+<td>reinforcement writes</td>
+<td>update the live association fanout cache incrementally for new
+<code>reinforces</code> edges instead of invalidating it and forcing a
+same-signal rebuild</td>
+</tr>
+</tbody>
+</table>
+
+One attempted variant was rejected: invalidating the association fanout
+cache after reinforcement writes preserved freshness but caused
+reconsolidation to rebuild the whole cache later in the same signal. In
+the copied probe this regressed mean process time to **56.1 ms** and
+restored a `Reconsolidation.neighbor_query` late-window cost of **5.75
+ms**. The accepted version updates the cache entry in place.
+
+Measured on the same copied checkpoint and provider setup:
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>Profile</th>
+<th style="text-align: right;">Window count</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">First-window process</th>
+<th style="text-align: right;">Last-window process</th>
+<th style="text-align: right;">Graph expansion</th>
+<th style="text-align: right;">Recon neighbor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>eviction/WAL baseline after earlier pass</td>
+<td style="text-align: right;">2k</td>
+<td style="text-align: right;">57.3 ms</td>
+<td style="text-align: right;">50.8 ms</td>
+<td style="text-align: right;">62.3 ms</td>
+<td style="text-align: right;">0.845 -&gt; 2.332 ms</td>
+<td style="text-align: right;">2.625 -&gt; 5.159 ms</td>
+</tr>
+<tr>
+<td>label/durable fingerprint throttles</td>
+<td style="text-align: right;">2k</td>
+<td style="text-align: right;">53.7 ms</td>
+<td style="text-align: right;">48.0 ms</td>
+<td style="text-align: right;">57.6 ms</td>
+<td style="text-align: right;">0.803 -&gt; 2.103 ms</td>
+<td style="text-align: right;">1.532 -&gt; 2.786 ms</td>
+</tr>
+<tr>
+<td>association fanout cache</td>
+<td style="text-align: right;">2k</td>
+<td style="text-align: right;">49.9 ms</td>
+<td style="text-align: right;">45.7 ms</td>
+<td style="text-align: right;">53.4 ms</td>
+<td style="text-align: right;">0.017 -&gt; 0.049 ms</td>
+<td style="text-align: right;">0.008 -&gt; 0.012 ms</td>
+</tr>
+<tr>
+<td>fanout cache + reinforcement cache update</td>
+<td style="text-align: right;">2k</td>
+<td style="text-align: right;">50.1 ms</td>
+<td style="text-align: right;">46.0 ms</td>
+<td style="text-align: right;">53.1 ms</td>
+<td style="text-align: right;">0.020 -&gt; 0.042 ms</td>
+<td style="text-align: right;">0.086 -&gt; 0.207 ms</td>
+</tr>
+<tr>
+<td>final 4k probe</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">54.4 ms</td>
+<td style="text-align: right;">45.5 ms</td>
+<td style="text-align: right;">61.9 ms</td>
+<td style="text-align: right;">0.016 -&gt; 0.054 ms</td>
+<td style="text-align: right;">0.085 -&gt; 0.307 ms</td>
+</tr>
+</tbody>
+</table>
+
+The specific recursive-scaling failure is therefore removed: generic
+graph expansion is now effectively flat in the 4k probe, and
+reconsolidation neighbor lookup remains sub-millisecond. The full
+process path is still not perfectly flat over 4,000 messages. The
+residual late-window growth is distributed across intended
+durable-history work rather than one runaway query: graph seed-cache
+search (`0.074 -> 0.657 ms`), predictive decay (`0.177 -> 0.636 ms`),
+memory storage (`0.519 -> 0.938 ms`), working-memory persistence
+(`0.287 -> 0.594 ms`), transaction commit (`10.094 -> 10.768 ms`), and
+closed historical working-memory rows. In the final 4k database, only
+**21** `WORKING` rows were active but **3,979** closed `WORKING` rows
+remained as history. Further flattening is therefore a
+storage/history-retention design question, not a recursive traversal
+bug.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>Graph retrieval*</code></td>
+<td style="text-align: right;">124 assertions / 28 cases passed</td>
+</tr>
+<tr>
+<td><code>Alg20*</code> reconsolidation</td>
+<td style="text-align: right;">34 assertions / 8 cases passed</td>
+</tr>
+<tr>
+<td><code>[detect_memory_usage]</code></td>
+<td style="text-align: right;">10 assertions / 2 cases passed</td>
+</tr>
+<tr>
+<td><code>DetectMemoryUsage*</code></td>
+<td style="text-align: right;">9 assertions / 3 cases passed</td>
+</tr>
+<tr>
+<td><code>[op14]</code></td>
+<td style="text-align: right;">17 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[op18][memory_strength]</code></td>
+<td style="text-align: right;">22 assertions / 6 cases passed</td>
+</tr>
+<tr>
+<td><code>[schema][migration]</code></td>
+<td style="text-align: right;">31 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td>4,000-message copied checkpoint</td>
+<td style="text-align: right;">process mean <strong>54.4 ms</strong>,
+graph expansion <strong>0.016 -&gt; 0.054 ms</strong>, recon neighbor
+<strong>0.085 -&gt; 0.307 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Working-Memory Text Reconstruction Cache (June 18, 2026)
+
+The follow-up profile found that the 4k process slope above was not
+caused by the association fanout cache.
+`GraphAugmentedRetrieveCandidates` still had an approximately **19 ms**
+unaccounted post-consolidation cost. Extra phase timers showed that the
+missing work happened before seed retrieval and scoring. The cause was
+`BuildWorkingMemoryTextPayload`: every retrieval reconstructed a short
+text query context by walking active working-memory signal records and
+calling `objstore_get` for their text blobs. The active working-memory
+slot count is bounded, but object-store reads on the hot retrieval path
+were still paid every signal.
+
+The accepted fix adds a transient `SignalRecord::text_payload` cache.
+Text signals populate this field at ingestion, and processor reload
+fills it once for active working-memory slots. Graph retrieval now uses
+the cached text and falls back to `objstore_get` only for legacy or
+missing payloads. This preserves the persisted schema and public API
+while moving payload materialization out of the per-signal retrieval
+path.
+
+A second adjustment changes closed working-memory cleanup from eager
+physical deletion to periodic pruning. Eager deletion capped the table
+at 21 rows but made `SignalProcessor.persist_working_memory` grow to
+nearly **2 ms** by 4k messages. The final implementation closes stale
+slots with `end_ts` on the hot path and prunes closed rows in bounded
+batches every 128 signals or on forced flush.
+
+Measured on the same copied checkpoint and provider setup:
+
+<table>
+<colgroup>
+<col style="width: 9%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th>Profile</th>
+<th style="text-align: right;">Window count</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">Event-500 process</th>
+<th style="text-align: right;">Event-4000 process</th>
+<th style="text-align: right;">Graph retrieve at 4000</th>
+<th style="text-align: right;">WM persist at 4000</th>
+<th style="text-align: right;">Working rows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>recursive-cache 4k baseline</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">54.4 ms</td>
+<td style="text-align: right;">34.2 ms</td>
+<td style="text-align: right;">63.4 ms</td>
+<td style="text-align: right;">23.3 ms</td>
+<td style="text-align: right;">0.775 ms</td>
+<td style="text-align: right;">4,000</td>
+</tr>
+<tr>
+<td>text cache + eager WM prune</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">36.3 ms</td>
+<td style="text-align: right;">34.4 ms</td>
+<td style="text-align: right;">44.3 ms</td>
+<td style="text-align: right;">5.1 ms</td>
+<td style="text-align: right;">1.990 ms</td>
+<td style="text-align: right;">21</td>
+</tr>
+<tr>
+<td>text cache + periodic WM prune</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;"><strong>35.5 ms</strong></td>
+<td style="text-align: right;">34.6 ms</td>
+<td style="text-align: right;">42.5 ms</td>
+<td style="text-align: right;"><strong>5.2 ms</strong></td>
+<td style="text-align: right;"><strong>0.738 ms</strong></td>
+<td style="text-align: right;">21</td>
+</tr>
+</tbody>
+</table>
+
+This reduces 4k mean process latency by **18.97 ms** relative to the
+previous recursive-cache baseline (**34.8%**), and it removes the large
+post-consolidation graph-retrieval step: graph retrieval at the 4k
+checkpoint falls from **23.3 ms** to **5.2 ms**. The checkpoint slope is
+not zero (**+7.9 ms** from event 500 to event 4000), but the residual
+terms are now smaller and explicit: graph scoring/seed cache,
+reconsolidation lability writes, predictive decay, retrieval debug
+capture, and periodic closed-WM cleanup. No full eval or status monitor
+was running during these probes.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>Graph retrieval*</code></td>
+<td style="text-align: right;">124 assertions / 28 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][working_memory]</code></td>
+<td style="text-align: right;">40 assertions / 14 cases passed</td>
+</tr>
+<tr>
+<td><code>[state_persistence][working_memory]</code></td>
+<td style="text-align: right;">14 assertions / 4 cases passed</td>
+</tr>
+<tr>
+<td><code>[accumulator]</code></td>
+<td style="text-align: right;">38 assertions / 8 cases passed</td>
+</tr>
+<tr>
+<td><code>[detect_memory_usage]</code></td>
+<td style="text-align: right;">10 assertions / 2 cases passed</td>
+</tr>
+<tr>
+<td><code>DetectMemoryUsage*</code></td>
+<td style="text-align: right;">9 assertions / 3 cases passed</td>
+</tr>
+<tr>
+<td><code>Alg20*</code> reconsolidation</td>
+<td style="text-align: right;">34 assertions / 8 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][predictive]</code></td>
+<td style="text-align: right;">38 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[op14]</code></td>
+<td style="text-align: right;">17 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[op18][memory_strength]</code></td>
+<td style="text-align: right;">22 assertions / 6 cases passed</td>
+</tr>
+<tr>
+<td><code>[schema][migration]</code></td>
+<td style="text-align: right;">31 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td>4,000-message copied checkpoint</td>
+<td style="text-align: right;">process mean <strong>35.5 ms</strong>,
+graph retrieval <strong>1.0 -&gt; 5.2 ms</strong>, WM persist
+<strong>0.168 -&gt; 0.738 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Rollback Snapshot, Seed Bounds, and WAL Cadence (June 18, 2026)
+
+The next profile pass used the same copied skip point but removed the
+active full-six-year evaluator and status monitor from the machine while
+debugging. The first 4,000-message baseline after the working-memory
+text-cache pass was
+`eval_runs/perf_probe_20260618T110252Z_skip17358_wm_textcache_periodicprune_4000`.
+It had a process mean of **35.46 ms** and a first-to-last bucket
+increase of **14.51 ms**. The large unaccounted growth was not in the
+operation timers: `SignalProcessor` copied the whole `ProcessorContext`
+before every signal so exception rollback could restore it. By this
+point the context contained corpus-sized rebuildable caches and indexes,
+so snapshot creation itself had become a hidden linear term.
+
+The accepted rollback fix makes the snapshot copy exclude rebuildable
+caches: label embeddings, summary/retrieval-surface caches and indexes,
+fact caches, durable-source and label-relation caches, association
+fanout caches, predictive/retrieval id sets, and procedural/index stores
+are detached before the snapshot copy and restored immediately afterward
+on the normal path. If an exception rolls back the database transaction,
+these caches are discarded and reloaded or rebuilt from durable state.
+`SignalProcessor.snapshot_context` is now timed explicitly so future
+probes cannot hide this cost again.
+
+The same pass removed smaller corpus-size terms:
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Hot path</th>
+<th>Implementation change</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>association and label-relation freshness</td>
+<td>steady-state cache validation now uses
+<code>consolidation_count</code>; eviction or consolidation invalidates
+caches explicitly instead of fingerprinting every signal</td>
+</tr>
+<tr>
+<td>predictive decay</td>
+<td>retrieval-surface pre-activation is decayed in memory every signal,
+but database decay is flushed in chunks every 64 signals</td>
+</tr>
+<tr>
+<td>label-graph source expansion</td>
+<td>source-label expansion uses the in-memory label-graph relation cache
+before falling back to SQL</td>
+</tr>
+<tr>
+<td>retrieval seed cache</td>
+<td>full seed-cache scans are capped; after the retrieval surface is
+large, candidate seeds come from sparse-key hits plus the newest bounded
+surface entries</td>
+</tr>
+<tr>
+<td>WAL growth between consolidation events</td>
+<td>with SQLite auto-checkpoint disabled, normal-message commits now run
+a passive Cortext-owned WAL checkpoint every 256 processed signals;
+consolidation and flush still use the existing full checkpoint</td>
+</tr>
+<tr>
+<td>reconsolidation ripple traversal</td>
+<td>cached graph traversal now caps per-node fanout and over-collection
+during BFS instead of walking an expanding frontier and truncating only
+after traversal</td>
+</tr>
+<tr>
+<td>WAL checkpoint placement</td>
+<td>normal-message passive checkpoints are skipped unless the WAL file
+is at least 256 MiB, avoiding small unnecessary checkpoints while
+retaining bounded WAL growth</td>
+</tr>
+</tbody>
+</table>
+
+Two variants were rejected. Switching seed lookup to sqlite-vec was
+slower than the in-memory seed cache: the measured seed SQL term rose to
+about **1.6 ms** at 1,500 events, **2.18 ms** at 2,000 events, and **2.9
+ms** at 4,000 events. A 128-signal passive WAL checkpoint cadence
+bounded the WAL but overpaid for writeback: in the 8,000-message no-deep
+probe it averaged up to **2.43 ms** in the last bucket. A later async
+checkpoint attempt was also rejected: it lowered the early process mean,
+but a separate checkpoint connection could not keep up with the
+continuous writer and the WAL reached **2.7 GB** by 2,000 messages. A
+512 MiB synchronous threshold was rejected as well: it reduced the
+first-to-last slope slightly, but raised the last-bucket checkpoint
+average to **1.77 ms** and the last-bucket process latency to **30.18
+ms**. The accepted setting is a 256-signal cadence with a 256 MiB
+WAL-size threshold.
+
+Measured results:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 10%" />
+</colgroup>
+<thead>
+<tr>
+<th>Profile</th>
+<th style="text-align: right;">Window</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">Last bucket process</th>
+<th style="text-align: right;">Tail-first process</th>
+<th style="text-align: right;">Snapshot tail-first</th>
+<th style="text-align: right;">Graph tail-first</th>
+<th>WAL / storage note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>text-cache baseline</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">35.46 ms</td>
+<td style="text-align: right;">41.73 ms</td>
+<td style="text-align: right;">+14.51 ms</td>
+<td style="text-align: right;">not timed</td>
+<td style="text-align: right;">+2.16 ms</td>
+<td>no explicit snapshot timing</td>
+</tr>
+<tr>
+<td>predictive DB flush</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">33.51 ms</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">+11.75 ms</td>
+<td style="text-align: right;">not timed</td>
+<td style="text-align: right;">n/a</td>
+<td>predictive SQL decay flattened</td>
+</tr>
+<tr>
+<td>rollback snapshot detach</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">30.51 ms</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">+5.70 ms</td>
+<td style="text-align: right;">+2.42 ms exposed</td>
+<td style="text-align: right;">n/a</td>
+<td>snapshot timer exposed remaining copied sets</td>
+</tr>
+<tr>
+<td>detached sets/indexes</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">28.57 ms</td>
+<td style="text-align: right;">29.80 ms</td>
+<td style="text-align: right;">+2.93 ms</td>
+<td style="text-align: right;">+0.15 ms</td>
+<td style="text-align: right;">+1.04 ms</td>
+<td>rollback copy no longer corpus-sized</td>
+</tr>
+<tr>
+<td>bounded seed prefilter</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">28.58 ms</td>
+<td style="text-align: right;">29.09 ms</td>
+<td style="text-align: right;">+2.31 ms</td>
+<td style="text-align: right;">+0.17 ms</td>
+<td style="text-align: right;">+0.48 ms</td>
+<td>seed-cache tail growth halved</td>
+</tr>
+<tr>
+<td>passive WAL 128, no deep</td>
+<td style="text-align: right;">8k</td>
+<td style="text-align: right;">31.50 ms</td>
+<td style="text-align: right;">32.53 ms</td>
+<td style="text-align: right;">+4.33 ms</td>
+<td style="text-align: right;">+0.11 ms</td>
+<td style="text-align: right;">+0.39 ms</td>
+<td>WAL bounded near 215 MB, checkpoint tail +1.79 ms</td>
+</tr>
+<tr>
+<td>passive WAL 256, no deep</td>
+<td style="text-align: right;">8k</td>
+<td style="text-align: right;"><strong>30.86 ms</strong></td>
+<td style="text-align: right;"><strong>30.97 ms</strong></td>
+<td style="text-align: right;"><strong>+3.08 ms</strong></td>
+<td style="text-align: right;">+0.11 ms</td>
+<td style="text-align: right;">+0.42 ms</td>
+<td>WAL bounded near 429 MB, checkpoint tail +0.59 ms</td>
+</tr>
+<tr>
+<td>bounded recon + WAL 256 MiB threshold</td>
+<td style="text-align: right;">8k</td>
+<td style="text-align: right;"><strong>29.08 ms</strong></td>
+<td style="text-align: right;"><strong>29.95 ms</strong></td>
+<td style="text-align: right;">+3.12 ms</td>
+<td style="text-align: right;">+0.12 ms</td>
+<td style="text-align: right;">+0.44 ms</td>
+<td>WAL bounded near 310 MB, recon tail +0.15 ms</td>
+</tr>
+<tr>
+<td>bounded recon + WAL 512 MiB threshold</td>
+<td style="text-align: right;">8k</td>
+<td style="text-align: right;">29.31 ms</td>
+<td style="text-align: right;">30.18 ms</td>
+<td style="text-align: right;"><strong>+2.64 ms</strong></td>
+<td style="text-align: right;">+0.11 ms</td>
+<td style="text-align: right;">+0.38 ms</td>
+<td>WAL bounded near 537 MB, checkpoint tail +1.61 ms</td>
+</tr>
+</tbody>
+</table>
+
+The final 8,000-message no-deep probe
+(`eval_runs/perf_probe_20260618T123607Z_skip17358_boundedseed_passivewal256_8000_nodeep`)
+processed all 8,000 text messages with mean process latency **30.86 ms**
+and mean total latency **33.23 ms**. The WAL stayed bounded during the
+run (`~397 MB` at 4k, `~422 MB` at 6k, `~429 MB` before close), whereas
+the same no-deep probe without periodic checkpointing reached **5.3 GB**
+WAL by 4,000 messages and **7.1 GB** before it was stopped. Closing the
+patched run left a single **158.7 MB** database file and no live WAL.
+
+The follow-up accepted probe
+(`eval_runs/perf_probe_20260618T125424Z_skip17358_syncwalthresh_boundedrecon_8000_nodeep`)
+processed the same 8,000-message slice with mean process latency **29.08
+ms** and mean total latency **31.50 ms**. The bounded reconsolidation
+traversal reduced late-bucket `ApplyReconsolidation` from about **1.72
+ms** to **0.48 ms**; `Reconsolidation.neighbor_query` fell from **0.76
+ms** to **0.08 ms** and neighbor lability writes fell from **0.71 ms**
+to **0.17 ms**. The WAL stayed around **310 MB** during replay and was
+folded into the **158.6 MB** database file at close.
+
+The remaining 8k tail is now explicit and small compared with the
+earlier runaway terms. From the first to last 1,000-message bucket in
+the accepted probe, the largest increases were passive WAL checkpointing
+(**+1.04 ms**), graph retrieval (**+0.44 ms**), transaction commit
+(**+0.38 ms**), working-memory persistence (**+0.20 ms**), seed-cache
+search (**+0.19 ms**), reconsolidation (**+0.15 ms**), accumulator
+update (**+0.14 ms**), and snapshot copy (**+0.12 ms**). This is not
+mathematically constant-time, but the previous corpus-copy,
+unbounded-WAL, and expanding-ripple traversal failure modes are removed.
+Quality impact from the bounded seed prefilter and bounded
+reconsolidation fanout still requires a full eval restart before
+treating the optimization as final experiment evidence.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>Graph retrieval*</code></td>
+<td style="text-align: right;">124 assertions / 28 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][predictive]</code></td>
+<td style="text-align: right;">38 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][working_memory]</code></td>
+<td style="text-align: right;">40 assertions / 14 cases passed</td>
+</tr>
+<tr>
+<td><code>*reconsolidation*</code></td>
+<td style="text-align: right;">61 assertions / 8 cases passed</td>
+</tr>
+<tr>
+<td><code>[op18][memory_strength]</code></td>
+<td style="text-align: right;">22 assertions / 6 cases passed</td>
+</tr>
+<tr>
+<td><code>[store][wal]</code></td>
+<td style="text-align: right;">31 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][detect_memory_usage]</code></td>
+<td style="text-align: right;">10 assertions / 2 cases passed</td>
+</tr>
+<tr>
+<td><code>[cortext]</code></td>
+<td style="text-align: right;">273 assertions / 22 cases passed</td>
+</tr>
+<tr>
+<td>8,000-message no-deep probe</td>
+<td style="text-align: right;">process mean <strong>30.86 ms</strong>,
+tail-first <strong>+3.08 ms</strong>, WAL bounded near <strong>429
+MB</strong></td>
+</tr>
+<tr>
+<td>follow-up 8,000-message no-deep probe</td>
+<td style="text-align: right;">process mean <strong>29.08 ms</strong>,
+tail-first <strong>+3.12 ms</strong>, WAL bounded near <strong>310
+MB</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Object-Store Backend and Sync Policy (June 18, 2026)
+
+The next bounded probe showed that the remaining constant latency floor
+was not coming from retrieval, reconstruction, or WAL checkpoint
+cadence. On the 16,000-message no-deep copied checkpoint
+(`eval_runs/perf_probe_20260618T131134Z_skip17358_current_16000_nodeep`),
+the run averaged **28.88 ms** process time and **31.23 ms** total time.
+Full per-operation timing showed a nearly fixed storage cost per text
+signal: `UpdateAccumulator.signal_payload_put` averaged about **9.3 ms**
+and `SignalProcessor.commit_transaction` about **10.4 ms**. The last
+2,000-message bucket still averaged **29.79 ms** process time, and the
+apparent slope was mostly storage maintenance rather than graph growth.
+
+The root cause was the default sqlite-objstore file backend. For small
+text payloads, the file backend paid a per-message payload or manifest
+sync cost in addition to the main SQLite transaction. We tested the sync
+and backend options on the same copied skip point:
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>Objstore mode</th>
+<th style="text-align: right;">Window</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">Mean total</th>
+<th style="text-align: right;">Payload put</th>
+<th style="text-align: right;">Commit</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>file backend, full sync</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">28.25 ms</td>
+<td style="text-align: right;">30.65 ms</td>
+<td style="text-align: right;">9.20 ms</td>
+<td style="text-align: right;">10.24 ms</td>
+<td>original hot-path fsync cost</td>
+</tr>
+<tr>
+<td>file backend, metadata sync</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">19.72 ms</td>
+<td style="text-align: right;">22.10 ms</td>
+<td style="text-align: right;">0.15 ms</td>
+<td style="text-align: right;">10.54 ms</td>
+<td>payload fsync removed, manifest/commit floor remains</td>
+</tr>
+<tr>
+<td>file backend, sync off</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">9.97 ms</td>
+<td style="text-align: right;">12.10 ms</td>
+<td style="text-align: right;">~0.18 ms</td>
+<td style="text-align: right;">~1.1 ms</td>
+<td>diagnostic only; weakens file-manifest durability</td>
+</tr>
+<tr>
+<td>SQLite backend</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;">10.11 ms</td>
+<td style="text-align: right;">12.45 ms</td>
+<td style="text-align: right;">near zero</td>
+<td style="text-align: right;">~1.0 ms</td>
+<td>accepted: transactional with main DB/WAL</td>
+</tr>
+<tr>
+<td>no-env default after change</td>
+<td style="text-align: right;">4k</td>
+<td style="text-align: right;"><strong>9.67 ms</strong></td>
+<td style="text-align: right;"><strong>11.81 ms</strong></td>
+<td style="text-align: right;">near zero</td>
+<td style="text-align: right;">~1.0 ms</td>
+<td>verifies the new default path</td>
+</tr>
+</tbody>
+</table>
+
+The accepted implementation makes sqlite-objstore use the SQLite backend
+by default for Cortext-managed connections. This keeps object payloads
+in the same SQLite transaction and WAL as the metadata rows, avoiding
+the file backend’s per-message manifest sync on text-heavy replay. File
+storage remains available for large media-heavy deployments with
+`CORTEXT_OBJSTORE_BACKEND=file` or `CORTEXT_OBJSTORE_BACKEND=auto`;
+`CORTEXT_OBJSTORE_SYNC=full|metadata|off` controls file-backend
+durability/performance tradeoffs for ablation and operations. Unknown
+values fail closed to the SQLite backend or metadata sync rather than to
+the slow full-sync file path.
+
+The longer validation probe with the SQLite backend
+(`eval_runs/perf_probe_20260618T133634Z_skip17358_objstore_sqlite_16000_nodeep`)
+processed **16,000** text messages with mean process latency **10.47
+ms** and mean total latency **12.70 ms**. Relative to the pre-change 16k
+probe, process latency fell from **28.88 ms** to **10.47 ms** and total
+latency from **31.23 ms** to **12.70 ms**. Wall time fell from roughly
+**505 s** excluding model load to roughly **209 s** for the same replay
+slice.
+
+The 2,000-message bucket profile after the backend change no longer
+showed a monotonic runaway term: process time was **9.12 ms** in the
+first bucket, peaked around **11.26 ms** in the 10k-12k bucket, and
+ended at **10.35 ms** in the final bucket. The remaining residual is
+small and distributed across graph retrieval,
+accumulator/memory-strength work, working-memory persistence, and
+passive WAL checkpoints. This is still not a mathematical constant-time
+proof, and quality impact from the preceding bounded-retrieval changes
+still requires a clean full-eval restart. It does remove the dominant
+storage sync floor that made every text signal pay tens of milliseconds
+before algorithmic work could matter.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>[store][wal]</code></td>
+<td style="text-align: right;">31 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[extensions]</code></td>
+<td style="text-align: right;">17 assertions / 1 case passed</td>
+</tr>
+<tr>
+<td><code>[object_store]</code></td>
+<td style="text-align: right;">11 assertions / 3 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][memory_storage]</code></td>
+<td style="text-align: right;">47 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[cortext][objstore][hydration]</code></td>
+<td style="text-align: right;">25 assertions / 1 case passed</td>
+</tr>
+<tr>
+<td><code>[cortext][store]</code></td>
+<td style="text-align: right;">2 assertions / 1 case passed</td>
+</tr>
+<tr>
+<td><code>[cortext]</code></td>
+<td style="text-align: right;">273 assertions / 22 cases passed</td>
+</tr>
+</tbody>
+</table>
+
+### Exact Storage-Tail Profiling (June 18, 2026)
+
+The object-store/backend pass removed the large average storage floor,
+but a later exact per-event curve showed that the mean alone was hiding
+rare filesystem stalls. Sparse progress rows looked flat, yet the full
+`working_set_curve` still contained occasional hundreds-of-milliseconds
+`SignalProcessor.commit_transaction` rows on the normal
+`/shared/cortext` backing filesystem. This changed the question from
+“which operation grows with corpus size?” to “which durable-write policy
+makes realtime tail latency bounded?”
+
+Two accepted code changes narrowed the hot path before the storage
+policy sweep:
+
+-   Foreground passive WAL checkpoints were made opt-in with
+    `CORTEXT_FOREGROUND_WAL_CHECKPOINT`. A 32k diagnostic run showed an
+    explicit foreground checkpoint dominating one event (**943 ms**
+    inside `SignalProcessor.sqlite_wal_checkpoint_passive`, **960 ms**
+    total process time). Smaller checkpoint cadences bounded WAL size
+    but increased hot-path checkpoint cost. Normal-message checkpoints
+    therefore no longer run by default; consolidation and flush still
+    use the explicit full-checkpoint path.
+-   Closed working-memory physical pruning was moved out of
+    normal-message replay. The hot path still marks stale rows closed
+    with `end_ts`, but physical deletion of closed working-memory rows
+    and their dependent vector rows now runs only on forced
+    flush/consolidation paths.
+
+We also bypassed the sqlite-objstore scalar commit-hook path for the
+default SQLite object backend. For Cortext-managed SQLite object
+storage, `SqlObjectStore` now writes and reads the underlying
+`objstore_data` and `objstore_rowidx` tables directly in the active
+transaction. This preserves the same content-addressed object ids and
+rollback behavior, while avoiding an extra sqlite-objstore staged-write
+flush at `COMMIT`. Focused object-store tests cover top-level and nested
+savepoint rollback.
+
+The exact 9,000-message replay probes then separated algorithmic cost
+from storage policy:
+
+<table>
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 10%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 10%" />
+</colgroup>
+<thead>
+<tr>
+<th>Probe</th>
+<th>SQLite/object policy</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">p99</th>
+<th style="text-align: right;">p999</th>
+<th style="text-align: right;">Max</th>
+<th style="text-align: right;">&gt;30 ms rows</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>walapi_noprune_9000_diag</code></td>
+<td>WAL, foreground checkpoints off</td>
+<td style="text-align: right;">9.97 ms</td>
+<td style="text-align: right;">15.54 ms</td>
+<td style="text-align: right;">23.61 ms</td>
+<td style="text-align: right;">337.42 ms</td>
+<td style="text-align: right;">8</td>
+<td>rare commit stalls remain</td>
+</tr>
+<tr>
+<td><code>direct_objstore_9000_diag</code></td>
+<td>direct SQLite object table writes</td>
+<td style="text-align: right;">9.93 ms</td>
+<td style="text-align: right;">15.39 ms</td>
+<td style="text-align: right;">24.94 ms</td>
+<td style="text-align: right;">379.39 ms</td>
+<td style="text-align: right;">8</td>
+<td>objstore commit hook is not the tail source</td>
+</tr>
+<tr>
+<td><code>sync_off_9000_diag</code></td>
+<td>WAL + SQLite synchronous off</td>
+<td style="text-align: right;">9.99 ms</td>
+<td style="text-align: right;">15.67 ms</td>
+<td style="text-align: right;">33.47 ms</td>
+<td style="text-align: right;">216.53 ms</td>
+<td style="text-align: right;">10</td>
+<td>fsync is not the only tail source</td>
+</tr>
+<tr>
+<td><code>tmpfs_9000_diag</code></td>
+<td>same code, DB on <code>/dev/shm</code></td>
+<td style="text-align: right;">9.45 ms</td>
+<td style="text-align: right;">14.24 ms</td>
+<td style="text-align: right;">18.77 ms</td>
+<td style="text-align: right;">26.30 ms</td>
+<td style="text-align: right;">0</td>
+<td>physical backing store/writeback is the tail</td>
+</tr>
+<tr>
+<td><code>file_objstore_9000_diag</code></td>
+<td>file object backend, objstore sync off</td>
+<td style="text-align: right;">9.18 ms</td>
+<td style="text-align: right;">14.95 ms</td>
+<td style="text-align: right;">89.29 ms</td>
+<td style="text-align: right;">352.70 ms</td>
+<td style="text-align: right;">17</td>
+<td>file backend still flushes at SQLite commit</td>
+</tr>
+<tr>
+<td><code>sqlite_memory_sync_off_9000_diag</code></td>
+<td><code>journal_mode=memory</code>, sync off</td>
+<td style="text-align: right;">6.71 ms</td>
+<td style="text-align: right;">9.82 ms</td>
+<td style="text-align: right;">12.25 ms</td>
+<td style="text-align: right;">20.53 ms</td>
+<td style="text-align: right;">0</td>
+<td>realtime diagnostic profile removes commit tail</td>
+</tr>
+<tr>
+<td><code>sqlite_off_sync_off_9000_diag</code></td>
+<td><code>journal_mode=off</code>, sync off</td>
+<td style="text-align: right;">6.25 ms</td>
+<td style="text-align: right;">9.02 ms</td>
+<td style="text-align: right;">11.91 ms</td>
+<td style="text-align: right;">28.61 ms</td>
+<td style="text-align: right;">0</td>
+<td>marginally faster, but weaker crash semantics</td>
+</tr>
+</tbody>
+</table>
+
+The tmpfs result is the decisive diagnostic: with the same algorithm and
+SQLite schema, the exact curve had no \>30 ms rows and the worst commit
+was small. On disk, the largest rows were overwhelmingly `COMMIT`, not
+graph retrieval or reconstruction. The object payload volume was also
+too small to explain the stalls: the direct-object run held about **288
+KB** of object data inside a **195 MB** database. The largest database
+surfaces were sqlite-vec embedding chunk tables and `memories`, so the
+remaining default-tail behavior comes from main-database writeback
+rather than sqlite-objstore payload volume.
+
+The accepted implementation exposes the relevant SQLite policy choices
+through environment variables without changing the public API:
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Environment variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CORTEXT_SQLITE_JOURNAL_MODE=wal|delete|truncate|persist|memory|off</code></td>
+<td>override the file-database journal mode</td>
+</tr>
+<tr>
+<td><code>CORTEXT_SQLITE_SYNCHRONOUS=off|normal|full|extra</code></td>
+<td>override SQLite synchronous mode</td>
+</tr>
+<tr>
+<td><code>CORTEXT_SQLITE_PAGE_SIZE=&lt;power-of-two&gt;</code></td>
+<td>set page size before schema creation for new databases</td>
+</tr>
+<tr>
+<td><code>CORTEXT_SQLITE_CACHE_SIZE_KB=&lt;kb&gt;</code></td>
+<td>override the per-connection page cache size</td>
+</tr>
+<tr>
+<td><code>CORTEXT_SQLITE_TEMP_STORE=default|file|memory</code></td>
+<td>control temporary storage</td>
+</tr>
+<tr>
+<td><code>CORTEXT_SQLITE_LOCKING_MODE=normal|exclusive</code></td>
+<td>expose locking mode for diagnostics</td>
+</tr>
+<tr>
+<td><code>CORTEXT_SQLITE_TRANSACTION_MODE=deferred|immediate|exclusive</code></td>
+<td>expose the root transaction begin mode</td>
+</tr>
+</tbody>
+</table>
+
+The recommended realtime/eval profile from this pass is:
+
+``` bash
+CORTEXT_FOREGROUND_WAL_CHECKPOINT=0 \
+CORTEXT_SQLITE_JOURNAL_MODE=memory \
+CORTEXT_SQLITE_SYNCHRONOUS=off \
+cortext_chat_replay_live_run ...
+```
+
+This is intentionally not the default durability profile.
+`journal_mode=memory` keeps the rollback journal in process memory, so a
+process or machine crash in the middle of a transaction can be less
+recoverable than WAL/NORMAL. It is, however, the first profile in this
+sequence that makes disk-backed exact latency look like the tmpfs
+control while preserving normal committed data persistence across clean
+process exits. `journal_mode=off` buys only a small additional speedup
+and removes even more rollback protection, so it is retained as a
+diagnostic/eval knob rather than the recommended setting.
+
+Verification after this storage-tail pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>[store],[wal],[object_store]</code></td>
+<td style="text-align: right;">114 assertions / 19 cases passed</td>
+</tr>
+<tr>
+<td>tmpfs 9,000-message probe</td>
+<td style="text-align: right;">p99 <strong>14.24 ms</strong>, p999
+<strong>18.77 ms</strong>, max <strong>26.30 ms</strong>, zero &gt;30 ms
+rows</td>
+</tr>
+<tr>
+<td>memory-journal 9,000-message probe</td>
+<td style="text-align: right;">p99 <strong>9.82 ms</strong>, p999
+<strong>12.25 ms</strong>, max <strong>20.53 ms</strong>, zero &gt;30 ms
+rows</td>
+</tr>
+<tr>
+<td>journal-off 9,000-message probe</td>
+<td style="text-align: right;">p99 <strong>9.02 ms</strong>, p999
+<strong>11.91 ms</strong>, max <strong>28.61 ms</strong>, zero &gt;30 ms
+rows</td>
+</tr>
+</tbody>
+</table>
+
+### Graph and Reconsolidation Tail Cleanup (June 18, 2026)
+
+After the storage-tail pass, the same memory-journal realtime/eval
+profile was used to build a clean 16,000-message text replay slice from
+the full-corpus window (`--skip-messages 17358`, `--max-messages 16000`,
+media disabled). This kept the storage backend from dominating the exact
+curve and exposed the next algorithmic tail terms.
+
+The first 16k diagnostic run
+(`eval_runs/perf_probe_20260618T151847Z_skip17358_wm_append_16000_diag`)
+had mean process latency **6.62 ms**, p99 **9.18 ms**, p999 **11.75
+ms**, and max **17.45 ms**, but the per-bucket profile showed about
+**0.18 ms/message** in
+`GraphRetrieve.durable_source_text_seed_metadata`. The durable-source
+cache was valid but empty because this replay had no `has_label` edges.
+The old code treated an empty complete cache as refresh-due on every
+signal, so foreground retrieval repeatedly rechecked metadata that could
+not change until the graph fingerprint changed. The fix records the
+metadata refresh signal even when the fingerprint matches an empty
+cache, and it splits the timing into fingerprint, metadata SQL, and
+metadata decode counters.
+
+The next 16k run
+(`eval_runs/perf_probe_20260618T153624Z_skip17358_durable_empty_cache_wm_anchor_16000_diag`)
+reduced durable-source metadata to **0.00036 ms/message** and mean
+process latency to **6.52 ms**, but it exposed one **20.24 ms**
+`GraphRetrieve.source_seed_temporal_seed_lookup` spike. That query was
+redundant for retrieval-surface seeds: the in-memory surface already
+carries `source_id` and `start_ts`, but temporal expansion still queried
+`memories` for every selected seed. We now carry `source_start_ts`
+through seed scoring, add source temporal anchors directly when the seed
+metadata is known, and fall back to SQLite only for seeds that lack
+those fields. The same pass also caps working-memory record anchors by
+the knob-derived temporal window so a slot’s full historical record list
+is not scanned on every signal.
+
+The third 16k run
+(`eval_runs/perf_probe_20260618T154420Z_skip17358_seed_anchor_reuse_16000_diag`)
+confirmed the source-seed lookup was gone (`max=0.0 ms`, `mean=0.0 ms`)
+and mean process latency fell to **6.43 ms**. It then exposed a separate
+reconsolidation tail: one event spent **29.70 ms** in cumulative
+`Reconsolidation.neighbor_lability_write`, driving a **45.27 ms**
+process maximum. This was not one slow update; it was many individual
+lability-only `UPDATE memories` statements issued after the ripple
+reconstruction budget had already been exhausted. The accepted change
+batches those lability-only neighbors per primary memory into bounded
+CASE-based updates, preserving the same per-neighbor lability values and
+timestamp in the same transaction.
+
+The final validation run
+(`eval_runs/perf_probe_20260618T154927Z_skip17358_recon_batch_16000_diag`)
+processed the same 16,000-message slice with mean process latency **6.40
+ms**, mean total latency **8.35 ms**, p99 **9.06 ms**, p999 **11.13
+ms**, and max **15.61 ms**. There were zero rows above 20 ms.
+`source_seed_temporal_seed_lookup` remained at zero,
+`Reconsolidation.neighbor_lability_write` maxed at **1.17 ms**, and the
+2,000-message buckets stayed in a narrow band after the initial warmup:
+
+<table>
+<colgroup>
+<col style="width: 9%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th>Run</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">p99</th>
+<th style="text-align: right;">p999</th>
+<th style="text-align: right;">Max</th>
+<th style="text-align: right;">&gt;20 ms rows</th>
+<th style="text-align: right;">Source-seed lookup max</th>
+<th style="text-align: right;">Recon lability max</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>WM append baseline</td>
+<td style="text-align: right;">6.62 ms</td>
+<td style="text-align: right;">9.18 ms</td>
+<td style="text-align: right;">11.75 ms</td>
+<td style="text-align: right;">17.45 ms</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.00 ms</td>
+<td style="text-align: right;">1.29 ms</td>
+</tr>
+<tr>
+<td>durable empty-cache fix</td>
+<td style="text-align: right;">6.52 ms</td>
+<td style="text-align: right;">9.44 ms</td>
+<td style="text-align: right;">11.80 ms</td>
+<td style="text-align: right;">28.51 ms</td>
+<td style="text-align: right;">2</td>
+<td style="text-align: right;">20.24 ms</td>
+<td style="text-align: right;">1.37 ms</td>
+</tr>
+<tr>
+<td>source-anchor reuse</td>
+<td style="text-align: right;">6.43 ms</td>
+<td style="text-align: right;">9.43 ms</td>
+<td style="text-align: right;">12.43 ms</td>
+<td style="text-align: right;">45.27 ms</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">0.00 ms</td>
+<td style="text-align: right;">29.70 ms</td>
+</tr>
+<tr>
+<td>recon lability batch</td>
+<td style="text-align: right;"><strong>6.40 ms</strong></td>
+<td style="text-align: right;"><strong>9.06 ms</strong></td>
+<td style="text-align: right;"><strong>11.13 ms</strong></td>
+<td style="text-align: right;"><strong>15.61 ms</strong></td>
+<td style="text-align: right;"><strong>0</strong></td>
+<td style="text-align: right;"><strong>0.00 ms</strong></td>
+<td style="text-align: right;"><strong>1.17 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+The final bucket means were:
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>Event bucket</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">Graph retrieval</th>
+<th style="text-align: right;">Durable metadata</th>
+<th style="text-align: right;">Source temporal</th>
+<th style="text-align: right;">Recon lability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0-2k</td>
+<td style="text-align: right;">5.40 ms</td>
+<td style="text-align: right;">2.34 ms</td>
+<td style="text-align: right;">0.00048 ms</td>
+<td style="text-align: right;">0.02463 ms</td>
+<td style="text-align: right;">0.141 ms</td>
+</tr>
+<tr>
+<td>2k-4k</td>
+<td style="text-align: right;">6.43 ms</td>
+<td style="text-align: right;">2.68 ms</td>
+<td style="text-align: right;">0.00032 ms</td>
+<td style="text-align: right;">0.03773 ms</td>
+<td style="text-align: right;">0.170 ms</td>
+</tr>
+<tr>
+<td>4k-6k</td>
+<td style="text-align: right;">6.56 ms</td>
+<td style="text-align: right;">2.75 ms</td>
+<td style="text-align: right;">0.00037 ms</td>
+<td style="text-align: right;">0.04043 ms</td>
+<td style="text-align: right;">0.159 ms</td>
+</tr>
+<tr>
+<td>6k-8k</td>
+<td style="text-align: right;">6.59 ms</td>
+<td style="text-align: right;">2.79 ms</td>
+<td style="text-align: right;">0.00036 ms</td>
+<td style="text-align: right;">0.04032 ms</td>
+<td style="text-align: right;">0.171 ms</td>
+</tr>
+<tr>
+<td>8k-10k</td>
+<td style="text-align: right;">6.67 ms</td>
+<td style="text-align: right;">2.81 ms</td>
+<td style="text-align: right;">0.00034 ms</td>
+<td style="text-align: right;">0.04151 ms</td>
+<td style="text-align: right;">0.169 ms</td>
+</tr>
+<tr>
+<td>10k-12k</td>
+<td style="text-align: right;">6.64 ms</td>
+<td style="text-align: right;">2.76 ms</td>
+<td style="text-align: right;">0.00036 ms</td>
+<td style="text-align: right;">0.04162 ms</td>
+<td style="text-align: right;">0.168 ms</td>
+</tr>
+<tr>
+<td>12k-14k</td>
+<td style="text-align: right;">6.49 ms</td>
+<td style="text-align: right;">2.65 ms</td>
+<td style="text-align: right;">0.00033 ms</td>
+<td style="text-align: right;">0.04182 ms</td>
+<td style="text-align: right;">0.164 ms</td>
+</tr>
+<tr>
+<td>14k-16k</td>
+<td style="text-align: right;">6.45 ms</td>
+<td style="text-align: right;">2.68 ms</td>
+<td style="text-align: right;">0.00035 ms</td>
+<td style="text-align: right;">0.04101 ms</td>
+<td style="text-align: right;">0.170 ms</td>
+</tr>
+</tbody>
+</table>
+
+This is not a proof that the full six-year replay is realtime-linear
+under all settings. The 16k exact slice shows that the previously
+observed foreground growth terms are now bounded under the
+memory-journal eval profile. The remaining largest rows are commit
+spikes around **8 ms** plus ordinary graph, predictive-decay, and
+stability-maintenance work; they are follow-up tuning targets rather
+than runaway corpus-size terms.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>*reconsolidation*</code></td>
+<td style="text-align: right;">61 assertions / 8 cases passed</td>
+</tr>
+<tr>
+<td><code>Graph retrieval*</code></td>
+<td style="text-align: right;">124 assertions / 28 cases passed</td>
+</tr>
+<tr>
+<td><code>[working_memory]</code></td>
+<td style="text-align: right;">379 assertions / 30 cases passed on
+rerun; first attempt hit an existing timing-sensitive 0.84997 vs 0.85
+tolerance failure</td>
+</tr>
+<tr>
+<td><code>[schema][migration]</code></td>
+<td style="text-align: right;">31 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td>16,000-message exact replay</td>
+<td style="text-align: right;">mean process <strong>6.40 ms</strong>,
+p999 <strong>11.13 ms</strong>, max <strong>15.61 ms</strong>, zero
+&gt;20 ms rows</td>
+</tr>
+</tbody>
+</table>
+
+### Full-Curve Seed Allocation and SQLite Cache Sizing (June 18, 2026)
+
+A subsequent 32,000-message exact replay
+(`eval_runs/perf_probe_20260618T155534Z_skip17358_current_32000_diag`)
+showed that the average graph path was no longer the dominant growth
+term, but rare foreground tails remained: one
+`GraphRetrieve.seed_cache_append` allocation spike, two
+`GraphRetrieve.reconstruction_versions` append spikes, and one
+`SignalProcessor.persist_working_memory` spike. The seed-cache spike
+came from reserving `seeds` for only the base KNN count even though
+cache, source, fact, and graph expansion can append additional `Scored`
+records carrying Eigen vectors. The retrieval code now reserves for the
+combined bounded seed sources and pre-sizes the seen-embedding set.
+
+The same pass added finer operation timings for reconstruction append
+and working-memory persistence. The earlier reconstruction outliers did
+not repeat once the seed allocation was fixed: in the 10,000-message
+replay
+(`eval_runs/perf_probe_20260618T160822Z_skip17358_seedreserve_instrument_10000_diag`),
+event 2357 dropped from **22.91 ms** to **6.83 ms**, and event 9441
+dropped from **30.39 ms** to **6.88 ms**. A new 32,000-message replay
+still found a single **51.44 ms** row, but the split timings attributed
+it to one reconstruction append. A targeted 21,000-message rerun with
+deeper append timing showed the same event at **7.24 ms** and the
+current-surface vec write at **0.074 ms**; the new maximum was instead a
+**49.84 ms** SQLite commit.
+
+The remaining non-linear tail was therefore storage commit jitter rather
+than sqlite-objstore, graph retrieval, reconstruction, or working-memory
+logic. WAL with synchronous disabled was worse on this workload and
+filesystem
+(`eval_runs/perf_probe_20260618T162405Z_skip17358_wal_cache_noexclusive_18000_diag`):
+p999 rose to **98.46 ms** and max to **317.34 ms** because commit time
+dominated. The best durable file-backed profile kept
+`journal_mode=memory` and `synchronous=off`, but raised the SQLite page
+cache and used in-memory temp storage. A 64 MiB cache was sufficient and
+outperformed the larger 256 MiB cache on the same 18,000-message slice:
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>Profile</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">p99</th>
+<th style="text-align: right;">p999</th>
+<th style="text-align: right;">Max</th>
+<th style="text-align: right;">&gt;30 ms rows</th>
+<th style="text-align: right;">Commit bucket range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>memory journal, default cache</td>
+<td style="text-align: right;">6.66 ms</td>
+<td style="text-align: right;">9.79 ms</td>
+<td style="text-align: right;">12.20 ms</td>
+<td style="text-align: right;">55.96 ms</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">not flat; one 49.84 ms commit</td>
+</tr>
+<tr>
+<td>memory journal, tmpfs, 256 MiB cache</td>
+<td style="text-align: right;">6.47 ms</td>
+<td style="text-align: right;">9.16 ms</td>
+<td style="text-align: right;">11.32 ms</td>
+<td style="text-align: right;">22.92 ms</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.48-1.25 ms</td>
+</tr>
+<tr>
+<td>memory journal, disk, 256 MiB cache</td>
+<td style="text-align: right;">6.24 ms</td>
+<td style="text-align: right;">8.49 ms</td>
+<td style="text-align: right;">10.41 ms</td>
+<td style="text-align: right;">22.86 ms</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0.53-1.25 ms</td>
+</tr>
+<tr>
+<td>memory journal, disk, 64 MiB cache</td>
+<td style="text-align: right;"><strong>5.93 ms</strong></td>
+<td style="text-align: right;"><strong>8.03 ms</strong></td>
+<td style="text-align: right;"><strong>9.59 ms</strong></td>
+<td style="text-align: right;">29.47 ms</td>
+<td style="text-align: right;"><strong>0</strong></td>
+<td style="text-align: right;"><strong>0.52-0.74 ms</strong></td>
+</tr>
+<tr>
+<td>patched defaults, memory journal</td>
+<td style="text-align: right;"><strong>5.90 ms</strong></td>
+<td style="text-align: right;"><strong>8.11 ms</strong></td>
+<td style="text-align: right;"><strong>10.20 ms</strong></td>
+<td style="text-align: right;"><strong>25.55 ms</strong></td>
+<td style="text-align: right;"><strong>0</strong></td>
+<td style="text-align: right;"><strong>0.52-0.71 ms</strong></td>
+</tr>
+<tr>
+<td>patched defaults, 32k memory journal</td>
+<td style="text-align: right;"><strong>6.18 ms</strong></td>
+<td style="text-align: right;"><strong>8.50 ms</strong></td>
+<td style="text-align: right;"><strong>11.07 ms</strong></td>
+<td style="text-align: right;"><strong>17.40 ms</strong></td>
+<td style="text-align: right;"><strong>0</strong></td>
+<td style="text-align: right;"><strong>0.52-0.80 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+The default SQLite connection profile now reflects the conservative 64
+MiB result: `cache_size` defaults to 64 MiB, `temp_store` defaults to
+MEMORY unless overridden, and `mmap_size` defaults to 256 MiB unless
+overridden. A final 18,000-message replay using only the durability
+knobs below
+(`eval_runs/perf_probe_20260618T164046Z_skip17358_defaultcache_memory_18000_diag`)
+reproduced the low-latency profile without manual cache/temp/mmap
+environment settings. A longer 32,000-message replay under the same
+patched-default profile
+(`eval_runs/perf_probe_20260618T164525Z_skip17358_defaultcache_memory_32000_diag`)
+processed 32,000 text messages with mean process latency **6.18 ms**,
+p99 **8.50 ms**, p999 **11.07 ms**, max **17.40 ms**, and zero rows
+above 20 ms. The 4,000-message bucket means rose from **5.39 ms** in the
+initial bucket to **6.52 ms** in the final bucket; after the warmup
+bucket, the rise was **0.48 ms** over the remaining 28k events. The
+residual drift was attributed mostly to bounded commit cost (**0.52 -\>
+0.80 ms**) and memory-strength maintenance (**0.18 -\> 0.28 ms**), while
+graph retrieval, reconstruction versions, and working-memory persistence
+stayed bounded.
+
+Durability mode is still selected separately. For exact replay/eval runs
+that prioritize foreground latency over crash recovery inside an
+individual transaction, the recommended profile remains:
+
+``` bash
+CORTEXT_FOREGROUND_WAL_CHECKPOINT=0 \
+CORTEXT_SQLITE_JOURNAL_MODE=memory \
+CORTEXT_SQLITE_SYNCHRONOUS=off \
+cortext_chat_replay_live_run ...
+```
+
+This pass changes the claim from “graph/reconstruction tails are
+bounded” to a more specific finding: after seed preallocation and SQLite
+cache sizing, the 18k exact slice is flat enough for realtime profiling
+(p999 under **10 ms**), and the residual rare \>20 ms rows are isolated
+graph or commit stalls rather than corpus-size runaway terms.
+
+### Full-Window 64k Tail Cleanup and Rejected Batching (June 18, 2026)
+
+The next pass extended the exact replay from 32,000 to 64,000 text
+messages from the same full-corpus window, still with media disabled and
+the memory-journal realtime/eval profile. This larger curve matters
+because it contains enough long-term memories and working-memory rows
+for low-frequency maintenance paths to show their late-run behavior.
+
+The first accepted 64k run under the patched SQLite defaults
+(`eval_runs/perf_probe_20260618T165518Z_skip17358_defaultcache_memory_64000_diag`)
+processed 64,000 text messages with mean process latency **6.38 ms**,
+p99 **9.30 ms**, p999 **14.10 ms**, and max **45.61 ms**. The 8k bucket
+means rose from **5.68 ms** to **6.64 ms**, and the diagnostic rows
+pointed at three remaining implementation costs: a retention scan that
+still touched too much state, eviction-frontier checks before the first
+consolidation, and rare graph seed/setup allocations.
+
+The accepted implementation changes were deliberately mechanical:
+
+-   Operation timing maps now reserve their expected number of operation
+    entries and update with `try_emplace`, avoiding rehash churn in the
+    benchmark instrumentation itself.
+-   Stability retention now samples recent active long-term memories
+    through the partial `idx_memories_ltm_created_strength` index
+    instead of scanning all active memory rows.
+-   Storage pressure and eviction-frontier values are cached in
+    `ProcessorContext` for the current store size/epoch. Before the
+    first consolidation, pre-consolidation eviction scans are deferred
+    because no long-term eviction can be valid yet.
+-   Graph retrieval reuses thread-local seed scratch containers and
+    reserves the bounded seed capacity before appending source, fact,
+    cache, and graph expansions.
+
+The resulting accepted 64k replay
+(`eval_runs/perf_probe_20260618T174607Z_skip17358_seed_scratch_pressurecache_64000_diag`)
+had mean process latency **6.54 ms**, mean total latency **8.43 ms**,
+p99 **9.20 ms**, p999 **12.21 ms**, and max **63.68 ms**. The mean was
+slightly higher than the previous 64k profile because this run carried
+additional operation timers, but the intended tail terms moved:
+retention was down to roughly **0.002-0.009 ms** per 8k bucket,
+eviction-select time was **0.0 ms** in every bucket, and the previous
+**40-55 ms** `GraphRetrieve.setup` spikes disappeared. The remaining
+worst rows were indexed memory-strength feedback updates, SQLite
+commit/persist bursts, one retrieval-surface update, and one
+uninstrumented graph outlier.
+
+A proposed batching fix for memory-strength feedback was rejected by
+direct measurement. The batch implementation staged feedback rows and
+flushed them with a temporary table, but the 64k replay
+(`eval_runs/perf_probe_20260618T180255Z_skip17358_feedback_batch_64000_diag`)
+worsened tail latency badly: p99 rose to **20.80 ms**, p999 to **77.13
+ms**, max to **100.85 ms**, and **592** rows exceeded 30 ms. The top
+rows were dominated by `MemoryStrength.feedback_flush_sql` at **69-85
+ms**. The change was reverted; direct per-event feedback updates were
+kept.
+
+The next hypothesis was write amplification from an obsolete covering
+index. The original `idx_memories_strength` index was introduced for
+retention aggregation over
+`(strength, last_access, created_at, start_ts)`, but the current
+retention and eviction paths use the partial long-term indexes
+`idx_memories_ltm_created_strength` and
+`idx_memories_ltm_strength_created`. Since feedback updates mutate
+`strength` and `last_access`, keeping the old index made every feedback
+write maintain an index no foreground query used. Migration 20 drops
+`idx_memories_strength`, and the clean-schema path no longer creates it.
+A migrated validation database records migrations 19 and 20 and contains
+only the two long-term indexes.
+
+The 64k replay after dropping the stale index
+(`eval_runs/perf_probe_20260618T182009Z_skip17358_drop_strength_index_64000_diag`)
+processed the same 64,000 messages with mean process latency **6.20
+ms**, mean total latency **8.06 ms**, p99 **8.59 ms**, p999 **11.38
+ms**, and max **63.21 ms**. Wall time fell from **560.4 s** to **536.7
+s** against the previous accepted 64k run.
+
+<table>
+<colgroup>
+<col style="width: 8%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>64k profile</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">Mean total</th>
+<th style="text-align: right;">p99</th>
+<th style="text-align: right;">p999</th>
+<th style="text-align: right;">Max</th>
+<th style="text-align: right;">&gt;10 ms rows</th>
+<th style="text-align: right;">&gt;20 ms rows</th>
+<th style="text-align: right;">&gt;30 ms rows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>seed scratch + pressure cache</td>
+<td style="text-align: right;">6.54 ms</td>
+<td style="text-align: right;">8.43 ms</td>
+<td style="text-align: right;">9.20 ms</td>
+<td style="text-align: right;">12.21 ms</td>
+<td style="text-align: right;">63.68 ms</td>
+<td style="text-align: right;">244</td>
+<td style="text-align: right;">9</td>
+<td style="text-align: right;">7</td>
+</tr>
+<tr>
+<td>feedback temp-table batch</td>
+<td style="text-align: right;">6.77 ms</td>
+<td style="text-align: right;">8.65 ms</td>
+<td style="text-align: right;">20.80 ms</td>
+<td style="text-align: right;">77.13 ms</td>
+<td style="text-align: right;">100.85 ms</td>
+<td style="text-align: right;">1,093</td>
+<td style="text-align: right;">671</td>
+<td style="text-align: right;">592</td>
+</tr>
+<tr>
+<td>drop obsolete strength index</td>
+<td style="text-align: right;"><strong>6.20 ms</strong></td>
+<td style="text-align: right;"><strong>8.06 ms</strong></td>
+<td style="text-align: right;"><strong>8.59 ms</strong></td>
+<td style="text-align: right;"><strong>11.38 ms</strong></td>
+<td style="text-align: right;"><strong>63.21 ms</strong></td>
+<td style="text-align: right;"><strong>137</strong></td>
+<td style="text-align: right;"><strong>5</strong></td>
+<td style="text-align: right;"><strong>4</strong></td>
+</tr>
+</tbody>
+</table>
+
+The bucket comparison shows the index removal helped across the curve
+rather than only in the warmup window:
+
+<table>
+<thead>
+<tr>
+<th>Event bucket</th>
+<th style="text-align: right;">Before drop</th>
+<th style="text-align: right;">After drop</th>
+<th style="text-align: right;">Delta</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0-8k</td>
+<td style="text-align: right;">6.01 ms</td>
+<td style="text-align: right;">5.56 ms</td>
+<td style="text-align: right;">-0.45 ms</td>
+</tr>
+<tr>
+<td>8k-16k</td>
+<td style="text-align: right;">6.47 ms</td>
+<td style="text-align: right;">6.15 ms</td>
+<td style="text-align: right;">-0.32 ms</td>
+</tr>
+<tr>
+<td>16k-24k</td>
+<td style="text-align: right;">6.42 ms</td>
+<td style="text-align: right;">6.19 ms</td>
+<td style="text-align: right;">-0.23 ms</td>
+</tr>
+<tr>
+<td>24k-32k</td>
+<td style="text-align: right;">6.42 ms</td>
+<td style="text-align: right;">6.21 ms</td>
+<td style="text-align: right;">-0.22 ms</td>
+</tr>
+<tr>
+<td>32k-40k</td>
+<td style="text-align: right;">6.65 ms</td>
+<td style="text-align: right;">6.42 ms</td>
+<td style="text-align: right;">-0.23 ms</td>
+</tr>
+<tr>
+<td>40k-48k</td>
+<td style="text-align: right;">6.99 ms</td>
+<td style="text-align: right;">6.41 ms</td>
+<td style="text-align: right;">-0.58 ms</td>
+</tr>
+<tr>
+<td>48k-56k</td>
+<td style="text-align: right;">6.84 ms</td>
+<td style="text-align: right;">6.25 ms</td>
+<td style="text-align: right;">-0.59 ms</td>
+</tr>
+<tr>
+<td>56k-64k</td>
+<td style="text-align: right;">6.54 ms</td>
+<td style="text-align: right;">6.43 ms</td>
+<td style="text-align: right;">-0.11 ms</td>
+</tr>
+</tbody>
+</table>
+
+The specific write-amplification signal moved as expected:
+
+<table>
+<thead>
+<tr>
+<th>Operation maximum</th>
+<th style="text-align: right;">Before drop</th>
+<th style="text-align: right;">After drop</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MemoryStrength.feedback_update_sql</code></td>
+<td style="text-align: right;">43.47 ms</td>
+<td style="text-align: right;"><strong>10.49 ms</strong></td>
+</tr>
+<tr>
+<td><code>SignalProcessor.commit_transaction</code></td>
+<td style="text-align: right;">11.71 ms</td>
+<td style="text-align: right;"><strong>10.42 ms</strong></td>
+</tr>
+<tr>
+<td><code>GraphAugmentedRetrieveCandidates</code></td>
+<td style="text-align: right;">53.06 ms</td>
+<td style="text-align: right;"><strong>24.40 ms</strong></td>
+</tr>
+<tr>
+<td><code>GraphRetrieve.setup</code></td>
+<td style="text-align: right;">0.83 ms</td>
+<td style="text-align: right;">0.84 ms</td>
+</tr>
+<tr>
+<td><code>MemoryStorage.retrieval_surface_update</code></td>
+<td style="text-align: right;">15.92 ms</td>
+<td style="text-align: right;">15.17 ms</td>
+</tr>
+<tr>
+<td><code>MemoryStorage.content_blob</code></td>
+<td style="text-align: right;">0.020 ms</td>
+<td style="text-align: right;">0.033 ms</td>
+</tr>
+</tbody>
+</table>
+
+This table is also the reason we did not modify sqlite-objstore in this
+pass. The content-object path was measured directly and was not the tail
+source: `MemoryStorage.content_blob` averaged about **0.0005 ms** per
+bucket and maxed at **0.033 ms** in the final run. The remaining storage
+outlier is the retrieval-surface update, not object payload storage.
+
+The residual four \>30 ms rows now have different causes: one
+uninstrumented or OS-scheduled processor row, one **39.69 ms**
+reconsolidation lability write row, one **24.40 ms** graph row, and one
+**15.17 ms** retrieval-surface update combined with normal processing.
+The next optimization target is therefore tail isolation around
+reconsolidation lability and graph/retrieval-surface write timing, not
+feedback batching and not sqlite-objstore payload I/O.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>[schema][migration]</code></td>
+<td style="text-align: right;">32 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[op14]</code></td>
+<td style="text-align: right;">17 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>Algorithm 18*</code></td>
+<td style="text-align: right;">22 assertions / 6 cases passed</td>
+</tr>
+<tr>
+<td><code>Graph retrieval*</code></td>
+<td style="text-align: right;">124 assertions / 28 cases passed</td>
+</tr>
+<tr>
+<td><code>*MemoryStorage*</code></td>
+<td style="text-align: right;">54 assertions / 6 cases passed</td>
+</tr>
+<tr>
+<td>64,000-message exact replay</td>
+<td style="text-align: right;">mean process <strong>6.20 ms</strong>,
+p99 <strong>8.59 ms</strong>, p999 <strong>11.38 ms</strong>, max
+<strong>63.21 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Working-Memory Recency and Predictive Active-Set Indexing (June 18, 2026)
+
+A follow-up 64,000-message pass investigated the remaining foreground
+tails from the same exact replay slice. The accepted comparison point
+was the bounded working-memory index replay
+(`eval_runs/perf_probe_20260618T185056Z_skip17358_bound_wm_indexes_64000_diag`):
+mean process **6.1595 ms**, mean total **8.0038 ms**, p99 **8.5603 ms**,
+p999 **10.9593 ms**, and max **69.9339 ms**. Its 8k process buckets were
+**5.619, 6.065, 6.083, 6.194, 6.394, 6.359, 6.277, 6.314 ms**.
+
+The first issue was semantic leakage from transient `WORKING` rows into
+durable recency paths. Working-memory rows are short-lived
+active-context state, but the durable `recent_retrievals` view,
+`idx_memories_last_access`, and retention-history restore query included
+them. Migration 22 recreates the view and last-access index with
+`kind != 'WORKING'`, and the restore path now uses the same filter. The
+direct 64k replay
+(`eval_runs/perf_probe_20260618T195104Z_skip17358_recency_only_64000_diag`)
+did not improve the aggregate curve by itself: mean process was **6.3059
+ms**, p99 **8.9198 ms**, p999 **11.3089 ms**, and max **74.9024 ms**. It
+did, however, remove the targeted working-memory write tail:
+
+<table>
+<colgroup>
+<col style="width: 27%" />
+<col style="width: 36%" />
+<col style="width: 36%" />
+</colgroup>
+<thead>
+<tr>
+<th>Operation</th>
+<th style="text-align: right;">Before recency filter</th>
+<th style="text-align: right;">After recency filter</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SignalProcessor.wm_update_slot_memory</code> max</td>
+<td style="text-align: right;">52.8195 ms</td>
+<td style="text-align: right;"><strong>0.3600 ms</strong></td>
+</tr>
+<tr>
+<td><code>SignalProcessor.persist_working_memory</code> max</td>
+<td style="text-align: right;">52.9597 ms</td>
+<td style="text-align: right;"><strong>9.5035 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+The aggregate replay still had large rows, but they moved to unrelated
+predictive, reconsolidation, commit, and retrieval-surface paths. We
+therefore keep the recency filter as a correctness and targeted-tail
+fix, not as an end-to-end curve-speedup claim.
+
+The next hypothesis was predictive pre-activation decay. A scheduler
+that decayed the predictive active set every signal eliminated the old
+bursty decay row, but it added steady overhead and was rejected:
+`eval_runs/perf_probe_20260618T192950Z_skip17358_recency_predictive_64000_diag`
+had mean process **6.7146 ms**, p99 **9.5422 ms**, p999 **12.4071 ms**,
+and **402** rows above 10 ms. An every-8-signals variant was killed
+early because its partial curve was already slower than the accepted
+line.
+
+The retained predictive change is narrower. Migration 23 adds
+`idx_memories_pre_activation_embedding_active` on `embedding_id` for
+rows with `pre_activation > 0.0`, and the predictive decay/select SQL
+now uses the same non-null predicate rather than
+`COALESCE(pre_activation, 0.0) > 0.0`, so SQLite can use the partial
+index. The 64k proof
+(`eval_runs/perf_probe_20260618T201107Z_skip17358_recency_predictive_index_64000_diag`)
+improved the recency-only mean slightly (**6.3059 -\> 6.2666 ms**) and
+mean total (**8.1945 -\> 8.1542 ms**). The predictive outlier was
+reduced but not fully eliminated in that run:
+
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th style="text-align: right;">Recency-only max</th>
+<th style="text-align: right;">+ predictive active index max</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Predictive.decay_active_sql</code></td>
+<td style="text-align: right;">45.3882 ms</td>
+<td style="text-align: right;"><strong>22.3195 ms</strong></td>
+</tr>
+<tr>
+<td><code>ApplyPredictivePreActivation</code></td>
+<td style="text-align: right;">45.5243 ms</td>
+<td style="text-align: right;"><strong>22.4609 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+A subsequent same-slice replay with an unrelated graph-debug experiment
+saw the same predictive path stay below **2.21 ms** with zero rows above
+10 ms, but that run was worse overall. The partial index is therefore
+retained as query-plan hardening for the active-set decay path; it is
+not enough to claim the full curve is solved.
+
+One additional hypothesis was tested and rejected: gating the large
+`cortext.graph_retrieval` debug telemetry payload behind an opt-in
+environment variable. The prior predictive-index run had one graph
+retrieval row where the parent operation measured **73.8911 ms** while
+all `GraphRetrieve.*` child spans summed to only **3.4408 ms**, which
+made telemetry or scheduler time a plausible culprit. The gated 64k
+replay
+(`eval_runs/perf_probe_20260618T203607Z_skip17358_graph_debug_gated_64000_diag`)
+was worse: mean process **6.6101 ms**, p99 **9.9637 ms**, p999 **14.7715
+ms**, and **617** rows above 10 ms, with graph retrieval max **49.4552
+ms**. The change was reverted. The result is useful only diagnostically:
+parent-only graph rows are possible, but debug-log gating was not a
+proven optimization.
+
+The window analysis of the best accepted 64k run shows the remaining
+long-horizon slope is distributed, not dominated by a single unbounded
+query:
+
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th style="text-align: right;">First 8k bucket</th>
+<th style="text-align: right;">Final 8k bucket</th>
+<th style="text-align: right;">Delta</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>process total</td>
+<td style="text-align: right;">5.619 ms</td>
+<td style="text-align: right;">6.314 ms</td>
+<td style="text-align: right;">+0.695 ms</td>
+</tr>
+<tr>
+<td>graph retrieval</td>
+<td style="text-align: right;">2.461 ms</td>
+<td style="text-align: right;">2.725 ms</td>
+<td style="text-align: right;">+0.264 ms</td>
+</tr>
+<tr>
+<td>detect-memory-usage</td>
+<td style="text-align: right;">0.526 ms</td>
+<td style="text-align: right;">0.602 ms</td>
+<td style="text-align: right;">+0.076 ms</td>
+</tr>
+<tr>
+<td>reconsolidation</td>
+<td style="text-align: right;">0.372 ms</td>
+<td style="text-align: right;">0.448 ms</td>
+<td style="text-align: right;">+0.076 ms</td>
+</tr>
+<tr>
+<td>predictive pre-activation</td>
+<td style="text-align: right;">0.122 ms</td>
+<td style="text-align: right;">0.166 ms</td>
+<td style="text-align: right;">+0.044 ms</td>
+</tr>
+</tbody>
+</table>
+
+Inside graph retrieval, the growth is mostly small bounded pieces:
+prefetch-prune, setup/seed-cache, fetch-cache, graph expansion, and
+reconstruction history each rise by a few hundredths of a millisecond.
+The next profiling loop should therefore focus on graph candidate-set
+accounting and reconstruction/retrieval-surface write timing. The
+current evidence does not support changing retrieval limits, predictive
+scheduling, or sqlite-objstore payload storage as the next step.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully after
+reverting the unproven graph-debug gate</td>
+</tr>
+<tr>
+<td><code>[schema][migration]</code></td>
+<td style="text-align: right;">43 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][predictive][decay]</code></td>
+<td style="text-align: right;">2 assertions / 1 case passed</td>
+</tr>
+<tr>
+<td><code>[operations][graph]</code></td>
+<td style="text-align: right;">376 assertions / 52 cases passed</td>
+</tr>
+<tr>
+<td>64,000-message predictive-index replay</td>
+<td style="text-align: right;">mean process <strong>6.2666 ms</strong>,
+p99 <strong>8.8368 ms</strong>, p999 <strong>11.5144 ms</strong>, max
+<strong>77.2390 ms</strong></td>
+</tr>
+<tr>
+<td>rejected graph-debug replay</td>
+<td style="text-align: right;">mean process <strong>6.6101 ms</strong>,
+p99 <strong>9.9637 ms</strong>, p999 <strong>14.7715 ms</strong>, max
+<strong>63.0717 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Benchmark SQLite Profile Guardrail (June 18, 2026)
+
+A later regression check reproduced a misleading slowdown by launching
+`cortext_chat_replay_live_run` without the realtime/eval SQLite profile.
+The core store correctly kept its durable WAL/NORMAL defaults, but the
+benchmark binary also inherited those defaults unless the caller
+remembered to set `CORTEXT_SQLITE_JOURNAL_MODE=memory` and
+`CORTEXT_SQLITE_SYNCHRONOUS=off`. That made long-horizon replay
+performance depend on shell state rather than the frozen benchmark
+command.
+
+The control run used the same 32,000-message slice from
+`/shared/Memory/Julie` with media disabled and full operation timings. A
+durable WAL run was stopped after an external checkpoint probe
+contaminated the baseline, but its progress rows had already shown the
+failure mode: the live WAL reached tens of GiB and mean process latency
+climbed past **8 ms** by 16k messages. Enabling foreground passive
+checkpoints bounded WAL size, but every checkpoint still ran in the
+foreground. The completed checkpoint run
+(`eval_runs/perf_probe_20260618T201441Z_skip17358_walcheckpoint_32000_diag`)
+had mean process **7.3654 ms**, p99 **10.035 ms**, p999 **229.205 ms**,
+max **707.095 ms**, and **124** rows above 30 ms. The checkpoint
+operation itself ran **124** times; **91** of those rows exceeded 200
+ms. This reconfirmed the earlier decision that normal-message foreground
+checkpointing is not a realtime solution.
+
+The accepted change is a benchmark-only guardrail.
+`cortext_chat_replay_live_run` now applies the proven realtime SQLite
+profile by default before opening the Cortext database:
+
+``` bash
+CORTEXT_FOREGROUND_WAL_CHECKPOINT=0
+CORTEXT_SQLITE_JOURNAL_MODE=memory
+CORTEXT_SQLITE_SYNCHRONOUS=off
+```
+
+The core `SQLiteStore` default remains durable WAL/NORMAL. The benchmark
+has an explicit `--sqlite-profile durable|inherit|realtime` switch so
+release runners can request the production durability profile or inherit
+externally set storage knobs when that is the intended experiment. Each
+summary now records the selected profile and effective SQLite
+environment under `sqlite_profile`, so future reports can detect
+accidental WAL/durability profile drift.
+
+The proof run after this guardrail
+(`eval_runs/perf_probe_20260618T202636Z_skip17358_benchmark_default_realtime_32000_diag`)
+used no SQLite environment variables and no `--sqlite-profile` flag. The
+summary recorded `profile=realtime` with the three defaults above
+applied. It processed 32,000 text messages with mean process **5.8948
+ms**, mean total **7.7710 ms**, p99 **8.083 ms**, p999 **9.725 ms**, max
+**42.061 ms**, and one row above 30 ms. The eight 4k process buckets
+were **5.293, 5.872, 6.057, 5.956, 5.955, 5.878, 5.977, 6.170 ms**. The
+first-to-last-quarter slope was **+0.491 ms**, mainly commit (**+0.125
+ms**), graph retrieval (**+0.100 ms**), detect-memory-usage (**+0.041
+ms**), predictive pre-activation (**+0.031 ms**), and reconsolidation
+(**+0.027 ms**). This is flatter and faster than the prior 32k
+memory-journal proof (**6.181 ms** mean process, **8.498 ms** p99,
+**11.038 ms** p999), while preserving the same storage durability
+distinction for non-benchmark callers.
+
+Verification after this guardrail included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td>durable profile smoke</td>
+<td style="text-align: right;"><code>--sqlite-profile durable</code>
+recorded WAL/NORMAL and processed 32 messages</td>
+</tr>
+<tr>
+<td><code>[store][wal]</code></td>
+<td style="text-align: right;">42 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td><code>[schema][migration]</code></td>
+<td style="text-align: right;">43 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td>32,000-message default benchmark replay</td>
+<td style="text-align: right;">mean process <strong>5.8948 ms</strong>,
+p99 <strong>8.083 ms</strong>, p999 <strong>9.725 ms</strong>, max
+<strong>42.061 ms</strong></td>
+</tr>
+</tbody>
+</table>
+
+### Foreground Tail Isolation in the Realtime Profile (June 18, 2026)
+
+The next recursive profile loop used the same 32,000-message slice and
+the same default realtime benchmark profile, but turned on full
+per-operation timing to explain the remaining non-constant tails. The
+prior proof above was already roughly flat in its 4k buckets, but
+isolated foreground rows still exceeded 40 ms. The top event spent
+**15.91 ms** in reconsolidation, **15.61 ms** in neighbor-lability
+writes, **11.81 ms** in transaction commit, and **8.91 ms** in
+memory-strength feedback SQL. A second profile after primary-keying the
+feedback path removed the memory-strength spike, but exposed two
+working-memory persistence spikes above 25 ms because closed
+working-memory rows accumulated through the whole replay.
+
+The accepted implementation changes are all foreground-bounding changes:
+
+-   Memory-usage events now carry the resolved `memory_id` alongside the
+    `embedding_id`. Memory-strength feedback and usage reinforcement
+    update by `memory_id` when available, avoiding duplicate
+    embedding-to-memory lookups and keeping retrieval-surface cache
+    updates keyed to the durable memory row.
+-   Closed working-memory rows are physically pruned incrementally
+    during realtime processing and deeply cleaned on forced flush. The
+    realtime prune only deletes stale `WORKING` memory rows and their
+    signal rows; expensive defensive association/current-surface/vector
+    cleanup is left to forced maintenance. This is valid for the current
+    schema because working-memory rows are not graph association nodes;
+    the final proof database ended with zero associations touching
+    `WORKING` rows.
+-   Reconsolidation lability-only ripple writes are capped per
+    foreground turn. Neighbor reconstruction remains controlled by the
+    knob-derived reconstruction budgets, but low-value lability-only
+    updates no longer walk the full high-degree ripple frontier in a
+    single user-facing transaction.
+
+The final accepted proof run was
+`eval_runs/perf_probe_20260618T211925Z_skip17358_pk_lability16_wmprune8_light2_reconcap_32000_diag`.
+It processed 32,000 text messages with media disabled and full operation
+timings:
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>Run</th>
+<th style="text-align: right;">Mean process</th>
+<th style="text-align: right;">p99</th>
+<th style="text-align: right;">p999</th>
+<th style="text-align: right;">Max</th>
+<th style="text-align: right;">&gt;20 ms rows</th>
+<th>4k process buckets</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>realtime guardrail baseline</td>
+<td style="text-align: right;">5.8948 ms</td>
+<td style="text-align: right;">8.083 ms</td>
+<td style="text-align: right;">9.725 ms</td>
+<td style="text-align: right;">42.061 ms</td>
+<td style="text-align: right;">2</td>
+<td>5.293, 5.872, 6.057, 5.956, 5.955, 5.878, 5.977, 6.170</td>
+</tr>
+<tr>
+<td>memory-id feedback + lability batch</td>
+<td style="text-align: right;">5.7971 ms</td>
+<td style="text-align: right;">7.926 ms</td>
+<td style="text-align: right;">9.848 ms</td>
+<td style="text-align: right;">36.265 ms</td>
+<td style="text-align: right;">3</td>
+<td>5.184, 5.751, 5.952, 5.706, 5.970, 5.898, 5.913, 6.002</td>
+</tr>
+<tr>
+<td>realtime WM prune, uncapped lability-only ripple</td>
+<td style="text-align: right;">5.9517 ms</td>
+<td style="text-align: right;">8.488 ms</td>
+<td style="text-align: right;">10.651 ms</td>
+<td style="text-align: right;">71.115 ms</td>
+<td style="text-align: right;">3</td>
+<td>5.034, 5.838, 6.000, 5.729, 6.003, 6.404, 6.494, 6.111</td>
+</tr>
+<tr>
+<td>final foreground-tail cap</td>
+<td style="text-align: right;"><strong>5.8146 ms</strong></td>
+<td style="text-align: right;"><strong>7.984 ms</strong></td>
+<td style="text-align: right;"><strong>9.719 ms</strong></td>
+<td style="text-align: right;"><strong>18.707 ms</strong></td>
+<td style="text-align: right;"><strong>0</strong></td>
+<td><strong>5.000, 5.821, 5.946, 6.172, 5.861, 5.869, 5.886,
+5.963</strong></td>
+</tr>
+</tbody>
+</table>
+
+The operation-level deltas show why the final run is accepted even
+though mean process time is only modestly lower than the original
+guardrail proof:
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 22%" />
+<col style="width: 16%" />
+</colgroup>
+<thead>
+<tr>
+<th>Operation</th>
+<th style="text-align: right;">Guardrail baseline max</th>
+<th style="text-align: right;">Final max</th>
+<th style="text-align: right;">Final p99</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MemoryStrength.feedback_update_sql</code></td>
+<td style="text-align: right;">8.911 ms</td>
+<td style="text-align: right;"><strong>0.361 ms</strong></td>
+<td style="text-align: right;"><strong>0.136 ms</strong></td>
+<td>memory-id keyed feedback removes lookup/update tail</td>
+</tr>
+<tr>
+<td><code>Reconsolidation.neighbor_lability_write</code></td>
+<td style="text-align: right;">15.609 ms</td>
+<td style="text-align: right;"><strong>0.402 ms</strong></td>
+<td style="text-align: right;"><strong>0.179 ms</strong></td>
+<td>lability-only ripple writes are now foreground-bounded</td>
+</tr>
+<tr>
+<td><code>SignalProcessor.wm_prune_delete</code></td>
+<td style="text-align: right;">not active</td>
+<td style="text-align: right;"><strong>4.750 ms</strong></td>
+<td style="text-align: right;"><strong>0.085 ms</strong></td>
+<td>incremental prune is normally sub-0.1 ms; one row remains a tail
+follow-up</td>
+</tr>
+<tr>
+<td><code>SignalProcessor.persist_working_memory</code></td>
+<td style="text-align: right;">8.018 ms</td>
+<td style="text-align: right;"><strong>11.327 ms</strong></td>
+<td style="text-align: right;"><strong>0.367 ms</strong></td>
+<td>closed-row accumulation fixed; one insert tail remains</td>
+</tr>
+<tr>
+<td><code>GraphAugmentedRetrieveCandidates</code></td>
+<td style="text-align: right;">6.322 ms</td>
+<td style="text-align: right;"><strong>14.671 ms</strong></td>
+<td style="text-align: right;"><strong>3.504 ms</strong></td>
+<td>rare graph/cache row remains the largest residual outlier</td>
+</tr>
+</tbody>
+</table>
+
+The final database contained **21** active working-memory rows, **0**
+closed working-memory rows, and **0** associations involving
+working-memory rows. That is the important structural proof for the
+closed-WM cleanup change: old working rows no longer accumulate across
+the run, and the realtime prune does not leave graph edges dangling in
+this workload.
+
+The remaining optimization frontier is no longer a monotonic closed-row
+or reconstruction-ledger growth term. The final run has no process rows
+above 20 ms; its residual tail is a rare graph retrieval/cache row and
+one working-memory insert row. Those are bounded tail events rather than
+the previously observed long-horizon slope, and they should be profiled
+separately before changing retrieval semantics.
+
+Verification after this pass included:
+
+<table>
+<colgroup>
+<col style="width: 42%" />
+<col style="width: 57%" />
+</colgroup>
+<thead>
+<tr>
+<th>Check</th>
+<th style="text-align: right;">Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>targeted build</td>
+<td style="text-align: right;"><code>cortext_tests</code> and
+<code>cortext_chat_replay_live_run</code> built successfully</td>
+</tr>
+<tr>
+<td><code>[operations][detect_memory_usage]</code></td>
+<td style="text-align: right;">14 assertions / 3 cases passed</td>
+</tr>
+<tr>
+<td><code>[op18][memory_strength]</code></td>
+<td style="text-align: right;">31 assertions / 7 cases passed</td>
+</tr>
+<tr>
+<td><code>[operations][recon]</code></td>
+<td style="text-align: right;">52 assertions / 10 cases passed</td>
+</tr>
+<tr>
+<td><code>[state_persistence][working_memory]</code></td>
+<td style="text-align: right;">17 assertions / 5 cases passed</td>
+</tr>
+<tr>
+<td>32,000-message final replay</td>
+<td style="text-align: right;">mean process <strong>5.8146 ms</strong>,
+p99 <strong>7.984 ms</strong>, p999 <strong>9.719 ms</strong>, max
+<strong>18.707 ms</strong></td>
+</tr>
+</tbody>
+</table>
 
 # Conclusion and Future Directions
 

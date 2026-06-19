@@ -327,6 +327,32 @@ extern "C"
                                             int height, int channels,
                                             const char *source_id);
 
+  /// @brief Encodes text and returns an embedding JSON object.
+  ///
+  /// The returned JSON has shape `{ "embedding": number[], "dimension": n }`.
+  /// It is an embedding-only call: no storage, retrieval, consolidation, or
+  /// processor-state mutation occurs. Free the returned string with
+  /// cortext_string_free().
+  CORTEXT_EXPORT char *cortext_embed_text_json (cortext_handle h,
+                                                const char *text);
+
+  /// @brief Encodes audio PCM and returns an embedding JSON object.
+  ///
+  /// Audio uses the same public input contract as cortext_process_audio: 16 kHz
+  /// mono float32 PCM. Free the returned string with cortext_string_free().
+  CORTEXT_EXPORT char *cortext_embed_audio_json (cortext_handle h,
+                                                 const float *pcm,
+                                                 size_t num_samples);
+
+  /// @brief Encodes image pixels and returns an embedding JSON object.
+  ///
+  /// Image data uses the same public input contract as cortext_process_image.
+  /// Free the returned string with cortext_string_free().
+  CORTEXT_EXPORT char *cortext_embed_image_json (cortext_handle h,
+                                                 const uint8_t *data,
+                                                 int width, int height,
+                                                 int channels);
+
   /// @brief Triggers consolidation evaluation.
   /// @param h Handle to a Cortext instance.
   /// @return 0 on success, 1 if invalid handle, 2 on internal error.
@@ -354,6 +380,15 @@ extern "C"
   /// This commits the current episode transaction and starts a new episode.
   /// Call after processing a batch of signals or before querying results.
   CORTEXT_EXPORT int cortext_flush (cortext_handle h);
+
+  /// @brief Resets volatile in-memory processor state.
+  /// @param h Handle to a Cortext instance.
+  /// @return 0 on success, 1 if invalid handle, 2 on internal error.
+  ///
+  /// Durable memories, signals, embeddings, and object-store content are
+  /// retained. The handle remains valid and reloads persisted adaptive state
+  /// from the same backing store.
+  CORTEXT_EXPORT int cortext_reset (cortext_handle h);
 
   /// @brief Returns the Cortext library version string.
   CORTEXT_EXPORT const char *cortext_version (void);

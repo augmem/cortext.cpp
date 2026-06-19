@@ -61,6 +61,7 @@ add_executable(cortext_tests
   operations_serial_position_apply.test.cpp
   operations_embedding_prediction_error.test.cpp
   operations_precision_modulation.test.cpp
+  providers.test.cpp
 
   operations_graph_build.test.cpp
   operations_graph_retrieval.test.cpp

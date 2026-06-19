@@ -646,6 +646,33 @@ struct PopulateWMSlotsOp : IOperation
   }
 };
 
+struct RotateOneWMSlotOp : IOperation
+{
+  mutable int sequence = 0;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &pctx = ctx.GetProcessorContext ();
+    pctx.wm_slots.clear ();
+
+    ProcessorContext::WMSlot slot;
+    slot.embedding = Eigen::VectorXf::Zero (256);
+    slot.embedding[sequence % 256] = 1.0f;
+    slot.strength = 0.8;
+    slot.last_ts = static_cast<double> (ctx.GetSignal ().timestamp) / 1000.0;
+    slot.start_ts = static_cast<int64_t> (ctx.GetSignal ().timestamp);
+    slot.source_id = "test";
+    slot.modality = "text";
+    slot.n_signals = 1;
+    slot.s_max = 0.5;
+    slot.s_avg = 0.5;
+    pctx.wm_slots.push_back (std::move (slot));
+    pctx.wm_slots_dirty = true;
+    ++sequence;
+  }
+};
+
 TEST_CASE ("Working memory slots are persisted",
            "[state_persistence][working_memory]")
 {
@@ -689,6 +716,37 @@ TEST_CASE ("Working memory slots are persisted",
                 WithinAbs (expected_stability, 1e-9));
   REQUIRE_THAT (GetDouble (rows[1], "stability"),
                 WithinAbs (expected_stability, 1e-9));
+}
+
+TEST_CASE ("Closed working memory rows are pruned incrementally",
+           "[state_persistence][working_memory][performance]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg = MakeConfig ();
+  cortext::testing::RequireEncoder (cfg);
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<RotateOneWMSlotOp> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  for (int i = 0; i < 96; ++i)
+    {
+      Signal s;
+      s.embedding = Eigen::VectorXf::Random (256);
+      s.timestamp = static_cast<uint64_t> (1000 + i * 1000);
+      s.source_id = "test";
+      processor.Process (s);
+    }
+
+  auto rows = store->Execute (
+      "SELECT "
+      "SUM(CASE WHEN end_ts IS NULL THEN 1 ELSE 0 END) AS active_count, "
+      "SUM(CASE WHEN end_ts IS NOT NULL THEN 1 ELSE 0 END) AS closed_count "
+      "FROM memories WHERE kind = 'WORKING'");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (GetInt64 (rows[0], "active_count") == 1LL);
+  REQUIRE (GetInt64 (rows[0], "closed_count") <= 64LL);
 }
 
 TEST_CASE ("Working memory slots are loaded on startup",

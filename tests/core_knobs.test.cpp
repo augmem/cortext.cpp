@@ -573,6 +573,9 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
       = RetrievalConstructiveReconstructionPolicy (0.5, 0.5, 1.0);
   REQUIRE (high_t_reconstruct.max_blend < low_t_reconstruct.max_blend);
   REQUIRE (high_t_reconstruct.query_weight < low_t_reconstruct.query_weight);
+  REQUIRE (RetrievalReconstructionUpdateCount (0.5, 0.5, 0.5) == 1);
+  REQUIRE (RetrievalReconstructionUpdateCount (0.0, 1.0, 0.0)
+           > RetrievalReconstructionUpdateCount (1.0, 0.0, 1.0));
   REQUIRE (RetrievalTotDiversificationScale (0.5, 0.5, 0.5, 0.0)
            == Catch::Approx (0.95));
   REQUIRE (RetrievalTotDiversificationScale (0.5, 0.5, 0.5, 1.0)
@@ -604,6 +607,16 @@ TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
   REQUIRE (RetrievalClusterLabelEnabled (0.5, 0.5, 0.5));
   REQUIRE (RetrievalDurableSourceTextMaxBytes (0.0, 0.5, 0.5)
            > RetrievalDurableSourceTextMaxBytes (1.0, 0.5, 0.5));
+  REQUIRE (RetrievalDurableSourceTextRefreshBatch (0.5, 0.5, 0.5)
+           < RetrievalDurableSourceTextSearchLimit (0.5, 0.5, 0.5));
+  REQUIRE (RetrievalDurableSourceTextRefreshBatch (0.0, 1.0, 0.0)
+           > RetrievalDurableSourceTextRefreshBatch (1.0, 0.0, 1.0));
+  REQUIRE (RetrievalDurableSourceTextRefreshInterval (0.5, 0.5, 0.5)
+           >= 16);
+  REQUIRE (RetrievalDurableSourceTextRefreshInterval (0.5, 0.5, 0.5)
+           <= 192);
+  REQUIRE (RetrievalDurableSourceTextRefreshInterval (1.0, 0.0, 1.0)
+           > RetrievalDurableSourceTextRefreshInterval (0.0, 1.0, 0.0));
   REQUIRE (RetrievalLabelGraphFanout (0.0, 0.5, 0.5)
            > RetrievalLabelGraphFanout (1.0, 0.5, 0.5));
   REQUIRE (RetrievalLabelGraphFanout (0.5, 1.0, 0.5)
@@ -1068,6 +1081,10 @@ TEST_CASE ("Reconsolidation and cascade gates derive from knobs",
            == Catch::Approx (0.01));
   REQUIRE (RippleDriftCapFactor (0.5, 0.5, 0.5)
            == Catch::Approx (0.50));
+  REQUIRE (ReconsolidationRippleReconstructionLimit (0.5, 0.5, 0.5)
+           == 0);
+  REQUIRE (ReconsolidationPrimaryReconstructionLimit (0.5, 0.5, 0.5)
+           == 1);
   REQUIRE (ReconsolidationUncertaintyRelevanceWeight (0.5, 0.5, 0.5)
            == Catch::Approx (0.50));
   REQUIRE (ReconsolidationPrimaryDriftMagnitude (0.5, 0.5, 0.5,
@@ -1085,6 +1102,10 @@ TEST_CASE ("Reconsolidation and cascade gates derive from knobs",
            > ReconsolidationDriftClamp (0.5, 0.5, 1.0));
   REQUIRE (RippleStrengthMin (0.5, 0.0, 0.5)
            > RippleStrengthMin (0.5, 1.0, 0.5));
+  REQUIRE (ReconsolidationRippleReconstructionLimit (0.0, 1.0, 0.0)
+           > ReconsolidationRippleReconstructionLimit (1.0, 0.0, 1.0));
+  REQUIRE (ReconsolidationPrimaryReconstructionLimit (0.0, 1.0, 0.0)
+           > ReconsolidationPrimaryReconstructionLimit (1.0, 0.0, 1.0));
 
   REQUIRE (CascadeIntensityFloor (0.5, 0.5, 0.5)
            == Catch::Approx (0.10));

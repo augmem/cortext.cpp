@@ -1,8 +1,14 @@
 #include "cortext/store/sqlite_store.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
+#include <optional>
 #include <sstream>
+#include <string>
 #include <string_view>
 
 #include "cortext/store/extension_loader.hpp"
@@ -52,6 +58,169 @@ ParseDbOperation (const std::string &q)
   if (tok.empty ())
     return "UNKNOWN";
   return tok;
+}
+
+int
+ResolveSynchronousMode (int configured)
+{
+  const char *value = std::getenv ("CORTEXT_SQLITE_SYNCHRONOUS");
+  if (!value || value[0] == '\0')
+    {
+      return configured;
+    }
+  std::string mode (value);
+  std::transform (mode.begin (), mode.end (), mode.begin (),
+                  [] (unsigned char c) {
+                    return static_cast<char> (std::tolower (c));
+                  });
+  if (mode == "off" || mode == "0")
+    {
+      return 0;
+    }
+  if (mode == "normal" || mode == "1")
+    {
+      return 1;
+    }
+  if (mode == "full" || mode == "2")
+    {
+      return 2;
+    }
+  if (mode == "extra" || mode == "3")
+    {
+      return 3;
+    }
+  return configured;
+}
+
+std::optional<long long>
+ParseLongLongEnv (const char *name)
+{
+  const char *value = std::getenv (name);
+  if (!value || value[0] == '\0')
+    {
+      return std::nullopt;
+    }
+  char *end = nullptr;
+  errno = 0;
+  const long long parsed = std::strtoll (value, &end, 10);
+  if (errno != 0 || end == value || (end && *end != '\0'))
+    {
+      return std::nullopt;
+    }
+  return parsed;
+}
+
+std::optional<std::string>
+ResolveJournalModeOverride ()
+{
+  const std::string mode = [] {
+    const char *value = std::getenv ("CORTEXT_SQLITE_JOURNAL_MODE");
+    if (!value || value[0] == '\0')
+      {
+        return std::string ();
+      }
+    std::string out (value);
+    std::transform (out.begin (), out.end (), out.begin (),
+                    [] (unsigned char c) {
+                      return static_cast<char> (std::tolower (c));
+                    });
+    return out;
+  } ();
+
+  if (mode.empty ())
+    {
+      return std::nullopt;
+    }
+  if (mode == "wal" || mode == "delete" || mode == "truncate"
+      || mode == "persist" || mode == "memory" || mode == "off")
+    {
+      return mode;
+    }
+  return std::nullopt;
+}
+
+std::optional<std::string>
+ResolveLockingModeOverride ()
+{
+  const std::string mode = [] {
+    const char *value = std::getenv ("CORTEXT_SQLITE_LOCKING_MODE");
+    if (!value || value[0] == '\0')
+      {
+        return std::string ();
+      }
+    std::string out (value);
+    std::transform (out.begin (), out.end (), out.begin (),
+                    [] (unsigned char c) {
+                      return static_cast<char> (std::tolower (c));
+                    });
+    return out;
+  } ();
+
+  if (mode == "exclusive" || mode == "normal")
+    {
+      return mode;
+    }
+  return std::nullopt;
+}
+
+std::optional<std::string>
+ResolveTempStoreOverride ()
+{
+  const std::string mode = [] {
+    const char *value = std::getenv ("CORTEXT_SQLITE_TEMP_STORE");
+    if (!value || value[0] == '\0')
+      {
+        return std::string ();
+      }
+    std::string out (value);
+    std::transform (out.begin (), out.end (), out.begin (),
+                    [] (unsigned char c) {
+                      return static_cast<char> (std::tolower (c));
+                    });
+    return out;
+  } ();
+
+  if (mode == "default" || mode == "0")
+    {
+      return std::string ("0");
+    }
+  if (mode == "file" || mode == "1")
+    {
+      return std::string ("1");
+    }
+  if (mode == "memory" || mode == "2")
+    {
+      return std::string ("2");
+    }
+  return std::nullopt;
+}
+
+std::string
+ResolveBeginTransactionSql ()
+{
+  const std::string mode = [] {
+    const char *value = std::getenv ("CORTEXT_SQLITE_TRANSACTION_MODE");
+    if (!value || value[0] == '\0')
+      {
+        return std::string ();
+      }
+    std::string out (value);
+    std::transform (out.begin (), out.end (), out.begin (),
+                    [] (unsigned char c) {
+                      return static_cast<char> (std::tolower (c));
+                    });
+    return out;
+  } ();
+
+  if (mode == "immediate")
+    {
+      return "BEGIN IMMEDIATE";
+    }
+  if (mode == "exclusive")
+    {
+      return "BEGIN EXCLUSIVE";
+    }
+  return "BEGIN";
 }
 
 sqlite3_stmt *
@@ -225,18 +394,64 @@ SQLiteConnection::SQLiteConnection (const std::string &database_path,
       {
         std::string msg = errmsg ? errmsg : "Unknown error";
         sqlite3_free (errmsg);
-        throw StoreError ("PRAGMA failed: " + msg);
+        throw StoreError ("PRAGMA failed (" + pragma + "): " + msg);
       }
   };
 
-  // Enable WAL mode for file databases (not :memory:)
-  if (config.enable_wal && database_path != ":memory:")
+  if (auto page_size = ParseLongLongEnv ("CORTEXT_SQLITE_PAGE_SIZE"))
     {
-      exec_pragma ("PRAGMA journal_mode = WAL");
+      if (*page_size >= 512 && *page_size <= 65536
+          && (*page_size & (*page_size - 1)) == 0)
+        {
+          exec_pragma ("PRAGMA page_size = " + std::to_string (*page_size));
+        }
+    }
+
+  if (auto temp_store = ResolveTempStoreOverride ())
+    {
+      exec_pragma ("PRAGMA temp_store = " + *temp_store);
+    }
+  else
+    {
+      exec_pragma ("PRAGMA temp_store = 2");
+    }
+
+  if (auto mmap_size = ParseLongLongEnv ("CORTEXT_SQLITE_MMAP_SIZE"))
+    {
+      if (*mmap_size >= 0)
+        {
+          exec_pragma ("PRAGMA mmap_size = " + std::to_string (*mmap_size));
+        }
+    }
+  else
+    {
+      exec_pragma ("PRAGMA mmap_size = 268435456");
+    }
+
+  // Enable WAL mode for file databases (not :memory:)
+  if (database_path != ":memory:")
+    {
+      const auto journal_override = ResolveJournalModeOverride ();
+      if (journal_override)
+        {
+          exec_pragma ("PRAGMA journal_mode = " + *journal_override);
+        }
+      else if (config.enable_wal)
+        {
+          exec_pragma ("PRAGMA journal_mode = WAL");
+        }
+      if ((journal_override && *journal_override == "wal")
+          || (!journal_override && config.enable_wal))
+        {
+          exec_pragma ("PRAGMA wal_autocheckpoint = 0");
+          sqlite3_wal_autocheckpoint (connection_, 0);
+        }
     }
 
   // Set synchronous mode (NORMAL by default for WAL)
-  exec_pragma ("PRAGMA synchronous = " + std::to_string (config.synchronous));
+  exec_pragma ("PRAGMA synchronous = "
+               + std::to_string (ResolveSynchronousMode (
+                   config.synchronous)));
 
   // Enable foreign key constraints
   if (config.enable_foreign_keys)
@@ -247,8 +462,20 @@ SQLiteConnection::SQLiteConnection (const std::string &database_path,
   // Set cache size (negative value = KB)
   if (config.cache_size_kb > 0)
     {
-      exec_pragma ("PRAGMA cache_size = -"
-                   + std::to_string (config.cache_size_kb));
+      const auto cache_size_override
+          = ParseLongLongEnv ("CORTEXT_SQLITE_CACHE_SIZE_KB");
+      const long long cache_size_kb
+          = cache_size_override.value_or (config.cache_size_kb);
+      if (cache_size_kb > 0)
+        {
+          exec_pragma ("PRAGMA cache_size = -"
+                       + std::to_string (cache_size_kb));
+        }
+    }
+
+  if (auto locking_mode = ResolveLockingModeOverride ())
+    {
+      exec_pragma ("PRAGMA locking_mode = " + *locking_mode);
     }
 }
 
@@ -522,7 +749,7 @@ SQLiteStore::Begin ()
     {
       if (!IsDbInTransaction ())
         {
-          ExecuteDirect ("BEGIN");
+          ExecuteDirect (ResolveBeginTransactionSql ());
         }
       in_transaction_ = true;
     }
@@ -764,6 +991,49 @@ SQLiteStore::GetWalStatus () const
   sqlite3_wal_checkpoint_v2 (connection_->GetConnection (), nullptr,
                              SQLITE_CHECKPOINT_PASSIVE, &wal_log, &wal_ckpt);
   return { wal_log, wal_ckpt };
+}
+
+int
+SQLiteStore::WalAutoCheckpointPages () const
+{
+  if (!connection_ || !connection_->IsValid ())
+    {
+      return 0;
+    }
+  auto rows = const_cast<SQLiteStore *> (this)->ExecuteDirect (
+      "PRAGMA wal_autocheckpoint", {});
+  if (rows.empty () || rows[0].count ("wal_autocheckpoint") == 0)
+    {
+      return 0;
+    }
+  try
+    {
+      return static_cast<int> (
+          std::any_cast<long long> (rows[0].at ("wal_autocheckpoint")));
+    }
+  catch (const std::bad_any_cast &)
+    {
+      return 0;
+    }
+}
+
+std::uintmax_t
+SQLiteStore::WalFileBytes () const
+{
+  if (!connection_ || !connection_->IsValid ())
+    {
+      return 0;
+    }
+  const char *db_filename = sqlite3_db_filename (
+      connection_->GetConnection (), "main");
+  if (!db_filename || std::string_view (db_filename) == ":memory:")
+    {
+      return 0;
+    }
+  std::error_code ec;
+  const auto wal_path = std::filesystem::path (db_filename).concat ("-wal");
+  const auto bytes = std::filesystem::file_size (wal_path, ec);
+  return ec ? 0 : bytes;
 }
 
 void

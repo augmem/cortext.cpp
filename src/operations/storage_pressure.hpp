@@ -4,6 +4,7 @@
 
 namespace cortext
 {
+struct ProcessorContext;
 class Transaction;
 }
 
@@ -20,6 +21,12 @@ struct StoragePressureState
 StoragePressureState
 ComputeStoragePressureState (Transaction &tx,
                              const eviction::EvictionAblationOverride &override);
+
+StoragePressureState
+ComputeCachedStoragePressureState (
+    ProcessorContext &ctx, Transaction &tx,
+    const eviction::EvictionAblationOverride &override,
+    int refresh_interval_signals = 64);
 
 double
 GateScale (const StoragePressureState &state,

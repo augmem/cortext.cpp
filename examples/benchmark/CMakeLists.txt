@@ -495,8 +495,11 @@ target_link_libraries(cortext_chat_replay_memory_eval PRIVATE
 target_link_libraries(cortext_chat_replay_live_run PRIVATE
   cortext
   nlohmann_json::nlohmann_json
-  sqlite3
+  ${SQLITE3_LIBRARIES}
 )
+if(SQLITE3_LIBRARY_DIRS)
+  target_link_directories(cortext_chat_replay_live_run PRIVATE ${SQLITE3_LIBRARY_DIRS})
+endif()
 target_link_libraries(cortext_chat_replay_conversation_memory_bakeoff PRIVATE
   cortext
   nlohmann_json::nlohmann_json

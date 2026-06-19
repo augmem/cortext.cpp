@@ -33,6 +33,32 @@ def load_probe_rows(path: pathlib.Path, limit: int) -> list[dict]:
     return rows
 
 
+def infer_replay_timezone(
+    explicit_timezone: str, probe_stream: pathlib.Path, db_path: pathlib.Path
+) -> str:
+    timezone = explicit_timezone.strip()
+    if timezone:
+        return timezone
+
+    candidates = [
+        db_path.parent / "progress.log",
+        probe_stream.parent / "progress.log",
+    ]
+    seen: set[pathlib.Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen or not path.exists():
+            continue
+        seen.add(resolved)
+        for line in path.read_text(errors="replace").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "replay_timezone":
+                timezone = value.strip()
+                if timezone:
+                    return timezone
+    return "process_default"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--probe-stream", type=pathlib.Path, required=True)
@@ -57,6 +83,7 @@ def main() -> int:
     parser.add_argument("--focus", type=float, default=0.5)
     parser.add_argument("--sensitivity", type=float, default=0.5)
     parser.add_argument("--stability", type=float, default=0.5)
+    parser.add_argument("--replay-timezone", default="")
     parser.add_argument("--daily-consolidation", action="store_true")
     parser.add_argument("--deep", action="store_true")
     args = parser.parse_args()
@@ -66,6 +93,9 @@ def main() -> int:
     probes = load_probe_rows(args.probe_stream, args.probe_limit)
     if not probes:
         raise RuntimeError(f"probe stream has no rows: {args.probe_stream}")
+    replay_timezone = infer_replay_timezone(
+        args.replay_timezone, args.probe_stream, args.db
+    )
 
     out = {
         "schema": "chat_replay_probe_stream_partial_summary_v1",
@@ -74,6 +104,7 @@ def main() -> int:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "input_dir": str(args.input_dir),
         "db_path": str(args.db),
+        "replay_timezone": replay_timezone,
         "timeline_skip_messages": args.timeline_skip_messages,
         "timeline_max_messages": args.timeline_max_messages,
         "timeline_media_limit": args.timeline_media_limit,

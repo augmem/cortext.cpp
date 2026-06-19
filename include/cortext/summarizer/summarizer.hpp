@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,13 @@ struct AudioSegment
 class Summarizer
 {
 public:
+  struct BatchTextItem
+  {
+    std::string id;
+    std::vector<std::string> texts;
+    int max_words = 0;
+  };
+
   virtual ~Summarizer () = default;
 
   /// @brief Summarize multiple text fragments into a single summary.
@@ -37,6 +45,24 @@ public:
   {
     (void)max_words;
     return SummarizeTexts (texts);
+  }
+
+  /// @brief Summarize multiple independent text groups.
+  ///
+  /// Implementations with native or provider-level batching should override
+  /// this. The default preserves existing behavior by issuing one summary at
+  /// a time through SummarizeTextsLimited().
+  virtual std::vector<std::string>
+  SummarizeTextBatches (const std::vector<BatchTextItem> &items)
+  {
+    std::vector<std::string> summaries;
+    summaries.reserve (items.size ());
+    for (const auto &item : items)
+      {
+        summaries.push_back (SummarizeTextsLimited (item.texts,
+                                                    item.max_words));
+      }
+    return summaries;
   }
 
   /// @brief Summarize audio content into text.

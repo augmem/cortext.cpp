@@ -80,6 +80,7 @@ public:
     // Storage output (MemoryStorage operation)
     std::optional<long long> stored_embedding_id;  // Set if stored to memory
     std::optional<long long> stored_memory_id;     // Set if stored to memory
+    std::optional<long long> stored_signal_id;     // Set if stored to signal
 
     // Key thresholds and stabilizers
     double threshold_T_dynamic = 0.0;  // Alg 8
@@ -160,7 +161,8 @@ private:
   // State persistence helpers (called within Process transaction)
   // v2 schema: Unified state persistence
   void PersistState (Transaction &tx);           // Unified STATE table
-  void PersistWorkingMemory (Transaction &tx);   // MEMORIES with kind='WORKING'
+  void PersistWorkingMemory (Transaction &tx, bool force = false,
+                             OperationContext *op_context = nullptr);
   void PersistAccumulators (Transaction &tx);    // ACCUMULATORS table
 
   Config config_;

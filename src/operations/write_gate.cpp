@@ -129,6 +129,15 @@ ComputeWriteGate::Execute (OperationContext &context,
       if (e_rep.size () > 0)
         {
           p_ctx.memory_stream.push_back (e_rep);
+          const size_t max_memory_stream
+              = static_cast<size_t> (std::max (
+                  core::KNeighbors (config.stability),
+                  static_cast<int> (core::NCtx (config.stability))
+                      + core::KCtx (config.stability)));
+          while (p_ctx.memory_stream.size () > max_memory_stream)
+            {
+              p_ctx.memory_stream.pop_front ();
+            }
         }
 
       // Section 8.2: Populate recent_memory_centroids for interrupt gate context.

@@ -99,9 +99,13 @@ UpdateUncertainty::Execute (OperationContext &context, Transaction &tx) const
     const double width_scale
         = static_cast<double> (core::kAttentionWidthMax) / attention_width;
     const int k = std::min (core::KNeighbors (config.stability), n);
+    const int stream_window = std::max (
+        k, static_cast<int> (core::NCtx (config.stability))
+               + core::KCtx (config.stability));
+    const int stream_start = std::max (0, n - stream_window);
     std::vector<double> sims;
-    sims.reserve (static_cast<size_t> (n));
-    for (int i = 0; i < n; ++i)
+    sims.reserve (static_cast<size_t> (n - stream_start));
+    for (int i = stream_start; i < n; ++i)
       {
         const auto &emb
             = p_ctx.memory_stream[static_cast<size_t> (i)];

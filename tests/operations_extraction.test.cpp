@@ -12,6 +12,8 @@
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
+#include <cortext/providers/adapters.hpp>
+#include <cortext/providers/provider.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <filesystem>
 #include <fstream>
@@ -132,6 +134,136 @@ public:
 private:
   std::vector<std::string> labels_;
   std::vector<operations::ExtractedRelation> relations_;
+};
+
+class BatchCountingExtractor : public Extractor
+{
+public:
+  operations::ExtractionResult
+  ExtractFromText (const std::string & /*text*/,
+                   const nlohmann::json & /*schema*/) override
+  {
+    ++text_calls;
+    operations::ExtractionResult result;
+    result.labels.push_back ({ "single-call", 1.0 });
+    return result;
+  }
+
+  std::vector<operations::ExtractionResult>
+  ExtractBatchFromTexts (const std::vector<BatchTextItem> &items,
+                         const nlohmann::json & /*schema*/) override
+  {
+    ++batch_calls;
+    batch_sizes.push_back (items.size ());
+    std::vector<operations::ExtractionResult> results;
+    results.reserve (items.size ());
+    for (const auto &item : items)
+      {
+        operations::ExtractionResult result;
+        result.summary_id = item.id;
+        result.labels.push_back ({ "batch-" + item.id, 1.0 });
+        results.push_back (std::move (result));
+      }
+    return results;
+  }
+
+  operations::ExtractionResult
+  ExtractFromAudio (const float * /*pcm*/, size_t /*num_samples*/,
+                    const nlohmann::json & /*schema*/) override
+  {
+    return {};
+  }
+
+  bool
+  IsAvailable () const override
+  {
+    return true;
+  }
+
+  int text_calls = 0;
+  int batch_calls = 0;
+  std::vector<std::size_t> batch_sizes;
+};
+
+class BatchRecordingProvider : public providers::InferenceProvider
+{
+public:
+  BatchRecordingProvider ()
+  {
+    capabilities_.text = true;
+    capabilities_.constraints = providers::ConstraintSupport::ServerSchema;
+    identity_.scheme = "test";
+    identity_.endpoint = "in-memory";
+    identity_.model = "batch-recorder";
+  }
+
+  bool
+  Health () const override
+  {
+    return true;
+  }
+
+  const providers::Capabilities &
+  GetCapabilities () const override
+  {
+    return capabilities_;
+  }
+
+  const providers::ProviderIdentity &
+  Identity () const override
+  {
+    return identity_;
+  }
+
+  providers::GenerateResponse
+  Generate (const providers::GenerateRequest &request) override
+  {
+    ++generate_calls;
+    if (request.role == providers::Role::Summarizer)
+      {
+        return { "single summary", false, {} };
+      }
+    return { R"({"labels":["single"],"relations":[],"facts":[]})", false,
+             {} };
+  }
+
+  std::vector<providers::GenerateResponse>
+  GenerateBatch (
+      const std::vector<providers::GenerateRequest> &requests) override
+  {
+    ++generate_batch_calls;
+    batch_sizes.push_back (requests.size ());
+    std::vector<providers::GenerateResponse> responses;
+    responses.reserve (requests.size ());
+    for (std::size_t i = 0; i < requests.size (); ++i)
+      {
+        if (requests[i].role == providers::Role::Summarizer)
+          {
+            responses.push_back (
+                { "summary-" + std::to_string (i), false, {} });
+            continue;
+          }
+        responses.push_back (
+            { nlohmann::json {
+                  { "labels",
+                    nlohmann::json::array (
+                        { "batch-" + std::to_string (i) }) },
+                  { "relations", nlohmann::json::array () },
+                  { "facts", nlohmann::json::array () },
+                }
+                  .dump (),
+              false, {} });
+      }
+    return responses;
+  }
+
+  int generate_calls = 0;
+  int generate_batch_calls = 0;
+  std::vector<std::size_t> batch_sizes;
+
+private:
+  providers::Capabilities capabilities_;
+  providers::ProviderIdentity identity_;
 };
 
 struct LabelEdgeMetrics
@@ -434,6 +566,113 @@ PrintLabels (const std::string &modality,
 
 } // namespace
 
+TEST_CASE ("Extractor default batch processes text items sequentially",
+           "[operations][extraction][batch]")
+{
+  FixedExtractor extractor ({ "Default Batch Label" });
+  std::vector<Extractor::BatchTextItem> items {
+    { "summary-a", "first item" },
+    { "summary-b", "second item" },
+  };
+
+  auto results = extractor.ExtractBatchFromTexts (items,
+                                                  nlohmann::json::object ());
+
+  REQUIRE (results.size () == 2);
+  REQUIRE (results[0].summary_id == "summary-a");
+  REQUIRE (results[1].summary_id == "summary-b");
+  REQUIRE (results[0].labels.size () == 1);
+  REQUIRE (results[0].labels[0].label == "Default Batch Label");
+}
+
+TEST_CASE ("ProviderExtractor routes text batches through provider batch API",
+           "[operations][extraction][batch]")
+{
+  auto provider = std::make_shared<BatchRecordingProvider> ();
+  providers::ProviderExtractor extractor (provider);
+  std::vector<Extractor::BatchTextItem> items {
+    { "summary-a", "first item" },
+    { "summary-b", "second item" },
+    { "summary-c", "third item" },
+  };
+
+  auto results = extractor.ExtractBatchFromTexts (
+      items, nlohmann::json::object ());
+
+  REQUIRE (provider->generate_batch_calls == 1);
+  REQUIRE (provider->generate_calls == 0);
+  REQUIRE (provider->batch_sizes == std::vector<std::size_t> { 3 });
+  REQUIRE (results.size () == 3);
+  REQUIRE (results[0].summary_id == "summary-a");
+  REQUIRE (results[1].summary_id == "summary-b");
+  REQUIRE (results[2].summary_id == "summary-c");
+  REQUIRE (results[0].labels[0].label == "batch-0");
+  REQUIRE (results[2].labels[0].label == "batch-2");
+}
+
+TEST_CASE ("ProviderSummarizer routes text batches through provider batch API",
+           "[providers][summarizer][batch]")
+{
+  auto provider = std::make_shared<BatchRecordingProvider> ();
+  providers::ProviderSummarizer summarizer (provider);
+  std::vector<Summarizer::BatchTextItem> items {
+    { "summary-a", { "first item", "second item" }, 12 },
+    { "summary-b", { "third item" }, 8 },
+  };
+
+  auto summaries = summarizer.SummarizeTextBatches (items);
+
+  REQUIRE (provider->generate_batch_calls == 1);
+  REQUIRE (provider->generate_calls == 0);
+  REQUIRE (provider->batch_sizes == std::vector<std::size_t> { 2 });
+  REQUIRE (summaries == std::vector<std::string> { "summary-0",
+                                                  "summary-1" });
+}
+
+TEST_CASE ("ProcessExtractionResults uses extractor batch API for queued text",
+           "[operations][extraction][batch]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> unit_embedding (kEmbeddingDim, 0.0f);
+  unit_embedding[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 10LL, unit_embedding, 1000LL);
+  cortext::testing::SeedMemoryV2 (*store, 20LL, 10LL, "s0",
+                                  "ASSOCIATION", 1.0, 1000LL);
+  cortext::testing::SeedEmbeddingV2 (*store, 11LL, unit_embedding, 1000LL);
+  cortext::testing::SeedMemoryV2 (*store, 21LL, 11LL, "s1",
+                                  "ASSOCIATION", 1.0, 1000LL);
+
+  FixedEncoder encoder (unit_embedding);
+  BatchCountingExtractor extractor;
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.encoder = &encoder;
+  cfg.extractor = &extractor;
+
+  ProcessorContext pctx;
+  pctx.extractor = &extractor;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
+  Signal s = MakeSignal (2000ULL);
+  OperationContext ctx (s, pctx, cfg, store.get ());
+  ctx.SetExtractionRequests (MakeRequests (2));
+
+  operations::ProcessExtractionResults op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE (extractor.batch_calls == 1);
+  REQUIRE (extractor.text_calls == 0);
+  REQUIRE (extractor.batch_sizes == std::vector<std::size_t> { 2 });
+  REQUIRE (ctx.GetOperationTimings ().count (
+               "ProcessExtractionResults.extractor_batch_call")
+           == 1);
+}
+
 TEST_CASE ("EnqueueExtractionJobs respects consolidation gate",
            "[operations][extraction][alg29c]")
 {
@@ -554,6 +793,28 @@ TEST_CASE ("Alg32 caps jobs to MaxExtractionsPerCycle(T)",
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   REQUIRE (captured.size () == 5);
+}
+
+TEST_CASE ("EnqueueExtractionJobs caps downstream internal extraction requests",
+           "[operations][extraction][alg32]")
+{
+  ProcessorContext pctx;
+  cortext::testing::SeedMatureLabelContrastBank (pctx, kEmbeddingDim);
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 1.0; // batch size=32, max_extractions_per_cycle=5
+
+  Signal s = MakeSignal (65'000ULL);
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetConsolidationShouldStart (true);
+  ctx.SetExtractionRequests (MakeRequests (10));
+
+  EnqueueExtractionJobs op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (ctx.GetExtractionRequests ().size () == 5);
 }
 
 TEST_CASE ("EnqueueExtractionJobs forwards summary and sources",

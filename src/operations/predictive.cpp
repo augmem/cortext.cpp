@@ -1,13 +1,18 @@
 #include "cortext/operations/predictive.hpp"
 
-#include "cortext/store/store.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/store.hpp"
+#include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
+#include <any>
+#include <chrono>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace cortext::operations
@@ -15,6 +20,10 @@ namespace cortext::operations
 
 namespace
 {
+using SteadyClock = std::chrono::steady_clock;
+constexpr std::size_t kPredictiveSqlChunkSize = 400;
+constexpr int kPredictiveDbDecayIntervalSignals = 64;
+
 inline Eigen::VectorXf
 Unit (const Eigen::VectorXf &v)
 {
@@ -24,6 +33,147 @@ Unit (const Eigen::VectorXf &v)
       return v;
     }
   return v / static_cast<float> (n);
+}
+
+double
+ElapsedMillis (SteadyClock::time_point start)
+{
+  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
+      .count ();
+}
+
+std::string
+Placeholders (std::size_t count)
+{
+  std::string text;
+  text.reserve (count * 2);
+  for (std::size_t i = 0; i < count; ++i)
+    {
+      if (i > 0)
+        {
+          text += ",";
+        }
+      text += "?";
+    }
+  return text;
+}
+
+std::vector<std::any>
+ChunkParams (const std::vector<long long> &ids, std::size_t begin,
+             std::size_t end)
+{
+  std::vector<std::any> params;
+  params.reserve (end - begin);
+  for (std::size_t i = begin; i < end; ++i)
+    {
+      params.push_back (ids[i]);
+    }
+  return params;
+}
+
+void
+DecayActivePreActivation (OperationContext &context, Transaction &tx,
+                          double pad)
+{
+  auto &active_ids = context.GetProcessorContext ()
+                         .predictive_pre_activation_embedding_ids;
+  if (active_ids.empty ())
+    {
+      return;
+    }
+
+  const auto start = SteadyClock::now ();
+  auto &p_ctx = context.GetProcessorContext ();
+  const bool flush_db_decay
+      = p_ctx.signals_processed <= 1
+        || (p_ctx.signals_processed % kPredictiveDbDecayIntervalSignals) == 0;
+  std::vector<long long> ids (active_ids.begin (), active_ids.end ());
+  std::unordered_set<long long> still_active;
+  still_active.reserve (ids.size ());
+
+  for (std::size_t begin = 0; begin < ids.size ();
+       begin += kPredictiveSqlChunkSize)
+    {
+      const std::size_t end
+          = std::min (ids.size (), begin + kPredictiveSqlChunkSize);
+      const std::string placeholders = Placeholders (end - begin);
+
+      std::vector<std::any> update_params;
+      update_params.reserve ((end - begin) + 2);
+      update_params.push_back (pad);
+      update_params.push_back (pad);
+      for (std::size_t i = begin; i < end; ++i)
+        {
+          update_params.push_back (ids[i]);
+        }
+
+      if (flush_db_decay)
+        {
+          tx.Execute ("UPDATE memories "
+                      "SET pre_activation = CASE "
+                      "  WHEN pre_activation * ? <= 1e-6 "
+                      "    THEN 0.0 "
+                      "  ELSE pre_activation * ? "
+                      "END "
+                      "WHERE embedding_id IN (" + placeholders + ") "
+                      "  AND pre_activation > 0.0",
+                      update_params);
+        }
+      std::vector<long long> cache_miss_ids;
+      cache_miss_ids.reserve (end - begin);
+      for (std::size_t i = begin; i < end; ++i)
+        {
+          const long long id = ids[i];
+          p_ctx.DecayRetrievalSurfacePreActivationByEmbedding (id, pad);
+          auto cache_it = p_ctx.retrieval_surface_embedding_index.find (id);
+          if (cache_it == p_ctx.retrieval_surface_embedding_index.end ())
+            {
+              if (flush_db_decay)
+                {
+                  cache_miss_ids.push_back (id);
+                }
+              else
+                {
+                  still_active.insert (id);
+                }
+              continue;
+            }
+          const auto &entry
+              = p_ctx.retrieval_surface_cache[cache_it->second];
+          if (entry.pre_activation > 1e-6)
+            {
+              still_active.insert (id);
+            }
+        }
+      if (flush_db_decay && !cache_miss_ids.empty ())
+        {
+          const std::string miss_placeholders = Placeholders (
+              cache_miss_ids.size ());
+          auto rows = tx.Execute (
+              "SELECT embedding_id FROM memories "
+              "WHERE embedding_id IN (" + miss_placeholders + ") "
+              "  AND pre_activation > 0.0 "
+              "  AND pre_activation > 1e-6",
+              ChunkParams (cache_miss_ids, 0, cache_miss_ids.size ()));
+          for (const auto &row : rows)
+            {
+              auto it = row.find ("embedding_id");
+              if (it == row.end ())
+                {
+                  continue;
+                }
+              const auto id = store::AnyToLongLong (it->second);
+              if (id.has_value () && *id > 0)
+                {
+                  still_active.insert (*id);
+                }
+            }
+        }
+    }
+
+  active_ids.swap (still_active);
+  context.AddOperationTiming ("Predictive.decay_active_sql",
+                              ElapsedMillis (start));
 }
 
 inline double
@@ -45,14 +195,8 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
   const auto &cfg = context.GetConfig ();
   const double pad = core::PredictivePreActivationDecay (cfg.stability);
 
-  // Keep predictive state transient by decaying prior pre-activation every turn.
-  tx.Execute ("UPDATE memories "
-              "SET pre_activation = CASE "
-              "  WHEN COALESCE(pre_activation, 0.0) <= 1e-6 THEN 0.0 "
-              "  ELSE COALESCE(pre_activation, 0.0) * ? "
-              "END "
-              "WHERE COALESCE(pre_activation, 0.0) > 0.0;",
-              { pad });
+  // Keep predictive state transient without scanning every memory row.
+  DecayActivePreActivation (context, tx, pad);
 
   // Need some recent context to estimate a trajectory.
   if (p_ctx.recent_context_embeddings.empty ())
@@ -145,6 +289,8 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
                   "SET pre_activation = MIN(?, COALESCE(pre_activation, 0.0) * ? + ?) "
                   "WHERE embedding_id = ?;",
                   { 1.0, pad, delta, id });
+      p_ctx.BoostRetrievalSurfacePreActivationByEmbedding (id, pad, delta);
+      p_ctx.predictive_pre_activation_embedding_ids.insert (id);
       ++boost_count;
     }
 

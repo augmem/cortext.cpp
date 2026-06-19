@@ -115,6 +115,34 @@ ResolveEvictionFrontier (Transaction &tx, double T,
   return frontier;
 }
 
+inline EvictionFrontier
+ResolveEvictionFrontier (ProcessorContext &ctx, Transaction &tx, double T,
+                         long long last_consolidation_ts,
+                         const eviction::EvictionAblationOverride &override)
+{
+  EvictionFrontier frontier;
+  frontier.cutoff
+      = override.periphery_cutoff.value_or (core::PeripheryCutoff (T));
+  frontier.fact_floor_active
+      = override.fact_floor_enabled.value_or (true);
+  frontier.fact_floor = frontier.fact_floor_active
+                            ? core::FactEvictionFloor (T)
+                            : 0.0;
+  frontier.consolidation_gate_active
+      = override.consolidation_gate_enabled.value_or (true);
+  frontier.consolidation_ts = last_consolidation_ts;
+
+  const pressure::StoragePressureState storage_gate
+      = pressure::ComputeCachedStoragePressureState (ctx, tx, override);
+  frontier.storage_gate_active = storage_gate.active;
+  frontier.storage_used_bytes = storage_gate.used_bytes;
+  frontier.storage_threshold_bytes = storage_gate.threshold_bytes;
+  frontier.storage_allows_eviction
+      = !(storage_gate.active
+          && storage_gate.used_bytes < storage_gate.threshold_bytes);
+  return frontier;
+}
+
 inline std::string
 MakePlaceholders (std::size_t count)
 {

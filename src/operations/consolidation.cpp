@@ -10,6 +10,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
+#include <chrono>
 #include <cmath>
 #include <string>
 
@@ -45,12 +46,14 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
   (void)tx;
   if (!context.GetConsolidationShouldStart ())
     {
+      context.SetExtractionRequests ({});
       return;
     }
   const auto mode = context.GetSignal ().consolidation_mode.value_or (
       ConsolidationMode::Both);
   if (mode == ConsolidationMode::Shallow)
     {
+      context.SetExtractionRequests ({});
       return;
     }
 
@@ -70,6 +73,7 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
       && (now_ts - p_ctx.last_extraction_ts)
              < static_cast<uint64_t> (std::max (interval, 0) * 1000))
     {
+      context.SetExtractionRequests ({});
       return;
     }
 
@@ -82,14 +86,15 @@ EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) cons
                                 batch_size, max_per_cycle });
 
   // Invoke extraction callback if registered.
+  std::vector<operations::ExtractionRequest> batch (requests.begin (),
+                                                    requests.begin () + count);
   auto *callback = context.GetExtractionCallback ();
   if (callback)
     {
-      std::vector<operations::ExtractionRequest> batch (requests.begin (),
-                                                        requests.begin () + count);
       (*callback) (batch);
     }
 
+  context.SetExtractionRequests (std::move (batch));
   p_ctx.last_extraction_ts = now_ts;
 
   telemetry::LogDebug("cortext.enqueue_extraction_jobs", {
@@ -120,6 +125,7 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   // V2: Update connectivity metric from ASSOCIATIONS edge count (Section 9.2).
   // Connectivity = normalized count of edges where this memory participates.
   // Normalized by max observed edge count to keep values in [0, 1].
+  const auto connectivity_start = std::chrono::steady_clock::now ();
   tx.Execute ("WITH edge_counts AS ("
               "  SELECT m.memory_id, m.embedding_id, "
               "         (SELECT COUNT(*) FROM associations a "
@@ -137,6 +143,11 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
               "memories.embedding_id"
               "), 0.0);",
               {});
+  context.AddOperationTiming (
+      "ScoreConsolidation.update_connectivity_sql",
+      std::chrono::duration<double, std::milli> (
+          std::chrono::steady_clock::now () - connectivity_start)
+          .count ());
 
   // v2: Select candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
@@ -170,10 +181,16 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
         "       + (?5 * CASE WHEN m.tag_expires_at > ?6 "
         "               THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) < ?7 "
         "ORDER BY computed_score ASC;";
+  const auto candidate_query_start = std::chrono::steady_clock::now ();
   auto rows = tx.Execute (
       query,
       { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
         floor_cutoff });
+  context.AddOperationTiming (
+      "ScoreConsolidation.candidate_query_sql",
+      std::chrono::duration<double, std::milli> (
+          std::chrono::steady_clock::now () - candidate_query_start)
+          .count ());
   internal::ThrowIfStopRequested ();
   const int min_cluster_size = core::MinClusterSize (F_raw);
   if (force_consolidation
@@ -182,31 +199,42 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
       const int fallback_limit
           = std::max ({ core::WRet (T), min_cluster_size, 1 });
       const std::string fallback_query = std::string (
-          "SELECT m.embedding_id, "
-          "       ((?1 * COALESCE(m.strength, 1.0)) "
-          "        - (?2 * COALESCE(m.redundancy, 0.0)) "
-          "        + (?3 * COALESCE(m.connectivity, 0.0)) "
-          "        + (?4 * COALESCE(m.stability, 0.0)) "
-          "        + (?5 * CASE WHEN m.tag_expires_at > ?6 "
-          "                THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) "
-          "        AS computed_score, "
-          "       e.embedding "
-          "FROM memories m "
-          "JOIN embeddings e ON m.embedding_id = e.embedding_id "
+          "WITH ranked AS ("
+          "  SELECT m.embedding_id, "
+          "         ((?1 * COALESCE(m.strength, 1.0)) "
+          "          - (?2 * COALESCE(m.redundancy, 0.0)) "
+          "          + (?3 * COALESCE(m.connectivity, 0.0)) "
+          "          + (?4 * COALESCE(m.stability, 0.0)) "
+          "          + (?5 * CASE WHEN m.tag_expires_at > ?6 "
+          "                  THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) "
+          "          AS computed_score "
+          "  FROM memories m "
           )
           + candidate_scope
           + blob_filter
-          + "ORDER BY computed_score ASC LIMIT ?7;";
+          + "  ORDER BY computed_score ASC LIMIT ?7"
+            ") "
+            "SELECT ranked.embedding_id, ranked.computed_score, e.embedding "
+            "FROM ranked "
+            "JOIN embeddings e ON ranked.embedding_id = e.embedding_id "
+            "ORDER BY ranked.computed_score ASC;";
+      const auto fallback_query_start = std::chrono::steady_clock::now ();
       rows = tx.Execute (
           fallback_query,
           { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
             fallback_limit });
+      context.AddOperationTiming (
+          "ScoreConsolidation.fallback_query_sql",
+          std::chrono::duration<double, std::milli> (
+              std::chrono::steady_clock::now () - fallback_query_start)
+              .count ());
       internal::ThrowIfStopRequested ();
     }
 
   std::vector<ConsolidationCandidate> candidates;
   if (!rows.empty())
     {
+      const auto decode_start = std::chrono::steady_clock::now ();
       candidates.reserve (rows.size ());
       int emb_dim = 256; // Default assumption
 
@@ -252,6 +280,11 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
 
           candidates.push_back (std::move (c));
         }
+      context.AddOperationTiming (
+          "ScoreConsolidation.decode_candidates",
+          std::chrono::duration<double, std::milli> (
+              std::chrono::steady_clock::now () - decode_start)
+              .count ());
     }
 
   long long candidate_count = static_cast<long long>(candidates.size());

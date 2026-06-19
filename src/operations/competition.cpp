@@ -2,6 +2,7 @@
 
 #include "neuromodulator_internal.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/store/utils.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
@@ -10,8 +11,10 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -20,6 +23,45 @@ namespace cortext::operations
 
 namespace
 {
+using SteadyClock = std::chrono::steady_clock;
+constexpr std::size_t kCompetitionSqlChunkSize = 400;
+
+double
+ElapsedMillis (SteadyClock::time_point start)
+{
+  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
+      .count ();
+}
+
+std::string
+Placeholders (std::size_t count)
+{
+  std::string text;
+  text.reserve (count * 2);
+  for (std::size_t i = 0; i < count; ++i)
+    {
+      if (i > 0)
+        {
+          text += ",";
+        }
+      text += "?";
+    }
+  return text;
+}
+
+std::vector<std::any>
+ChunkParams (const std::vector<long long> &ids, std::size_t begin,
+             std::size_t end)
+{
+  std::vector<std::any> params;
+  params.reserve (end - begin);
+  for (std::size_t i = begin; i < end; ++i)
+    {
+      params.push_back (ids[i]);
+    }
+  return params;
+}
+
 /// @brief Computes suppression per retrieval based on Stability.
 inline double
 SuppressionPerRetrieval (double F, double S, double T,
@@ -43,37 +85,92 @@ Clamp01 (double v)
   return v;
 }
 void
-ApplyRIFRecovery (Transaction &tx, long long now_ts, double recovery_time)
+ApplyRIFRecovery (OperationContext &context, Transaction &tx, long long now_ts,
+                  double recovery_time)
 {
-  // v2: RIF state (suppression, suppression_ts) merged into memories table
-  // Recovery: restore strength proportional to elapsed time since suppression
-  tx.Execute (
-      "UPDATE memories "
-      "SET strength = MAX(0.0, strength + ("
-      "  suppression * ("
-      "    CASE "
-      "      WHEN (? - COALESCE(suppression_ts, 0)) <= 0 THEN 0.0 "
-      "      WHEN (? - COALESCE(suppression_ts, 0)) >= ? THEN 1.0 "
-      "      ELSE ((? - COALESCE(suppression_ts, 0)) * 1.0 / ?) "
-      "    END"
-      "  )"
-      ")) "
-      "WHERE suppression > 0;",
-      { now_ts, now_ts, recovery_time, now_ts, recovery_time });
+  auto &active_ids
+      = context.GetProcessorContext ().retrieval_suppression_embedding_ids;
+  if (active_ids.empty ())
+    {
+      return;
+    }
 
-  // Decay suppression proportional to recovery
-  tx.Execute (
-      "UPDATE memories "
-      "SET suppression = MAX(0.0, suppression - (suppression * ("
-      "    CASE "
-      "      WHEN (? - COALESCE(suppression_ts, 0)) <= 0 THEN 0.0 "
-      "      WHEN (? - COALESCE(suppression_ts, 0)) >= ? THEN 1.0 "
-      "      ELSE ((? - COALESCE(suppression_ts, 0)) * 1.0 / ?) "
-      "    END"
-      "  ))), "
-      "    suppression_ts = ? "
-      "WHERE suppression > 0;",
-      { now_ts, now_ts, recovery_time, now_ts, recovery_time, now_ts });
+  const auto start = SteadyClock::now ();
+  std::vector<long long> ids (active_ids.begin (), active_ids.end ());
+  std::unordered_set<long long> still_active;
+  still_active.reserve (ids.size ());
+
+  for (std::size_t begin = 0; begin < ids.size ();
+       begin += kCompetitionSqlChunkSize)
+    {
+      const std::size_t end
+          = std::min (ids.size (), begin + kCompetitionSqlChunkSize);
+      const std::string placeholders = Placeholders (end - begin);
+
+      std::vector<std::any> update_params;
+      update_params.reserve ((end - begin) + 12);
+      update_params.push_back (now_ts);
+      update_params.push_back (now_ts);
+      update_params.push_back (recovery_time);
+      update_params.push_back (now_ts);
+      update_params.push_back (recovery_time);
+      update_params.push_back (now_ts);
+      update_params.push_back (now_ts);
+      update_params.push_back (recovery_time);
+      update_params.push_back (now_ts);
+      update_params.push_back (recovery_time);
+      update_params.push_back (now_ts);
+      for (std::size_t i = begin; i < end; ++i)
+        {
+          update_params.push_back (ids[i]);
+        }
+
+      tx.Execute (
+          "UPDATE memories "
+          "SET strength = MAX(0.0, strength + ("
+          "  suppression * ("
+          "    CASE "
+          "      WHEN (? - COALESCE(suppression_ts, 0)) <= 0 THEN 0.0 "
+          "      WHEN (? - COALESCE(suppression_ts, 0)) >= ? THEN 1.0 "
+          "      ELSE ((? - COALESCE(suppression_ts, 0)) * 1.0 / ?) "
+          "    END"
+          "  )"
+          ")), "
+          "suppression = MAX(0.0, suppression - (suppression * ("
+          "    CASE "
+          "      WHEN (? - COALESCE(suppression_ts, 0)) <= 0 THEN 0.0 "
+          "      WHEN (? - COALESCE(suppression_ts, 0)) >= ? THEN 1.0 "
+          "      ELSE ((? - COALESCE(suppression_ts, 0)) * 1.0 / ?) "
+          "    END"
+          "  ))), "
+          "suppression_ts = ? "
+          "WHERE embedding_id IN (" + placeholders + ") "
+          "  AND COALESCE(suppression, 0.0) > 0.0",
+          update_params);
+
+      auto rows = tx.Execute (
+          "SELECT embedding_id FROM memories "
+          "WHERE embedding_id IN (" + placeholders + ") "
+          "  AND COALESCE(suppression, 0.0) > 1e-9",
+          ChunkParams (ids, begin, end));
+      for (const auto &row : rows)
+        {
+          auto it = row.find ("embedding_id");
+          if (it == row.end ())
+            {
+              continue;
+            }
+          const auto id = store::AnyToLongLong (it->second);
+          if (id.has_value () && *id > 0)
+            {
+              still_active.insert (*id);
+            }
+        }
+    }
+
+  active_ids.swap (still_active);
+  context.AddOperationTiming ("Competition.rif_recovery_active_sql",
+                              ElapsedMillis (start));
 }
 
 struct Candidate
@@ -114,6 +211,7 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
                         double focus, double sensitivity, double stability,
                         double competition_scale,
                         long long now_ts, Transaction &tx,
+                        std::unordered_set<long long> &active_ids,
                         int &suppressed_count)
 {
   for (const auto &loser : losers)
@@ -143,6 +241,7 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
                   "    strength = MAX(0.0, strength - ?) "
                   "WHERE embedding_id = ?;",
                   { total_supp, now_ts, total_supp, loser.id });
+      active_ids.insert (loser.id);
       ++suppressed_count;
     }
 }
@@ -169,7 +268,7 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
       = static_cast<long long> (context.GetSignal ().timestamp);
   const double recovery_time = core::RetrievalCompetitionRecoverySeconds (
       cfg.stability);
-  ApplyRIFRecovery (tx, now_ts, recovery_time);
+  ApplyRIFRecovery (context, tx, now_ts, recovery_time);
   const double competition_scale
       = neuromodulation::RetrievalCompetitionScale (p_ctx.neuromod_ne);
 
@@ -188,9 +287,10 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
       return;
     }
   int suppressed_count = 0;
+  auto &active_suppression_ids = p_ctx.retrieval_suppression_embedding_ids;
   ApplyLateralInhibition (winners, losers, radius, cfg.focus, cfg.sensitivity,
                           cfg.stability, competition_scale, now_ts, tx,
-                          suppressed_count);
+                          active_suppression_ids, suppressed_count);
 
   // Debug logging
   telemetry::LogDebug ("cortext.competition", {

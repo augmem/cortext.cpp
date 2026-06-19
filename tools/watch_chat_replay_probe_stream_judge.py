@@ -859,6 +859,8 @@ def materialize_partial(args: argparse.Namespace, milestone: int, summary_path: 
         str(args.sensitivity),
         "--stability",
         str(args.stability),
+        "--replay-timezone",
+        str(args.replay_timezone),
     ]
     if args.daily_consolidation:
         cmd.append("--daily-consolidation")
@@ -1303,6 +1305,7 @@ def main() -> int:
     parser.add_argument("--focus", type=float, default=0.5)
     parser.add_argument("--sensitivity", type=float, default=0.5)
     parser.add_argument("--stability", type=float, default=0.5)
+    parser.add_argument("--replay-timezone", default="")
     parser.add_argument("--daily-consolidation", action="store_true")
     parser.add_argument("--deep", action="store_true")
     parser.add_argument("--judge-provider", default="ollama", choices=["ollama", "nemotron"])

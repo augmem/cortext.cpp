@@ -301,6 +301,25 @@ therefore keeps the same two-arm WM21 stripping contrast and live judge setup,
 but treats consolidation as a source-time nightly sleep event rather than a
 host-time calendar boundary.
 
+A live-judge alignment defect was found during that replacement run on June 16,
+2026. The streamed probe row carries the true query metadata
+(`timestamp`, `source_id`, `modality`, and token count), but the live judge was
+using `probe.event_index` as a positional index into a separately rebuilt
+timeline. Because the materialized judge timeline can differ from the native
+replay timeline, especially when replay timezone and media rows are involved,
+late probes were judged against an earlier current turn. The prior-only
+fairness filter then treated valid Cortext working-memory rows as future rows
+and removed most or all of the working packet. A spot check at
+`probe_event_index=39000` resolved to the true `query_event_index=39167`; under
+the corrected alignment, Cortext retained 510 context tokens, including 291
+working-memory tokens, and the one-row blind judge winner flipped to
+`cortext_native`. Pre-fix live-judge artifacts from this run are therefore
+diagnostics only. The judge now resolves probes by query metadata first, records
+both declared and resolved event indices, propagates the replay timezone through
+partial materialization, and the live watchers were restarted into
+`*_fixed_queryalign` output directories. Only regenerated fixed-query-alignment
+judge artifacts should support the final full-corpus verdict.
+
 ## ACT-R-Inspired Retrieval Gate Ablations
 
 On **June 11, 2026**, we added a focused real-encoder ablation target for the ACT-R-inspired retrieval ideas: `examples/benchmark/cortext_actr_retrieval_ablation_bench`. This benchmark does not import ACT-R's production-rule architecture. It tests four transplanted scoring ideas in the existing Cortext retrieval pipeline: base-level availability, recent retrieval inhibition, procedural utility, and partial matching over existing metadata. It also tests downstream evidence blending as a rank-preserving packet-generation step for near-tied selected candidates and evidence-weighted confidence as a rank-preserving annotation/source-confidence mechanism for those packets. The harness encodes all query and memory text through the production AIST path, truncates to the same 256-dimensional Matryoshka retrieval view used by the SQLite vector schema, and then runs each study with the relevant gate off and on. The validation run used:
@@ -713,7 +732,7 @@ throughput excluding consolidation was **0.398 events/s** over **474** events.
 The following 200- and 500-message runs are superseded for release quality and
 mixed-media temporal claims, but retained here because they verify the
 single-durable probe policy and rough token behavior. The corrected harness now
-reuses the single durable public Cortext call for both
+reuses the same durable timestamped Cortext replay turn for both
 chat ingest and probe measurement, and every probe records the
 `single_durable_chat_turn_reused_for_probe_and_ingest` policy. The corrected
 200-message mixed-media replay

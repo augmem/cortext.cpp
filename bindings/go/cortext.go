@@ -54,6 +54,11 @@ type Handle struct {
 	ptr C.cortext_handle
 }
 
+type EmbeddingResult struct {
+	Embedding []float32 `json:"embedding"`
+	Dimension int       `json:"dimension"`
+}
+
 func Version() string {
 	return C.GoString(C.cortext_version())
 }
@@ -153,6 +158,22 @@ func (h *Handle) ProcessText(text string, sourceID string) (map[string]any, erro
 	return decodeJSONObject(h.ProcessTextJSON(text, sourceID))
 }
 
+func (h *Handle) EmbedTextJSON(text string) ([]byte, error) {
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+
+	raw := C.cortext_embed_text_json(h.ptr, cText)
+	return takeJSONString(raw)
+}
+
+func (h *Handle) EmbedText(text string) ([]float32, error) {
+	result, err := decodeEmbeddingResult(h.EmbedTextJSON(text))
+	if err != nil {
+		return nil, err
+	}
+	return result.Embedding, nil
+}
+
 func (h *Handle) ProcessAudioJSON(pcm []float32, sourceID string) ([]byte, error) {
 	cSourceID := C.CString(sourceID)
 	defer C.free(unsafe.Pointer(cSourceID))
@@ -168,6 +189,24 @@ func (h *Handle) ProcessAudioJSON(pcm []float32, sourceID string) ([]byte, error
 
 func (h *Handle) ProcessAudio(pcm []float32, sourceID string) (map[string]any, error) {
 	return decodeJSONObject(h.ProcessAudioJSON(pcm, sourceID))
+}
+
+func (h *Handle) EmbedAudioJSON(pcm []float32) ([]byte, error) {
+	var rawPCM *C.float
+	if len(pcm) > 0 {
+		rawPCM = (*C.float)(unsafe.Pointer(unsafe.SliceData(pcm)))
+	}
+
+	raw := C.cortext_embed_audio_json(h.ptr, rawPCM, C.size_t(len(pcm)))
+	return takeJSONString(raw)
+}
+
+func (h *Handle) EmbedAudio(pcm []float32) ([]float32, error) {
+	result, err := decodeEmbeddingResult(h.EmbedAudioJSON(pcm))
+	if err != nil {
+		return nil, err
+	}
+	return result.Embedding, nil
 }
 
 func (h *Handle) ProcessImageJSON(data []byte, width int, height int, channels int, sourceID string) ([]byte, error) {
@@ -194,6 +233,30 @@ func (h *Handle) ProcessImage(data []byte, width int, height int, channels int, 
 	return decodeJSONObject(h.ProcessImageJSON(data, width, height, channels, sourceID))
 }
 
+func (h *Handle) EmbedImageJSON(data []byte, width int, height int, channels int) ([]byte, error) {
+	var rawData *C.uint8_t
+	if len(data) > 0 {
+		rawData = (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(data)))
+	}
+
+	raw := C.cortext_embed_image_json(
+		h.ptr,
+		rawData,
+		C.int(width),
+		C.int(height),
+		C.int(channels),
+	)
+	return takeJSONString(raw)
+}
+
+func (h *Handle) EmbedImage(data []byte, width int, height int, channels int) ([]float32, error) {
+	result, err := decodeEmbeddingResult(h.EmbedImageJSON(data, width, height, channels))
+	if err != nil {
+		return nil, err
+	}
+	return result.Embedding, nil
+}
+
 func (h *Handle) ConsolidateJSON() ([]byte, error) {
 	raw := C.cortext_consolidate_json(h.ptr)
 	return takeJSONString(raw)
@@ -214,6 +277,14 @@ func (h *Handle) ConsolidateMode(mode ConsolidationMode) (map[string]any, error)
 
 func (h *Handle) Flush() error {
 	status := C.cortext_flush(h.ptr)
+	if status != 0 {
+		return lastError()
+	}
+	return nil
+}
+
+func (h *Handle) Reset() error {
+	status := C.cortext_reset(h.ptr)
 	if status != 0 {
 		return lastError()
 	}
@@ -250,6 +321,17 @@ func decodeJSONObject(payload []byte, err error) (map[string]any, error) {
 	var out map[string]any
 	if unmarshalErr := json.Unmarshal(payload, &out); unmarshalErr != nil {
 		return nil, unmarshalErr
+	}
+	return out, nil
+}
+
+func decodeEmbeddingResult(payload []byte, err error) (EmbeddingResult, error) {
+	if err != nil {
+		return EmbeddingResult{}, err
+	}
+	var out EmbeddingResult
+	if unmarshalErr := json.Unmarshal(payload, &out); unmarshalErr != nil {
+		return EmbeddingResult{}, unmarshalErr
 	}
 	return out, nil
 }

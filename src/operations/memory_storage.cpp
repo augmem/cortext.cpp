@@ -11,6 +11,7 @@
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -21,6 +22,14 @@ namespace cortext::operations
 
 namespace
 {
+using SteadyClock = std::chrono::steady_clock;
+
+double
+ElapsedMillis (SteadyClock::time_point start)
+{
+  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
+      .count ();
+}
 
 /// @brief Determine primary modality from signal records (majority vote)
 std::string
@@ -111,10 +120,13 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
   auto &acc = acc_it->second;
 
   // Use nested transaction for atomicity - all writes succeed or none
+  const auto savepoint_begin_start = SteadyClock::now ();
   auto savepoint = tx.Begin ();
   auto object_savepoint = context.GetObjectTransaction ()
                               ? context.GetObjectTransaction ()->Begin ()
                               : nullptr;
+  context.AddOperationTiming ("MemoryStorage.begin_savepoints",
+                              ElapsedMillis (savepoint_begin_start));
   auto rollback_savepoints = [&] {
     if (object_savepoint)
       {
@@ -180,6 +192,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
         }
 
       // 5. Store memory-level content blob by concatenating signal blobs.
+      const auto content_start = SteadyClock::now ();
+      double content_get_ms = 0.0;
+      double content_put_ms = 0.0;
       std::vector<unsigned char> content_payload;
       std::vector<const SignalRecord *> ordered_signals;
       ordered_signals.reserve (acc.signals.size ());
@@ -204,7 +219,13 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const bool single_payload_mode = ordered_signals.size () == 1;
       const bool memory_blob_supported
           = text_mode || audio_mode || single_payload_mode;
-      if (memory_blob_supported)
+      std::vector<unsigned char> content_blob_id;
+      if (single_payload_mode && !ordered_signals.empty ()
+          && ordered_signals[0] && !ordered_signals[0]->blob_id.empty ())
+        {
+          content_blob_id = ordered_signals[0]->blob_id;
+        }
+      else if (memory_blob_supported)
         {
           for (const auto *rec : ordered_signals)
             {
@@ -212,8 +233,10 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                 {
                   continue;
                 }
+              const auto object_get_start = SteadyClock::now ();
               auto bytes_opt = GetObject (object_savepoint.get (), *savepoint,
                                           rec->blob_id);
+              content_get_ms += ElapsedMillis (object_get_start);
               if (bytes_opt)
                 {
                   const auto &bytes = *bytes_opt;
@@ -234,23 +257,36 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
         {
           content_payload = *signal.payload;
         }
-      std::vector<unsigned char> content_blob_id;
-      if (!content_payload.empty ())
+      if (content_blob_id.empty () && !content_payload.empty ())
         {
+          const auto object_put_start = SteadyClock::now ();
           content_blob_id
               = PutObject (object_savepoint.get (), *savepoint,
                            content_payload);
+          content_put_ms += ElapsedMillis (object_put_start);
         }
+      context.AddOperationTiming ("MemoryStorage.content_get_objects",
+                                  content_get_ms);
+      context.AddOperationTiming ("MemoryStorage.content_put_object",
+                                  content_put_ms);
+      context.AddOperationTiming ("MemoryStorage.content_blob",
+                                  ElapsedMillis (content_start));
 
       // 6. Insert memory embedding (v2: minimal sqlite-vec table)
       const std::string insert_sql = std::string ("INSERT INTO embeddings (")
                                      + store::kEmbeddingsInsertColumns
                                      + ") VALUES ("
                                      + store::kEmbeddingsInsertDefaults + ")";
+      const auto insert_embedding_start = SteadyClock::now ();
       savepoint->Execute (insert_sql,
                           { emb_vec, static_cast<long long> (end_ts) });
+      context.AddOperationTiming ("MemoryStorage.insert_memory_embedding",
+                                  ElapsedMillis (insert_embedding_start));
 
+      const auto embedding_id_start = SteadyClock::now ();
       auto id_rows = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
+      context.AddOperationTiming ("MemoryStorage.select_embedding_id",
+                                  ElapsedMillis (embedding_id_start));
       if (id_rows.empty () || id_rows[0].count ("id") == 0)
         {
           rollback_savepoints ();
@@ -287,6 +323,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           cfg.focus, cfg.sensitivity, cfg.stability);
       const double initial_stability = core::MemoryInitialStabilityPolicy (
           cfg.focus, cfg.sensitivity, cfg.stability);
+      const auto insert_memory_start = SteadyClock::now ();
       savepoint->Execute (
           "INSERT INTO memories ("
           "  embedding_id, source_id, kind, start_ts, end_ts, n_signals, "
@@ -308,16 +345,26 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             initial_strength, initial_stability,
             initial_trace.fast, initial_trace.medium, initial_trace.slow,
             initial_trace.ultra });
+      context.AddOperationTiming ("MemoryStorage.insert_memory",
+                                  ElapsedMillis (insert_memory_start));
 
       // 8. Get memory_id from inserted memories row
+      const auto memory_id_start = SteadyClock::now ();
       auto mem_id_rows
           = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
+      context.AddOperationTiming ("MemoryStorage.select_memory_id",
+                                  ElapsedMillis (memory_id_start));
       const long long memory_id
           = mem_id_rows.empty ()
                 ? 0
                 : AnyToLongLong (mem_id_rows[0].at ("id")).value_or (0);
 
       // 9. Insert SIGNALS rows (one per tracked signal)
+      std::optional<long long> stored_signal_id;
+      std::optional<long long> current_signal_id;
+      double signal_embedding_insert_ms = 0.0;
+      double signal_row_insert_ms = 0.0;
+      double signal_id_select_ms = 0.0;
       for (const auto &sig_rec : acc.signals)
         {
           long long signal_embedding_id = embedding_id;
@@ -325,11 +372,16 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             {
               const std::vector<float> sig_vec
                   = EigenToFloatVec (sig_rec.embedding);
+              const auto signal_embedding_start = SteadyClock::now ();
               savepoint->Execute (insert_sql,
                                   { sig_vec,
                                     static_cast<long long> (sig_rec.timestamp) });
+              signal_embedding_insert_ms
+                  += ElapsedMillis (signal_embedding_start);
+              const auto signal_embedding_id_start = SteadyClock::now ();
               auto sig_id_rows
                   = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
+              signal_id_select_ms += ElapsedMillis (signal_embedding_id_start);
               if (!sig_id_rows.empty () && sig_id_rows[0].count ("id") != 0)
                 {
                   signal_embedding_id
@@ -338,6 +390,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                 }
             }
 
+          const auto signal_row_start = SteadyClock::now ();
           savepoint->Execute (
               "INSERT INTO signals ("
               "  memory_id, source_id, embedding_id, timestamp, modality, "
@@ -350,36 +403,90 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                          : std::any (sig_rec.blob_id),
                 static_cast<long long> (sig_rec.serial_position), sig_rec.score,
                 static_cast<long long> (sig_rec.timestamp) });
+          signal_row_insert_ms += ElapsedMillis (signal_row_start);
+          const auto signal_id_start = SteadyClock::now ();
+          auto signal_id_rows
+              = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
+          signal_id_select_ms += ElapsedMillis (signal_id_start);
+          if (!signal_id_rows.empty ()
+              && signal_id_rows[0].count ("id") != 0)
+            {
+              const auto signal_id
+                  = AnyToLongLong (signal_id_rows[0].at ("id"));
+              if (signal_id && *signal_id > 0)
+                {
+                  stored_signal_id = *signal_id;
+                  if (sig_rec.timestamp == signal.timestamp
+                      && sig_rec.modality == signal.modality)
+                    {
+                      current_signal_id = *signal_id;
+                    }
+                }
+            }
         }
+      context.AddOperationTiming ("MemoryStorage.insert_signal_embeddings",
+                                  signal_embedding_insert_ms);
+      context.AddOperationTiming ("MemoryStorage.insert_signal_rows",
+                                  signal_row_insert_ms);
+      context.AddOperationTiming ("MemoryStorage.select_signal_ids",
+                                  signal_id_select_ms);
 
       // 10. Leave signal tracking until accumulator resets (used by WM gating)
       if (!constructive_recall::Disabled () && memory_id > 0)
         {
+          const auto reconstruction_start = SteadyClock::now ();
           constructive_recall::AppendReconstructionWithEmbeddingId (
               *savepoint, memory_id, embedding_id, content_blob_id,
               static_cast<long long> (end_ts), 0.0, "initial", 1.0, 1.0);
+          context.AddOperationTiming ("MemoryStorage.initial_reconstruction",
+                                      ElapsedMillis (reconstruction_start));
         }
 
       // Commit the savepoint
+      const auto savepoint_commit_start = SteadyClock::now ();
       if (object_savepoint)
         {
           object_savepoint->Commit ();
         }
       savepoint->Commit ();
+      context.AddOperationTiming ("MemoryStorage.commit_savepoints",
+                                  ElapsedMillis (savepoint_commit_start));
 
       // Set stored_embedding_id in context for output
       context.SetStoredEmbeddingId (embedding_id);
       if (memory_id > 0)
         {
           context.SetStoredMemoryId (memory_id);
+          context.SetStoredSignalId (
+              current_signal_id.has_value () ? current_signal_id
+                                             : stored_signal_id);
         }
       else
         {
           context.SetStoredMemoryId (std::nullopt);
+          context.SetStoredSignalId (std::nullopt);
         }
       p_ctx.memories_since_consolidation += 1;
       if (memory_id > 0 && embedding_to_store.size () > 0)
         {
+          const auto surface_start = SteadyClock::now ();
+	          ProcessorContext::RetrievalSurfaceEntry surface_entry;
+	          surface_entry.memory_id = memory_id;
+	          surface_entry.embedding_id = embedding_id;
+	          surface_entry.created_at = static_cast<long long> (end_ts);
+	          surface_entry.start_ts = static_cast<long long> (start_ts);
+          surface_entry.event_ts = static_cast<long long> (start_ts);
+          surface_entry.kind = "LONG_TERM";
+	          surface_entry.source_id = signal.source_id;
+	          surface_entry.modality = primary_modality;
+	          surface_entry.source_reliability = source_reliability;
+          if (acc.c_t.size () > 0)
+            {
+              surface_entry.context_embedding = acc.c_t;
+            }
+          surface_entry.embedding = embedding_to_store;
+          p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
+
           const int k_key = core::SparseKeySize (
               context.GetConfig ().focus, context.GetConfig ().sensitivity,
               context.GetConfig ().stability);
@@ -389,6 +496,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
               p_ctx.index_store[key].push_back (memory_id);
               p_ctx.index_reverse[memory_id] = key;
             }
+          context.AddOperationTiming ("MemoryStorage.retrieval_surface_update",
+                                      ElapsedMillis (surface_start));
         }
       telemetry::AddCounter ("cortext.memory_storage.stored_total", 1);
       telemetry::AddCounter ("cortext.memory_storage.signals_written_total",

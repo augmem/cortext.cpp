@@ -1459,6 +1459,8 @@ def build_benchmark_command(args: argparse.Namespace, db: pathlib.Path, summary:
         "--out",
         str(summary),
     ]
+    if args.replay_timezone:
+        cmd += ["--replay-timezone", args.replay_timezone]
     # Deep-LLM provider URIs are arm-defining: they change the summarizer/
     # extractor runtime (and therefore latency comparability with on-device
     # figures), so they flow through the frozen benchmark command and are
@@ -1493,6 +1495,8 @@ def build_early_judge_command(
         str(args.max_messages),
         "--timeline-media-limit",
         str(args.media_limit),
+        "--replay-timezone",
+        str(args.replay_timezone),
         "--milestones",
         args.early_judge_milestones,
         "--periodic-stride",
@@ -2108,6 +2112,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-messages", type=int, default=0)
     parser.add_argument("--max-messages", type=int, default=1200)
     parser.add_argument("--media-limit", type=int, default=16)
+    parser.add_argument("--replay-timezone", default="")
     parser.add_argument(
         "--require-media-modalities",
         default="",

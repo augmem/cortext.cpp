@@ -3,6 +3,7 @@
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/core/utils.hpp>
 #include <cortext/operations/reconsolidation.hpp>
 #include <cortext/processor.hpp>
@@ -618,4 +619,73 @@ TEST_CASE ("Alg20 ripple respects co_occurs edge type",
     const double lab = std::any_cast<double> (rows[0].at ("lability_state"));
     REQUIRE (lab > 0.0);
   }
+}
+
+TEST_CASE ("Alg20 bounds ripple reconstruction writes but keeps lability",
+           "[operations][recon][ripple]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  const Eigen::VectorXf cur = MakeUnitVec256 (0);
+  const Eigen::VectorXf mem = MakeUnitVec256 (0);
+  std::unordered_map<long long, Eigen::VectorXf> all_embs{ { 1LL, mem } };
+  for (long long i = 0; i < 12; ++i)
+    {
+      all_embs.emplace (100LL + i,
+                        MakeUnitVec256 (static_cast<int> (20 + i)));
+    }
+
+  auto seed = std::make_unique<SeedEmbeddingsOp> (all_embs);
+  auto setup = std::make_unique<SetupReconInputsOp> (
+      cur, std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, mem } });
+  auto apply = std::make_unique<ApplyReconsolidation> ();
+  auto ops = std::make_unique<cortext::DynamicOperationSet> (
+      std::move (seed), std::move (setup), std::move (apply));
+
+  cortext::SignalProcessor processor (cfg, store, std::move (ops));
+
+  for (long long i = 0; i < 8; ++i)
+    {
+      store->Execute (
+          "INSERT INTO associations (source_memory_id, target_memory_id, "
+          "edge_type, weight) VALUES (?, ?, ?, ?)",
+          { 1LL, 100LL + i, std::string ("reinforces"), 1.0 });
+    }
+  for (long long i = 8; i < 12; ++i)
+    {
+      store->Execute (
+          "INSERT INTO associations (source_memory_id, target_memory_id, "
+          "edge_type, weight) VALUES (?, ?, ?, ?)",
+          { 100LL, 100LL + i, std::string ("reinforces"), 1.0 });
+    }
+
+  processor.Process (MakeSignal (cur, /*ts=*/500));
+  processor.Flush ();
+
+  const int reconstruction_limit
+      = core::ReconsolidationRippleReconstructionLimit (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  REQUIRE (reconstruction_limit < 12);
+
+  auto recon_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memory_reconstructions "
+      "WHERE memory_id >= 100 AND trigger = 'reconsolidation'",
+      {});
+  REQUIRE (recon_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (recon_rows[0].at ("cnt"))
+           == reconstruction_limit);
+
+  auto lability_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memories "
+      "WHERE memory_id >= 100 AND lability_state > 0.0",
+      {});
+  REQUIRE (lability_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (lability_rows[0].at ("cnt")) == 12LL);
 }

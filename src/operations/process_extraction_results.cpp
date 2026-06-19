@@ -17,6 +17,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <any>
+#include <chrono>
 #include <cstdlib>
 #include <map>
 #include <optional>
@@ -1998,6 +1999,7 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
   // Process extraction requests using in-process extractor if available
   const auto &requests = context.GetExtractionRequests ();
+  std::vector<Extractor::BatchTextItem> extraction_batch_items;
   std::unordered_map<std::string, std::string> request_evidence_text;
   std::unordered_map<std::string, bool> request_replaces_labels;
   std::unordered_map<std::string, bool> request_has_blob_evidence;
@@ -2088,6 +2090,8 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 
               operations::ExtractionResult result;
               bool extracted = false;
+              const auto extraction_call_start
+                  = std::chrono::steady_clock::now ();
               if (auto *gemma = dynamic_cast<GemmaExtractor *> (extractor))
                 {
                   for (const auto &source_blob : req.source_blobs)
@@ -2147,9 +2151,17 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
 	                                  combined_text, refinement_current_labels,
 	                                  cfg.focus, cfg.sensitivity,
 	                                  cfg.stability);
-                  result = extractor->ExtractFromText (extraction_text,
-                                                       kExtractionSchema);
+                  extraction_batch_items.push_back (
+                      { req.summary_id, extraction_text });
+                  continue;
                 }
+              const auto extraction_call_end
+                  = std::chrono::steady_clock::now ();
+              context.AddOperationTiming (
+                  "ProcessExtractionResults.extractor_call",
+                  std::chrono::duration<double, std::milli> (
+                      extraction_call_end - extraction_call_start)
+                      .count ());
               result.summary_id = req.summary_id;
 
               // Add to pending results for processing
@@ -2165,6 +2177,80 @@ ProcessExtractionResults::Execute (OperationContext &context, Transaction &tx) c
                                                  req.cluster_size),
                     telemetry::Attribute::String ("error", e.what ()) });
               // Skip failed extractions
+            }
+        }
+      if (!extraction_batch_items.empty ())
+        {
+          const auto extraction_batch_start
+              = std::chrono::steady_clock::now ();
+          try
+            {
+              auto results = extractor->ExtractBatchFromTexts (
+                  extraction_batch_items, kExtractionSchema);
+              const auto extraction_batch_end
+                  = std::chrono::steady_clock::now ();
+              const double batch_ms
+                  = std::chrono::duration<double, std::milli> (
+                        extraction_batch_end - extraction_batch_start)
+                        .count ();
+              context.AddOperationTiming (
+                  "ProcessExtractionResults.extractor_batch_call", batch_ms);
+              context.AddOperationTiming (
+                  "ProcessExtractionResults.extractor_call", batch_ms);
+              for (std::size_t i = 0; i < results.size ()
+                                      && i < extraction_batch_items.size ();
+                   ++i)
+                {
+                  results[i].summary_id = extraction_batch_items[i].id;
+                  p_ctx.pending_extraction_results.push_back (
+                      std::move (results[i]));
+                }
+            }
+          catch (const std::exception &e)
+            {
+              telemetry::LogWarn (
+                  "cortext.extraction_batch_failed",
+                  { telemetry::Attribute::Int64 (
+                        "request_count",
+                        static_cast<std::int64_t> (
+                            extraction_batch_items.size ())),
+                    telemetry::Attribute::String ("error", e.what ()) });
+              const auto extraction_batch_end
+                  = std::chrono::steady_clock::now ();
+              context.AddOperationTiming (
+                  "ProcessExtractionResults.extractor_batch_failed_ms",
+                  std::chrono::duration<double, std::milli> (
+                      extraction_batch_end - extraction_batch_start)
+                      .count ());
+              for (const auto &item : extraction_batch_items)
+                {
+                  const auto extraction_call_start
+                      = std::chrono::steady_clock::now ();
+                  try
+                    {
+                      auto result = extractor->ExtractFromText (
+                          item.text, kExtractionSchema);
+                      const auto extraction_call_end
+                          = std::chrono::steady_clock::now ();
+                      context.AddOperationTiming (
+                          "ProcessExtractionResults.extractor_call",
+                          std::chrono::duration<double, std::milli> (
+                              extraction_call_end - extraction_call_start)
+                              .count ());
+                      result.summary_id = item.id;
+                      p_ctx.pending_extraction_results.push_back (
+                          std::move (result));
+                    }
+                  catch (const std::exception &single_error)
+                    {
+                      telemetry::LogWarn (
+                          "cortext.extraction_failed",
+                          { telemetry::Attribute::String ("summary_id",
+                                                          item.id),
+                            telemetry::Attribute::String (
+                                "error", single_error.what ()) });
+                    }
+                }
             }
         }
     }

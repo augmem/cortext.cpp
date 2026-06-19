@@ -926,6 +926,10 @@ context_to_json (const cortext::Cortext::Context &ctx)
       ctx.output.stored_memory_id.has_value ()
           ? nlohmann::json (*ctx.output.stored_memory_id)
           : nlohmann::json (nullptr) },
+    { "stored_signal_id",
+      ctx.output.stored_signal_id.has_value ()
+          ? nlohmann::json (*ctx.output.stored_signal_id)
+          : nlohmann::json (nullptr) },
     { "signal_filter_evaluated", ctx.output.signal_filter_evaluated },
     { "signal_filter_accepted", ctx.output.signal_filter_accepted },
     { "signal_filter_modality", ctx.output.signal_filter_modality },
@@ -987,6 +991,18 @@ context_result_to_json (const cortext::Cortext::Context &ctx)
       -1, ' ', false, nlohmann::json::error_handler_t::replace));
 }
 
+char *
+embedding_result_to_json (const std::vector<float> &embedding)
+{
+  clear_last_error ();
+  return copy_string_result (
+      nlohmann::json {
+          { "embedding", embedding },
+          { "dimension", embedding.size () },
+      }
+          .dump ());
+}
+
 cortext::ConsolidationMode
 parse_mode_or_default (int mode)
 {
@@ -1030,6 +1046,26 @@ invoke_json (Fn &&fn)
   try
     {
       return context_result_to_json (fn ());
+    }
+  catch (const std::exception &ex)
+    {
+      set_last_error (ex.what ());
+      return nullptr;
+    }
+  catch (...)
+    {
+      set_last_error ("internal error");
+      return nullptr;
+    }
+}
+
+template <typename Fn>
+char *
+invoke_embedding_json (Fn &&fn)
+{
+  try
+    {
+      return embedding_result_to_json (fn ());
     }
   catch (const std::exception &ex)
     {
@@ -1421,6 +1457,50 @@ extern "C"
     });
   }
 
+  char *
+  cortext_embed_text_json (cortext_handle h, const char *text)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !text)
+      {
+        set_last_error ("handle and text must both be non-NULL");
+        return nullptr;
+      }
+
+    return invoke_embedding_json (
+        [&] { return p->EmbedText (std::string (text)); });
+  }
+
+  char *
+  cortext_embed_audio_json (cortext_handle h, const float *pcm,
+                            size_t num_samples)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !pcm)
+      {
+        set_last_error ("handle and pcm must both be non-NULL");
+        return nullptr;
+      }
+
+    return invoke_embedding_json (
+        [&] { return p->EmbedAudio (pcm, num_samples); });
+  }
+
+  char *
+  cortext_embed_image_json (cortext_handle h, const uint8_t *data, int width,
+                            int height, int channels)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !data)
+      {
+        set_last_error ("handle and data must both be non-NULL");
+        return nullptr;
+      }
+
+    return invoke_embedding_json (
+        [&] { return p->EmbedImage (data, width, height, channels); });
+  }
+
   int
   cortext_consolidate (cortext_handle h)
   {
@@ -1459,6 +1539,19 @@ extern "C"
       }
 
     return invoke_status_only ([&] { p->Flush (); });
+  }
+
+  int
+  cortext_reset (cortext_handle h)
+  {
+    auto *p = cast_handle (h);
+    if (!p)
+      {
+        set_last_error ("handle must not be NULL");
+        return 1;
+      }
+
+    return invoke_status_only ([&] { p->Reset (); });
   }
 
   const char *

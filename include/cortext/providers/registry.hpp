@@ -16,7 +16,7 @@ namespace cortext::providers
 ///   litert://models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm
 ///   gguf://models/LFM2.5-1.2B-Instruct-GGUF
 ///   ollama://127.0.0.1:11435/gemma4:e4b
-///   openai://api.example.com/v1/some-model
+///   openai://127.0.0.1:8000/v1/some-model
 struct ProviderUri
 {
   std::string scheme;

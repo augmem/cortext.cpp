@@ -71,6 +71,7 @@ struct WindowScore;
 // MemoryStorage
 struct StoredEmbeddingId;
 struct StoredMemoryId;
+struct StoredSignalId;
 
 // CheckStreamingPacing
 struct ShouldCheckRetrieval;

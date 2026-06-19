@@ -527,6 +527,8 @@ def build_early_judge_command(
         cmd += ["--min-cortext-win-rate", str(args.early_min_cortext_win_rate)]
     if not args.early_quality_gate_requires_rag_pressure:
         cmd.append("--no-quality-gate-requires-rag-pressure")
+    if command_has_flag(bench_cmd, "--replay-timezone"):
+        cmd += ["--replay-timezone", command_flag_value(bench_cmd, "--replay-timezone")]
     if daily:
         cmd.append("--daily-consolidation")
     if command_has_flag(bench_cmd, "--deep"):

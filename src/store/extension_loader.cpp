@@ -1,7 +1,9 @@
 // src/store/extension_loader.cpp
 #include "cortext/store/extension_loader.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -17,6 +19,80 @@
 
 namespace cortext
 {
+
+namespace
+{
+
+#if defined(CORTEXT_EMBED_OBJSTORE)
+std::string
+LowerEnv (const char *name)
+{
+  const char *value = std::getenv (name);
+  if (!value || value[0] == '\0')
+    {
+      return {};
+    }
+
+  std::string out (value);
+  std::transform (out.begin (), out.end (), out.begin (),
+                  [] (unsigned char c) {
+                    return static_cast<char> (std::tolower (c));
+                  });
+  return out;
+}
+
+objstore_sync_mode
+ObjstoreSyncModeFromEnv ()
+{
+  const std::string mode = LowerEnv ("CORTEXT_OBJSTORE_SYNC");
+  if (mode.empty ())
+    {
+      return OBJSTORE_SYNC_METADATA;
+    }
+
+  if (mode == "full")
+    {
+      return OBJSTORE_SYNC_FULL;
+    }
+  if (mode == "off" || mode == "none" || mode == "0")
+    {
+      return OBJSTORE_SYNC_OFF;
+    }
+  return OBJSTORE_SYNC_METADATA;
+}
+
+objstore_backend_kind
+ObjstoreBackendFromEnv ()
+{
+  const std::string backend = LowerEnv ("CORTEXT_OBJSTORE_BACKEND");
+  if (backend.empty ())
+    {
+      // The SQLite backend shares the main database transaction and avoids the
+      // file backend's per-message manifest fsync on small text payloads. Large
+      // media-heavy deployments can opt back into file/auto with the env knob.
+      return OBJSTORE_BACKEND_SQLITE;
+    }
+  if (backend == "file")
+    {
+      return OBJSTORE_BACKEND_FILE;
+    }
+  if (backend == "sqlite" || backend == "db")
+    {
+      return OBJSTORE_BACKEND_SQLITE;
+    }
+  if (backend == "vfs")
+    {
+      return OBJSTORE_BACKEND_VFS;
+    }
+  if (backend == "auto")
+    {
+      return OBJSTORE_BACKEND_AUTO;
+    }
+  return OBJSTORE_BACKEND_SQLITE;
+}
+#endif
+
+} // namespace
 
 extern "C"
 {
@@ -152,7 +228,8 @@ RegisterBuiltInExtensionsOnDb (sqlite3 *db)
 #endif
 #if defined(CORTEXT_EMBED_OBJSTORE)
   objstore_config cfg{};
-  cfg.backend = OBJSTORE_BACKEND_AUTO;
+  cfg.backend = ObjstoreBackendFromEnv ();
+  cfg.sync_mode = ObjstoreSyncModeFromEnv ();
   // The objects root must be keyed to the database, never the process cwd:
   // a cwd-relative root is shared mutable state across unrelated processes,
   // and the file backend's open-time staging recovery deletes another live

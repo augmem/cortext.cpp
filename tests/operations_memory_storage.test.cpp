@@ -115,6 +115,9 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   auto stored_id = ctx.GetStoredEmbeddingId ();
   REQUIRE (stored_id.has_value ());
   REQUIRE (*stored_id > 0);
+  auto stored_signal_id = ctx.GetStoredSignalId ();
+  REQUIRE (stored_signal_id.has_value ());
+  REQUIRE (*stored_signal_id > 0);
 
   // Verify embedding was inserted
   auto emb_rows
@@ -137,9 +140,10 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
 
   // Verify signal row inserted with its own embedding + blob
   auto sig_rows = store->Execute (
-      "SELECT embedding_id, blob_id FROM signals WHERE memory_id = ?",
+      "SELECT signal_id, embedding_id, blob_id FROM signals WHERE memory_id = ?",
       { memory_id });
   REQUIRE (sig_rows.size () == 1);
+  REQUIRE (AnyToLongLong (sig_rows[0].at ("signal_id")) == stored_signal_id);
   const auto sig_emb_id = AnyToLongLong (sig_rows[0].at ("embedding_id"));
   REQUIRE (sig_emb_id.has_value ());
   auto sig_blob_id = BlobFromAny (sig_rows[0].at ("blob_id"));

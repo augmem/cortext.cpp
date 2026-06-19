@@ -9,19 +9,16 @@
 namespace cortext::providers
 {
 
-/// @brief InferenceProvider over an Ollama server's native /api/chat.
+/// @brief Text-only OpenAI-compatible chat provider for vLLM/llama.cpp style
+/// local servers.
 ///
-/// Text parts join the message content; image bytes and audio (encoded to
-/// 16 kHz mono WAV) ride the `images` field — the same convention the chat-replay
-/// judge harness uses for Gemma 4 multimodal payloads. JSON-schema
-/// constraints are enforced server-side via `format` (ServerSchema).
-class OllamaProvider : public InferenceProvider
+/// URI shape: openai://host[:port]/v1/model-name. The first path component is
+/// used as the API base path; the remaining path is the served model name.
+class OpenAIProvider : public InferenceProvider
 {
 public:
-  /// @param authority host[:port], e.g. "127.0.0.1:11434"
-  /// @param model     model name, e.g. "gemma4:e4b"
-  OllamaProvider (std::string authority, std::string model);
-  ~OllamaProvider () override;
+  OpenAIProvider (std::string authority, std::string path);
+  ~OpenAIProvider () override;
 
   bool Health () const override;
   const Capabilities &GetCapabilities () const override;
@@ -30,7 +27,6 @@ public:
   std::vector<GenerateResponse>
   GenerateBatch (const std::vector<GenerateRequest> &requests) override;
 
-  /// @brief Registry factory for the "ollama" scheme.
   static std::unique_ptr<InferenceProvider>
   Create (const ProviderUri &uri, Role role, std::string *error_out);
 
