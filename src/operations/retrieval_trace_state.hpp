@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace cortext::operations::retrieval_debug
+namespace cortext::operations::retrieval_trace
 {
 
 struct ActivationLedger
@@ -121,4 +121,4 @@ private:
   bool previous_;
 };
 
-} // namespace cortext::operations::retrieval_debug
+} // namespace cortext::operations::retrieval_trace

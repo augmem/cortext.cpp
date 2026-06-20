@@ -1,4 +1,4 @@
-#include "../../src/operations/retrieval_debug_state.hpp"
+#include "../../src/operations/retrieval_trace_state.hpp"
 
 #include <cortext/core/sparse.hpp>
 #include <cortext/encoder/encoder.hpp>
@@ -224,7 +224,7 @@ RunProceduralStudy (bool disable_proactive)
   cfg.stability = 0.5;
   cfg.procedural_enabled = true;
 
-  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  cortext::operations::retrieval_trace::ClearLastRankedCandidates ();
   auto ops = std::make_unique<cortext::DynamicOperationSet> (
       std::make_unique<ForceRetrievalGateOp> (),
       std::make_unique<SeedProceduralStoreOp> (500LL, 1.0),
@@ -242,7 +242,7 @@ RunProceduralStudy (bool disable_proactive)
 
   StudyResult result;
   const auto &ranked
-      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+      = cortext::operations::retrieval_trace::GetLastRankedCandidates ();
   for (const auto &candidate : ranked)
     {
       if (candidate.memory_id == 500LL)

@@ -1,7 +1,7 @@
 #include "cortext/operations/graph_retrieval.hpp"
 
 #include "constructive_recall_internal.hpp"
-#include "retrieval_debug_state.hpp"
+#include "retrieval_trace_state.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -141,11 +141,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                                            Transaction &tx) const
 {
   auto started = std::chrono::steady_clock::now ();
-  retrieval_debug::ClearLastSelectedEmbeddingOrder ();
-  retrieval_debug::ClearLastRankedCandidates ();
-  retrieval_debug::ClearLastRejectedCandidates ();
-  retrieval_debug::ClearLastEvidencePackets ();
-  retrieval_debug::ClearLastRetrievalSummary ();
+  retrieval_trace::ClearLastSelectedEmbeddingOrder ();
+  retrieval_trace::ClearLastRankedCandidates ();
+  retrieval_trace::ClearLastRejectedCandidates ();
+  retrieval_trace::ClearLastEvidencePackets ();
+  retrieval_trace::ClearLastRetrievalSummary ();
 
   if (!context.GetShouldCheckRetrieval ())
     {
@@ -345,28 +345,28 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   out.reserve (ranked.size ());
   std::vector<long long> selected_order;
   selected_order.reserve (ranked.size ());
-  std::vector<retrieval_debug::RankedCandidate> debug_ranked;
-  debug_ranked.reserve (ranked.size ());
+  std::vector<retrieval_trace::RankedCandidate> trace_ranked;
+  trace_ranked.reserve (ranked.size ());
   for (const auto &candidate : ranked)
     {
       out.emplace (candidate.embedding_id, candidate.embedding);
       selected_order.push_back (candidate.embedding_id);
 
-      retrieval_debug::RankedCandidate debug;
-      debug.embedding_id = candidate.embedding_id;
-      debug.memory_id = candidate.memory_id;
-      debug.score = candidate.score;
-      debug.relevance = candidate.seed_score;
-      debug.temporal_score = candidate.temporal_score;
-      debug.activation.base_level = candidate.seed_score;
-      debug.activation.spreading_activation = candidate.graph_score;
-      debug.activation.activation_total = candidate.score;
-      debug_ranked.push_back (debug);
+      retrieval_trace::RankedCandidate trace;
+      trace.embedding_id = candidate.embedding_id;
+      trace.memory_id = candidate.memory_id;
+      trace.score = candidate.score;
+      trace.relevance = candidate.seed_score;
+      trace.temporal_score = candidate.temporal_score;
+      trace.activation.base_level = candidate.seed_score;
+      trace.activation.spreading_activation = candidate.graph_score;
+      trace.activation.activation_total = candidate.score;
+      trace_ranked.push_back (trace);
     }
 
-  retrieval_debug::SetLastSelectedEmbeddingOrder (selected_order);
-  retrieval_debug::SetLastRankedCandidates (debug_ranked);
-  retrieval_debug::SetLastRetrievalSummary ({});
+  retrieval_trace::SetLastSelectedEmbeddingOrder (selected_order);
+  retrieval_trace::SetLastRankedCandidates (trace_ranked);
+  retrieval_trace::SetLastRetrievalSummary ({});
   {
     const auto reconstruction_start = std::chrono::steady_clock::now ();
     if (constructive_recall_enabled && signal.embedding.size () > 0)

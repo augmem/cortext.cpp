@@ -6,7 +6,7 @@
 #include <cortext/store/utils.hpp>
 
 #include "../../src/encoder/text_encoder_factory.hpp"
-#include "../../src/operations/retrieval_debug_state.hpp"
+#include "../../src/operations/retrieval_trace_state.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -602,14 +602,14 @@ MemoryPacketJson (
 }
 
 nlohmann::json
-RetrievalDebugJson ()
+RetrievalTraceJson ()
 {
   const auto summary
-      = cortext::operations::retrieval_debug::GetLastRetrievalSummary ();
+      = cortext::operations::retrieval_trace::GetLastRetrievalSummary ();
   nlohmann::json ranked = nlohmann::json::array ();
   int rank = 0;
   for (const auto &candidate :
-       cortext::operations::retrieval_debug::GetLastRankedCandidates ())
+       cortext::operations::retrieval_trace::GetLastRankedCandidates ())
     {
       ranked.push_back ({
         { "rank", rank++ },
@@ -639,7 +639,7 @@ RetrievalDebugJson ()
     }
   nlohmann::json rejected = nlohmann::json::array ();
   for (const auto &entry :
-       cortext::operations::retrieval_debug::GetLastRejectedCandidates ())
+       cortext::operations::retrieval_trace::GetLastRejectedCandidates ())
     {
       const auto &candidate = entry.candidate;
       rejected.push_back ({
@@ -673,7 +673,7 @@ RetrievalDebugJson ()
     }
   nlohmann::json evidence_packets = nlohmann::json::array ();
   for (const auto &packet :
-       cortext::operations::retrieval_debug::GetLastEvidencePackets ())
+       cortext::operations::retrieval_trace::GetLastEvidencePackets ())
     {
       nlohmann::json members = nlohmann::json::array ();
       for (const auto &member : packet.members)
@@ -1918,8 +1918,8 @@ main (int argc, char **argv)
                       probe["cortext_top_operation_ms"]
                           = TopOperationTimingsJson (
                               probe_ctx.output.operation_ms, 12);
-                      probe["cortext_retrieval_debug"]
-                          = RetrievalDebugJson ();
+                      probe["cortext_retrieval_trace"]
+                          = RetrievalTraceJson ();
                       probe["normal_rag_compaction_latency_ms"]
                           = compaction_ms;
                       probe["normal_rag_retrieval_latency_ms"]
@@ -2265,7 +2265,7 @@ main (int argc, char **argv)
                   probe["cortext_top_operation_ms"]
                       = TopOperationTimingsJson (probe_ctx.output.operation_ms,
                                                  12);
-                  probe["cortext_retrieval_debug"] = RetrievalDebugJson ();
+                  probe["cortext_retrieval_trace"] = RetrievalTraceJson ();
                   std::vector<float> rag_query_embedding;
                   rag_encoder_selection.encoder->EncodeText (
                       msg.text, rag_query_embedding);
@@ -2659,7 +2659,7 @@ main (int argc, char **argv)
                   probe["cortext_top_operation_ms"]
                       = TopOperationTimingsJson (probe_ctx.output.operation_ms,
                                                  12);
-                  probe["cortext_retrieval_debug"] = RetrievalDebugJson ();
+                  probe["cortext_retrieval_trace"] = RetrievalTraceJson ();
                   probe["normal_rag_compaction_latency_ms"] = compaction_ms;
                   probe["normal_rag_retrieval_latency_ms"] = rag_retrieval_ms;
                   probe["normal_rag_total_latency_ms"]

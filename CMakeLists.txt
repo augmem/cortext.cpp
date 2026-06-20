@@ -180,7 +180,7 @@ add_library(cortext
     src/operations/graph_retrieval.cpp
     src/operations/eviction_policy_override.cpp
     src/operations/storage_pressure.cpp
-    src/operations/retrieval_debug_state.cpp
+    src/operations/retrieval_trace_state.cpp
     src/operations/neuromodulators.cpp
     # Phase 4: Knowledge Graph Enhancement
     src/operations/emotion_cascade.cpp
