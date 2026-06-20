@@ -12,8 +12,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
     - name: Install dependencies
       run: |
@@ -34,8 +32,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
     - name: Build and test on Arch Linux
       run: |
@@ -52,8 +48,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
     - uses: mymindstorm/setup-emsdk@v14
       with:
@@ -72,8 +66,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
     - uses: mlugg/setup-zig@v2
       with:
