@@ -124,7 +124,8 @@ RepoModelsDir ()
 }
 } // namespace
 
-TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
+TEST_CASE ("Cortext C++ stub can be created and used",
+           "[cortext][stub][aist]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -152,7 +153,7 @@ TEST_CASE ("Cortext C++ stub can be created and used", "[cortext][stub]")
 }
 
 TEST_CASE ("Cortext embed-only API returns vectors without storing signals",
-           "[cortext][embed]")
+           "[cortext][embed][aist]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -209,7 +210,7 @@ TEST_CASE ("internal replay ingress preserves media event timestamps",
 }
 
 TEST_CASE ("timestamped replay persists working memory source timestamps",
-           "[cortext][replay][working_memory]")
+           "[cortext][replay][working_memory][aist]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -242,7 +243,7 @@ TEST_CASE ("timestamped replay persists working memory source timestamps",
 }
 
 TEST_CASE ("internal replay text ingress can skip context hydration",
-           "[cortext][replay][hydration]")
+           "[cortext][replay][hydration][aist]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -292,7 +293,7 @@ TEST_CASE ("internal replay text ingress can skip context hydration",
 }
 
 TEST_CASE ("working memory persistence does not rewrite clean slot embeddings",
-           "[cortext][replay][working_memory][performance]")
+           "[cortext][replay][working_memory][performance][aist]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -334,7 +335,7 @@ TEST_CASE ("working memory persistence does not rewrite clean slot embeddings",
 }
 
 TEST_CASE ("replay clock override preserves working memory on reopen",
-           "[cortext][replay][clock][working_memory]")
+           "[cortext][replay][clock][working_memory][aist]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -365,7 +366,7 @@ TEST_CASE ("replay clock override preserves working memory on reopen",
 }
 
 TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
-           "[cortext][replay][consolidation]")
+           "[cortext][replay][consolidation][aist]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -405,8 +406,8 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
            == "ASSOCIATION");
 }
 
-TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
-           "[cortext][models]")
+TEST_CASE ("Cortext::Create can resolve AIST from env when models dir is missing",
+           "[cortext][models][aist]")
 {
   cortext::Cortext::Config cfg;
   std::unique_ptr<cortext::Cortext> ctx;
@@ -415,7 +416,8 @@ TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
   REQUIRE (ctx != nullptr);
 }
 
-TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
+TEST_CASE ("Cortext C ABI stubs return success",
+           "[cortext][capi][stub][aist]")
 {
   const std::string models_dir = RepoModelsDir ();
   cortext_handle h = cortext_create_with_models (
@@ -464,7 +466,7 @@ TEST_CASE ("Cortext C ABI rejects invalid store callbacks",
 }
 
 TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
-           "[cortext][objstore][hydration]")
+           "[cortext][objstore][hydration][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -573,7 +575,7 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
 }
 
 TEST_CASE ("Cortext filters mixed signal blobs to the memory surface",
-           "[cortext][hydration]")
+           "[cortext][hydration][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -642,7 +644,7 @@ TEST_CASE ("Cortext filters mixed signal blobs to the memory surface",
 }
 
 TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
-           "[cortext][hydration][soft_anchor]")
+           "[cortext][hydration][soft_anchor][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -718,7 +720,7 @@ TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
 }
 
 TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
-           "[cortext][hydration][retrieval]")
+           "[cortext][hydration][retrieval][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -782,7 +784,7 @@ TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
 }
 
 TEST_CASE ("Cortext expands durable association retrieval nodes even when the cue has text",
-           "[cortext][hydration][retrieval]")
+           "[cortext][hydration][retrieval][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -844,7 +846,7 @@ TEST_CASE ("Cortext expands durable association retrieval nodes even when the cu
 }
 
 TEST_CASE ("Cortext expands durable label retrieval nodes through association sources",
-           "[cortext][hydration][retrieval]")
+           "[cortext][hydration][retrieval][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -904,7 +906,7 @@ TEST_CASE ("Cortext expands durable label retrieval nodes through association so
 }
 
 TEST_CASE ("Cortext orders durable label source hydration by query similarity",
-           "[cortext][hydration][retrieval]")
+           "[cortext][hydration][retrieval][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -990,7 +992,7 @@ TEST_CASE ("Cortext orders durable label source hydration by query similarity",
 }
 
 TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit",
-           "[cortext][hydration][retrieval]")
+           "[cortext][hydration][retrieval][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -1081,7 +1083,7 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
 }
 
 TEST_CASE ("Cortext hides unresolved internal retrieval nodes",
-           "[cortext][hydration][retrieval]")
+           "[cortext][hydration][retrieval][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();
@@ -1119,7 +1121,65 @@ TEST_CASE ("Cortext hides unresolved internal retrieval nodes",
   REQUIRE (label_hydrated.retrieved_memory.empty ());
 }
 
-TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
+TEST_CASE ("C API handles NULL handles without a model",
+           "[cortext][capi][safety]")
+{
+  SECTION ("cortext_version returns a non-empty string")
+  {
+    const char *version = cortext_version ();
+    REQUIRE (version != nullptr);
+    REQUIRE (std::strlen (version) > 0);
+  }
+
+  SECTION ("cortext_free accepts NULL handle")
+  {
+    REQUIRE_NOTHROW (cortext_free (nullptr));
+  }
+
+  SECTION ("cortext_process_text returns 1 for NULL handle")
+  {
+    CHECK (cortext_process_text (nullptr, "text", "src") == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle, text, and source_id must all be non-NULL");
+  }
+
+  SECTION ("cortext_embed_text_json reports NULL handle")
+  {
+    char *json_ptr = cortext_embed_text_json (nullptr, "hello");
+    REQUIRE (json_ptr == nullptr);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle and text must both be non-NULL");
+  }
+
+  SECTION ("cortext_consolidate returns 1 for NULL handle")
+  {
+    CHECK (cortext_consolidate (nullptr) == 1);
+    REQUIRE (std::string (cortext_last_error ()) == "handle must not be NULL");
+  }
+
+  SECTION ("cortext_flush returns 1 for NULL handle")
+  {
+    CHECK (cortext_flush (nullptr) == 1);
+    REQUIRE (std::string (cortext_last_error ()) == "handle must not be NULL");
+  }
+
+  SECTION ("cortext_reset returns 1 for NULL handle")
+  {
+    CHECK (cortext_reset (nullptr) == 1);
+    REQUIRE (std::string (cortext_last_error ()) == "handle must not be NULL");
+  }
+
+  SECTION ("JSON C API reports errors through cortext_last_error")
+  {
+    char *json_ptr = cortext_process_text_json (nullptr, "hello", "src");
+    REQUIRE (json_ptr == nullptr);
+    REQUIRE (std::string (cortext_last_error ())
+             == "handle, text, and source_id must all be non-NULL");
+  }
+}
+
+TEST_CASE ("C API handles NULL inputs correctly",
+           "[cortext][capi][safety][aist]")
 {
   SECTION ("cortext_version returns a non-empty string")
   {
