@@ -6,10 +6,12 @@
 namespace cortext::operations
 {
 
-/// @brief Shallow consolidation: embedding-only labeling and graph priming.
+/// @brief Shallow consolidation: embedding-only graph priming.
 ///
-/// Creates association centroids and attaches labels by embedding similarity.
-/// This phase runs only when explicitly requested.
+/// Creates association centroids and source edges for consolidation clusters.
+/// If a database already contains LABEL memories, matching labels may be linked
+/// by embedding similarity; this operation does not create labels or a label
+/// bank.
 class ConsolidationShallow
     : public Operation<Requires<tags::ConsolidationShouldStart, tags::ConsolidationClusters>, Satisfies<> >
 {
