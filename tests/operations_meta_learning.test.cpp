@@ -136,7 +136,7 @@ TEST_CASE ("ApplyMetaLearning consolidates successful dynamic state into priors"
     }
 }
 
-TEST_CASE ("ApplyMetaLearning ablation flag freezes learned coefficients",
+TEST_CASE ("ApplyMetaLearning disable flag freezes learned coefficients",
            "[operations][meta_learning]")
 {
   cortext::testing::ScopedEnvVar disable ("CORTEXT_DISABLE_META_LEARNING", "1");

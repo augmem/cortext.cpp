@@ -12,7 +12,6 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/schema.hpp>
-#include <cortext/consolidation_mode.hpp>
 #include <string>
 
 using namespace cortext;
@@ -67,12 +66,11 @@ MakeSignal (uint64_t ts)
 }
 
 static Signal
-MakeConsolidationSignal (uint64_t ts,
-                         ConsolidationMode mode = ConsolidationMode::Both)
+MakeConsolidationSignal (uint64_t ts)
 {
   auto s = MakeSignal (ts);
   s.source_id = "test/consolidation";
-  s.consolidation_mode = mode;
+  s.force_consolidation = true;
   return s;
 }
 
@@ -352,7 +350,7 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
   Signal dummy;
   dummy.timestamp = 50'000ULL;
   dummy.source_id = "test/consolidation";
-  dummy.consolidation_mode = ConsolidationMode::Shallow;
+  dummy.force_consolidation = true;
   dummy.embedding = Eigen::VectorXf::Zero (4); // Not used by op directly
   ProcessorContext p_ctx;
   OperationContext ctx (dummy, p_ctx, cfg, store.get ());
@@ -394,81 +392,6 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
   REQUIRE (candidates[0].embedding(0) == Catch::Approx(1.0f));
 }
 
-TEST_CASE ("ScoreConsolidation deep mode falls back to lowest eligible scores",
-           "[operations][consolidation]")
-{
-  auto unique_store = SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<Store> (std::move (unique_store));
-
-  cortext::store::ApplyMigrations (*store);
-
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
-
-  Signal dummy;
-  dummy.timestamp = 90'000ULL;
-  dummy.source_id = "test/consolidation";
-  dummy.consolidation_mode = ConsolidationMode::Deep;
-  dummy.embedding = Eigen::VectorXf::Zero (4);
-  ProcessorContext p_ctx;
-  OperationContext ctx (dummy, p_ctx, cfg, store.get ());
-
-  std::vector<float> emb_a (256, 0.0f);
-  std::vector<float> emb_b (256, 0.0f);
-  std::vector<float> emb_c (256, 0.0f);
-  emb_a[0] = 1.0f;
-  emb_b[1] = 1.0f;
-  emb_c[2] = 1.0f;
-  std::vector<unsigned char> blob_a = { 'a' };
-  std::vector<unsigned char> blob_c = { 'c' };
-
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
-      { 1LL, emb_a, 0LL });
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
-      { 2LL, emb_b, 0LL });
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
-      { 3LL, emb_c, 0LL });
-
-  // All scores are above the floor, so forced deep consolidation should fall
-  // back to the lowest-scoring eligible rows. Memory 2 has no blob and must be
-  // excluded by the deep-mode filter.
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, stability, redundancy, "
-      "blob_id, created_at) "
-      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, 0)",
-      { 1LL, 1LL, 0.60, 0.0, 0.0, blob_a });
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, stability, redundancy, "
-      "created_at) "
-      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, ?, 0)",
-      { 2LL, 2LL, 0.55, 0.0, 0.0 });
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, stability, redundancy, "
-      "blob_id, created_at) "
-      "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, 0)",
-      { 3LL, 3LL, 0.80, 0.0, 0.0, blob_c });
-
-  ScoreConsolidation op;
-  auto tx = store->Begin ();
-  op.Execute (ctx, *tx);
-
-  const auto &candidates = ctx.GetConsolidationCandidates ();
-  REQUIRE (candidates.size () == 2);
-  REQUIRE (candidates[0].embedding_id == 1LL);
-  REQUIRE (candidates[0].score == Catch::Approx (0.30).margin (1e-6));
-  REQUIRE (candidates[1].embedding_id == 3LL);
-  REQUIRE (candidates[1].score == Catch::Approx (0.40).margin (1e-6));
-}
-
 TEST_CASE ("ScoreConsolidation forced mode broadens partial candidate sets",
            "[operations][consolidation]")
 {
@@ -486,7 +409,7 @@ TEST_CASE ("ScoreConsolidation forced mode broadens partial candidate sets",
   Signal dummy;
   dummy.timestamp = 120'000ULL;
   dummy.source_id = "test/consolidation";
-  dummy.consolidation_mode = ConsolidationMode::Deep;
+  dummy.force_consolidation = true;
   dummy.embedding = Eigen::VectorXf::Zero (4);
   ProcessorContext p_ctx;
   OperationContext ctx (dummy, p_ctx, cfg, store.get ());
@@ -522,7 +445,7 @@ TEST_CASE ("ScoreConsolidation forced mode broadens partial candidate sets",
   REQUIRE (candidates[0].embedding_id == 1LL);
 }
 
-TEST_CASE ("ScoreConsolidation forced shallow mode broadens partial candidate sets",
+TEST_CASE ("ScoreConsolidation forced mode includes memories without blobs",
            "[operations][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -539,7 +462,7 @@ TEST_CASE ("ScoreConsolidation forced shallow mode broadens partial candidate se
   Signal dummy;
   dummy.timestamp = 130'000ULL;
   dummy.source_id = "test/consolidation";
-  dummy.consolidation_mode = ConsolidationMode::Shallow;
+  dummy.force_consolidation = true;
   dummy.embedding = Eigen::VectorXf::Zero (4);
   ProcessorContext p_ctx;
   OperationContext ctx (dummy, p_ctx, cfg, store.get ());

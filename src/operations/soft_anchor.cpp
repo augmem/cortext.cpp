@@ -328,7 +328,7 @@ UpdateSoftAnchor::Execute (OperationContext &context, Transaction &tx) const
   const SignalViews views = ExtractViews (*embedding, F, S, T);
   const int step = processor.signals_processed;
   const int working_ttl = std::max (
-      1, core::STMShadowHardBoundaryRetainSteps (F, S, T));
+      1, core::SoftAnchorHardBoundaryRetainSteps (F, S, T));
   const int active_ttl = std::max (1, core::SoftAnchorActiveTTLSteps (T));
   const std::size_t recent_memory_limit = static_cast<std::size_t> (
       std::max (1, core::SoftAnchorRecentMemoryLimit (F, S, T)));

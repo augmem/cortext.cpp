@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <any>
 #include <chrono>
+#include <cmath>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -24,10 +25,22 @@ using SteadyClock = std::chrono::steady_clock;
 constexpr std::size_t kPredictiveSqlChunkSize = 400;
 constexpr int kPredictiveDbDecayIntervalSignals = 64;
 
+double
+VectorNorm (const Eigen::VectorXf &v)
+{
+  double sum_sq = 0.0;
+  for (Eigen::Index i = 0; i < v.size (); ++i)
+    {
+      const double x = static_cast<double> (v.coeff (i));
+      sum_sq += x * x;
+    }
+  return std::sqrt (sum_sq);
+}
+
 inline Eigen::VectorXf
 Unit (const Eigen::VectorXf &v)
 {
-  const double n = v.norm ();
+  const double n = VectorNorm (v);
   if (n <= constants::kNormEpsilon)
     {
       return v;
@@ -221,7 +234,7 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
     }
   pred = Unit (pred);
   // Fallback to last context if degenerate.
-  if (pred.norm () <= 1e-9f)
+  if (VectorNorm (pred) <= 1e-9f)
     {
       pred = Unit (p_ctx.recent_context_embeddings.back ());
     }
@@ -302,7 +315,7 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
     telemetry::Attribute::Double ("update_rate_on_surprise", update_rate_on_surprise),
     telemetry::Attribute::Double ("surp_sens", surp_sens),
     telemetry::Attribute::Double ("surprise_01", surprise_01),
-    telemetry::Attribute::Double ("prediction_norm", static_cast<double> (pred.norm ())),
+    telemetry::Attribute::Double ("prediction_norm", VectorNorm (pred)),
     telemetry::Attribute::Int64 ("boost_count", static_cast<int64_t> (boost_count))
   });
 }

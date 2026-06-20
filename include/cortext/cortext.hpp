@@ -7,7 +7,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "cortext/consolidation_mode.hpp"
 #include "cortext/export.hpp"
 #include "cortext/retention.hpp"
 #include "cortext/stop_token.hpp"
@@ -17,10 +16,8 @@ namespace cortext
 
 class Cortext;
 class Clock;
-class Extractor;
 class ObjectStore;
 class Store;
-class Summarizer;
 
 // Forward declaration for ProcessorOutput fields
 namespace operations
@@ -157,7 +154,6 @@ public:
     bool signal_filter_audio_enabled = true;
     bool signal_filter_image_enabled = true;
     bool signal_filter_text_enabled = false;
-    std::string label_bank_path;
   };
 
   /// @brief Factory to create a Cortext instance.
@@ -202,35 +198,6 @@ public:
                                           std::shared_ptr<Store> store,
                                           const std::string &models_dir,
                                           std::shared_ptr<Clock> clock);
-
-  /// @brief Caller-supplied inference dependencies, mirroring the Store /
-  /// ObjectStore injection pattern. Roles left null resolve through the
-  /// built-in factory's local model auto-discovery; when both roles are
-  /// supplied, local model discovery is skipped entirely (remote-only
-  /// deployments need no local weights). Configuration mechanisms (CLI
-  /// flags, environment) belong to the application layer, which turns them
-  /// into instances before calling Create.
-  struct InferenceOverrides
-  {
-    std::unique_ptr<Summarizer> summarizer;
-    std::unique_ptr<Extractor> extractor;
-  };
-
-  /// @brief Factory with caller-supplied stores, clock, and inference
-  /// dependencies (the fully injected form).
-  static std::unique_ptr<Cortext>
-  Create (const Config &cfg, std::shared_ptr<Store> store,
-          std::shared_ptr<ObjectStore> object_store,
-          const std::string &models_dir, std::shared_ptr<Clock> clock,
-          InferenceOverrides inference);
-
-  /// @brief SQLite-path factory with caller-supplied clock and inference
-  /// dependencies.
-  static std::unique_ptr<Cortext> Create (const Config &cfg,
-                                          const std::string &db_path,
-                                          const std::string &models_dir,
-                                          std::shared_ptr<Clock> clock,
-                                          InferenceOverrides inference);
 
   /// @brief Factory with caller-supplied database and object stores.
   /// @param cfg Three-knob configuration.
@@ -323,11 +290,8 @@ public:
                                  int height, int channels) const;
 
   /// @brief Attempt to trigger consolidation if conditions allow.
-  /// @param mode Shallow (embedding-only), deep (local summary/labels backend),
-  /// or both.
-  Context Consolidate (ConsolidationMode mode = ConsolidationMode::Both);
-  Context Consolidate (StopToken stop_token,
-                       ConsolidationMode mode = ConsolidationMode::Both);
+  Context Consolidate ();
+  Context Consolidate (StopToken stop_token);
 
   /// @brief Flush/commit any pending episode writes.
   void Flush ();
@@ -392,15 +356,6 @@ private:
                     std::shared_ptr<ObjectStore> object_store,
                     const std::string &models_dir,
                     std::shared_ptr<Clock> clock);
-  explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
-                    std::shared_ptr<ObjectStore> object_store,
-                    const std::string &models_dir,
-                    std::shared_ptr<Clock> clock,
-                    InferenceOverrides inference);
-  explicit Cortext (const Config &cfg, const std::string &db_path,
-                    const std::string &models_dir,
-                    std::shared_ptr<Clock> clock,
-                    InferenceOverrides inference);
   std::unique_ptr<Impl> impl_;
 };
 

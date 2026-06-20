@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cortext VERSION 0.1.0 LANGUAGES C CXX)
+project(cortext VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CORTEXT_TARGET_IOS OFF)
 if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_OSX_SYSROOT MATCHES "iphone")
@@ -27,14 +27,14 @@ option(CORTEXT_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 option(CORTEXT_BUILD_EXAMPLES "Build examples" OFF)
 option(CORTEXT_BUILD_NODE_BINDINGS "Build Node.js addon bindings" OFF)
 option(BUILD_WASM "Build WebAssembly version" OFF)
-option(CORTEXT_WASM_EXPORT_ALL "Export all functions in WASM build" ON)
+option(CORTEXT_WASM_EXPORT_ALL "Export all functions in WASM build" OFF)
 option(CORTEXT_EMBED_VEC "Embed sqlite-vec extension" ON)
 option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
 option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
-option(CORTEXT_ENABLE_GEMMA_ORT "Enable ONNX Runtime for Gemma text generator" OFF)
-option(CORTEXT_DISABLE_LITERT "Disable LiteRT-LM for Gemma Extractor/Summarizer" OFF)
 option(CORTEXT_DISABLE_SHERPA_ONNX "Disable sherpa-onnx ASR/TTS integration" OFF)
+set(CORTEXT_WASM_PRELOAD_MODELS_DIR "" CACHE PATH
+    "Optional model directory to embed into the browser WASM bundle at /models")
 
 # Sanitizer options for catching memory bugs during development
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -44,59 +44,55 @@ option(CORTEXT_ENABLE_MSAN "Enable MemorySanitizer (Clang only)" OFF)
 set(CORTEXT_NODE_EXECUTABLE "" CACHE FILEPATH "Path to the node executable used for Node.js addon builds")
 set(CORTEXT_NODE_INCLUDE_DIR "" CACHE PATH "Path to Node.js headers used for Node.js addon builds")
 
-if(APPLE)
-  set(CORTEXT_ENABLE_ORT_COREML ON CACHE BOOL "Enable CoreML EP in ONNX Runtime build" FORCE)
-else()
-  set(CORTEXT_ENABLE_ORT_COREML OFF CACHE BOOL "Enable CoreML EP in ONNX Runtime build" FORCE)
-endif()
-
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
   set(BUILD_TESTING OFF CACHE BOOL "Build tests" FORCE)
 endif()
 
+if(BUILD_WASM AND NOT EMSCRIPTEN)
+  message(FATAL_ERROR "BUILD_WASM requires the Emscripten toolchain. Use cmake --preset wasm.")
+endif()
+
 include(FetchContent)
 
-# Use a block to scope BUILD_TESTING variable for third-party dependencies
-# This prevents Eigen tests from being added to ctest
-block(SCOPE_FOR VARIABLES)
-  set(BUILD_TESTING OFF)
-  set(EIGEN_BUILD_TESTING OFF)
-  set(EIGEN_TESTING OFF)
-  if(DEFINED CMAKE_Fortran_COMPILER)
-    set(_cortext_saved_fortran_compiler "${CMAKE_Fortran_COMPILER}")
-  else()
-    set(_cortext_saved_fortran_compiler "__UNSET__")
-  endif()
-  set(CMAKE_Fortran_COMPILER "NOTFOUND" CACHE FILEPATH "Disable Fortran while configuring Eigen" FORCE)
-  
-  FetchContent_Declare(
-    eigen
-    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-    GIT_TAG 3.4.0
-  )
-  FetchContent_MakeAvailable(eigen)
-  if(_cortext_saved_fortran_compiler STREQUAL "__UNSET__")
-    unset(CMAKE_Fortran_COMPILER CACHE)
-  else()
-    set(CMAKE_Fortran_COMPILER "${_cortext_saved_fortran_compiler}" CACHE FILEPATH "Fortran compiler" FORCE)
-  endif()
+# Temporarily disable third-party tests while configuring dependencies.
+set(_cortext_saved_dependency_build_testing "${BUILD_TESTING}")
+set(BUILD_TESTING OFF)
+set(EIGEN_BUILD_TESTING OFF)
+set(EIGEN_TESTING OFF)
+if(DEFINED CMAKE_Fortran_COMPILER)
+  set(_cortext_saved_fortran_compiler "${CMAKE_Fortran_COMPILER}")
+else()
+  set(_cortext_saved_fortran_compiler "__UNSET__")
+endif()
+set(CMAKE_Fortran_COMPILER "NOTFOUND" CACHE FILEPATH "Disable Fortran while configuring Eigen" FORCE)
 
-  # nlohmann/json for generator JSON schema handling
-  # Note: v3.12.0 required to match LiteRT-LM's nlohmann/json version
-  FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.12.0
-  )
-  FetchContent_MakeAvailable(nlohmann_json)
-endblock()
+FetchContent_Declare(
+  eigen
+  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+  GIT_TAG 3.4.0
+)
+FetchContent_MakeAvailable(eigen)
+if(_cortext_saved_fortran_compiler STREQUAL "__UNSET__")
+  unset(CMAKE_Fortran_COMPILER CACHE)
+else()
+  set(CMAKE_Fortran_COMPILER "${_cortext_saved_fortran_compiler}" CACHE FILEPATH "Fortran compiler" FORCE)
+endif()
+
+# nlohmann/json for C API JSON serialization and test fixtures.
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.12.0
+)
+FetchContent_MakeAvailable(nlohmann_json)
+set(BUILD_TESTING "${_cortext_saved_dependency_build_testing}")
 
 #
 # OpenTelemetry dependency (native builds only).
 #
 # cortext links against the OpenTelemetry API only. Applications are responsible
-# for installing SDK providers/exporters as needed.
+# for installing telemetry SDK exporters as needed.
 #
 if(NOT EMSCRIPTEN AND NOT CORTEXT_DISABLE_OPENTELEMETRY AND NOT CORTEXT_TARGET_IOS)
   # Temporarily disable BUILD_TESTING while configuring the dependency to avoid
@@ -136,7 +132,6 @@ add_library(cortext
     src/store/extension_loader.cpp
     src/store/object_store.cpp
     src/store/schema.cpp
-    src/store/facts.cpp
     src/internal/cancellation.cpp
     src/processor/operation_context.cpp
     src/signal_processor.cpp
@@ -170,25 +165,20 @@ add_library(cortext
     src/operations/predictive.cpp
     src/operations/emotion.cpp
     src/operations/working_memory.cpp
-    src/operations/metacognitive.cpp
     src/operations/serial_position.cpp
     src/operations/serial_position_apply.cpp
     src/operations/interrupt_gate.cpp
     src/operations/consolidation.cpp
     src/operations/consolidation_cluster.cpp
     src/operations/consolidation_gate.cpp
-  src/operations/consolidation_shallow.cpp
-  src/operations/label_bank.cpp
-    src/operations/consolidation_summarize.cpp
-    src/operations/process_extraction_results.cpp
+    src/operations/consolidation_shallow.cpp
     src/operations/embedding_prediction_error.cpp
     src/operations/precision.cpp
     src/operations/constructive_recall_internal.cpp
     src/operations/meta_learning_internal.cpp
     src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
-    src/operations/temporal_retrieval.cpp
-    src/operations/eviction_ablation.cpp
+    src/operations/eviction_policy_override.cpp
     src/operations/storage_pressure.cpp
     src/operations/retrieval_debug_state.cpp
     src/operations/neuromodulators.cpp
@@ -201,32 +191,14 @@ add_library(cortext
     src/operations/synaptic_tagging.cpp
     src/operations/drift_accumulation.cpp
     src/operations/streaming_pacing.cpp
-    src/operations/short_term_memory_shadow.cpp
     src/operations/soft_anchor.cpp
     # Section 4.4: Accumulator operations
     src/operations/accumulator_scores.cpp
     src/operations/accumulator.cpp
     src/operations/accumulator_reset.cpp
     src/operations/spike_bypass.cpp
-    # Extractor component
-    src/extractor/extraction_parsing.cpp
-    src/extractor/gemma_extractor.cpp
-    # Summarizer component
-    src/summarizer/gemma_summarizer.cpp
-    # Deep consolidation stack (Gemma/LiteRT-LM)
-    src/deep_llm/deep_llm_factory.cpp
     # Embedding-model pin (precomputed vectors hard-fail on encoder mismatch)
     src/models/embedding_model_pin.cpp
-    # Inference provider registry and legacy-interface adapters
-    src/providers/registry.cpp
-    src/providers/adapters.cpp
-    src/providers/contract.cpp
-    src/providers/ollama_provider.cpp
-    src/providers/openai_provider.cpp
-    # JSON schema parser for constrained decoding
-    src/generator/json_decoder.cpp
-    # Audio preprocessing
-    src/audio/gemma_audio.cpp
 )
 
 set(CORTEXT_LLAMA_CPP_AVAILABLE OFF)
@@ -307,7 +279,7 @@ if(NOT EMSCRIPTEN)
       target_link_libraries(cortext PRIVATE ${ACCELERATE_FRAMEWORK})
     endif()
   else()
-    message(STATUS "llama.cpp library not found; GGUF generation backends disabled")
+    message(STATUS "llama.cpp library not found; GGUF embedding backend disabled")
   endif()
 endif()
 
@@ -322,19 +294,10 @@ endif()
 # runtime always builds.
 target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp)
 
-if(NOT CORTEXT_DISABLE_SHERPA_ONNX)
+if(NOT CORTEXT_DISABLE_SHERPA_ONNX AND NOT EMSCRIPTEN)
   target_sources(cortext PRIVATE src/audio/sherpa_onnx.cpp)
 endif()
 add_library(cortext::cortext ALIAS cortext)
-
-if(CORTEXT_TARGET_IOS AND CORTEXT_DISABLE_LITERT)
-  set_source_files_properties(
-    src/extractor/gemma_extractor.cpp
-    src/summarizer/gemma_summarizer.cpp
-    src/audio/gemma_audio.cpp
-    PROPERTIES HEADER_FILE_ONLY ON
-  )
-endif()
 
 # Public include dirs
 target_include_directories(cortext
@@ -435,6 +398,14 @@ if(CORTEXT_EMBED_OBJSTORE)
     BLAKE3_NO_AVX2=1
     BLAKE3_NO_AVX512=1
   )
+  if(EMSCRIPTEN)
+    target_compile_definitions(cortext PRIVATE
+      OBJSTORE_HAVE_BACKEND_FILE=0
+      OBJSTORE_HAVE_BACKEND_SQLITE=0
+      OBJSTORE_HAVE_BACKEND_OPFS=1
+      OBJSTORE_HAVE_BACKEND_VFS=1
+    )
+  endif()
   if(CMAKE_C_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
     set_source_files_properties(
       ${CORTEXT_OBJSTORE_SRCS}
@@ -459,20 +430,18 @@ if(CORTEXT_NLOHMANN_INCLUDE_DIRS)
   target_include_directories(cortext BEFORE PRIVATE ${CORTEXT_NLOHMANN_INCLUDE_DIRS})
 endif()
 if(EMSCRIPTEN)
-  # Use a block to prevent SQLite tests from being added to ctest
-  block(SCOPE_FOR VARIABLES)
-    set(BUILD_TESTING OFF)
-    add_subdirectory(third_party/sqlite)
-  endblock()
-  target_link_libraries(cortext PRIVATE sqlite3)
+  target_compile_options(cortext PRIVATE -sUSE_SQLITE3=1)
   target_compile_definitions(cortext PRIVATE SQLITE_OMIT_LOAD_EXTENSION=1)
   target_sources(cortext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wasm/auto_extensions.cpp)
 elseif(CORTEXT_TARGET_IOS)
   target_link_libraries(cortext PRIVATE ${SQLITE3_IOS_LIB})
   target_compile_definitions(cortext PRIVATE SQLITE_OMIT_LOAD_EXTENSION=1)
 else()
-  target_include_directories(cortext PRIVATE ${SQLITE3_INCLUDE_DIRS})
-  target_link_libraries(cortext PRIVATE ${SQLITE3_LIBRARIES})
+  target_include_directories(cortext PUBLIC ${SQLITE3_INCLUDE_DIRS})
+  if(SQLITE3_LIBRARY_DIRS)
+    target_link_directories(cortext PUBLIC ${SQLITE3_LIBRARY_DIRS})
+  endif()
+  target_link_libraries(cortext PUBLIC ${SQLITE3_LIBRARIES})
 endif()
 
 #
@@ -500,80 +469,6 @@ else()
   target_compile_definitions(cortext PRIVATE CORTEXT_DISABLE_OPENTELEMETRY=1)
 endif()
 
-# Optional ONNX Runtime integration for Gemma text generator
-if(CORTEXT_ENABLE_GEMMA_ORT)
-  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_GEMMA_ORT=1)
-
-  include(ExternalProject)
-  find_package(ZLIB REQUIRED)
-
-  set(CORTEXT_ORT_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
-  if(NOT CORTEXT_ORT_BUILD_TYPE)
-    set(CORTEXT_ORT_BUILD_TYPE "Release")
-  endif()
-
-  set(CORTEXT_ORT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime/cmake")
-  set(CORTEXT_ORT_BINARY_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-build")
-  set(CORTEXT_ORT_INSTALL_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-install")
-  set(CORTEXT_ORT_LIB_PATH
-      "${CORTEXT_ORT_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}onnxruntime${CMAKE_SHARED_LIBRARY_SUFFIX}")
-
-  set(CORTEXT_ORT_USE_COREML OFF)
-  if(APPLE AND CORTEXT_ENABLE_ORT_COREML)
-    set(CORTEXT_ORT_USE_COREML ON)
-  endif()
-
-  target_include_directories(cortext PRIVATE
-    ${CORTEXT_ORT_INSTALL_DIR}/include
-  )
-
-  if(NOT EXISTS "${CORTEXT_ORT_LIB_PATH}")
-    ExternalProject_Add(onnxruntime_ep
-      SOURCE_DIR "${CORTEXT_ORT_SOURCE_DIR}"
-      BINARY_DIR "${CORTEXT_ORT_BINARY_DIR}"
-      INSTALL_DIR "${CORTEXT_ORT_INSTALL_DIR}"
-      CMAKE_ARGS
-        -DCMAKE_BUILD_TYPE=${CORTEXT_ORT_BUILD_TYPE}
-        -DCMAKE_INSTALL_PREFIX=${CORTEXT_ORT_INSTALL_DIR}
-        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-        -DCMAKE_DISABLE_FIND_PACKAGE_Protobuf=ON
-        -DCMAKE_DISABLE_FIND_PACKAGE_protobuf=ON
-        -DCMAKE_DISABLE_FIND_PACKAGE_ONNX=ON
-        -DCMAKE_DISABLE_FIND_PACKAGE_onnx=ON
-        -DCMAKE_DISABLE_FIND_PACKAGE_Flatbuffers=ON
-        -DCMAKE_DISABLE_FIND_PACKAGE_flatbuffers=ON
-        -Donnxruntime_BUILD_SHARED_LIB=ON
-        -Donnxruntime_BUILD_UNIT_TESTS=OFF
-        -Donnxruntime_ENABLE_PYTHON=OFF
-        -Donnxruntime_USE_COREML=${CORTEXT_ORT_USE_COREML}
-        -DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER
-      BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config ${CORTEXT_ORT_BUILD_TYPE} -- -j8
-      BUILD_BYPRODUCTS "${CORTEXT_ORT_LIB_PATH}"
-      USES_TERMINAL_CONFIGURE TRUE
-      USES_TERMINAL_BUILD TRUE
-      USES_TERMINAL_INSTALL TRUE
-    )
-  else()
-    add_custom_target(onnxruntime_ep)
-  endif()
-
-  add_library(onnxruntime SHARED IMPORTED GLOBAL)
-  set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION "${CORTEXT_ORT_LIB_PATH}")
-  add_dependencies(onnxruntime onnxruntime_ep)
-
-  target_link_libraries(cortext PRIVATE onnxruntime ZLIB::ZLIB)
-  add_dependencies(cortext onnxruntime_ep)
-  if(APPLE AND CORTEXT_ENABLE_ORT_COREML)
-    set(CORTEXT_ORT_COREML_PROVIDER_LIB
-        "${CORTEXT_ORT_BINARY_DIR}/lib/libonnxruntime_providers_coreml.a")
-    if(EXISTS "${CORTEXT_ORT_COREML_PROVIDER_LIB}")
-      target_link_libraries(cortext PRIVATE "${CORTEXT_ORT_COREML_PROVIDER_LIB}")
-    endif()
-  endif()
-endif()
-
-
 # Optional sherpa-onnx integration for ASR/TTS
 # Enabled by default; set CORTEXT_DISABLE_SHERPA_ONNX=ON to disable
 if(CORTEXT_DISABLE_SHERPA_ONNX)
@@ -592,14 +487,7 @@ if(NOT CORTEXT_DISABLE_SHERPA_ONNX AND NOT EMSCRIPTEN)
   set(SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION ON CACHE BOOL "" FORCE)
   set(SHERPA_ONNX_ENABLE_C_API ON CACHE BOOL "" FORCE)
 
-  # Prefer sherpa-onnx to download its own ORT if our build isn't ready yet.
-  if(DEFINED CORTEXT_ORT_LIB_PATH AND EXISTS "${CORTEXT_ORT_LIB_PATH}")
-    set(ENV{SHERPA_ONNXRUNTIME_INCLUDE_DIR} "${CORTEXT_ORT_INSTALL_DIR}/include")
-    set(ENV{SHERPA_ONNXRUNTIME_LIB_DIR} "${CORTEXT_ORT_INSTALL_DIR}/lib")
-    set(SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE ON CACHE BOOL "" FORCE)
-  else()
-    set(SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
-  endif()
+  set(SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 
   # sherpa-onnx transitively builds openfst/simple-sentencepiece code that is
   # not C++20-clean yet; keep the vendored subproject on C++17 while cortext
@@ -614,137 +502,12 @@ if(NOT CORTEXT_DISABLE_SHERPA_ONNX AND NOT EMSCRIPTEN)
   target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_SHERPA_ONNX=1)
 endif()
 
-# Optional LiteRT-LM integration for Gemma Extractor/Summarizer
-# Enabled by default; set CORTEXT_DISABLE_LITERT=ON to disable
-if(CORTEXT_DISABLE_LITERT)
-  target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_LITERT=1)
-endif()
-
-if(NOT CORTEXT_DISABLE_LITERT AND NOT EMSCRIPTEN)
-  include(ExternalProject)
-
-  target_sources(cortext PRIVATE
-    src/extractor/json_schema_constraint.cpp
-  )
-
-  # Detect platform for Bazel config
-  if(APPLE)
-    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-      set(LITERT_BAZEL_CONFIG "macos_arm64")
-    else()
-      set(LITERT_BAZEL_CONFIG "macos_x86_64")
-    endif()
-  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
-      set(LITERT_BAZEL_CONFIG "linux_arm64")
-    else()
-      set(LITERT_BAZEL_CONFIG "linux_x86_64")
-    endif()
-  else()
-    message(FATAL_ERROR "Unsupported platform for LiteRT-LM")
-  endif()
-
-  set(LITERT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/litert-lm")
-  set(LITERT_INSTALL_DIR "${CMAKE_BINARY_DIR}/third_party/litert-lm-install")
-  set(LITERT_LIB_PATH "${LITERT_INSTALL_DIR}/lib/${CMAKE_SHARED_LIBRARY_PREFIX}litert_lm_cpp${CMAKE_SHARED_LIBRARY_SUFFIX}")
-
-  # Check for bazel/bazelisk
-  find_program(BAZEL_EXECUTABLE NAMES bazelisk bazel)
-  if(NOT BAZEL_EXECUTABLE)
-    message(FATAL_ERROR "Bazel not found. Install with: brew install bazelisk")
-  endif()
-
-  # Append custom BUILD target for C++ shared library if not already added
-  set(LITERT_CUSTOM_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/litert-lm-BUILD.bazel")
-  set(LITERT_ROOT_BUILD "${LITERT_SOURCE_DIR}/BUILD")
-
-  if(NOT EXISTS "${LITERT_LIB_PATH}")
-    ExternalProject_Add(litert_ep
-      SOURCE_DIR "${LITERT_SOURCE_DIR}"
-      CONFIGURE_COMMAND ${CMAKE_COMMAND} -E echo "Appending custom BUILD target..." &&
-        ${CMAKE_COMMAND} -DLITERT_CUSTOM_BUILD=${LITERT_CUSTOM_BUILD}
-          -DLITERT_ROOT_BUILD=${LITERT_ROOT_BUILD}
-          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/litert_append_build.cmake
-      BUILD_COMMAND ${BAZEL_EXECUTABLE}
-        --output_base=${CMAKE_BINARY_DIR}/bazel-output
-        build //:liblitert_lm_cpp.so
-        --config=${LITERT_BAZEL_CONFIG}
-        --compilation_mode=opt
-        --verbose_failures
-      BUILD_IN_SOURCE TRUE
-      INSTALL_COMMAND ${CMAKE_COMMAND}
-        -DLITERT_SOURCE_DIR=${LITERT_SOURCE_DIR}
-        -DLITERT_INSTALL_DIR=${LITERT_INSTALL_DIR}
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/litert_install.cmake
-      BUILD_BYPRODUCTS "${LITERT_LIB_PATH}"
-      USES_TERMINAL_BUILD TRUE
-    )
-  else()
-    add_custom_target(litert_ep)
-  endif()
-
-  add_library(litert_lm SHARED IMPORTED GLOBAL)
-  set_target_properties(litert_lm PROPERTIES IMPORTED_LOCATION "${LITERT_LIB_PATH}")
-  add_dependencies(litert_lm litert_ep)
-
-  target_include_directories(cortext SYSTEM PRIVATE ${LITERT_INSTALL_DIR}/include)
-  # PRIVATE link - LiteRT-LM symbols are hidden via visibility settings
-  target_link_libraries(cortext PRIVATE litert_lm)
-  add_dependencies(cortext litert_ep)
-
-  # Set RPATH for runtime library discovery
-  if(APPLE)
-    set_property(TARGET cortext APPEND PROPERTY BUILD_RPATH
-      "@loader_path/../third_party/litert-lm-install/lib"
-    )
-    list(APPEND CMAKE_BUILD_RPATH "${LITERT_INSTALL_DIR}/lib")
-  elseif(UNIX)
-    set_property(TARGET cortext APPEND PROPERTY BUILD_RPATH
-      "$ORIGIN/../third_party/litert-lm-install/lib"
-    )
-  endif()
-
-  # Ensure LiteRT accelerator dylibs are present in the install lib dir on macOS.
-  if(APPLE)
-    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-      set(LITERT_ACCEL_DIR "${LITERT_SOURCE_DIR}/prebuilt/macos_arm64")
-    else()
-      set(LITERT_ACCEL_DIR "${LITERT_SOURCE_DIR}/prebuilt/macos_x86_64")
-    endif()
-    file(GLOB LITERT_ACCEL_LIBS "${LITERT_ACCEL_DIR}/*.dylib")
-    if(NOT EMSCRIPTEN)
-      list(FILTER LITERT_ACCEL_LIBS EXCLUDE REGEX "WebGpuAccelerator")
-    endif()
-    set(LITERT_ACCEL_CLEANUP_COMMANDS "")
-    if(NOT EMSCRIPTEN)
-      list(APPEND LITERT_ACCEL_CLEANUP_COMMANDS
-        COMMAND ${CMAKE_COMMAND} -E rm -f
-          "${LITERT_INSTALL_DIR}/lib/libLiteRtWebGpuAccelerator.dylib"
-      )
-    endif()
-    if(LITERT_ACCEL_LIBS)
-      set(LITERT_ACCEL_SENTINEL "${LITERT_INSTALL_DIR}/lib/.litert_accel_copied")
-      add_custom_command(
-        OUTPUT "${LITERT_ACCEL_SENTINEL}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${LITERT_INSTALL_DIR}/lib"
-        ${LITERT_ACCEL_CLEANUP_COMMANDS}
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${LITERT_ACCEL_LIBS} "${LITERT_INSTALL_DIR}/lib/"
-        COMMAND ${CMAKE_COMMAND} -E touch "${LITERT_ACCEL_SENTINEL}"
-        DEPENDS ${LITERT_ACCEL_LIBS}
-      )
-      add_custom_target(litert_accel ALL DEPENDS "${LITERT_ACCEL_SENTINEL}")
-      add_dependencies(cortext litert_accel)
-    endif()
-  endif()
-endif()
-
 # Use C++20 features
 target_compile_features(cortext PUBLIC cxx_std_20)
 target_compile_definitions(cortext PUBLIC CORTEXT_VERSION="${PROJECT_VERSION}")
 
-# Set hidden visibility by default to avoid symbol collisions with dependencies
-# (e.g., protobuf from LiteRT-LM vs OpenTelemetry). Only symbols marked with
-# CORTEXT_EXPORT will be visible to consumers.
+# Set hidden visibility by default. Only symbols marked with CORTEXT_EXPORT
+# will be visible to consumers.
 # Only apply when building as shared library - static libs don't have visibility.
 if(NOT EMSCRIPTEN AND BUILD_SHARED_LIBS)
   set_target_properties(cortext PROPERTIES
@@ -781,21 +544,90 @@ endif()
 if(EMSCRIPTEN)
   target_compile_options(cortext PRIVATE
     -O3
-    -s WASM=1
     $<IF:$<BOOL:${CORTEXT_WARNINGS_AS_ERRORS}>, -Werror, >
-  )
-  target_link_options(cortext PRIVATE
-    -O3
-    -s WASM=1
-    $<IF:$<BOOL:${CORTEXT_WASM_EXPORT_ALL}>, -s EXPORT_ALL=1, >
-    -s ALLOW_MEMORY_GROWTH=1
-    -s MODULARIZE=1
-    -s EXPORT_ES6=1
   )
 elseif(MSVC)
   target_compile_options(cortext PRIVATE /W4 $<IF:$<BOOL:${CORTEXT_WARNINGS_AS_ERRORS}>,/WX,>)
 else()
   target_compile_options(cortext PRIVATE -Wall -Wextra -Wpedantic $<IF:$<BOOL:${CORTEXT_WARNINGS_AS_ERRORS}>, -Werror, >)
+endif()
+
+if(EMSCRIPTEN AND BUILD_WASM)
+  set(_cortext_wasm_exported_functions
+    "_malloc"
+    "_free"
+    "_cortext_config_init"
+    "_cortext_create"
+    "_cortext_create_with_config"
+    "_cortext_create_with_store_callbacks"
+    "_cortext_create_with_store_and_object_callbacks"
+    "_cortext_create_with_config_and_object_callbacks"
+    "_cortext_create_with_models"
+    "_cortext_free"
+    "_cortext_process_text"
+    "_cortext_process_audio"
+    "_cortext_process_image"
+    "_cortext_embed_text_json"
+    "_cortext_embed_audio_json"
+    "_cortext_embed_image_json"
+    "_cortext_consolidate"
+    "_cortext_flush"
+    "_cortext_reset"
+    "_cortext_version"
+    "_cortext_last_error"
+    "_cortext_string_free"
+    "_cortext_process_text_json"
+    "_cortext_process_audio_json"
+    "_cortext_process_image_json"
+    "_cortext_consolidate_json"
+  )
+  list(JOIN _cortext_wasm_exported_functions "\",\"" _cortext_wasm_exports_joined)
+  set(_cortext_wasm_exports_json "[\"${_cortext_wasm_exports_joined}\"]")
+
+  set(_cortext_wasm_runtime_methods
+    "FS"
+    "ccall"
+    "cwrap"
+    "UTF8ToString"
+    "stringToUTF8"
+    "lengthBytesUTF8"
+    "addFunction"
+    "removeFunction"
+  )
+  list(JOIN _cortext_wasm_runtime_methods "\",\"" _cortext_wasm_runtime_joined)
+  set(_cortext_wasm_runtime_json "[\"${_cortext_wasm_runtime_joined}\"]")
+
+  add_executable(cortext_wasm src/wasm/module.cpp)
+  target_compile_features(cortext_wasm PRIVATE cxx_std_20)
+  target_link_libraries(cortext_wasm PRIVATE cortext)
+  set_target_properties(cortext_wasm PROPERTIES
+    OUTPUT_NAME "cortext"
+    SUFFIX ".js"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dist/wasm"
+  )
+  target_link_options(cortext_wasm PRIVATE
+    -O3
+    --no-entry
+    -sWASM=1
+    -sUSE_SQLITE3=1
+    -sALLOW_MEMORY_GROWTH=1
+    -sALLOW_TABLE_GROWTH=1
+    -sFORCE_FILESYSTEM=1
+    -sMODULARIZE=1
+    -sEXPORT_ES6=1
+    -sEXPORT_NAME=createCortextModule
+    -sENVIRONMENT=web,worker
+    "-sEXPORTED_FUNCTIONS=${_cortext_wasm_exports_json}"
+    "-sEXPORTED_RUNTIME_METHODS=${_cortext_wasm_runtime_json}"
+  )
+  if(CORTEXT_WASM_EXPORT_ALL)
+    target_link_options(cortext_wasm PRIVATE -sEXPORT_ALL=1)
+  endif()
+  if(CORTEXT_WASM_PRELOAD_MODELS_DIR)
+    target_link_options(cortext_wasm PRIVATE
+      --preload-file "${CORTEXT_WASM_PRELOAD_MODELS_DIR}@/models"
+    )
+  endif()
 endif()
 
 include(GNUInstallDirs)

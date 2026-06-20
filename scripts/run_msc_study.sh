@@ -14,14 +14,10 @@ fi
 
 mkdir -p "${ROOT}"
 
-export CORTEXT_EMBEDDINGGEMMA_BACKEND=llama.cpp
-export CORTEXT_DEEP_LLM_BACKEND=auto
-
 COMMON_ARGS=(
   --binary build/examples/topical_chat_analysis/cortext_topical_chat_analysis
   --models "${MODELS_DIR}"
   --data "${DATA}"
-  --label-bank ""
   --no-baseline
   --no-multi
   --cases "0.5,0.5,0.5"

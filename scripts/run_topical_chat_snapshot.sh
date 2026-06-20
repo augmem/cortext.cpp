@@ -15,10 +15,8 @@ SEED="${SEED:-1337}"
 DETERMINISTIC="${DETERMINISTIC:-1}"
 SYNTHETIC_START_MS="${SYNTHETIC_START_MS:-1700000000000}"
 CADENCE_ENABLED="${CADENCE_ENABLED:-0}"
-LABEL_BANK="${LABEL_BANK:-data/label_bank/metadata.json}"
 CONSOLIDATE="${CONSOLIDATE:-1}"
 CONSOLIDATE_CYCLES="${CONSOLIDATE_CYCLES:-2}"
-CONSOLIDATE_MODE="${CONSOLIDATE_MODE:-both}"
 CONSOLIDATE_DURING="${CONSOLIDATE_DURING:-1}"
 CONSOLIDATE_IDLE="${CONSOLIDATE_IDLE:-1}"
 CONSOLIDATE_EVERY="${CONSOLIDATE_EVERY:-0}"
@@ -26,14 +24,6 @@ CONSOLIDATE_EVERY_AUTO="${CONSOLIDATE_EVERY_AUTO:-1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 OUT_DIR="${OUT_DIR:-logs/topical_chat_snapshots/$(date +%Y%m%d_%H%M%S)}"
 DB_PATH="$OUT_DIR/cortext.db"
-
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  LITERT_LIB="$ROOT/build/third_party/litert-lm-install/lib"
-  if [[ -d "$LITERT_LIB" ]]; then
-    export DYLD_LIBRARY_PATH="$LITERT_LIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-  fi
-fi
 
 mkdir -p "$OUT_DIR"
 
@@ -86,17 +76,15 @@ cat > "$config" <<EOF
   "seed": ${SEED},
   "deterministic": ${DETERMINISTIC},
   "synthetic_start_ms": ${SYNTHETIC_START_MS},
-  "label_bank": "${LABEL_BANK}",
   "consolidate": ${CONSOLIDATE},
   "consolidate_cycles": ${CONSOLIDATE_CYCLES},
-  "consolidate_mode": "${CONSOLIDATE_MODE}",
   "consolidate_during": ${CONSOLIDATE_DURING},
   "consolidate_idle": ${CONSOLIDATE_IDLE},
   "consolidate_every_turns": ${CONSOLIDATE_EVERY}
 }
 EOF
 
-echo "focus,sensitivity,stability,turns,writes,consolidation_runs,consolidation_failures,consolidation_every_turns,consolidation_association_created,consolidation_label_created,consolidation_summary_count,consolidation_summaries_with_model,consolidation_summaries_fallback,consolidation_extraction_jobs,consolidation_extraction_results,consolidation_labels_seen,consolidation_relations_seen,duration_sec,signals_per_sec,perf_encode_ms_mean,perf_process_ms_mean,perf_hydrate_ms_mean,perf_total_ms_mean,retrieval_turn_rate,retrieval_avg_candidates,retrieval_overlap_mean,retrieval_context_overlap_mean,retrieval_semantic_overlap_mean,retrieval_context_semantic_overlap_mean,retrieval_association_candidate_rate,retrieval_label_candidate_rate,retrieval_association_turn_rate,retrieval_label_turn_rate,interrupt_turn_rate,interrupt_abort_rate,interrupt_semantic_overlap_mean,interrupt_context_semantic_overlap_mean,interrupt_association_candidate_rate,interrupt_label_candidate_rate,interrupt_association_turn_rate,interrupt_label_turn_rate,boundary_at_rate,boundary_score_pass_rate,boundary_score_mean" > "$summary"
+echo "focus,sensitivity,stability,turns,writes,consolidation_runs,consolidation_failures,consolidation_every_turns,consolidation_association_created,consolidation_label_created,duration_sec,signals_per_sec,perf_encode_ms_mean,perf_process_ms_mean,perf_hydrate_ms_mean,perf_total_ms_mean,retrieval_turn_rate,retrieval_avg_candidates,retrieval_overlap_mean,retrieval_context_overlap_mean,retrieval_semantic_overlap_mean,retrieval_context_semantic_overlap_mean,retrieval_association_candidate_rate,retrieval_label_candidate_rate,retrieval_association_turn_rate,retrieval_label_turn_rate,interrupt_turn_rate,interrupt_abort_rate,interrupt_semantic_overlap_mean,interrupt_context_semantic_overlap_mean,interrupt_association_candidate_rate,interrupt_label_candidate_rate,interrupt_association_turn_rate,interrupt_label_turn_rate,boundary_at_rate,boundary_score_pass_rate,boundary_score_mean" > "$summary"
 
 get_metric() {
   local key="$1"
@@ -108,9 +96,6 @@ get_metric() {
 }
 
 extra_args=()
-if [[ -n "$LABEL_BANK" && -f "$LABEL_BANK" ]]; then
-  extra_args+=(--label-bank="$LABEL_BANK")
-fi
 if [[ -n "$SEED" ]]; then
   extra_args+=(--seed="$SEED")
 fi
@@ -122,7 +107,6 @@ if [[ -n "$SYNTHETIC_START_MS" ]]; then
 fi
 if [[ "$CONSOLIDATE" == "1" ]]; then
   extra_args+=(--consolidate --consolidate-cycles="$CONSOLIDATE_CYCLES")
-  extra_args+=(--consolidate-mode="$CONSOLIDATE_MODE")
   if [[ "$CONSOLIDATE_EVERY" != "0" ]]; then
     extra_args+=(--consolidate-every="$CONSOLIDATE_EVERY")
   fi
@@ -170,13 +154,6 @@ consolidation_failures="$(get_metric consolidation_failures "$log")"
 consolidation_every_turns="$(get_metric consolidation_every_turns "$log")"
 consolidation_association_created="$(get_metric consolidation_association_created "$log")"
 consolidation_label_created="$(get_metric consolidation_label_created "$log")"
-consolidation_summary_count="$(get_metric consolidation_summary_count "$log")"
-consolidation_summaries_with_model="$(get_metric consolidation_summaries_with_model "$log")"
-consolidation_summaries_fallback="$(get_metric consolidation_summaries_fallback "$log")"
-consolidation_extraction_jobs="$(get_metric consolidation_extraction_jobs "$log")"
-consolidation_extraction_results="$(get_metric consolidation_extraction_results "$log")"
-consolidation_labels_seen="$(get_metric consolidation_labels_seen "$log")"
-consolidation_relations_seen="$(get_metric consolidation_relations_seen "$log")"
 retrieval_turn_rate="$(get_metric retrieval_turn_rate "$log")"
 retrieval_avg_candidates="$(get_metric retrieval_avg_candidates "$log")"
 retrieval_overlap_mean="$(get_metric retrieval_overlap_mean "$log")"
@@ -211,7 +188,7 @@ print(0.0 if dur <= 0 else (turns / dur))
 PY
 )"
 
-echo "${FOCUS},${SENSITIVITY},${STABILITY},${turns},${writes},${consolidation_runs},${consolidation_failures},${consolidation_every_turns},${consolidation_association_created},${consolidation_label_created},${consolidation_summary_count},${consolidation_summaries_with_model},${consolidation_summaries_fallback},${consolidation_extraction_jobs},${consolidation_extraction_results},${consolidation_labels_seen},${consolidation_relations_seen},${duration_sec},${signals_per_sec},${perf_encode_ms_mean},${perf_process_ms_mean},${perf_hydrate_ms_mean},${perf_total_ms_mean},${retrieval_turn_rate},${retrieval_avg_candidates},${retrieval_overlap_mean},${retrieval_context_overlap_mean},${retrieval_semantic_overlap_mean},${retrieval_context_semantic_overlap_mean},${retrieval_association_candidate_rate},${retrieval_label_candidate_rate},${retrieval_association_turn_rate},${retrieval_label_turn_rate},${interrupt_turn_rate},${interrupt_abort_rate},${interrupt_semantic_overlap_mean},${interrupt_context_semantic_overlap_mean},${interrupt_association_candidate_rate},${interrupt_label_candidate_rate},${interrupt_association_turn_rate},${interrupt_label_turn_rate},${boundary_at_rate},${boundary_score_pass_rate},${boundary_score_mean}" >> "$summary"
+echo "${FOCUS},${SENSITIVITY},${STABILITY},${turns},${writes},${consolidation_runs},${consolidation_failures},${consolidation_every_turns},${consolidation_association_created},${consolidation_label_created},${duration_sec},${signals_per_sec},${perf_encode_ms_mean},${perf_process_ms_mean},${perf_hydrate_ms_mean},${perf_total_ms_mean},${retrieval_turn_rate},${retrieval_avg_candidates},${retrieval_overlap_mean},${retrieval_context_overlap_mean},${retrieval_semantic_overlap_mean},${retrieval_context_semantic_overlap_mean},${retrieval_association_candidate_rate},${retrieval_label_candidate_rate},${retrieval_association_turn_rate},${retrieval_label_turn_rate},${interrupt_turn_rate},${interrupt_abort_rate},${interrupt_semantic_overlap_mean},${interrupt_context_semantic_overlap_mean},${interrupt_association_candidate_rate},${interrupt_label_candidate_rate},${interrupt_association_turn_rate},${interrupt_label_turn_rate},${boundary_at_rate},${boundary_score_pass_rate},${boundary_score_mean}" >> "$summary"
 
 export PERF_OUT="$perf"
 export PERF_START_TIME="$start_iso"

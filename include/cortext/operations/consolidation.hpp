@@ -35,17 +35,4 @@ public:
   void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
-/// @brief Algorithm 29c: Entity and Relation Extraction (enqueue jobs).
-///
-/// Queues semantic extraction jobs for consolidated summaries based on knob-
-/// derived gating and batching rules. This operation does not perform model
-/// inference; it only inserts rows into `extraction_jobs` with a prompt built
-/// from the summary text and its clustered source texts.
-class EnqueueExtractionJobs
-    : public Operation<Requires<tags::ExtractionRequests>, Satisfies<> >
-{
-public:
-  void Execute (OperationContext &context, Transaction &tx) const override;
-};
-
 } // namespace cortext::operations

@@ -26,10 +26,6 @@ struct RankedCandidate
   double proc_score = 0.0;
   double predictive_bonus = 0.0;
   double pre_activation = 0.0;
-  double fact_boost = 0.0;
-  double fact_stale_penalty = 0.0;
-  int linked_fact_count = 0;
-  double label_graph_boost = 0.0;
   int label_match_count = 0;
   double durable_source_boost = 0.0;
   int durable_source_count = 0;
@@ -82,18 +78,9 @@ struct EvidencePacket
 
 struct RetrievalSummary
 {
-  bool fact_layer_enabled = false;
-  int fact_seed_count = 0;
-  int candidate_fact_link_memory_count = 0;
-  int candidate_fact_link_row_count = 0;
-  int selected_fact_linked_count = 0;
   int text_query_token_count = 0;
   int text_query_wm_slots = 0;
   int text_query_wm_chars = 0;
-  int fact_text_candidate_count = 0;
-  int fact_text_rejected_low_score_count = 0;
-  int fact_text_match_count = 0;
-  double fact_text_best_score = 0.0;
   int rejected_candidate_count = 0;
   int rejected_filter_count = 0;
   int rejected_selection_count = 0;

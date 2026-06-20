@@ -282,12 +282,12 @@ class CortextBindings {
         )
       >();
 
-  /// @brief Triggers consolidation evaluation.
+  /// @brief Runs one explicit shallow consolidation pass.
   /// @param h Handle to a Cortext instance.
   /// @return 0 on success, 1 if invalid handle, 2 on internal error.
   ///
-  /// This evaluates whether background consolidation should start based on
-  /// system conditions. Changes are buffered until cortext_flush().
+  /// This replays stored embeddings through the v1 graph/label consolidation
+  /// path. Changes are buffered until cortext_flush().
   int cortext_consolidate(cortext_handle h) {
     return _cortext_consolidate(h);
   }
@@ -298,25 +298,6 @@ class CortextBindings {
       );
   late final _cortext_consolidate = _cortext_consolidatePtr
       .asFunction<int Function(cortext_handle)>();
-
-  /// @brief Triggers consolidation with explicit mode.
-  /// @param h Handle to a Cortext instance.
-  /// @param mode Consolidation mode (shallow, deep, or both).
-  /// @return 0 on success, 1 if invalid handle, 2 on internal error.
-  ///
-  /// Shallow runs embedding-only labeling/graphing; deep runs the configured
-  /// local summarization/extraction backend (Gemma/LiteRT-LM, LFM2/llama.cpp,
-  /// or the mixed Gemma+LFM2 path). Both defaults to the full deep path.
-  int cortext_consolidate_mode(cortext_handle h, int mode) {
-    return _cortext_consolidate_mode(h, mode);
-  }
-
-  late final _cortext_consolidate_modePtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(cortext_handle, ffi.Int)>>(
-        'cortext_consolidate_mode',
-      );
-  late final _cortext_consolidate_mode = _cortext_consolidate_modePtr
-      .asFunction<int Function(cortext_handle, int)>();
 
   /// @brief Commits all buffered database writes.
   /// @param h Handle to a Cortext instance.
@@ -576,7 +557,7 @@ class CortextBindings {
         )
       >();
 
-  /// @brief Triggers consolidation and returns the resulting Context as JSON.
+  /// @brief Runs shallow consolidation and returns the resulting Context as JSON.
   ffi.Pointer<ffi.Char> cortext_consolidate_json(cortext_handle h) {
     return _cortext_consolidate_json(h);
   }
@@ -588,22 +569,6 @@ class CortextBindings {
   late final _cortext_consolidate_json = _cortext_consolidate_jsonPtr
       .asFunction<ffi.Pointer<ffi.Char> Function(cortext_handle)>();
 
-  /// @brief Triggers consolidation with explicit mode and returns JSON.
-  ffi.Pointer<ffi.Char> cortext_consolidate_mode_json(
-    cortext_handle h,
-    int mode,
-  ) {
-    return _cortext_consolidate_mode_json(h, mode);
-  }
-
-  late final _cortext_consolidate_mode_jsonPtr =
-      _lookup<
-        ffi.NativeFunction<
-          ffi.Pointer<ffi.Char> Function(cortext_handle, ffi.Int)
-        >
-      >('cortext_consolidate_mode_json');
-  late final _cortext_consolidate_mode_json = _cortext_consolidate_mode_jsonPtr
-      .asFunction<ffi.Pointer<ffi.Char> Function(cortext_handle, int)>();
 }
 
 /// @brief Opaque handle to a Cortext instance.
@@ -640,8 +605,6 @@ final class cortext_config extends ffi.Struct {
   @ffi.Int()
   external int sequential_edges_enabled;
 
-  external ffi.Pointer<ffi.Char> label_bank_path;
-
   @ffi.Int()
   external int signal_filter_audio_enabled;
 
@@ -650,27 +613,4 @@ final class cortext_config extends ffi.Struct {
 
   @ffi.Int()
   external int signal_filter_text_enabled;
-
-  external ffi.Pointer<ffi.Char> summarizer_provider_uri;
-
-  external ffi.Pointer<ffi.Char> extractor_provider_uri;
-}
-
-/// @brief Consolidation mode for cortext_consolidate_mode.
-enum cortext_consolidation_mode {
-  CORTEXT_CONSOLIDATE_SHALLOW(0),
-  CORTEXT_CONSOLIDATE_DEEP(1),
-  CORTEXT_CONSOLIDATE_BOTH(2);
-
-  final int value;
-  const cortext_consolidation_mode(this.value);
-
-  static cortext_consolidation_mode fromValue(int value) => switch (value) {
-    0 => CORTEXT_CONSOLIDATE_SHALLOW,
-    1 => CORTEXT_CONSOLIDATE_DEEP,
-    2 => CORTEXT_CONSOLIDATE_BOTH,
-    _ => throw ArgumentError(
-      'Unknown value for cortext_consolidation_mode: $value',
-    ),
-  };
 }

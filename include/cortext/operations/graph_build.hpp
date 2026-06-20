@@ -10,7 +10,8 @@ namespace cortext::operations
 /// @brief Algorithm 30: Graph Construction from Clusters.
 ///
 /// Builds graph edges (ASSOCIATIONS) from clustered memories.
-/// This operation reads MEMORIES with cluster_id (set by ConsolidationSummarize)
+/// This operation reads MEMORIES with cluster_id (set by consolidation
+/// clustering)
 /// and creates edges in ASSOCIATIONS based on embedding similarity and temporal
 /// patterns.
 ///
@@ -21,7 +22,7 @@ namespace cortext::operations
 /// - 'reinforces': Decay applied to existing reinforcement edges
 ///
 /// Input:
-/// - MEMORIES table (with cluster_id from ConsolidationSummarize)
+/// - MEMORIES table (with cluster_id from consolidation clustering)
 /// - embeddings table (for computing similarities)
 ///
 /// Output:

@@ -43,8 +43,7 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   const auto &cfg = context.GetConfig ();
   auto params = ConsolidationClusterParams::FromKnobs (cfg.focus, cfg.sensitivity,
                                                        cfg.stability);
-  const bool force_consolidation
-      = context.GetSignal ().consolidation_mode.has_value ();
+  const bool force_consolidation = context.GetSignal ().force_consolidation;
 
   // v2: Load candidates from context (in-memory passing)
   const auto &input_candidates = context.GetConsolidationCandidates ();
@@ -156,9 +155,10 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
               std::vector<int> nb_neighbors = neighbors_of (nb);
               if (static_cast<int> (nb_neighbors.size ()) >= min_pts)
                 {
-                  neighbors.insert (neighbors.end (),
-                                    nb_neighbors.begin (),
-                                    nb_neighbors.end ());
+                  for (int candidate : nb_neighbors)
+                    {
+                      neighbors.push_back (candidate);
+                    }
                 }
             }
           if (cluster_labels[static_cast<size_t> (nb)] < 0)

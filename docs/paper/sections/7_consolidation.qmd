@@ -1,459 +1,125 @@
 # Consolidation and Graph Integration {#sec-consolidation}
 
-The consolidation system transforms episodic memories into semantic structures through clustering, summarization, and knowledge graph construction. Memory-level storage (@sec-write-pacing) ensures each embedding represents a coherent unit.
+Consolidation now means explicit embedding replay over stored memories. It is a
+production operation inside the normal pipeline, not a separate semantic batch
+processor. The current hard-cut implementation removes the previous internal
+generative consolidation stack and keeps only shallow graph consolidation.
 
-## Complementary Learning Systems Split (Hippocampus vs Cortex)
+## Complementary Learning Systems Split
 
-Cortext implements a **Complementary Learning Systems (CLS)-inspired** split. The episodic stream remains intact, but a separate **sparse index store** supports rapid binding and pattern completion (hippocampal analogue). Consolidation then transfers structure into the semantic graph and long-lived embeddings (cortical analogue) via replay.
+Cortext keeps the Complementary Learning Systems split at the level that matters
+for the product:
 
-* **Episodic stream (hippocampus-like):** `memory_stream` of coherent units + full metadata.
-* **Index store (hippocampus-like):** sparse keys for fast binding, disambiguation, and pattern completion.
-* **Semantic graph + long-lived embeddings (cortex-like):** consolidated, slowly-changing semantic structures.
+* **Fast episodic write path:** coherent memories are written immediately with
+  source payloads, embeddings, timestamps, and graph metadata.
+* **Bounded live state:** working memory and soft-anchor state support immediate
+  continuity without scanning the whole store.
+* **Slow durable graph:** explicit consolidation periodically clusters older
+  long-term memories and writes stable graph structure.
 
-This split makes “episodic vs semantic” a functional distinction rather than a storage convention.
-
-## Pattern Separation and Completion {#sec-pattern-separation}
-
-Each memory builds a deterministic **sparse key** for pattern separation. The current implementation uses the top absolute embedding dimensions as a compact signature, not a learned projection. Retrieval can then perform exact-key sparse seeding from partial cues; radius/Hamming expansion remains a planned extension rather than the active lookup path.
-
-```
-key  ← top_abs_dims(e_rep, k = round(lerp(16, 64, F)))  # deterministic sparse signature
-index_store[key].append(memory_id)
-```
-
-Pattern completion from a partial cue uses the sparse key to seed retrieval:
-```
-cue_key ← top_abs_dims(q_partial, k)
-seed_ids ← index_store.lookup(cue_key)  # exact sparse-key lookup in current runtime
-```
-
-These seeds are merged with vector and graph candidates, improving disambiguation when content similarity is ambiguous.
-
-On write, every memory updates the index store:
-```
-index_store[key].append(memory_id)
-```
+The split is functional rather than model-based. No decoder is required to
+transfer state from the fast path to the durable graph.
 
 ## Consolidation Triggers {#sec-consolidation-triggers}
 
-Consolidation operates on stored memory representatives (e_rep from @sec-rep-embedding), not individual signals. Candidates are restricted to **unclustered LONG_TERM memories**, and deep mode additionally requires stored content blobs (`blob_id` present) so summarization always has raw source text. Previously generated **ASSOCIATION** summaries are treated as sealed semantic products at the same consolidation level: they remain available for retrieval and graph expansion, but they are not fed back into later same-level deep summarization. **Consolidation is only initiated via an explicit API call (`Consolidate()`).** The core runtime does not auto-trigger consolidation.
+Consolidation is external-only. The runtime never schedules it by itself.
+Callers invoke `Consolidate()` or process a maintenance signal with
+`Signal::force_consolidation=true`. This keeps production scheduling under the
+application's control while still letting the engine derive recommendation flags
+from the three knobs.
 
-External schedulers can still **derive a trigger policy** from the knobs. One recommended heuristic is:
+A caller can use the following external scheduling rule:
 
-```
-should_consolidate = (memory_count > consolidation_threshold) OR
-                      (m_rate < rate_target / 2) OR
-                      (elapsed_time > consolidation_interval) OR
-                      (tagged_memory_pending == true)
-```
-
-Definitions (knob-derived):
-```
-consolidation_interval(T) = lerp(300, 3600, T)  # seconds (5 min → 1 hour)
-consolidation_threshold(T) = n_ctx(T) × win_score(T)  # memory-count trigger
-merge_threshold(F) = lerp(0.85, 0.95, F)  # similarity required for clustering
+```text
+should_consolidate =
+  elapsed_time >= consolidation_interval(T)
+  OR memories_since_consolidation >= consolidation_threshold(F,S,T)
+  OR caller_idle_window_available
 ```
 
-**Recommendation signal (external scheduling):** Each `Process*` call returns two flags that notify the caller when consolidation is **recommended** or **required** (without auto-triggering). These use the same knob-derived thresholds:
+The engine can recommend consolidation, but the API call is the only way to
+start it. `source_id` strings are never interpreted as maintenance commands.
 
-```
-consolidation_recommended =
-  (elapsed_time ≥ consolidation_interval) OR
-  (memories_since_consolidation ≥ consolidation_threshold)
-consolidation_required =
-  (elapsed_time ≥ consolidation_required_interval) OR
-  (memories_since_consolidation ≥ consolidation_required_threshold)
-consolidation_required_interval(T) = consolidation_interval(T) × lerp(1.5, 2.5, T)
-consolidation_required_threshold(T) = consolidation_threshold(T) × lerp(1.5, 2.5, T)
-```
+## Candidate Selection
 
-The consolidation rate adapts to Stability and Sensitivity (write_rate tracks memory writes, not signal writes):
+Consolidation operates on stored memory representatives, not raw signals.
+Candidates are restricted to eligible `LONG_TERM` source memories that have not
+already been assigned to the current consolidation cluster. The gate and cluster
+breadth derive from F/S/T:
 
-```
-rate_consolidate = (1 / max(consolidation_interval, 1)) ×
-                    (0.3 + 0.7T) × (1 − 0.5S)
+```text
+merge_threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
+min_cluster_size = ConsolidationMinClusterSize(F,S,T)
+source_span = ConsolidationClusterSourceSpan(F,S,T)
 ```
 
-When `Consolidate()` is invoked and fewer than `min_cluster_size(F)` candidates fall below the periphery cutoff, the forced path broadens to the lowest-scoring `max(w_ret(T), min_cluster_size(F))` eligible source memories. Deep mode keeps the source-blob eligibility filter so summarization always has raw evidence; shallow mode can use embedding-only memories. If clustering still yields no groups, a fallback mini-cluster is formed around the lowest-score item using its top cosine neighbors. This keeps replay/summarization active while remaining fully knob-derived.
+When a forced consolidation has too few low-strength candidates, the path
+broadens to the lowest-scoring eligible source memories. If clustering still
+finds no group, the fallback mini-cluster forms around the lowest-score item and
+its nearest cosine neighbors. This keeps replay active without adding a mode
+flag.
 
-### Activity-Aware Scheduling {#sec-activity}
+## Shallow Replay Product
 
-If the caller wants idle-aware scheduling, the following knob-derived gating can be applied **externally**. The is_accumulating_memory check ensures consolidation doesn't interrupt mid-memory accumulation:
+For each cluster, shallow consolidation writes one centroid `ASSOCIATION` memory
+and durable graph edges:
 
-```
-idle_required(T) = round(0.25 × win_rate_s(T))
-idle_for_s = now_s() − to_s(last_retrieval_ts)
-# Consolidation waits for memory completion, not just signal arrival
-should_start = (NOT is_accumulating_memory) AND
-                (retrieval_queue_depth == 0) AND
-                (idle_for_s ≥ idle_required(T))
-```
+```text
+association.embedding = centroid(cluster)
+association.kind = ASSOCIATION
+association.source_id = association_<timestamp>_<counter>
+association.label = ""
 
-Consolidation begins only after the current memory has been flushed (@sec-boundary) and the idle period has elapsed. On retrieval events, consolidation pauses, commits micro-batches, and resumes when idle.
-
-**Implementation note (topical_chat_analysis):** consolidation is **external-only**.
-The runtime does not schedule consolidation automatically; the caller must
-invoke `Consolidate()` explicitly (e.g., at a known idle window).
-
-## Consolidation Scoring
-
-Each stored embedding represents a memory representative (e_rep from @sec-rep-embedding). Each memory receives a consolidation score determining merge priority:
-
-```
-score_consolidate(m) = weight_strength × strength(m) −
-                        weight_redundancy × redundancy(m) +
-                        weight_connectivity × connectivity(m) +
-                        weight_stability × stability(m) +
-                        weight_tag × active_tag_strength(m)
+for source in cluster:
+  source.cluster_id = association.memory_id
+  emit association --derived_from--> source
 ```
 
-Weights derive from knobs:
+If durable `LABEL` memories already exist, the association centroid can attach
+to the nearest labels:
 
-```
-weight_strength = T; weight_redundancy = F; weight_connectivity = S; weight_stability = T
-weight_tag = ConsolidationCandidateTagWeight(F,S,T)
-```
-
-Low-scoring memories are marked for merging.
-
-## Replay-Based Consolidation and Summaries
-
-Consolidation proceeds via **generative replay** rather than one-shot merges. Representative episodes are re-encoded and used to update semantic structures, reducing drift and preserving detail.
-
-**Summarization + labeling engine (deep mode):** Consolidation is the only stage that invokes a generative model. Deep mode resolves a local backend internally: **Gemma 4 E2B** through `third_party/litert_lm`, **LFM2/LFM2.5** through `llama.cpp` GGUFs, or a **mixed** path that uses Gemma 4 for summarization and a Liquid GGUF for extraction. Auto resolution now requires the local Gemma 4 E2B LiteRT model. The Liquid resolver remains available by explicit override and prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization when present, defaulting to the local `Q4_K_M` checkpoints and accepting other bundled GGUF quantizations as fallbacks. Other online operations remain embedding-first and graph-first; production retrieval can also use bounded F/S/T-derived text, fact, label, and source-evidence routes when durable evidence already exists. **There is no extractive fallback**: if no deep backend is available, deep consolidation raises an error rather than silently degrading. Summarization now creates compact retrieval-surface summary nodes when the summarizer is available, while destructive eviction remains storage-gated. After the prompt-technique ablations in [Section 9](#sec-extractor-prompt-ablation) and [Section 9](#sec-summarizer-prompt-ablation), the default local Liquid extraction prompt is now a short **few-shot durable** prompt, and the default local Liquid summarization prompt is now a **transcript few-shot** prompt for the override path. The production default relies on Gemma 4 for multimodal label refinement and summarization.
-
-## Shallow Consolidation (Embedding‑Only)
-
-Shallow consolidation is an explicit, embedding‑only phase for fast labeling and graph priming. It skips summarization/extraction and instead:
-
-1. Creates a centroid **ASSOCIATION** node per cluster (no summary blob).
-2. Updates `cluster_id` for source memories and emits `derived_from` edges.
-3. Attaches existing **LABEL** nodes by embedding similarity.
-
-Shallow labeling uses knob‑derived limits and thresholds:
-
-```
-max_labels_per_cluster = ShallowConsolidationMaxLabels(F,S,T)
-label_attach_threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
+```text
+max_labels = ShallowConsolidationMaxLabels(F,S,T)
+threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
+emit association --has_label--> label when cos(centroid, label) >= threshold
 ```
 
-For each cluster centroid, we compute cosine similarity to the attached static label-bank vectors and to any durable dynamic labels already produced by consolidation, retain candidates above the threshold, and attach the top‑K labels by similarity.
-
-To avoid a cold start, Cortext ships a **label bank** as a static list of high-frequency labels (objects, sounds, relations, names) pre-embedded with the configured text encoder. The static bank is not copied into each user's graph database and is not stored as user-owned `LABEL` memories. Instead, production `LoadLabelBank` attaches `data/label_bank/label_bank.sqlite` read-only and queries its sqlite-vec table directly. Candidate static labels receive a knob-derived baseline salience:
-
-```
-salience_seed = clamp(lerp(0.35, 0.65, 0.5(F̃+S̃)) × lerp(1.0, 0.9, T), 0, 1)
-```
-
-This provides shallow consolidation with immediate label candidates without invoking any generative model.
-
-Label bank embeddings are generated offline (dataset -> embeddings) and committed
-as a compact SQLite vector seed at `data/label_bank/label_bank.sqlite`.
-The JSONL form
-(`data/label_bank/labels.jsonl` plus `metadata.json`) remains the rebuild input
-and does not require runtime re‑encoding. We build the label list from
-**Hugging Face datasets** (FSD50K for sounds, ConceptNet for common terms, and
-Gender‑by‑Name for names) using `tools/label_bank_builder/build_label_bank.py`,
-embed with `tools/label_bank_generator`, and pack the committed SQLite vector
-seed with `tools/label_bank_sqlite_builder`.
-
-Replay batch:
-```
-replay_batch ← sample(memory_stream, weights = strength(m) × (1 + tag_bonus(m)))
-for m in replay_batch:
-    reencoded ← encode(fetch_blobs(m))  # re-encode episodic content
-    update_semantic_structures(reencoded, m.context, m.source_model)
-```
-
-After replay, marked memories can still cluster via density-based methods (e.g., DBSCAN) or k-means using embedding similarity:
-
-```
-cluster_i = {m_j | cos(m_j, μ_i) > merge_threshold}
-μ_i = centroid(cluster_i)
-```
-
-Deep consolidation first creates a non-lossy associative cue node. This node is
-the stable graph anchor for labels and retrieval; it does not replace the raw
-episodic memories and does not count as compression:
-
-```
-cue.embedding = μ_i
-cue.source_id = "associative_cue_*"
-cue.metadata.sources = [m.id for m in cluster_i]
-emit edge(cue, m, type="derived_from") for m in cluster_i
-```
-
-When source text and a summarizer are available, deep consolidation can also
-create a compact summary node:
-
-```
-summary.embedding = μ_i
-summary.blob = summarize(fetch_blobs(cluster_i))  # deep local LLM backend (Gemma/LiteRT-LM or LFM2/llama.cpp)
-summary.metadata.sources = [m.id for m in cluster_i]
-```
-
-**Current implementation note:** same-level deep summarization now replays only raw episodic `LONG_TERM` memories that have not yet been assigned to a consolidation cluster. This prevents repeated summary-of-summary compression in long chat sessions while still allowing later raw evidence to form new sibling summaries. Higher-level semantic summarization, if desired, should be modeled as an explicit separate layer rather than by recursively feeding first-level summary blobs back into the same consolidation path. Associative cue nodes are reusable graph anchors for a source set. Summary node creation is not itself gated by storage pressure when the summarizer and source text are available; storage pressure gates destructive eviction/deletion, so raw evidence remains canonical unless a separate deletion guard is satisfied.
-
-To keep consolidation latency bounded, summarization input is capped by knob‑derived limits. Source texts are ranked by similarity to the cluster centroid and truncated:
-
-```
-budget = ConsolidationSummaryEvidenceBudgetForKnobs(F,S,T)
-max_source_texts = budget.max_source_texts
-max_text_chars   = budget.max_text_chars
-max_total_chars  = budget.max_total_chars
-source_texts = topk_by_cosine(cluster_texts, k=max_source_texts)
-truncate each text to max_text_chars and total to max_total_chars
-size decoder budget from capped input length; do not hard-trim stored summary text
-```
-
-## Semantic Extraction
-
-For sufficiently large clusters, semantic extraction identifies labels and relations (deep mode only):
-
-```
-extraction_batch_size = round(lerp(8, 32, T))
-min_cluster_size = round(lerp(3, 10, F))
-label_frequency_threshold = round(lerp(5, 15, T))
-extraction_interval = lerp(300, 3600, T)  # 5 min → 1 hour
-max_extractions_per_cycle = round(lerp(20, 5, T))
-```
-
-Extraction uses structured prompting over raw source texts from the memory
-cluster, not over the summary text. Labels attach to the associative cue node with
-`has_label` edges:
-
-```
-request.texts = fetch_blobs(cluster_i)
-request.anchor = cue.source_id
-labels, relations, facts = extract(request.texts)
-emit edge(cue, label, type="has_label")
-```
-
-This makes label formation a consolidation behavior, independent of storage
-pressure and independent of whether a lossy summary is created. The label array
-is allowed to be empty: filler-only or banter-only clusters should produce no
-`LABEL` node rather than forcing the model to choose a token. Extracted
-labels/tags (people, places, organizations, concepts) and relationships
-(co-occurrence, implication, contradiction) are stored as graph products.
-Labels are stored as surface strings (no type/category field) **and** persisted
-with their own embeddings so they can participate in retrieval and graph
-expansion.
-
-Deep consolidation also consumes the **short-term graph memory** accumulated
-during live processing. Before the relabeler runs, the associative cue gathers
-candidate labels from the STM graph whose signal embeddings match the cluster's
-source memories. These labels are passed as `current_labels` to the relabeler
-alongside the raw source blobs/text. The relabeler/pruner then returns the
-replacement durable label set for that cue: supported labels are inserted or
-reweighted as `has_label` edges, unsupported provisional STM labels are simply
-not promoted, unsupported durable label edges are deleted when present, and the
-cue remains connected to every source memory through `derived_from` edges. In
-other words, the intended LTM product is not a summary string. It is a durable,
-source-grounded graph node produced by replaying STM graph structure through a
-blob-aware relabel/prune step.
-
-**Current implementation note:** the deployed runtime now persists extracted labels directly from each extraction result, deduped by normalized label key within the result and reused by key across the store. The old knob-derived repetition gate and single-label fallback were removed because they made durable label formation too dependent on exact repeated strings and caused obvious chat failures like identity/name loss and severe label undercounting. The current runtime also applies deterministic quality gates before persistence: transcript fillers, helper tokens, and speaker-role terms such as `ya`, `know`, `you know`, `um`, `uh`, `ok`, `okay`, `user`, and `assistant` are not durable graph labels even if a model emits them; when raw cue evidence is available, candidate labels must also appear in the source memory text after simple canonicalization. This rejects prompt/example leakage such as `confidence` or `interview` in banter-only clusters without globally banning those words when they are actually present. The online path is still simple: accepted label strings are inserted as `LABEL` memories, salience is embedding-derived, and repeated mentions update `s_max` on the existing label node. In parallel, we continue to study a more semantic alternative through the **offline semantic label-classifier prototype** in `scripts/build_wordnet_label_index.py`, `scripts/build_name_priors.py`, `scripts/build_label_training_data.py`, `scripts/train_label_classifier.py`, and `scripts/eval_label_classifier.py`. That prototype trains two small models over candidate spans:
-
-* a **span typing** head (`identity`, `person_entity`, `place`, `org_project`, `topic`, `state`, `none`), and
-* a **promotion** head (`durable`, `provisional`, `ignore`)
-
-using WordNet-derived concept priors, multilingual given-name/surname priors, sentence context, and optional external text embeddings. The current study build sources those priors from the multilingual `data/surnames` tables plus U.S. Census surnames. It is currently an offline study artifact rather than part of the deployed consolidation path.
-
-Label salience is derived from embeddings rather than model guesses:
-
-```
-e_label = encode(label_text)
-salience(label) = clamp((cos(e_label, cue.embedding) + 1) / 2, 0, 1)
-```
-
-Label embeddings are cached by normalized label key. If a label already exists
-in the store (or is present in the in-memory cache), its embedding is reused
-instead of re-encoding, reducing consolidation latency without changing
-salience computation.
-
-If a label already exists, its stored salience is updated with `s_max = max(s_max, salience(label))`.
-
-## Temporal Consolidation of Changing Facts
-
-For long-horizon personal memory support, consolidation must avoid flattening changing facts into one timeless summary. Living arrangements, caregivers, appointments, medications, projects, and routines can all change over time. A memory system that simply overwrites older facts loses exactly the temporal nuance that matters most in care-oriented settings.
-
-Phase 1 adds **fact assertions with temporal semantics** as a consolidation product alongside labels and relations:
-
-```
-fact_assertion_j = (
-  subject,
-  predicate,
-  object,
-  valid = [t_v_start, t_v_end),
-  tx    = [t_tx_start, t_tx_end),
-  provenance = {source_memory_ids, source_associative_cue_ids, source_summary_ids},
-  confidence
-)
-```
-
-Under this model, consolidation preserves temporal history at the fact layer. New evidence does not erase prior assertions in place as timeless truth. Instead:
-
-1. A new assertion is inserted with its own valid and transaction interval.
-2. If it conflicts with an earlier open-ended assertion on the same subject/predicate, the earlier assertion can be closed or superseded.
-3. Both the earlier and later assertions remain queryable through their intervals and provenance.
-
-This yields a cleaner separation between:
-
-* what was true in the world at a given time,
-* when Cortext learned that truth,
-* and when Cortext later revised its belief.
-
-For example, "caregiver = Sarah" may be valid through March, while "caregiver = Emily" becomes valid in April but is only learned in May. Bitemporal consolidation preserves both the world timeline and the system-learning timeline, preventing late-arriving information from rewriting the past.
-
-This temporal structure is especially important for dementia-support scenarios. Gentle reminders should be able to express not only the current state ("Emily is your caregiver now") but also historical context ("Sarah used to visit on Tuesdays") and uncertainty about when a change was learned ("as of the latest update"). In practice, this means summarization should verbalize temporal transitions rather than compress them away. Retrieval-time use of these facts is a later phase; the current phase is about preserving the right temporal ground truth and provenance.
-
-The next core requirement is lifecycle maintenance. Facts should remain more durable than raw episodes, but they should not become an unbounded append-only residue. The current implementation therefore treats repeated confirmations as support updates rather than new open assertions, tracks contradiction pressure and source diversity, decays unsupported facts toward `weak` or `archived`, and only physically deletes low-severity archived facts after an additional retention gate. High-severity historical facts remain archived rather than deleted so temporal reconstruction is preserved.
-
-## Knowledge Graph Construction
-
-The durable graph surface includes several node/fact products:
-
-* **Episodic Memory Nodes:** Raw coherent memories and their embeddings.
-* **Association/Cue/Summary Nodes:** Consolidation anchors and optional compact summaries.
-* **Label Nodes:** Extracted labels/tags derived from content blobs.
-* **Fact Assertions/Cache Rows:** Bitemporal structured claims and retrieval surfaces used by fact-aware ranking.
-
-Edge types capture relationships:
-
-Edge weight convention (MUST): all association weights are normalized to [0, 1]. For cosine-based edges, store weight01 = clamp((cos_sim + 1) / 2, 0, 1).
-
-* **co_occurs:** Shared context or temporal proximity
-* **implies:** Directional correlation in embedding drift
-* **causes:** Directional correlation in embedding drift
-* **contradicts:** Strong negative similarity or constraint violation
-* **reinforces:** Frequent joint retrieval
-* **derived_from:** Links summaries to source memories
-* **similar_to:** High cosine similarity (soft equivalence)
-* **has_label:** Attaches an extracted label/tag to a node
-* **next_in_episode:** Sequential link to next memory in the same episode
-* **prev_in_episode:** Sequential link to previous memory in the same episode
-* **within_same_event:** Link for memories within the same inferred boundary segment
-
-### Edge Construction
-
-Co-occurrence edges derive from embedding similarity:
-
-```
-for (m_i, m_j) in cluster.sources:
-    cos_sim ← cos(m_i.embedding, m_j.embedding)
-    if cos_sim > lerp(0.85, 0.95, F):
-        weight01 ← clamp((cos_sim + 1) / 2, 0, 1)
-        create_edge(m_i, m_j, 'co_occurs', weight01)
-```
-
-Causal edges derive from temporal drift:
-
-```
-temporal_order ← sort_by_timestamp(cluster.sources)
-for i in range(len(temporal_order) − 1):
-    m_i, m_j ← temporal_order[i], temporal_order[i+1]
-    drift_vec ← m_j.embedding − m_i.embedding
-    drift_mag ← ‖drift_vec‖
-    if drift_mag > lerp(0.15, 0.35, T):
-        weight01 ← clamp(drift_mag / 2, 0, 1)  # drift_mag ∈ [0,2] when embeddings are L2-normalized
-        create_edge(m_i, m_j, 'causes', weight01)
-```
-
-Sequential edges preserve episode order as first-class memory:
-
-```
-for i in range(len(temporal_order) − 1):
-    m_i, m_j ← temporal_order[i], temporal_order[i+1]
-    gap_s ← to_s(m_j.created_at) − to_s(m_i.created_at)
-    boundary_prob ← m_j.boundary_score  # stored posterior from @sec-boundary
-    w_seq ← clamp(exp(−gap_s / lerp(10, 60, T)) × (1 − boundary_prob), 0, 1)
-    create_edge(m_i, m_j, 'next_in_episode', w_seq)
-    create_edge(m_j, m_i, 'prev_in_episode', w_seq)
-    if boundary_prob < 0.3:
-        create_edge(m_i, m_j, 'within_same_event', w_seq)
-```
-
-## Graph-Augmented Retrieval
-
-Retrieval combines vector similarity, **index-store pattern completion**, temporal context reinstatement, and graph expansion. The query vector is the **current accumulator centroid** (μ_acc), L2‑normalized for vector search.
-
-```
-# Query and re-rank using current memory centroid + recent context
-μ_ctx ← mean(recent_context_embeddings)  # recent context query blend
-λ_q(F,S,T) = RetrievalContextMix(F,S,T)  # bounded STM recency cue
-q ← l2_normalize((1 − λ_q) × μ_acc + λ_q × μ_ctx)  # cached pre-reset
-q_ctx ← c_t               # temporal context from @sec-temporal-context
-
-kNN_size(F) = RetrievalMaxResults(F)
-seed_search_k = RetrievalSeedSearchK(F,S,T,kNN_size)
-results_vec ← topK(vector_search(q, k=seed_search_k))
-score_vec(r) = RetrievalVectorDistanceScore(r.distance,F,S,T)
-seed_vec ← [r.id for r in results_vec]
-summary_k = RetrievalSummaryLabelSeedCount(F,S,T)
-fact_k = RetrievalFactVectorSeedCount(F,S,T)
-static_label_seeds ← topK(attached_label_bank_vec, q, k=summary_k)
-dynamic_label_seeds ← topK(durable_label_and_association_state, q, k=summary_k)
-fact_seeds ← topK(fact_cache_vec, q, k=fact_k) ∪ bounded_fact_text_route(q)
-source_text_seeds ← bounded_durable_source_text_route(q)
-seed_idx ← index_store.lookup(sparse_key(q))  # exact-key in current runtime
-seed_nodes ← union(seed_vec, static_label_seeds, dynamic_label_seeds,
-                   fact_seeds, source_text_seeds, seed_idx)
-
-if |seed_nodes| == 0 OR graph is empty:
-    return results_vec  # deterministic fallback, skip expansion
-
-expanded_nodes ← graph.traverse(seed_nodes,
-                                depth=graph_depth(T),
-                                min_edge_weight=min_edge_weight(F),
-                                row_limit=RetrievalGraphExpansionRowLimit(F,S,T,k),
-                                edge_types=associations_above_threshold)
-combined ← union(seed_nodes, expanded_nodes)
-{min_assoc,min_label} = RetrievalGraphExpansionEvidenceCounts(F,S,T)
-if min_assoc > 0:
-    combined ← combined ∪ {assoc | edge_type='derived_from' AND target∈combined}
-if min_label > 0:
-    combined ← combined ∪ {label | edge_type='has_label' AND source∈combined}
-min_edge_weight(F) = lerp(0.08, 0.40, F)
-dup_thresh = lerp(0.985, 0.95, F) × (0.98 + 0.02T)
-eligible ← {m ∈ combined | m.created_at < write_exclusion_ts}
-eligible ← {m ∈ eligible | max_{w∈WM} cos(m.embedding, w) < dup_thresh}
-seed_only_source_confidence = RetrievalSeedFallbackSourceConfidence(F,S,T)
-source_backed_floor = RetrievalSourceBackedBoostFloor(F,S,T)
-eligible ← {m ∈ eligible | source_confidence(m) ≥ RetrievalSourceConfidenceThreshold(F,S,T,storage_pressure)}
-
-# Diversified re-rank (MMR-style) with context reinstatement
-w_rel_raw = lerp(0.65, 0.94, F) × lerp(1.0, 0.85, S) × lerp(1.0, 0.90, T)
-w_div_raw = lerp(0.35, 0.06, F) × lerp(0.75, 1.15, S) × lerp(0.85, 0.65, T)
-[w_rel, w_div] = normalize([w_rel_raw, w_div_raw])
-[w_ctx,w_proc,label_boost] = RetrievalCandidateBlendScoringWeights(F,S,T)
-w_emotion = lerp(0.0, 0.12, S_affect)
-affect_gain(S) = lerp(1.0, 2.4, S_affect)
-[w_arousal, w_affect_emotion, w_salience] = AffectDriveWeights(S)
-affect_drive = clamp(affect_gain(S) × (w_arousal × arousal + w_affect_emotion × emotion_intensity + w_salience × salience), 0, 1)
-weights_mem_raw = [lerp(0.60, 0.80, S), lerp(0.20, 0.40, S)]
-[w_mem_emotion, w_mem_arousal] = normalize(weights_mem_raw)
-
-selected ← []
-while |selected| < k AND |eligible| > 0:
-    m* ← argmax_{m ∈ eligible} [
-            w_rel × max(0, cos(q, m.embedding)) +
-            w_ctx × max(0, cos(q_ctx, m.context)) +
-            w_proc × max(0, proc_sim(m)) +
-            label_boost × durable_label_overlap(q,m) +
-            fact_boost(F,S,T,m) +
-            temporal_rank_weight(F,S,T) × temporal_rank_score(m) +
-            w_emotion × affect_drive × (w_mem_emotion × emotional_intensity(m) + w_mem_arousal × s_arousal_avg(m)) −
-            w_div × max_{s∈selected} max(0, cos(m.embedding, s.embedding))
-         ]
-    selected.append(m*)
-    eligible.remove(m*)
-return selected
-```
-
-Graph expansion uses recursive traversal with depth limits to find related context that pure vector search might miss. Using the memory centroid maintains consistency between vector search and graph expansion results.
-
-Static label seeds come from the attached read-only SQLite label bank through sqlite-vec search. Dynamic label, association, fact, and summary seeds come from the ordinary durable memory graph produced by consolidation. The runtime no longer copies the static label bank into user memory tables or hydrates the entire bank into an in-memory `summary_cache`; production retrieval is embedding-first with bounded F/S/T-derived label, fact, text, durable-source, graph, and temporal routes layered onto the same compact candidate surface.
-
-For affective gain in retrieval, we use a lighter bias \(S_{affect} = \mathrm{BiasMid}(S, -0.06)\) to preserve mid‑range affect modulation.
-
-`proc_sim(m)` denotes procedural similarity (habit/skill match) when a procedural embedding is available; if no procedural cue is present, treat it as 0 so retrieval remains purely declarative.
+This is intentionally opportunistic. The current engine does not synthesize
+labels from a decoder, does not attach a static taxonomy database, and does not
+promote provisional shadow labels. Existing label nodes are treated as graph
+evidence only.
+
+## Graph Build
+
+After shallow replay, `BuildGraphFromConsolidation` reinforces durable graph
+structure among the cluster products and sources. The graph builder remains
+bounded by knob-derived edge weights, relation fanout, and source-span limits.
+The graph products are useful for later retrieval because graph expansion can
+recover clustered source memories through `derived_from`, co-occurrence,
+similarity, reinforcement, and causal edges.
+
+## What Was Removed
+
+The following systems are no longer part of the runtime:
+
+* mode-selected semantic batch replay and public mode enums,
+* internal decoder-backed semantic operations,
+* vendored decoder runtime integration,
+* remote/local decoder adapter registry,
+* static taxonomy loading,
+* STM shadow graph promotion,
+* persistent confidence-monitoring state,
+* bitemporal fact assertion/cache/evidence tables,
+* fact-aware retrieval and eviction policies.
+
+The removal is a hard cut, not a compatibility shim. New databases no longer
+create the removed tables, public bindings no longer expose the removed mode
+fields, and replay reports no longer emit the removed debug metrics.
+
+## Latency Discipline
+
+The consolidation target is bounded sleep-like replay. The work is dominated by
+SQLite candidate reads, vector centroid formation, association writes, and graph
+edge updates. There are no hidden decoder calls in the current path, so replay
+latency should scale with the number of selected memories and cluster edges, not
+with source text length or multimodal payload size.

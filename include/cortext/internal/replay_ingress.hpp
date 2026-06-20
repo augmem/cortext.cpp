@@ -33,9 +33,8 @@ public:
       int channels, const std::string &source_id, std::uint64_t timestamp,
       Retention retention = Retention::Durable);
 
-  static Cortext::Context ConsolidateAt (
-      Cortext &cortext, std::uint64_t timestamp,
-      ConsolidationMode mode = ConsolidationMode::Both);
+  static Cortext::Context ConsolidateAt (Cortext &cortext,
+                                         std::uint64_t timestamp);
 };
 
 } // namespace cortext::internal

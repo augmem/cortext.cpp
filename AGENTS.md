@@ -36,19 +36,14 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - CMake 3.16+ - primary native build system in `CMakeLists.txt`; presets require CMake 3.21+ in `CMakePresets.json`.
 - SQLite 3 - primary persistence layer via system `sqlite3` on native builds and vendored `third_party/sqlite` for WASM in `CMakeLists.txt` and `include/cortext/store/sqlite_store.hpp`.
 - Eigen 3.4.0 - numeric/vector math dependency fetched in `CMakeLists.txt`.
-- nlohmann/json v3.12.0 - JSON handling for C API responses, generator schemas, and tests in `CMakeLists.txt`, `src/capi.cpp`, and `src/generator/json_decoder.cpp`.
+- nlohmann/json v3.12.0 - JSON handling for C API responses, binding helpers, and tests in `CMakeLists.txt` and `src/capi.cpp`.
 - Catch2 v3.5.3 - unit/integration test framework fetched in `tests/CMakeLists.txt`.
 - CTest - test registration and execution live in `CMakeLists.txt` and `tests/CMakeLists.txt`.
-- Bazel/Bazelisk - required to build LiteRT-LM in `CMakeLists.txt` and `scripts/build_litert.sh`.
 - pkg-config - required to discover system SQLite on native builds in `CMakeLists.txt`.
-- Zlib - required for ONNX Runtime integration in `CMakeLists.txt` and `src/encoder/embeddinggemma.cpp`.
 - Emscripten - optional WASM toolchain in `cmake/EmscriptenToolchain.cmake`.
 ## Key Dependencies
 - `opentelemetry-cpp` v1.24.0 - tracing/metrics/logging API dependency fetched in `CMakeLists.txt` and used in `src/telemetry/telemetry.cpp`.
-- ONNX Runtime - optional local inference runtime for Gemma ORT paths in `CMakeLists.txt` and `src/encoder/embeddinggemma.cpp`.
-- `onnxruntime-genai` - Phi-4 extractor/summarizer backend vendored via `third_party/onnxruntime-genai` and linked in `CMakeLists.txt`, `src/extractor/phi4_extractor.cpp`, and `include/cortext/summarizer/phi4_summarizer.hpp`.
-- LiteRT-LM - Gemma extractor/summarizer backend vendored via `third_party/litert-lm` and linked in `CMakeLists.txt`, `src/extractor/gemma_extractor.cpp`, and `src/summarizer/gemma_summarizer.cpp`.
-- `llama.cpp` system libraries (`llama`, `ggml`, `ggml-base`) - GGUF inference path for Liquid/LFM2 and optional EmbeddingGemma GGUF in `CMakeLists.txt`, `src/deep_llm/deep_llm_factory.cpp`, and `src/encoder/embeddinggemma.cpp`.
+- `llama.cpp` system library - optional GGUF embedding backend for AIST in `CMakeLists.txt`, `src/models/aist_gguf_encoder.cpp`, and `src/models/llama_cpp_support.hpp`.
 - `sherpa-onnx` - offline ASR/TTS integration in `CMakeLists.txt`, `src/audio/sherpa_onnx.cpp`, and `include/cortext/audio/sherpa_onnx.hpp`.
 - `sqlite-vec` - embedded vector index for 256-dim embeddings in `CMakeLists.txt`, `src/store/schema.cpp`, and `src/store/extension_loader.cpp`.
 - `sqlite-objstore` - blob/object payload storage in `CMakeLists.txt`, `src/store/schema.cpp`, `src/store/extension_loader.cpp`, and `src/operations/memory_storage.cpp`.
@@ -56,29 +51,20 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Desktop UI stack for chat example:
 ## Configuration
 - Build toggles are controlled through CMake options in `CMakeLists.txt` and presets in `CMakePresets.json`.
-- Runtime model discovery is driven by the `models_dir` argument on `cortext::Cortext::Create()` in `include/cortext/cortext.hpp` and by encoder/backend resolution in `src/encoder/text_encoder_factory.hpp` and `src/deep_llm/deep_llm_factory.cpp`.
+- Runtime model discovery is driven by the `models_dir` argument on `cortext::Cortext::Create()` in `include/cortext/cortext.hpp` and by encoder/backend resolution in `src/encoder/text_encoder_factory.hpp`.
 - Important runtime overrides are read from environment variables in:
 - `.env` files: not detected by filename in the repo root during this scan.
 - Root build graph: `CMakeLists.txt`
 - Presets: `CMakePresets.json`
-- LiteRT helper scripts: `cmake/litert_append_build.cmake`, `cmake/litert_install.cmake`, and `scripts/build_litert.sh`
 - CI build recipe: `.github/workflows/build.yml`
 - Binding manifests: `bindings/python/pyproject.toml`, `bindings/go/go.mod`, and `bindings/javascript/package.json`
 ## Model and Runtime Assets
-- EmbeddingGemma ONNX export in `models/embeddinggemma-300m-onnx/`
-- EmbeddingGemma LiteRT export in `models/embeddinggemma-300m-litert/`
-- EmbeddingGemma GGUF in `models/llama_cpp/`
-- Gemma 3n LiteRT models in `models/gemma3n-e2b-litert/`
-- Gemma 3n ONNX assets in `models/gemma-3n/onnx/`
-- Phi-4 multimodal ONNX assets in `models/phi4-mm-cpu/`
-- Liquid/LFM2 GGUF assets in `models/LFM2-1.2B-Extract-GGUF/`, `models/LFM2-2.6B-Transcript-GGUF/`, `models/LFM2.5-1.2B-Instruct-GGUF/`, and `models/LFM2.5-350M-GGUF/`
+- AIST GGUF release model in `models/AIST-87M-GGUF/`
+- Optional fallback/demo embedding assets in `models/mdbr-leaf-ir/`
 - sherpa-onnx ASR/TTS assets in `models/sherpa-onnx/`
-- whisper.cpp asset in `models/whisper.cpp/`
 - Preferred text encoder resolution is implemented in `src/encoder/text_encoder_factory.hpp`.
-- Deep LLM backend selection and model fallback order are implemented in `src/deep_llm/deep_llm_factory.cpp`.
 ## Platform Requirements
 - C++20-capable compiler, CMake, pkg-config, and SQLite development headers are required by `README.md`, `CMakeLists.txt`, and `.github/workflows/build.yml`.
-- Bazel/Bazelisk is required when LiteRT-LM is enabled in `CMakeLists.txt` and `scripts/build_litert.sh`.
 - Native chat example additionally needs `glfw3`, OpenGL, and libcurl per `examples/chat/CMakeLists.txt`.
 - macOS voice/chat extras rely on Cocoa, Foundation, AVFoundation, IOKit, and CoreVideo in `examples/chat/CMakeLists.txt` and `examples/chat/voice_session.mm`.
 - No hosted deployment target is defined in the repo.
@@ -92,7 +78,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 ## Naming Patterns
 - Use lower_snake_case for C++ source and header files. Public/private pairs usually mirror each other, for example `src/operations/focus.cpp` with `include/cortext/operations/focus.hpp`, and tests follow the same stem with `.test.cpp`, for example `tests/operations_focus.test.cpp`.
 - Keep subsystem prefixes in filenames so related files sort together: `src/store/schema.cpp`, `src/store/facts.cpp`, `tests/store.test.cpp`, `tests/store_extensions.test.cpp`.
-- Internal-only helpers are explicit in the filename instead of hidden behind umbrella headers, for example `src/operations/meta_learning_internal.hpp`, `src/operations/constructive_recall_internal.hpp`, and `src/operations/eviction_ablation.hpp`.
+- Internal-only helpers are explicit in the filename instead of hidden behind umbrella headers, for example `src/operations/meta_learning_internal.hpp`, `src/operations/constructive_recall_internal.hpp`, and `src/operations/eviction_policy_override.hpp`.
 - In the library and most tests, use PascalCase for functions and methods, including file-local helpers: `NowMillis`, `ParseDbOperation`, `LoadObjstorePayload`, `InitializeCoreSchema`, `SeedEmbeddingV2`, and `IOperation::Execute`.
 - Preserve local style when a file already uses a different convention. Some tests and scripts use lower_snake_case helpers such as `create_temp_db`, `cleanup_temp_db`, `parse_metrics`, and `run_case` in `tests/store.test.cpp` and `scripts/run_memory_harness.py`.
 - Operation classes expose work through `Execute (OperationContext &, Transaction &) const` as defined in `include/cortext/processor/operation.hpp`.
@@ -114,10 +100,10 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Sanitizers are opt-in quality checks in `CMakeLists.txt`: `CORTEXT_ENABLE_ASAN`, `CORTEXT_ENABLE_UBSAN`, and `CORTEXT_ENABLE_MSAN`.
 ## Import Organization
 - Public headers are included with the installed-style prefix, for example `<cortext/processor.hpp>`, `<cortext/store/sqlite_store.hpp>`, and `<cortext/operations/focus.hpp>`.
-- Internal-only test coverage sometimes reaches into non-public code with relative includes when there is no public seam. Examples: `tests/deep_llm_factory.test.cpp` includes `../src/deep_llm/deep_llm_factory.hpp`, and `tests/chat_chunk_diagnostics.test.cpp` includes `../examples/chat/chunk_diagnostics.hpp`.
+- Internal-only test coverage sometimes reaches into non-public code with relative includes when there is no public seam. Examples include `tests/chat_chunk_diagnostics.test.cpp` including `../examples/chat/chunk_diagnostics.hpp`.
 - There are no alias macros or umbrella headers acting as barrel files. Include the exact header you need.
 ## Error Handling
-- Throw typed or standard exceptions for hard failures in low-level components. `src/store.cpp` throws `StoreError` on SQLite prepare/open failures, and `tests/deep_llm_factory.test.cpp` expects `std::runtime_error` for invalid backend overrides.
+- Throw typed or standard exceptions for hard failures in low-level components. `src/store.cpp` throws `StoreError` on SQLite prepare/open failures.
 - Catch exceptions at system boundaries when the code can degrade gracefully, then emit telemetry instead of crashing. `LoadObjstorePayload` and `LoadSignalBlobs` in `src/cortext.cpp` catch `std::exception` and log warnings before returning `false`.
 - Use `std::optional`, empty containers, or boolean return values for absence and best-effort behavior, for example `Context::ProcessorOutput` fields in `include/cortext/cortext.hpp` and the `bool` returns in `src/cortext.cpp`.
 - Mark intentionally unused parameters explicitly with `(void)tx;` in operation implementations such as `src/operations/focus.cpp`.
@@ -140,7 +126,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Stateful operations usually mutate context and transaction state rather than returning values. Follow the `IOperation` contract unless you are writing a pure helper outside the pipeline.
 ## Module Design
 - Public surface area lives under `include/cortext/` and is marked with `CORTEXT_EXPORT` when needed, for example `include/cortext/cortext.hpp`.
-- Keep internal implementation details in `src/` or internal headers such as `src/deep_llm/deep_llm_factory.hpp` and `include/cortext/internal/cancellation.hpp`.
+- Keep internal implementation details in `src/` or internal headers such as `src/operations/meta_learning_internal.hpp` and `include/cortext/internal/cancellation.hpp`.
 - Do not widen the public API accidentally. Tests are willing to include internal headers directly when coverage needs it.
 - Not used. Headers are imported directly by subsystem path, for example `include/cortext/operations/focus.hpp` and `include/cortext/store/sqlite_store.hpp`.
 - When adding a new operation or subsystem, create a matching header/source pair and include it explicitly from the call sites that need it.
@@ -157,12 +143,12 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Purpose: Stable entrypoints for native and FFI consumers.
 - Location: `include/cortext/cortext.hpp`, `include/cortext/capi.h`, `src/capi.cpp`
 - Contains: `cortext::Cortext`, the `Context` DTO, config structs, C ABI wrappers, JSON serialization helpers.
-- Depends on: `SignalProcessor`, encoder/extractor/summarizer factories, store implementation.
+- Depends on: `SignalProcessor`, encoder factory, store implementation.
 - Used by: `examples/topical_chat_analysis/main.cpp`, `examples/chat/main.cpp`, `bindings/python/cortext/__init__.py`, `bindings/go/cortext.go`, `bindings/javascript/src/addon.cpp`, tests such as `tests/cortext.test.cpp`.
 - Purpose: Build the runtime graph and choose local model backends.
-- Location: `src/cortext.cpp`, `src/encoder/text_encoder_factory.hpp`, `src/deep_llm/deep_llm_factory.cpp`
-- Contains: `Cortext::Impl`, operation-pipeline assembly, text encoder selection, deep summarizer/extractor selection, context hydration.
-- Depends on: operations, processor, store, telemetry, encoder/summarizer/extractor implementations.
+- Location: `src/cortext.cpp`, `src/encoder/text_encoder_factory.hpp`
+- Contains: `Cortext::Impl`, operation-pipeline assembly, text encoder selection, context hydration.
+- Depends on: operations, processor, store, telemetry, encoder implementations.
 - Used by: `Cortext::Create()` in `src/cortext.cpp`.
 - Purpose: Execute one signal through the algorithm stack while mutating long-lived processor state.
 - Location: `include/cortext/processor.hpp`, `include/cortext/processor/processor_context.hpp`, `include/cortext/processor/operation_context.hpp`, `src/signal_processor.cpp`
@@ -172,18 +158,18 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Purpose: Implement the actual cognitive/memory algorithms as small pipeline steps.
 - Location: `include/cortext/operations/*.hpp`, `src/operations/*.cpp`
 - Contains: scoring, thresholding, retrieval, graph construction, consolidation, working-memory, neuromodulation, accumulation, storage, and feedback steps.
-- Depends on: `OperationContext`, `ProcessorContext`, `Store`, occasionally encoder/extractor/summarizer interfaces.
+- Depends on: `OperationContext`, `ProcessorContext`, and `Store`.
 - Used by: `BuildPipelineRoot()` in `src/cortext.cpp`.
 - Purpose: Own schema, migrations, SQL execution, transaction nesting, and low-level content storage.
 - Location: `include/cortext/store/*.hpp`, `src/store.cpp`, `src/store/schema.cpp`, `src/store/facts.cpp`, `src/store/extension_loader.cpp`
 - Contains: `Store`, `Transaction`, `SQLiteStore`, schema migrations, sqlite extension loading, fact queries/helpers.
 - Depends on: SQLite C API, bundled sqlite extensions, telemetry.
 - Used by: `SignalProcessor`, `Cortext` hydration, store-focused tests such as `tests/store.test.cpp` and `tests/migration_core.test.cpp`.
-- Purpose: Encoders and local inference adapters for summarization, extraction, audio, and deep consolidation.
-- Location: `include/cortext/encoder/*.hpp`, `include/cortext/extractor/*.hpp`, `include/cortext/summarizer/*.hpp`, `include/cortext/audio/*.hpp`, `src/encoder/*.cpp`, `src/extractor/*.cpp`, `src/summarizer/*.cpp`, `src/audio/*.cpp`, `src/deep_llm/*.cpp`
-- Contains: `Encoder`, `Extractor`, `Summarizer` interfaces plus EmbeddingGemma, Gemma, Phi-4, sherpa-onnx, and llama.cpp-backed implementations.
+- Purpose: Encoders and local audio adapters.
+- Location: `include/cortext/encoder/*.hpp`, `include/cortext/models/*.hpp`, `include/cortext/audio/*.hpp`, `src/encoder/*.hpp`, `src/models/*.cpp`, and `src/audio/*.cpp`
+- Contains: `Encoder`, AIST GGUF embedding support, sherpa-onnx audio integration, and local model pinning.
 - Depends on: model assets under `models/`, third-party runtimes configured in `CMakeLists.txt`.
-- Used by: the composition layer in `src/cortext.cpp` and targeted tests like `tests/gemma_extractor.test.cpp` and `tests/phi4_summarizer.test.cpp`.
+- Used by: the composition layer in `src/cortext.cpp` and targeted AIST/model-pin tests.
 - Purpose: Optional binaries for manual use, experiments, telemetry smoke tests, and research sweeps.
 - Location: `examples/`, `tools/`, `scripts/`
 - Contains: chat UI, benchmark programs, topical-chat analysis, sqlite telemetry smoke test, offline label/text tools, Python/bash experiment harnesses.
@@ -207,12 +193,12 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Examples: `include/cortext/store/store.hpp`, `include/cortext/store/sqlite_store.hpp`
 - Pattern: Interface + SQLite implementation with nested transactions/savepoints.
 - Purpose: Hide model-specific runtime details from the processing pipeline.
-- Examples: `include/cortext/encoder/encoder.hpp`, `include/cortext/extractor/extractor.hpp`, `include/cortext/summarizer/summarizer.hpp`
+- Examples: `include/cortext/encoder/encoder.hpp`, `include/cortext/models/aist_gguf_encoder.hpp`, `include/cortext/models/embedding_model_pin.hpp`
 - Pattern: Runtime-selected strategy objects passed into `SignalProcessor::Config`.
 ## Entry Points
 - Location: `src/cortext.cpp`
 - Triggers: `Cortext::Create()` from C++ callers and `cortext_create_with_config()` from `src/capi.cpp`
-- Responsibilities: Open store, run migrations, choose encoder and deep LLM backends, build pipeline root, create `SignalProcessor`.
+- Responsibilities: Open store, run migrations, choose encoder backend, build pipeline root, create `SignalProcessor`.
 - Location: `include/cortext/cortext.hpp`, `src/cortext.cpp`
 - Triggers: Text/audio/image calls from examples, tests, and bindings.
 - Responsibilities: Encode input, execute processor, hydrate memory results, return `Context`.
@@ -271,7 +257,7 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 - `examples/`: runnable demos and analysis tooling (e.g., `examples/topical_chat_analysis`).
 - `scripts/` + `tools/`: experiment harnesses and generators (e.g., `scripts/run_memory_harness.py`).
 - `docs/paper/sections/`: manuscript source; `docs/paper/_manuscript/` is generated output.
-- `models/` + `third_party/`: runtime assets (EmbeddingGemma, LiteRT, sqlite extensions).
+- `models/` + `third_party/`: runtime assets (AIST, sqlite extensions, optional audio/runtime support).
 
 ## Build, Test, and Development Commands
 - Configure/build:
@@ -318,7 +304,7 @@ Do not make direct repo edits outside a GSD workflow unless the user explicitly 
 
 ## Repository-Specific Notes
 - Behavior should derive from the three knobs (F/S/T) wherever possible.
-- Consolidation/labeling uses Gemma 4 E2B by default; embeddings use the configured text encoder.
+- Consolidation is explicit, shallow, and embedding/graph-only; embeddings use the configured text encoder.
 - Do not modify the public API surface (public headers in `include/`, C API) without explicit approval.
 
 ## SML / stateforward Rules

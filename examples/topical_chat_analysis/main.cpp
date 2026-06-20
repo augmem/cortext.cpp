@@ -9,14 +9,16 @@
 
 #include <nlohmann/json.hpp>
 
-#include <opentelemetry/logs/provider.h>
-#include <opentelemetry/nostd/shared_ptr.h>
-#include <opentelemetry/sdk/logs/exporter.h>
-#include <opentelemetry/sdk/logs/logger_provider.h>
-#include <opentelemetry/sdk/logs/logger_provider_factory.h>
-#include <opentelemetry/sdk/logs/read_write_log_record.h>
-#include <opentelemetry/sdk/logs/simple_log_record_processor_factory.h>
-#include <opentelemetry/sdk/resource/resource.h>
+#ifndef CORTEXT_DISABLE_OPENTELEMETRY
+#  include <opentelemetry/logs/provider.h>
+#  include <opentelemetry/nostd/shared_ptr.h>
+#  include <opentelemetry/sdk/logs/exporter.h>
+#  include <opentelemetry/sdk/logs/logger_provider.h>
+#  include <opentelemetry/sdk/logs/logger_provider_factory.h>
+#  include <opentelemetry/sdk/logs/read_write_log_record.h>
+#  include <opentelemetry/sdk/logs/simple_log_record_processor_factory.h>
+#  include <opentelemetry/sdk/resource/resource.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -43,15 +45,9 @@
 namespace {
 
 struct ConsolidationTelemetry {
-  std::atomic<int64_t> summary_count{0};
-  std::atomic<int64_t> extraction_jobs{0};
-  std::atomic<int64_t> summaries_with_summarizer{0};
-  std::atomic<int64_t> summaries_fallback{0};
-  std::atomic<int64_t> extraction_results{0};
-  std::atomic<int64_t> labels_seen{0};
-  std::atomic<int64_t> relations_seen{0};
 };
 
+#ifndef CORTEXT_DISABLE_OPENTELEMETRY
 class SimpleStdoutLogExporter final
     : public opentelemetry::sdk::logs::LogRecordExporter {
 public:
@@ -121,32 +117,7 @@ public:
         return std::nullopt;
       };
 
-      if (cons_metrics_) {
-        if (body == "cortext.consolidation_summarize") {
-          if (auto v = get_attr_i64("summary_count")) {
-            cons_metrics_->summary_count.fetch_add(*v, std::memory_order_relaxed);
-          }
-          if (auto v = get_attr_i64("extraction_jobs_queued")) {
-            cons_metrics_->extraction_jobs.fetch_add(*v, std::memory_order_relaxed);
-          }
-          if (auto v = get_attr_i64("summaries_with_summarizer")) {
-            cons_metrics_->summaries_with_summarizer.fetch_add(*v, std::memory_order_relaxed);
-          }
-          if (auto v = get_attr_i64("summaries_fallback")) {
-            cons_metrics_->summaries_fallback.fetch_add(*v, std::memory_order_relaxed);
-          }
-        } else if (body == "cortext.process_extraction_results") {
-          if (auto v = get_attr_i64("results_processed")) {
-            cons_metrics_->extraction_results.fetch_add(*v, std::memory_order_relaxed);
-          }
-          if (auto v = get_attr_i64("labels_seen")) {
-            cons_metrics_->labels_seen.fetch_add(*v, std::memory_order_relaxed);
-          }
-          if (auto v = get_attr_i64("relations_seen")) {
-            cons_metrics_->relations_seen.fetch_add(*v, std::memory_order_relaxed);
-          }
-        }
-      }
+      (void)get_attr_i64;
 
       std::ostringstream attrs;
       bool first = true;
@@ -247,12 +218,20 @@ void InstallOtelLogger(const std::string &log_path,
       new logs_sdk::LoggerProvider(std::move(processor), resource));
   opentelemetry::logs::Provider::SetLoggerProvider(provider);
 }
+#else
+void InstallOtelLogger(const std::string &log_path,
+                       std::vector<std::string> filters,
+                       ConsolidationTelemetry *cons_metrics) {
+  (void)log_path;
+  (void)filters;
+  (void)cons_metrics;
+}
+#endif
 
 struct AnalysisConfig {
   std::string dataset_path;
   std::string models_dir = "models";
   std::string db_path = ":memory:";
-  std::string label_bank_path;
   std::string otel_log_path;
   std::vector<std::string> otel_filters = {
       "cortext.boundary",
@@ -276,7 +255,6 @@ struct AnalysisConfig {
   int cadence_max_ms = 1200;
   int context_window_turns = 4;
   bool run_consolidation = false;
-  std::string consolidate_mode = "both";
   int consolidation_cycles = 1;
   int consolidation_every_turns = 0;
   bool consolidate_during = false;
@@ -319,17 +297,6 @@ struct DistSummary {
   double p50 = 0.0;
   double p90 = 0.0;
 };
-
-cortext::ConsolidationMode
-GetConsolidationMode(const AnalysisConfig &cfg) {
-  if (cfg.consolidate_mode == "shallow") {
-    return cortext::ConsolidationMode::Shallow;
-  }
-  if (cfg.consolidate_mode == "deep") {
-    return cortext::ConsolidationMode::Deep;
-  }
-  return cortext::ConsolidationMode::Both;
-}
 
 struct Stats {
   int conversations = 0;
@@ -948,8 +915,6 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.models_dir = *v;
     } else if (auto v = take("--db=")) {
       cfg.db_path = *v;
-    } else if (auto v = take("--label-bank=")) {
-      cfg.label_bank_path = *v;
     } else if (auto v = take("--max-conversations=")) {
       cfg.max_conversations = std::stoi(*v);
     } else if (auto v = take("--max-turns=")) {
@@ -1023,15 +988,6 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.interleave = std::max(1, std::stoi(*v));
     } else if (auto v = take("--consolidate-cycles=")) {
       cfg.consolidation_cycles = std::max(1, std::stoi(*v));
-    } else if (auto v = take("--consolidate-mode=")) {
-      cfg.consolidate_mode = *v;
-      if (cfg.consolidate_mode != "shallow"
-          && cfg.consolidate_mode != "deep"
-          && cfg.consolidate_mode != "both") {
-        std::cerr << "Unknown --consolidate-mode=" << cfg.consolidate_mode
-                  << "; defaulting to 'both'.\n";
-        cfg.consolidate_mode = "both";
-      }
     } else if (auto v = take("--consolidate-every=")) {
       cfg.run_consolidation = true;
       cfg.consolidation_every_turns = std::max(1, std::stoi(*v));
@@ -1256,7 +1212,6 @@ int main(int argc, char **argv) {
       c.reinforcement_enabled = cfg.reinforcement_enabled;
       c.procedural_enabled = cfg.procedural_enabled;
       c.sequential_edges_enabled = cfg.sequential_edges_enabled;
-      c.label_bank_path = cfg.label_bank_path;
       cortext = cortext::Cortext::Create(c, cfg.db_path, cfg.models_dir);
       embedding_cache.clear();
       memory_kind_cache.clear();
@@ -1751,7 +1706,7 @@ int main(int argc, char **argv) {
             if (should_consolidate && last_consolidation_turn != stats.turns) {
               for (int cycle = 0; cycle < cfg.consolidation_cycles; ++cycle) {
                 try {
-                  cortext->Consolidate(GetConsolidationMode(cfg));
+                  cortext->Consolidate();
                   stats.consolidation_runs++;
                 } catch (const std::exception &e) {
                   stats.consolidation_failures++;
@@ -1774,7 +1729,7 @@ int main(int argc, char **argv) {
     if (cfg.run_consolidation && cortext) {
       for (int i = 0; i < cfg.consolidation_cycles; ++i) {
         try {
-          cortext->Consolidate(GetConsolidationMode(cfg));
+          cortext->Consolidate();
           stats.consolidation_runs++;
         } catch (const std::exception &e) {
           stats.consolidation_failures++;
@@ -1975,17 +1930,6 @@ int main(int argc, char **argv) {
           : static_cast<double>(stats.interrupt_gate_fail_boundary_mu)
                 / static_cast<double>(interrupt_false_negative_total);
 
-  const int64_t cons_summary_count = cons_metrics.summary_count.load();
-  const int64_t cons_extraction_jobs = cons_metrics.extraction_jobs.load();
-  const int64_t cons_summaries_model =
-      cons_metrics.summaries_with_summarizer.load();
-  const int64_t cons_summaries_fallback =
-      cons_metrics.summaries_fallback.load();
-  const int64_t cons_extraction_results =
-      cons_metrics.extraction_results.load();
-  const int64_t cons_labels_seen = cons_metrics.labels_seen.load();
-  const int64_t cons_relations_seen = cons_metrics.relations_seen.load();
-
   const auto novelty_summary = Summarize(stats.novelty_values);
   const auto relevance_summary = Summarize(stats.relevance_values);
   const auto surprise_summary = Summarize(stats.surprise_values);
@@ -2090,18 +2034,6 @@ int main(int argc, char **argv) {
               << stats.consolidation_association_created << "\n";
     std::cout << "consolidation_label_created="
               << stats.consolidation_label_created << "\n";
-    std::cout << "consolidation_summary_count=" << cons_summary_count << "\n";
-    std::cout << "consolidation_summaries_with_model="
-              << cons_summaries_model << "\n";
-    std::cout << "consolidation_summaries_fallback="
-              << cons_summaries_fallback << "\n";
-    std::cout << "consolidation_extraction_jobs="
-              << cons_extraction_jobs << "\n";
-    std::cout << "consolidation_extraction_results="
-              << cons_extraction_results << "\n";
-    std::cout << "consolidation_labels_seen=" << cons_labels_seen << "\n";
-    std::cout << "consolidation_relations_seen="
-              << cons_relations_seen << "\n";
   }
   std::cout << "reinforcement_edge_count=" << stats.reinforcement_edge_count << "\n";
   std::cout << "reinforcement_weight_mean=" << stats.reinforcement_weight_mean

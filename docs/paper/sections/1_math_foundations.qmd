@@ -72,40 +72,30 @@ signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 
 Most behavioral thresholds, gains, and caps are derived from the three knobs (F, S, T) and/or state. Fixed numeric values are permitted for numerical stability floors (e.g., ε(F, S, T)), unit conversions, and explicitly labeled resource/safety invariants such as storage-pressure floors. This keeps the system's qualitative behavior governed by the three knobs while still allowing bounded implementation guards.
 
-## Temporal Semantics for Structured Facts
+## Temporal Semantics
 
-Cortext currently treats raw memories primarily as **event-time observations**: a memory is written when a coherent unit is detected, and its stored timestamp records when that unit was observed. The phase-1 bitemporal fact layer adds a structured consolidation product that distinguishes three related but non-identical temporal notions:
+Cortext treats durable memories as **event-time observations**: a memory is
+written when a coherent unit is detected, and its stored timestamp records when
+that unit was observed. The engine no longer maintains a separate structured
+fact layer with valid-time and transaction-time intervals; temporal reasoning
+therefore operates over memory and signal timestamps directly.
 
-* **Event time:** when the source experience was observed by the system.
-* **Valid time:** when an extracted fact was true in the world.
-* **Transaction time:** when Cortext learned, inserted, corrected, or superseded that fact.
-
-For an episodic memory `m_i`, we define the event timestamp:
+For an episodic memory `m_i`, the event timestamp is:
 
 ```
 t_event(m_i) = created_at(m_i)
 ```
 
-For a structured fact assertion `f_j = (subject, predicate, object)`, we define two half-open intervals:
+Retrieval and consolidation consume this event time through recency windows,
+temporal context vectors, association ordering, and explicit replay timestamps:
 
 ```
-valid(f_j) = [t_v_start(f_j), t_v_end(f_j))
-tx(f_j)    = [t_tx_start(f_j), t_tx_end(f_j))
+t_retrieve(q, m_i) = q.timestamp - t_event(m_i)
 ```
 
-The valid interval models when the assertion held in the world. The transaction interval models when the system regarded that assertion as active knowledge.
-
-This distinction supports three different query semantics:
-
-```
-true_at(f_j, τ)     = 1 if τ ∈ valid(f_j), else 0
-known_at(f_j, τ)    = 1 if τ ∈ tx(f_j), else 0
-current(f_j, now)   = true_at(f_j, now) ∧ known_at(f_j, now)
-```
-
-This is the core of **bitemporal modeling**: the system can separately answer "what was true then?" and "what did the system believe then?" without collapsing historical corrections into a single timeless statement.
-
-In the current alpha, Cortext's live behavior remains primarily event-driven and recency-weighted. The bitemporal formulation above is an additive structured-fact layer for evolving personal knowledge rather than a replacement for the episodic memory stream.
+This keeps the live store aligned with the episodic memory stream and avoids a
+second assertion lifecycle that must be extracted, corrected, superseded, and
+retrieved separately.
 
 ### Buffers {#sec-buffers}
 
@@ -197,8 +187,8 @@ candidate discovery pass stays broad so source memories remain reachable:
 seed_k(F) = round(lerp(96, 8, FocusBias(F)))
 ```
 
-The prompt-facing output is then narrowed after graph, fact, temporal, recency,
-affect, procedural, and context scoring:
+The prompt-facing output is then narrowed after graph, event-time recency,
+affect, procedural, source-confidence, and context scoring:
 
 ```
 selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
@@ -224,9 +214,9 @@ source_reliability_0(F,S,T)
 
 This split lets low Focus explore many source/blob seeds while still keeping the
 application prompt bounded by a compact final surface. The intermediate graph
-boosts, label-route weights, durable-source floors, and text/fact seed thresholds
-are likewise derived from Focus, Sensitivity, and Stability in the implementation
-rather than exposed as additional user settings.
+boosts, source-confidence weights, durable-source floors, and text seed
+thresholds are likewise derived from Focus, Sensitivity, and Stability in the
+implementation rather than exposed as additional user settings.
 
 ### Experiential Mass and Maturity
 

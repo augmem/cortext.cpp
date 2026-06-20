@@ -6,11 +6,10 @@
 namespace cortext::operations
 {
 
-/// @brief Gate that runs consolidation scoring and extraction jobs
-///        only when EvaluateConsolidation signaled start.
+/// @brief Gate that runs consolidation scoring only when EvaluateConsolidation
+///        signaled start.
 ///
-/// This operation dynamically instantiates ScoreConsolidation and
-/// EnqueueExtractionJobs during Execute().
+/// This operation dynamically instantiates ScoreConsolidation during Execute().
 class ConsolidationGate
     : public Operation<Requires<tags::ConsolidationShouldStart>, Satisfies<> >
 {

@@ -19,8 +19,8 @@ struct ConsolidationClusterParams
 /// @brief Algorithm 29b: Cluster consolidation candidates.
 ///
 /// Groups consolidation candidates into clusters based on embedding similarity.
-/// Clusters meeting minimum size requirements are passed to the summarization
-/// phase via OperationContext.
+/// Clusters meeting minimum size requirements are passed to shallow
+/// consolidation and graph construction via OperationContext.
 ///
 /// This operation uses a greedy clustering algorithm:
 /// 1. For each unassigned candidate, start a new cluster

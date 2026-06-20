@@ -1,21 +1,72 @@
-# cortext (Go)
+# cortext Go Binding
 
-Build the native shared library first:
+The Go package uses `cgo` over the Cortext C ABI.
+
+## Build
+
+From the repository root:
 
 ```bash
 zig build -Dshared=true -Dllama=false
+```
 
-# or the legacy CMake path:
+or:
+
+```bash
 cmake --preset ffi-release
 cmake --build --preset ffi-release --target cortext
 ```
 
-Then the package can link against `zig-out/lib/libcortext.*` or
-`build/ffi-release/libcortext.*` directly:
+Then:
 
 ```bash
 cd bindings/go
 go test .
 ```
 
-The package uses the JSON-returning C ABI so callers can either consume raw JSON or unmarshal into their own structs.
+The package links against `zig-out/lib/libcortext.*` or
+`build/ffi-release/libcortext.*`.
+
+## Use
+
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/augmem/cortext/bindings/go"
+)
+
+func main() {
+	engine, err := cortext.New(":memory:", "models", nil)
+	if err != nil {
+		panic(err)
+	}
+	defer engine.Close()
+
+	ctx, err := engine.ProcessText("Bailey likes tennis balls.", "chat/main")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(ctx["should_interrupt"])
+
+	embedding, err := engine.EmbedText("embed without storing")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(len(embedding))
+}
+```
+
+## API
+
+- `Config`: Focus/Sensitivity/Stability, mechanism toggles, and signal-filter
+  toggles. Pass `nil` to `New` for native defaults.
+- `ProcessText`, `ProcessAudio`, `ProcessImage`: decoded JSON context maps.
+- `ProcessTextJSON`, `ProcessAudioJSON`, `ProcessImageJSON`: raw JSON bytes.
+- `EmbedText`, `EmbedAudio`, `EmbedImage`: embed-only helpers.
+- `Consolidate`, `Flush`, `Reset`, `Close`.
+
+Audio input is 16 kHz mono float32 PCM. Image input is row-major RGB/RGBA bytes
+with explicit dimensions.

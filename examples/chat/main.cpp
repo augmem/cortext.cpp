@@ -1150,7 +1150,6 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
   const auto sig_count = store->Execute("SELECT COUNT(*) AS cnt FROM signals", {});
   const auto assoc_count = store->Execute("SELECT COUNT(*) AS cnt FROM associations", {});
   const auto ep_count = store->Execute("SELECT COUNT(*) AS cnt FROM episodes", {});
-  const auto fact_count = store->Execute("SELECT COUNT(*) AS cnt FROM fact_assertions", {});
   const auto eviction_count = store->Execute("SELECT COUNT(*) AS cnt FROM memory_evictions", {});
 
   const auto memory_rows = store->Execute(
@@ -1200,20 +1199,6 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
       "FROM episodes "
       "ORDER BY start_ts DESC, episode_id DESC "
       "LIMIT 40",
-      {});
-
-  const auto fact_rows = store->Execute(
-      "SELECT fact_id, subject, predicate, object, "
-      "       COALESCE(valid_start_ts, 0) AS valid_start_ts, "
-      "       COALESCE(valid_end_ts, 0) AS valid_end_ts, "
-      "       recorded_at_ts, "
-      "       COALESCE(superseded_at_ts, 0) AS superseded_at_ts, "
-      "       confidence, summary_memory_id, "
-      "       COALESCE(lifecycle_state, '') AS lifecycle_state, "
-      "       COALESCE(severity_class, '') AS severity_class "
-      "FROM fact_assertions "
-      "ORDER BY recorded_at_ts DESC, fact_id DESC "
-      "LIMIT 80",
       {});
 
   const auto eviction_rows = store->Execute(
@@ -1315,25 +1300,6 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
     episodes.push_back(std::move(item));
   }
 
-  std::vector<chat::DatabaseFactRow> facts;
-  facts.reserve(fact_rows.size());
-  for (const auto& row : fact_rows) {
-    chat::DatabaseFactRow item;
-    item.fact_id = GetAnyInt64(row, "fact_id");
-    item.subject = GetAnyString(row, "subject");
-    item.predicate = GetAnyString(row, "predicate");
-    item.object = GetAnyString(row, "object");
-    item.valid_start_ts = static_cast<uint64_t>(GetAnyInt64(row, "valid_start_ts"));
-    item.valid_end_ts = static_cast<uint64_t>(GetAnyInt64(row, "valid_end_ts"));
-    item.recorded_at_ts = static_cast<uint64_t>(GetAnyInt64(row, "recorded_at_ts"));
-    item.superseded_at_ts = static_cast<uint64_t>(GetAnyInt64(row, "superseded_at_ts"));
-    item.confidence = GetAnyDouble(row, "confidence");
-    item.summary_memory_id = GetAnyInt64(row, "summary_memory_id");
-    item.lifecycle_state = GetAnyString(row, "lifecycle_state");
-    item.severity_class = GetAnyString(row, "severity_class");
-    facts.push_back(std::move(item));
-  }
-
   std::vector<chat::DatabaseEvictionRow> evictions;
   evictions.reserve(eviction_rows.size());
   for (const auto& row : eviction_rows) {
@@ -1365,13 +1331,11 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
   state.signals = std::move(signals);
   state.associations = std::move(associations);
   state.episodes = std::move(episodes);
-  state.facts = std::move(facts);
   state.evictions = std::move(evictions);
   state.total_memories = mem_count.empty() ? 0 : GetAnyInt64(mem_count.front(), "cnt");
   state.total_signals = sig_count.empty() ? 0 : GetAnyInt64(sig_count.front(), "cnt");
   state.total_associations = assoc_count.empty() ? 0 : GetAnyInt64(assoc_count.front(), "cnt");
   state.total_episodes = ep_count.empty() ? 0 : GetAnyInt64(ep_count.front(), "cnt");
-  state.total_facts = fact_count.empty() ? 0 : GetAnyInt64(fact_count.front(), "cnt");
   state.total_evictions = eviction_count.empty() ? 0 : GetAnyInt64(eviction_count.front(), "cnt");
   state.refreshed_at = NowUnixMillis();
   state.refresh_requested = false;
@@ -1379,7 +1343,6 @@ void RefreshDatabaseExplorer(chat::DatabaseExplorerState& state,
       "Loaded " + std::to_string(state.memories.size()) + " memories, "
       + std::to_string(state.associations.size()) + " relationships, "
       + std::to_string(state.signals.size()) + " signals, "
-      + std::to_string(state.facts.size()) + " temporal facts, "
       + std::to_string(state.evictions.size()) + " evictions.";
 }
 
@@ -1897,13 +1860,13 @@ std::string DefaultMemoryPromptPrefix() {
          "<clock> element as the current local time for temporal references "
          "like now, today, tomorrow, and deadlines. The snapshot may contain "
          "retrieved memories from earlier interaction with this same user. "
-         "Treat any memories in it as facts about the current user unless a "
-         "memory clearly refers to someone else or quotes someone else. Use "
+         "Treat any memories in it as reliable context about the current user "
+         "unless a memory clearly refers to someone else or quotes someone else. Use "
          "them as supporting context when they are relevant to the user's "
          "current message. Prefer these memories over guesses, but do not "
          "mention memory IDs, soft_anchor IDs, the XML format, or that you "
          "were given retrieved memories. Treat soft_anchor entries as optional "
-         "continuity likelihoods for their memory, not as resolved facts.";
+         "continuity likelihoods for their memory, not as resolved context.";
 }
 
 std::string DefaultMemoryPromptSuffix() {
@@ -2151,22 +2114,12 @@ int main(int argc, char** argv) {
   std::filesystem::path db_path = GetEnv("CORTEXT_CHAT_DB", "examples/chat/chat_memory.db");
   std::filesystem::path models_dir = GetEnv("CORTEXT_MODELS_DIR", "models");
   std::filesystem::path settings_path = GetEnv("CORTEXT_CHAT_SETTINGS");
-  std::filesystem::path label_bank_path = GetEnv("CORTEXT_LABEL_BANK_PATH");
 
   if (!has_models_env && models_dir.is_relative() && repo_root.has_value()) {
     models_dir = *repo_root / models_dir;
   }
   if (!has_db_env && db_path.is_relative() && repo_root.has_value()) {
     db_path = *repo_root / db_path;
-  }
-  if (label_bank_path.empty() && repo_root.has_value()) {
-    const auto default_label_bank = *repo_root / "data/label_bank/metadata.json";
-    std::error_code ec;
-    if (std::filesystem::exists(default_label_bank, ec)) {
-      label_bank_path = default_label_bank;
-    }
-  } else if (label_bank_path.is_relative() && repo_root.has_value()) {
-    label_bank_path = *repo_root / label_bank_path;
   }
   if (settings_path.empty()) {
     settings_path = DefaultChatSettingsPath(db_path, repo_root);
@@ -2387,7 +2340,6 @@ int main(int argc, char** argv) {
   cfg.focus = initial_focus;
   cfg.sensitivity = initial_sensitivity;
   cfg.stability = initial_stability;
-  cfg.label_bank_path = label_bank_path.string();
   std::unique_ptr<cortext::Cortext> cortext_ctx;
   try {
     cortext_ctx = cortext::Cortext::Create(cfg, db_path.string(), models_dir.string());
@@ -2818,8 +2770,7 @@ int main(int argc, char** argv) {
           cortext::Cortext::Context cons_ctx;
           {
             std::lock_guard<std::mutex> lock(db_write_mu);
-            cons_ctx = cortext_ctx->Consolidate(
-                stop_token, cortext::ConsolidationMode::Both);
+            cons_ctx = cortext_ctx->Consolidate(stop_token);
           }
           chat::ConsolidationMetricsSample metrics_sample;
           metrics_sample.timestamp_ms = NowUnixMillis();
@@ -3282,7 +3233,6 @@ int main(int argc, char** argv) {
           next_cfg.reinforcement_enabled = cfg.reinforcement_enabled;
           next_cfg.procedural_enabled = cfg.procedural_enabled;
           next_cfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
-          next_cfg.label_bank_path = cfg.label_bank_path;
 
           std::unique_ptr<cortext::Cortext> next_ctx;
           {

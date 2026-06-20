@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortext"
-version = "0.1.0"
+version = "1.0.0"
 description = "Python bindings for the Cortext native library"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,4 +14,3 @@ package-dir = {"" = "."}
 
 [tool.setuptools.packages.find]
 where = ["."]
-

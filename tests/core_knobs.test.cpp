@@ -114,19 +114,6 @@ TEST_CASE ("Emotion projection policy derives from Sensitivity",
   REQUIRE (high.ewma_alpha > low.ewma_alpha);
 }
 
-TEST_CASE ("Fact lifecycle maintenance sweep is knob-derived with historical midpoint",
-           "[core][knobs]")
-{
-  REQUIRE (FactLifecycleMaintenanceSweepLimit (0.5, 0.5, 0.5) == 256);
-
-  const int narrow = FactLifecycleMaintenanceSweepLimit (1.0, 0.0, 0.0);
-  const int broad = FactLifecycleMaintenanceSweepLimit (0.0, 1.0, 1.0);
-  REQUIRE (narrow < FactLifecycleMaintenanceSweepLimit (0.5, 0.5, 0.5));
-  REQUIRE (broad > FactLifecycleMaintenanceSweepLimit (0.5, 0.5, 0.5));
-  REQUIRE (narrow >= 96);
-  REQUIRE (broad <= 512);
-}
-
 TEST_CASE ("WMBaseCapacity defaults to the capacity-21 operating point",
            "[core][knobs]")
 {
@@ -240,21 +227,13 @@ TEST_CASE ("Signal filter adaptive policy derives from knobs",
                  .focus_pressure);
 }
 
-TEST_CASE ("STM hard boundary policy derives from knobs", "[core][knobs]")
+TEST_CASE ("Soft anchor hard boundary retention derives from knobs",
+           "[core][knobs]")
 {
-  const double threshold_mid
-      = STMShadowHardBoundaryThreshold (0.5, 0.5, 0.5);
-  REQUIRE (threshold_mid > BoundaryThreshold (0.5, 0.5));
-  REQUIRE (threshold_mid < 0.70);
-  REQUIRE (STMShadowHardBoundaryThreshold (1.0, 0.5, 0.5)
-           > STMShadowHardBoundaryThreshold (0.0, 0.5, 0.5));
-  REQUIRE (STMShadowHardBoundaryThreshold (0.5, 1.0, 0.5)
-           < STMShadowHardBoundaryThreshold (0.5, 0.0, 0.5));
-
-  REQUIRE (STMShadowHardBoundaryRetainSteps (1.0, 0.5, 0.5)
-           <= STMShadowHardBoundaryRetainSteps (0.0, 0.5, 0.5));
-  REQUIRE (STMShadowHardBoundaryRetainSteps (0.5, 0.5, 1.0)
-           >= STMShadowHardBoundaryRetainSteps (0.5, 0.5, 0.0));
+  REQUIRE (SoftAnchorHardBoundaryRetainSteps (1.0, 0.5, 0.5)
+           <= SoftAnchorHardBoundaryRetainSteps (0.0, 0.5, 0.5));
+  REQUIRE (SoftAnchorHardBoundaryRetainSteps (0.5, 0.5, 1.0)
+           >= SoftAnchorHardBoundaryRetainSteps (0.5, 0.5, 0.0));
 }
 
 TEST_CASE ("Boundary evidence weights derive from all knobs", "[core][knobs]")
@@ -479,12 +458,6 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
 
   REQUIRE (RetrievalGraphExpandedRagTemporalRankScore (0.5, 0.5, 0.5, 0)
            > RetrievalGraphExpandedRagTemporalRankScore (0.5, 0.5, 0.5, 1));
-  REQUIRE (RetrievalAnyFactMatchSupportFloor (0.5, 1.0, 0.5)
-           < RetrievalAnyFactMatchSupportFloor (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalAnyFactMatchLinkCap (0.0, 1.0, 0.5)
-           >= RetrievalAnyFactMatchLinkCap (1.0, 0.0, 0.5));
-  REQUIRE (RetrievalUnknownCautionCutoffMultiplier (0.5, 0.5, 0.5, 1.0)
-           > RetrievalUnknownCautionCutoffMultiplier (0.5, 0.5, 0.5, 0.0));
   REQUIRE (RetrievalContextReinstatementAlpha (0.5, 0.5, 1.0)
            < RetrievalContextReinstatementAlpha (0.5, 0.5, 0.0));
   REQUIRE (RetrievalGraphExpansionFanout (1.0, 0.5, 0.5)
@@ -507,13 +480,6 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
   REQUIRE (RetrievalSourceBackedBoostFloor (0.5, 0.5, 0.5) > 0.01);
   REQUIRE (RetrievalSourceBackedBoostFloor (1.0, 0.5, 0.5)
            > RetrievalSourceBackedBoostFloor (0.0, 0.5, 0.5));
-  REQUIRE (RetrievalUnknownCautionCertaintyRequirement (0.5, 0.5, 1.0, 1.0)
-           > RetrievalUnknownCautionCertaintyRequirement (0.5, 0.5, 0.0,
-                                                          1.0));
-  REQUIRE (RetrievalUnknownCautionCertaintyRequirement (0.5, 0.5, 0.5, 1.0)
-           > RetrievalUnknownCautionCertaintyRequirement (0.5, 0.5, 0.5,
-                                                          0.0));
-
   REQUIRE (RetrievalContextMix (0.5, 0.5, 0.5) > 0.18);
   REQUIRE (RetrievalContextMix (0.5, 1.0, 0.5)
            > RetrievalContextMix (0.5, 0.0, 0.5));
@@ -522,28 +488,10 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
   REQUIRE (RetrievalContextMix (1.0, 0.5, 0.5)
            < RetrievalContextMix (0.0, 0.5, 0.5));
 
-  REQUIRE (RetrievalFactBoostWeakMultiplier (0.5, 0.5, 0.5)
-           == Catch::Approx (0.55));
-  REQUIRE (RetrievalFactBoostStrongMultiplier (0.5, 0.5, 0.5)
-           == Catch::Approx (1.45));
   REQUIRE (RetrievalStalePenaltyStrongMultiplier (0.5, 0.5, 0.5)
            == Catch::Approx (1.75));
-  REQUIRE (RetrievalFactMissingConfidence (0.5, 0.5, 0.5)
-           == Catch::Approx (0.50));
-  REQUIRE (RetrievalFactMissingEvidenceSupportWeight (0.5, 0.5, 0.5)
-           == Catch::Approx (0.72));
-  REQUIRE (RetrievalSummaryDuplicateThresholdCap (0.5, 0.5, 0.5)
-           == Catch::Approx (0.99));
-  REQUIRE (RetrievalFactBoostWeakMultiplier (0.5, 1.0, 0.5)
-           > RetrievalFactBoostWeakMultiplier (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalFactBoostStrongMultiplier (0.5, 1.0, 0.5)
-           > RetrievalFactBoostStrongMultiplier (0.5, 0.0, 0.5));
   REQUIRE (RetrievalStalePenaltyStrongMultiplier (0.5, 0.5, 1.0)
            > RetrievalStalePenaltyStrongMultiplier (0.5, 0.5, 0.0));
-  REQUIRE (RetrievalFactMissingConfidence (0.5, 1.0, 0.5)
-           > RetrievalFactMissingConfidence (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalFactMissingEvidenceSupportWeight (0.5, 1.0, 0.5)
-           > RetrievalFactMissingEvidenceSupportWeight (0.5, 0.0, 0.5));
 
   REQUIRE (RetrievalVectorDistanceScore (0.0, 0.5, 0.5, 0.5)
            == Catch::Approx (1.0));
@@ -576,12 +524,6 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
   REQUIRE (RetrievalReconstructionUpdateCount (0.5, 0.5, 0.5) == 1);
   REQUIRE (RetrievalReconstructionUpdateCount (0.0, 1.0, 0.0)
            > RetrievalReconstructionUpdateCount (1.0, 0.0, 1.0));
-  REQUIRE (RetrievalTotDiversificationScale (0.5, 0.5, 0.5, 0.0)
-           == Catch::Approx (0.95));
-  REQUIRE (RetrievalTotDiversificationScale (0.5, 0.5, 0.5, 1.0)
-           == Catch::Approx (0.75));
-  REQUIRE (RetrievalTotDiversificationScale (1.0, 0.5, 0.5, 1.0)
-           < RetrievalTotDiversificationScale (0.0, 0.5, 0.5, 1.0));
 }
 
 TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
@@ -597,38 +539,8 @@ TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
   REQUIRE (linked_weights.first + linked_weights.second
            == Catch::Approx (1.0));
 
-  REQUIRE (RetrievalSummaryLabelSeedCount (0.5, 0.5, 0.5) == 2);
-  REQUIRE (RetrievalFactVectorSeedCount (0.5, 0.5, 0.5) == 5);
-  REQUIRE (RetrievalFactVectorSeedCount (0.5, 1.0, 0.5)
-           >= RetrievalFactVectorSeedCount (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalFactTextSeedCount (0.5, 1.0, 0.5)
-           >= RetrievalFactTextSeedCount (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalLabelTokenTextRouteEnabled (0.5, 0.5, 0.5));
-  REQUIRE (RetrievalClusterLabelEnabled (0.5, 0.5, 0.5));
-  REQUIRE (RetrievalDurableSourceTextMaxBytes (0.0, 0.5, 0.5)
-           > RetrievalDurableSourceTextMaxBytes (1.0, 0.5, 0.5));
-  REQUIRE (RetrievalDurableSourceTextRefreshBatch (0.5, 0.5, 0.5)
-           < RetrievalDurableSourceTextSearchLimit (0.5, 0.5, 0.5));
-  REQUIRE (RetrievalDurableSourceTextRefreshBatch (0.0, 1.0, 0.0)
-           > RetrievalDurableSourceTextRefreshBatch (1.0, 0.0, 1.0));
-  REQUIRE (RetrievalDurableSourceTextRefreshInterval (0.5, 0.5, 0.5)
-           >= 16);
-  REQUIRE (RetrievalDurableSourceTextRefreshInterval (0.5, 0.5, 0.5)
-           <= 192);
-  REQUIRE (RetrievalDurableSourceTextRefreshInterval (1.0, 0.0, 1.0)
-           > RetrievalDurableSourceTextRefreshInterval (0.0, 1.0, 0.0));
-  REQUIRE (RetrievalLabelGraphFanout (0.0, 0.5, 0.5)
-           > RetrievalLabelGraphFanout (1.0, 0.5, 0.5));
-  REQUIRE (RetrievalLabelGraphFanout (0.5, 1.0, 0.5)
-           > RetrievalLabelGraphFanout (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalFactEvidenceFanout (0.5, 1.0, 0.5)
-           > RetrievalFactEvidenceFanout (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalFactStaleExpansionLimit (0.5, 0.5, 0.5, 3) >= 3);
   REQUIRE (RetrievalDurableSourceLinkFanout (0.5, 1.0, 0.5, 4)
            > RetrievalDurableSourceLinkFanout (0.5, 0.0, 0.5, 4));
-  REQUIRE (STMLabelClusterIterations (0.0, 1.0, 1.0)
-           > STMLabelClusterIterations (1.0, 0.0, 0.0));
-
   const auto evidence_mid
       = RetrievalGraphExpansionEvidenceCounts (0.5, 0.5, 0.5);
   REQUIRE (evidence_mid.min_association_count == 2);
@@ -640,59 +552,9 @@ TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
            > RecentRetrievedIdWindow (0.5, 0.5, 0.0));
 }
 
-TEST_CASE ("Fact write and retrieval scoring policies derive from knobs",
+TEST_CASE ("Retrieval candidate blend scoring policies derive from knobs",
            "[core][knobs][retrieval]")
 {
-  REQUIRE (FactRoutineAffinity (0.5, 0.5, 0.5, 0.8)
-           == Catch::Approx (0.8));
-  REQUIRE (FactRoutineClassAffinity (
-               0.5, 0.5, 0.5, FactRoutineClass::StableRoutine)
-           == Catch::Approx (1.0));
-  REQUIRE (FactRoutineClassAffinity (
-               0.5, 0.5, 0.5, FactRoutineClass::Preference)
-           == Catch::Approx (0.8));
-  REQUIRE (FactRoutineClassAffinity (
-               0.5, 0.5, 0.5, FactRoutineClass::MutableState)
-           == Catch::Approx (0.35));
-  REQUIRE (FactRoutineClassAffinity (
-               0.5, 0.5, 0.5, FactRoutineClass::Generic)
-           == Catch::Approx (0.15));
-  REQUIRE (FactRoutineClassAffinity (
-               0.5, 1.0, 0.5, FactRoutineClass::Generic)
-           > FactRoutineClassAffinity (
-               0.5, 0.0, 0.5, FactRoutineClass::Generic));
-  REQUIRE (FactCriticalityClassPrior (
-               0.5, 0.5, 0.5, FactCriticalityClass::High)
-           == Catch::Approx (1.0));
-  REQUIRE (FactCriticalityClassPrior (
-               0.5, 0.5, 0.5, FactCriticalityClass::Medium)
-           == Catch::Approx (0.75));
-  REQUIRE (FactCriticalityClassPrior (
-               0.5, 0.5, 0.5, FactCriticalityClass::Preference)
-           == Catch::Approx (0.45));
-  REQUIRE (FactCriticalityClassPrior (
-               0.5, 1.0, 0.5, FactCriticalityClass::Medium)
-           > FactCriticalityClassPrior (
-               0.5, 0.0, 0.5, FactCriticalityClass::Medium));
-  REQUIRE (FactDerivedEventConfidence (0.5, 0.5, 0.5)
-           == Catch::Approx (0.62));
-  REQUIRE (FactEvidenceWriteSupportWeight (0.5, 0.5, 0.5, "episodic")
-           == Catch::Approx (0.75));
-  REQUIRE (FactEvidenceWriteSupportWeight (0.5, 0.5, 0.5, "summary")
-           == Catch::Approx (1.0));
-  REQUIRE (FactSupersessionConfidenceMargin (0.5, 0.5)
-           == Catch::Approx (0.12));
-  REQUIRE (FactSupersessionConfidenceMargin (1.0, 0.5)
-           < FactSupersessionConfidenceMargin (0.0, 0.5));
-
-  const auto fact_weights_low
-      = RetrievalFactCandidateScoringWeights (0.0, 0.5, 0.5);
-  const auto fact_weights_high
-      = RetrievalFactCandidateScoringWeights (1.0, 0.5, 0.5);
-  REQUIRE (fact_weights_high.boost_weight > fact_weights_low.boost_weight);
-  REQUIRE (fact_weights_high.stale_penalty_weight
-           > fact_weights_low.stale_penalty_weight);
-
   const auto blend_low
       = RetrievalCandidateBlendScoringWeights (0.0, 0.0, 0.5);
   const auto blend_high
@@ -729,7 +591,7 @@ TEST_CASE ("Fact write and retrieval scoring policies derive from knobs",
   REQUIRE (influence_mid.sustain_window == Catch::Approx (4.0));
   REQUIRE (influence_mid.sustain_alpha == Catch::Approx (0.4));
   REQUIRE (influence_mid.contextual_gain_weight == Catch::Approx (0.50));
-  REQUIRE (influence_mid.generative_similarity_weight == Catch::Approx (0.40));
+  REQUIRE (influence_mid.predictive_similarity_weight == Catch::Approx (0.40));
   REQUIRE (influence_mid.drift_weight == Catch::Approx (0.30));
   REQUIRE (InfluenceFeedbackPolicyForKnobs (0.5, 0.5, 1.0).sustain_window
            > InfluenceFeedbackPolicyForKnobs (0.5, 0.5, 0.0).sustain_window);
@@ -800,7 +662,7 @@ TEST_CASE ("Neuromodulator and serial floor policies derive from knobs",
            < SerialMiddleMultiplierFloor (0.5, 0.0));
 }
 
-TEST_CASE ("STM/LTM label extraction policies derive from knobs",
+TEST_CASE ("Consolidation cluster policy derives from knobs",
            "[core][knobs]")
 {
   REQUIRE (ConsolidationMaxClusters (0.5, 0.5, 0.5) == 100);
@@ -808,27 +670,6 @@ TEST_CASE ("STM/LTM label extraction policies derive from knobs",
            > ConsolidationMaxClusters (1.0, 0.5, 0.5));
   REQUIRE (ConsolidationMaxClusters (0.5, 0.5, 1.0)
            > ConsolidationMaxClusters (0.5, 0.5, 0.0));
-
-  REQUIRE (STMLTMLabelPromptMinWords (0.5, 0.5, 0.5) == 2);
-  REQUIRE (STMLTMLabelPromptMaxWords (0.5, 0.5, 0.5) == 5);
-  REQUIRE (STMLTMLabelPromptMinWords (1.0, 0.5, 0.5)
-           >= STMLTMLabelPromptMinWords (0.0, 0.5, 0.5));
-  REQUIRE (STMLTMLabelPromptMaxWords (0.0, 0.5, 0.5)
-           >= STMLTMLabelPromptMaxWords (1.0, 0.5, 0.5));
-
-  const auto source_span
-      = STMLTMSourceSpanCandidatePolicy (0.5, 0.5, 0.5);
-  REQUIRE (source_span.contextual_min_width == 4);
-  REQUIRE (source_span.contextual_max_width == 5);
-  REQUIRE (source_span.contextual_min_content_tokens == 3);
-  REQUIRE (source_span.action_object_max_tokens == 3);
-  REQUIRE (source_span.subject_search_max_gap == 3);
-  REQUIRE (source_span.proper_noun_max_parts == 3);
-  REQUIRE (source_span.phrase_min_width == 2);
-  REQUIRE (source_span.phrase_max_width == 3);
-  REQUIRE (source_span.singleton_min_chars == 5);
-  REQUIRE (STMLTMRelationEndpointAliasMinSharedTokens (0.5, 0.5, 0.5)
-           == 2);
 }
 
 TEST_CASE ("Memory trace policy derives from knobs with neutral midpoint",
@@ -957,7 +798,7 @@ TEST_CASE ("InterruptCandidateCount follows spec: round(lerp(10, 6, F))",
   REQUIRE (InterruptCandidateCount (0.3) >= InterruptCandidateCount (0.7));
 }
 
-TEST_CASE ("Consolidation label and evidence budgets derive from knobs",
+TEST_CASE ("Consolidation label budgets derive from knobs",
            "[core][knobs]")
 {
   REQUIRE (ShallowConsolidationMaxLabels (0.5, 0.5, 0.5) == 3);
@@ -971,27 +812,11 @@ TEST_CASE ("Consolidation label and evidence budgets derive from knobs",
   REQUIRE (ShallowConsolidationLabelMinSimilarity (0.5, 1.0, 0.5)
            < ShallowConsolidationLabelMinSimilarity (0.5, 0.0, 0.5));
 
-  const auto budget_mid
-      = ConsolidationSummaryEvidenceBudgetForKnobs (0.5, 0.5, 0.5);
-  REQUIRE (budget_mid.max_source_texts == 5);
-  REQUIRE (budget_mid.max_total_chars == 2400);
-  REQUIRE (budget_mid.max_text_chars == 540);
   REQUIRE (ConsolidationCandidateTagWeight (0.5, 0.5, 0.5)
            == Catch::Approx (0.16));
   REQUIRE (ConsolidationCandidateTagWeight (0.5, 1.0, 0.5)
            > ConsolidationCandidateTagWeight (0.5, 0.0, 0.5));
-  REQUIRE (ConsolidationSummaryEvidenceBudgetForKnobs (0.5, 1.0, 0.5)
-               .max_source_texts
-           >= budget_mid.max_source_texts);
-  REQUIRE (ConsolidationSummaryEvidenceBudgetForKnobs (0.5, 0.5, 1.0)
-               .max_total_chars
-           > ConsolidationSummaryEvidenceBudgetForKnobs (0.5, 0.5, 0.0)
-                 .max_total_chars);
 
-  REQUIRE (STMLabelConsolidationMaxLabels (0.5, 0.5, 0.5)
-           == STMLabelConsolidationMaxLabels (0.5, 0.5));
-  REQUIRE (STMLTMSourceSpanCandidateLimit (0.0, 0.5, 0.5)
-           > STMLTMSourceSpanCandidateLimit (1.0, 0.5, 0.5));
 }
 
 TEST_CASE ("Runtime adaptation constants derive from knobs", "[core][knobs]")

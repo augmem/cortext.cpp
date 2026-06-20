@@ -60,7 +60,6 @@
                 "CMAKE_BUILD_TYPE": "Release",
                 "BUILD_TESTING": "OFF",
                 "BUILD_SHARED_LIBS": "ON",
-                "CORTEXT_DISABLE_LITERT": "ON",
                 "CORTEXT_DISABLE_SHERPA_ONNX": "ON"
             }
         },
@@ -93,7 +92,8 @@
             "cacheVariables": {
                 "BUILD_WASM": "ON",
                 "CMAKE_BUILD_TYPE": "Release",
-                "BUILD_TESTING": "OFF"
+                "BUILD_TESTING": "OFF",
+                "CORTEXT_DISABLE_SHERPA_ONNX": "ON"
             }
         }
     ],

@@ -447,118 +447,6 @@ RetrievalSeedSearchK (double F, double S, double T, int seed_k)
 }
 
 inline int
-RetrievalFactVectorSearchK (double F, double S, double T, int fact_k)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double multiplier = Lerp (14.0, 8.0, f) * Lerp (1.08, 0.92, s)
-                            * Lerp (1.05, 0.90, t);
-  const int cap = static_cast<int> (
-      std::round (Lerp (320.0, 128.0, f) * Lerp (1.05, 0.90, t)));
-  const int floor = static_cast<int> (
-      std::round (Lerp (48.0, 24.0, f) * Lerp (1.05, 0.95, t)));
-  const int expanded = static_cast<int> (
-      std::round (static_cast<double> (std::max (1, fact_k)) * multiplier));
-  return std::max (fact_k, std::min (cap, std::max (floor, expanded)));
-}
-
-inline int
-RetrievalFactTextSearchLimit (double F, double S, double T, int seed_count)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double multiplier = Lerp (24.0, 10.0, f) * Lerp (1.10, 0.90, s)
-                            * Lerp (1.05, 0.90, t);
-  const int cap = static_cast<int> (
-      std::round (Lerp (900.0, 240.0, f) * Lerp (1.05, 0.90, t)));
-  const int floor = std::max (seed_count * 4, 64);
-  const int expanded = static_cast<int> (
-      std::round (static_cast<double> (std::max (1, seed_count)) * multiplier));
-  return std::max (seed_count, std::min (cap, std::max (floor, expanded)));
-}
-
-inline int
-RetrievalLabelTextRouteLimit (double F, double S, double T, int top_labels)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const int base = static_cast<int> (
-      std::round (Lerp (512.0, 128.0, f) * Lerp (1.08, 0.92, s)
-                  * Lerp (1.05, 0.90, t)));
-  return std::max (top_labels, base);
-}
-
-inline bool
-RetrievalLabelTokenTextRouteEnabled (double F, double S, double T)
-{
-  return RetrievalLabelTextRouteLimit (F, S, T, 1) > 0
-         && RetrievalTokenOverlapQueryWeight (F, S, T) > 0.0;
-}
-
-inline int
-RetrievalLabelBankStaticSearchK (double F, double S, double T, int top_labels)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const int multiplier = static_cast<int> (
-      std::round (Lerp (4.0, 2.0, f) * Lerp (1.05, 0.95, s)
-                  * Lerp (1.05, 0.90, t)));
-  return std::max (top_labels, std::max (8, top_labels * multiplier));
-}
-
-inline int
-RetrievalDurableSourceTextSearchLimit (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (1200.0, 320.0, f) * Lerp (1.10, 0.90, s)
-                             * Lerp (1.05, 0.90, t),
-                         192.0, 1600.0)));
-}
-
-inline int
-RetrievalDurableSourceTextRefreshBatch (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (9.0, 3.0, f) * Lerp (1.10, 0.90, s)
-                             * Lerp (1.05, 0.90, t),
-                         2.0, 16.0)));
-}
-
-inline int
-RetrievalDurableSourceTextRefreshInterval (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (32.0, 96.0, f) * Lerp (1.25, 0.75, s)
-                             * Lerp (0.85, 1.15, t),
-                         16.0, 192.0)));
-}
-
-inline int
-RetrievalDurableSourceTextMaxBytes (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (4096.0, 1536.0, f) * Lerp (0.95, 1.10, s)
-                             * Lerp (1.05, 0.90, t),
-                         1024.0, 8192.0)));
-}
-
-inline int
 RetrievalGraphExpansionRowLimit (double F, double S, double T, int result_k)
 {
   const double f = RetrievalFocusBias (F);
@@ -585,43 +473,6 @@ RetrievalGraphExpansionFanout (double F, double S, double T)
 }
 
 inline int
-RetrievalLabelGraphFanout (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (96.0, 24.0, f) * Lerp (0.90, 1.15, s)
-                     * Lerp (1.05, 0.85, t);
-  return static_cast<int> (std::round (Clamp (raw, 12.0, 128.0)));
-}
-
-inline int
-RetrievalFactEvidenceFanout (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (16.0, 6.0, f) * Lerp (0.95, 1.15, s)
-                     * Lerp (1.05, 0.90, t);
-  return static_cast<int> (std::round (Clamp (raw, 4.0, 24.0)));
-}
-
-inline int
-RetrievalFactStaleExpansionLimit (double F, double S, double T,
-                                  int matched_fact_count)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const int per_fact = static_cast<int> (
-      std::round (Clamp (Lerp (8.0, 3.0, f) * Lerp (0.95, 1.15, s)
-                             * Lerp (1.05, 0.90, t),
-                         2.0, 12.0)));
-  return std::max (std::max (1, matched_fact_count),
-                   std::max (1, matched_fact_count) * per_fact);
-}
-
-inline int
 RetrievalDurableSourceLinkFanout (double F, double S, double T,
                                   int candidate_count)
 {
@@ -634,32 +485,6 @@ RetrievalDurableSourceLinkFanout (double F, double S, double T,
                          2.0, 16.0)));
   return std::max (std::max (1, candidate_count),
                    std::max (1, candidate_count) * per_candidate);
-}
-
-inline int
-RetrievalSummaryLabelSeedCount (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return std::max (1, static_cast<int> (
-                          std::round (Lerp (2.0, 6.0, s)
-                                      * Lerp (1.0, 0.75, f)
-                                      * Lerp (1.0, 0.85, t))));
-}
-
-inline int
-RetrievalFactVectorSeedCount (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t = Clamp (T, 0.0, 1.0);
-  return std::max (2, static_cast<int> (
-                          std::round (Lerp (12.0, 3.0, f)
-                                      * Lerp (1.0, 0.85, t)
-                                      * Clamp (1.0 + 0.18 * (s - s0),
-                                               0.85, 1.18))));
 }
 
 struct RetrievalGraphExpansionEvidencePolicy
@@ -680,125 +505,6 @@ RetrievalGraphExpansionEvidenceCounts (double F, double S, double T)
            std::max (0, static_cast<int> (
                              std::round (Lerp (0.0, 3.0, s)
                                          * Lerp (1.0, 0.85, f)))) };
-}
-
-inline int
-RetrievalFactTextSeedCount (double F, double S, double T)
-{
-  // Lower focus and higher sensitivity allow a wider fact-text rescue set;
-  // higher stability tightens it slightly because durable fact state should be
-  // less volatile.
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t = RetrievalStabilityBias (T);
-  return std::max (
-      1, static_cast<int> (
-             std::round (Lerp (24.0, 6.0, f) * Lerp (1.05, 0.90, t)
-                         * Clamp (1.0 + 0.20 * (s - s0), 0.85, 1.20))));
-}
-
-inline double
-RetrievalFactTextSeedMinScore (double F, double S, double T)
-{
-  // Fact text scores are query-token coverage over concise fact text. When
-  // working memory is folded into the query, useful overlaps are smaller than
-  // exact-label matches, so Sensitivity lowers the admission floor.
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.18, 0.32, f) * Lerp (1.05, 0.82, s)
-                    * Lerp (0.95, 1.05, t),
-                0.14, 0.40);
-}
-
-inline double
-RetrievalPreconsolidatedLabelGraphWeight (double F, double S, double T)
-{
-  // Label-graph boosts are a soft candidate-ranking prior. Higher Sensitivity
-  // trusts label evidence more; higher Focus keeps the boost conservative.
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.14, 0.26, s) * Lerp (1.10, 0.82, f)
-                    * Lerp (1.05, 0.92, t),
-                0.08, 0.32);
-}
-
-inline int
-RetrievalPreconsolidatedLabelGraphTopLabels (double F, double T)
-{
-  // Lower Focus explores more provisional labels; higher Stability narrows the
-  // set because durable state should already carry persistent anchors.
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (16.0, 6.0, f) * Lerp (1.08, 0.92, t)));
-}
-
-inline double
-RetrievalPreconsolidatedLabelGraphMinQueryScore (double F, double S, double T)
-{
-  // Keep this low: the label graph is a rescue route, not a hard exact-match
-  // gate. Sensitivity lowers the floor for weak but useful query overlap.
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.0, 0.04, f) * Lerp (1.05, 0.70, s)
-                    * Lerp (0.90, 1.10, t),
-                0.0, 0.06);
-}
-
-inline double
-RetrievalPreconsolidatedLabelRelationWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.24, 0.46, s) * Lerp (1.05, 0.90, f)
-                    * Lerp (0.95, 1.05, t),
-                0.18, 0.55);
-}
-
-inline double
-RetrievalPreconsolidatedLabelGraphDegreeDamping (double F, double S, double T)
-{
-  // Generic-hub suppression rises with Sensitivity and lower Focus.
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.03, 0.12, s) * Lerp (1.20, 0.75, f)
-                    * Lerp (1.00, 0.85, t),
-                0.0, 0.15);
-}
-
-inline int
-RetrievalPreconsolidatedLabelGraphSeedSources (double F, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (32.0, 12.0, f) * Lerp (1.05, 0.90, t)));
-}
-
-inline int
-RetrievalDurableSourceTextSeedSources (double F, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (24.0, 8.0, f) * Lerp (1.05, 0.92, t)));
-}
-
-inline double
-RetrievalDurableSourceTextMinScore (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.12, 0.24, f) * Lerp (1.05, 0.82, s)
-                    * Lerp (0.95, 1.05, t),
-                0.08, 0.30);
 }
 
 inline int
@@ -834,91 +540,6 @@ RetrievalDurableSourceSupportSaturationCount (double F, double T)
   const double f = RetrievalFocusBias (F);
   const double t = RetrievalStabilityBias (T);
   return Clamp (Lerp (6.0, 4.0, f) * Lerp (1.05, 0.95, t), 2.0, 8.0);
-}
-
-inline double
-RetrievalDurableSourceTextBaseWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.72, 0.86, f) * Lerp (1.00, 0.94, s)
-                    * Lerp (0.98, 1.02, t),
-                0.60, 0.92);
-}
-
-struct RetrievalFactCandidateScoringPolicy
-{
-  double boost_weight;
-  double stale_penalty_weight;
-};
-
-inline RetrievalFactCandidateScoringPolicy
-RetrievalFactCandidateScoringWeights (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return { Lerp (0.08, 0.28, f) * Lerp (0.90, 1.10, s)
-               * Lerp (1.05, 0.95, t),
-           Lerp (0.05, 0.20, f) * Lerp (0.90, 1.05, s)
-               * Lerp (0.98, 1.02, t) };
-}
-
-inline double
-RetrievalFactMissingConfidence (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  return Clamp (0.50 + 0.04 * (s - s0) - 0.03 * (f - f0)
-                    + 0.02 * (t - t0),
-                0.40, 0.60);
-}
-
-inline double
-RetrievalFactMissingEvidenceSupportWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  return Clamp (0.72 - 0.06 * (f - f0) + 0.08 * (s - s0)
-                    + 0.04 * (t - t0),
-                0.55, 0.90);
-}
-
-inline double
-RetrievalFactBoostWeakMultiplier (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  const double scale = 1.0 - 0.12 * (f - f0) + 0.18 * (s - s0)
-                       + 0.08 * (t - t0);
-  return Clamp (0.55 * scale, 0.40, 0.75);
-}
-
-inline double
-RetrievalFactBoostStrongMultiplier (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  const double scale = 1.0 - 0.10 * (f - f0) + 0.16 * (s - s0)
-                       + 0.10 * (t - t0);
-  return Clamp (1.45 * scale, 1.10, 1.85);
 }
 
 inline double
@@ -1152,7 +773,7 @@ struct InfluenceFeedbackPolicy
   double sustain_window;
   double sustain_alpha;
   double contextual_gain_weight;
-  double generative_similarity_weight;
+  double predictive_similarity_weight;
   double drift_weight;
 };
 
@@ -1214,42 +835,6 @@ RetrievalMemoryAffectScoringWeights (double S)
 }
 
 inline double
-RetrievalSummaryDuplicateThresholdScale (double F, double S, double T)
-{
-  (void)S;
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (1.35, 1.10, f) * Lerp (1.02, 0.98, t), 1.0,
-                1.45);
-}
-
-inline double
-RetrievalSummaryDuplicateThresholdCap (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  const double scale = 1.0 - 0.02 * (f - f0) + 0.02 * (s - s0)
-                       + 0.01 * (t - t0);
-  return Clamp (0.99 * scale, 0.94, 0.995);
-}
-
-inline bool
-RetrievalBypassSummaryOverlap (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double threshold = Clamp (0.75 * Lerp (1.05, 0.95, s)
-                                      * Lerp (0.98, 1.02, t),
-                                  0.62, 0.88);
-  return f < threshold;
-}
-
-inline double
 RetrievalDurableSourceSetWeight (double F, double S, double T)
 {
   const double f = RetrievalFocusBias (F);
@@ -1294,54 +879,6 @@ RetrievalSourceBackedBoostFloor (double F, double S, double T)
   return Clamp (Lerp (0.012, 0.045, f) * Lerp (1.05, 0.80, s)
                     * Lerp (0.90, 1.05, t),
                 0.010, 0.060);
-}
-
-struct RetrievalFactStalePolicy
-{
-  double similarity_weight;
-  double confidence_weight;
-  double lifecycle_floor;
-};
-
-inline RetrievalFactStalePolicy
-RetrievalFactStaleScoringPolicy (double F, double S, double T)
-{
-  (void)S;
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  const double similarity_weight
-      = Clamp (Lerp (0.45, 0.67, f) * Lerp (0.98, 1.02, t), 0.35,
-               0.80);
-  return { similarity_weight,
-           1.0 - similarity_weight,
-           Clamp (Lerp (0.40, 0.60, t) * Lerp (0.98, 1.02, f), 0.35,
-                  0.70) };
-}
-
-struct RetrievalFactBoostPolicy
-{
-  double similarity_weight;
-  double confidence_weight;
-  double support_weight;
-  double temporal_weight;
-};
-
-inline RetrievalFactBoostPolicy
-RetrievalFactBoostScoringPolicy (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double similarity_raw = Lerp (0.35, 0.50, f);
-  const double confidence_raw = Lerp (0.40, 0.30, f) * Lerp (1.05, 0.95, s);
-  const double support_raw = Lerp (0.18, 0.28, s) * Lerp (1.05, 0.95, f);
-  const double sum = std::max (1e-12,
-                               similarity_raw + confidence_raw + support_raw);
-  return { similarity_raw / sum,
-           confidence_raw / sum,
-           support_raw / sum,
-           Clamp (Lerp (0.55, 0.42, t) * Lerp (0.98, 1.02, s), 0.30,
-                  0.65) };
 }
 
 struct RetrievalRoutineRecencyAdjustmentWeights
@@ -1500,461 +1037,6 @@ RetrievalSeedFallbackSourceConfidence (double F, double S, double T)
                 0.42, 0.82);
 }
 
-enum class FactSeverity
-{
-  Low,
-  Medium,
-  High
-};
-
-enum class FactRoutineClass
-{
-  Generic,
-  StableRoutine,
-  Preference,
-  MutableState
-};
-
-enum class FactCriticalityClass
-{
-  Generic,
-  High,
-  Medium,
-  Preference
-};
-
-struct FactRetrievalPolicy
-{
-  double evidence_mass_weight;
-  double evidence_count_weight;
-  double evidence_count_saturation;
-  double routine_duration_window_ms;
-  double routine_duration_weight;
-  double routine_evidence_weight;
-  double routine_confirmation_saturation;
-  double recency_window_ms;
-  double active_lifecycle_multiplier;
-  double weak_current_lifecycle_multiplier;
-  double weak_history_lifecycle_multiplier;
-  double archived_current_lifecycle_multiplier;
-  double archived_history_lifecycle_multiplier;
-  double temporal_match_weight;
-  double confidence_weight;
-  double evidence_support_weight;
-  double current_boost_weight;
-  double source_diversity_weight;
-  double source_diversity_saturation;
-  double supersession_penalty_weight;
-  double routine_bias_weight;
-  double routine_recency_penalty_weight;
-  double recency_bias_weight;
-  double recency_routine_penalty_weight;
-};
-
-inline FactRetrievalPolicy
-FactRetrievalScoringPolicy (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double evidence_mass_weight = Clamp (
-      Lerp (0.64, 0.76, s) * Lerp (0.98, 1.02, t), 0.55, 0.85);
-  const double routine_duration_weight = Clamp (
-      Lerp (0.50, 0.60, t) * Lerp (1.04, 0.96, s), 0.40, 0.70);
-  const double routine_evidence_weight = Clamp (
-      Lerp (0.50, 0.60, t) * Lerp (0.96, 1.04, s), 0.40, 0.70);
-  return { evidence_mass_weight,
-           1.0 - evidence_mass_weight,
-           Clamp (Lerp (4.0, 6.0, t) * Lerp (1.06, 0.94, s), 3.0, 8.0),
-           Clamp (Lerp (6000.0, 10000.0, t) * Lerp (1.05, 0.95, s),
-                  4000.0, 14000.0),
-           routine_duration_weight,
-           routine_evidence_weight,
-           Clamp (Lerp (5.0, 7.0, t) * Lerp (1.06, 0.94, s), 3.0, 10.0),
-           Clamp (Lerp (6000.0, 10000.0, t) * Lerp (1.08, 0.92, s),
-                  4000.0, 14000.0),
-           1.0,
-           Clamp (Lerp (0.56, 0.68, t) * Lerp (1.02, 0.98, s), 0.45,
-                  0.78),
-           Clamp (Lerp (0.78, 0.90, t) * Lerp (1.02, 0.98, s), 0.68,
-                  0.96),
-           0.0,
-           Clamp (Lerp (0.80, 0.90, t) * Lerp (1.02, 0.98, s), 0.70,
-                  0.96),
-           Clamp (Lerp (0.34, 0.46, f) * Lerp (1.03, 0.97, s), 0.25,
-                  0.55),
-           Clamp (Lerp (0.18, 0.26, f) * Lerp (1.03, 0.97, s), 0.12,
-                  0.32),
-           Clamp (Lerp (0.18, 0.30, s) * Lerp (1.02, 0.98, f), 0.12,
-                  0.36),
-           Clamp (Lerp (0.08, 0.12, t) * Lerp (0.98, 1.02, f), 0.04,
-                  0.16),
-           Clamp (Lerp (0.03, 0.05, s) * Lerp (0.98, 1.02, t), 0.01,
-                  0.08),
-           Clamp (Lerp (2.0, 4.0, t) * Lerp (1.05, 0.95, s), 1.0, 6.0),
-           Clamp (Lerp (0.14, 0.22, s) * Lerp (1.03, 0.97, t), 0.08,
-                  0.30),
-           Clamp (Lerp (0.24, 0.36, t) * Lerp (0.94, 1.06, s), 0.15,
-                  0.45),
-           Clamp (Lerp (0.08, 0.16, s) * Lerp (1.04, 0.96, t), 0.04,
-                  0.24),
-           Clamp (Lerp (0.28, 0.40, s) * Lerp (0.96, 1.04, 1.0 - t), 0.18,
-                  0.50),
-           Clamp (Lerp (0.12, 0.20, s) * Lerp (1.04, 0.96, t), 0.06,
-                  0.28) };
-}
-
-inline double
-FactRetrievalEvidenceTypeWeight (double F, double S, double T,
-                                 const char *evidence_type)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const bool episodic = evidence_type != nullptr && evidence_type[0] == 'e'
-                        && evidence_type[1] == 'p';
-  const bool summary = evidence_type != nullptr && evidence_type[0] == 's'
-                       && evidence_type[1] == 'u';
-  if (episodic)
-    {
-      return 1.0;
-    }
-  if (summary)
-    {
-      return Clamp (Lerp (0.82, 0.94, t) * Lerp (1.02, 0.98, s), 0.74,
-                    0.98);
-    }
-  return Clamp (Lerp (0.64, 0.76, s) * Lerp (0.98, 1.02, f)
-                    * Lerp (1.02, 0.98, t),
-                0.52, 0.86);
-}
-
-inline double
-FactRetrievalEvidenceSupportFloor (double F, double S, double T)
-{
-  (void)F;
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (0.24, 0.16, s) * Lerp (0.96, 1.04, t), 0.10,
-                0.32);
-}
-
-inline double
-FactRoutineClassAffinity (double F, double S, double T,
-                          FactRoutineClass routine_class)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double s0 = SensitivityBias (0.5);
-  switch (routine_class)
-    {
-    case FactRoutineClass::StableRoutine:
-      return Clamp (1.0 * (1.0 + 0.04 * (f - 0.5) - 0.06 * (s - s0)
-                           + 0.08 * (t - 0.5)),
-                    0.0, 1.0);
-    case FactRoutineClass::Preference:
-      return Clamp (0.80 * (1.0 + 0.02 * (f - 0.5) + 0.04 * (s - s0)
-                            + 0.04 * (t - 0.5)),
-                    0.0, 1.0);
-    case FactRoutineClass::MutableState:
-      return Clamp (0.35 * (1.0 - 0.04 * (f - 0.5) + 0.08 * (s - s0)
-                            - 0.08 * (t - 0.5)),
-                    0.0, 1.0);
-    case FactRoutineClass::Generic:
-      break;
-    }
-  return Clamp (0.15 * (1.0 - 0.06 * (f - 0.5) + 0.08 * (s - s0)
-                        - 0.04 * (t - 0.5)),
-                0.0, 1.0);
-}
-
-inline double
-FactRoutineAffinity (double F, double S, double T, double class_affinity)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double s0 = SensitivityBias (0.5);
-  const double scale = 1.0 - 0.08 * (f - 0.5) + 0.12 * (s - s0)
-                       + 0.08 * (t - 0.5);
-  return Clamp (class_affinity * scale,
-                0.0, 1.0);
-}
-
-inline double
-FactCriticalityClassPrior (double F, double S, double T,
-                           FactCriticalityClass criticality_class)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double s0 = SensitivityBias (0.5);
-  switch (criticality_class)
-    {
-    case FactCriticalityClass::High:
-      return Clamp (1.0 * (1.0 + 0.03 * (f - 0.5) + 0.05 * (s - s0)
-                           + 0.05 * (t - 0.5)),
-                    0.0, 1.0);
-    case FactCriticalityClass::Medium:
-      return Clamp (0.75 * (1.0 + 0.03 * (f - 0.5) + 0.03 * (s - s0)
-                            + 0.04 * (t - 0.5)),
-                    0.0, 1.0);
-    case FactCriticalityClass::Preference:
-      return Clamp (0.45 * (1.0 - 0.02 * (f - 0.5) + 0.05 * (s - s0)
-                            - 0.02 * (t - 0.5)),
-                    0.0, 1.0);
-    case FactCriticalityClass::Generic:
-      break;
-    }
-  return Clamp (0.60 * (1.0 + 0.02 * (f - 0.5) + 0.03 * (s - s0)
-                        + 0.02 * (t - 0.5)),
-                0.0, 1.0);
-}
-
-inline double
-FactCriticality (double F, double S, double T, double class_criticality)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double s0 = SensitivityBias (0.5);
-  const double scale = 1.0 + 0.06 * (f - 0.5) + 0.10 * (s - s0)
-                       + 0.08 * (t - 0.5);
-  return Clamp (class_criticality * scale, 0.0, 1.0);
-}
-
-inline double
-FactSupersessionConfidenceMargin (double S, double T)
-{
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Lerp (0.18, 0.03, s) * Lerp (1.10, 0.90, t);
-}
-
-inline double
-FactDerivedEventConfidence (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double s0 = SensitivityBias (0.5);
-  const double scale = 1.0 - 0.04 * (f - 0.5) + 0.08 * (s - s0)
-                       + 0.05 * (t - 0.5);
-  return Clamp (0.62 * scale,
-                0.50, 0.75);
-}
-
-inline double
-FactEvidenceWriteSupportWeight (double F, double S, double T,
-                                const char *evidence_type)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const bool episodic = evidence_type != nullptr && evidence_type[0] == 'e'
-                        && evidence_type[1] == 'p';
-  if (!episodic)
-    {
-      return 1.0;
-    }
-  const double s0 = SensitivityBias (0.5);
-  const double scale = 1.0 - 0.08 * (f - 0.5) + 0.08 * (s - s0)
-                       + 0.06 * (t - 0.5);
-  return Clamp (0.75 * scale,
-                0.55, 0.95);
-}
-
-inline double
-FactLifecycleDecayWindowMillis (double F, double S, double T,
-                                FactSeverity severity)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double base = severity == FactSeverity::High
-                          ? 18000.0
-                          : (severity == FactSeverity::Medium ? 12000.0
-                                                               : 7000.0);
-  return Clamp (base * Lerp (0.92, 1.22, t) * Lerp (1.08, 0.92, s)
-                    * Lerp (0.97, 1.03, f),
-                base * 0.60, base * 1.60);
-}
-
-inline double
-FactLifecycleDeletionGraceWindowMillis (double F, double S, double T,
-                                        FactSeverity severity)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double base = severity == FactSeverity::High
-                          ? 16000.0
-                          : (severity == FactSeverity::Medium ? 9000.0
-                                                               : 4500.0);
-  return Clamp (base * Lerp (0.90, 1.24, t) * Lerp (1.10, 0.90, s)
-                    * Lerp (0.96, 1.04, f),
-                base * 0.60, base * 1.70);
-}
-
-inline double
-FactLifecycleEvidenceNormDenominator (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (1.9, 2.5, t) * Lerp (1.08, 0.92, s)
-                    * Lerp (0.98, 1.02, f),
-                1.4, 3.2);
-}
-
-inline double
-FactLifecycleDiversitySaturation (double F, double S, double T)
-{
-  (void)F;
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (2.5, 3.5, t) * Lerp (1.06, 0.94, s), 2.0, 5.0);
-}
-
-inline double
-FactLifecycleRepeatedCompressedSaturation (double F, double S, double T)
-{
-  (void)F;
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (16.0, 24.0, t) * Lerp (1.08, 0.92, s), 10.0,
-                32.0);
-}
-
-inline double
-FactLifecycleRepeatedRawSaturation (double F, double S, double T)
-{
-  (void)F;
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (5.0, 7.0, t) * Lerp (1.06, 0.94, s), 3.0, 10.0);
-}
-
-inline double
-FactLifecycleHighSeverityRecencyFloor (double F, double S, double T)
-{
-  (void)F;
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (0.24, 0.36, t) * Lerp (1.04, 0.96, s), 0.16,
-                0.45);
-}
-
-inline double
-FactLifecycleContradictionNormDenominator (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (1.35, 1.85, t) * Lerp (0.94, 1.06, s)
-                    * Lerp (0.98, 1.02, f),
-                1.0, 2.4);
-}
-
-struct FactLifecycleSupportPolicy
-{
-  double confidence_weight;
-  double evidence_weight;
-  double diversity_weight;
-  double repeated_weight;
-  double recency_base_weight;
-  double recency_dynamic_weight;
-  double contradiction_weight;
-};
-
-inline FactLifecycleSupportPolicy
-FactLifecycleSupportScoringPolicy (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double confidence_raw = Lerp (0.34, 0.42, f) * Lerp (1.02, 0.98, s);
-  const double evidence_raw = Lerp (0.24, 0.36, s) * Lerp (1.02, 0.98, f);
-  const double diversity_raw = Lerp (0.13, 0.21, t) * Lerp (1.04, 0.96, f);
-  const double repeated_raw = Lerp (0.12, 0.18, t) * Lerp (1.06, 0.94, s);
-  const double sum = std::max (1e-12, confidence_raw + evidence_raw
-                                           + diversity_raw + repeated_raw);
-  const double recency_dynamic = Clamp (
-      Lerp (0.48, 0.62, t) * Lerp (1.04, 0.96, s), 0.35, 0.72);
-  return { confidence_raw / sum,
-           evidence_raw / sum,
-           diversity_raw / sum,
-           repeated_raw / sum,
-           1.0 - recency_dynamic,
-           recency_dynamic,
-           Clamp (Lerp (0.14, 0.22, s) * Lerp (1.05, 0.95, t), 0.08,
-                  0.30) };
-}
-
-inline double
-FactLifecycleSupportScoreFloor (double F, double S, double T,
-                                FactSeverity severity)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double base = severity == FactSeverity::High ? 0.22 : 0.0;
-  return Clamp (base * Lerp (0.90, 1.16, t) * Lerp (1.04, 0.96, s)
-                    * Lerp (0.98, 1.02, f),
-                0.0, 0.35);
-}
-
-inline double
-FactLifecycleActiveThreshold (double F, double S, double T,
-                              FactSeverity severity)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double base = severity == FactSeverity::High ? 0.45 : 0.52;
-  return Clamp (base * Lerp (0.96, 1.06, f) * Lerp (1.06, 0.92, s)
-                    * Lerp (0.98, 1.04, t),
-                0.30, 0.70);
-}
-
-inline double
-FactLifecycleWeakThreshold (double F, double S, double T,
-                            FactSeverity severity)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double base = severity == FactSeverity::Low ? 0.22 : 0.18;
-  return Clamp (base * Lerp (1.02, 0.96, f) * Lerp (1.06, 0.92, s)
-                    * Lerp (0.98, 1.04, t),
-                0.08, 0.34);
-}
-
-inline double
-FactLifecycleDeleteThreshold (double F, double S, double T,
-                              FactSeverity severity)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double base = severity == FactSeverity::Medium ? 0.08 : 0.18;
-  return Clamp (base * Lerp (1.04, 0.96, f) * Lerp (1.08, 0.90, s)
-                    * Lerp (0.96, 1.08, t),
-                0.03, 0.30);
-}
-
-inline int
-FactLifecycleMaintenanceSweepLimit (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (360.0, 100.0, f) * Lerp (0.92, 1.12, s)
-                     * Lerp (0.95, 1.05, t);
-  return static_cast<int> (std::round (Clamp (raw, 96.0, 512.0)));
-}
-
 inline int
 RetrievalDurableSourceMinTopK (double F, double T)
 {
@@ -2036,17 +1118,6 @@ RetrievalGraphExpandedRagTemporalWeight (double F, double S, double T)
 }
 
 inline double
-RetrievalGraphExpandedRagFactWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.12, 0.30, s) * Lerp (1.05, 0.88, f)
-	                    * Lerp (0.96, 1.06, t),
-	                0.06, 0.34);
-}
-
-inline double
 RetrievalGraphExpandedRagTemporalRankScore (double F, double S, double T,
                                             int rank)
 {
@@ -2063,51 +1134,6 @@ RetrievalGraphExpandedRagTemporalRankScore (double F, double S, double T,
                                1.5, 2.6);
   return RetrievalGraphExpandedRagTemporalWeight (F, S, T)
          / (std::max (0, rank) + offset);
-}
-
-inline double
-RetrievalAnyFactMatchSupportFloor (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  return Clamp (0.25
-                    * (1.0 + 0.06 * (f - f0) - 0.10 * (s - s0)
-                       + 0.04 * (t - t0)),
-                0.15, 0.36);
-}
-
-inline int
-RetrievalAnyFactMatchLinkCap (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (3.0, 1.0, f) * Lerp (1.10, 0.90, s)
-                             * Lerp (0.95, 1.05, t),
-                         1.0, 4.0)));
-}
-
-inline double
-RetrievalUnknownCautionCutoffMultiplier (double F, double S, double T,
-                                         double unknown_caution_scale)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  const double max_lift = Clamp (0.15
-                                    * (1.0 + 0.08 * (f - f0)
-                                       - 0.06 * (s - s0)
-                                       + 0.06 * (t - t0)),
-                                0.08, 0.22);
-  return 1.0 + max_lift * Clamp (unknown_caution_scale, 0.0, 1.0);
 }
 
 inline double
@@ -2153,40 +1179,6 @@ RetrievalProceduralSeedFanout (double F, double S, double T)
       1, static_cast<int> (std::round (Lerp (1.0, 4.0, s)
                                        * Lerp (1.0, 0.75, t)
                                        * focus_scale)));
-}
-
-inline double
-RetrievalTotExpansionFactor (double F, double S, double T,
-                             double confidence_scale)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double base = Lerp (0.22, 0.12, f) * Lerp (1.02, 0.96, t);
-  const double span = Lerp (0.30, 0.42, s) * Lerp (1.06, 0.92, f)
-                      * Lerp (1.02, 0.96, t);
-  return 1.0 + base + span * Clamp (confidence_scale, 0.0, 1.0);
-}
-
-inline double
-RetrievalTotDepthConfidenceThreshold (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.26, 0.12, s) * Lerp (0.94, 1.06, f)
-                    * Lerp (1.04, 0.96, t),
-                0.08, 0.40);
-}
-
-inline int
-RetrievalTotMaxDepth (double F, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (4.0, 3.0, f) * Lerp (1.05, 0.95, t),
-                         2.0, 4.0)));
 }
 
 struct RetrievalReconstructionPolicy
@@ -2265,85 +1257,11 @@ RetrievalReconstructionUpdateCount (double F, double S, double T)
   return static_cast<int> (std::round (Clamp (raw, 1.0, 4.0)));
 }
 
-inline int
-RetrievalClusterLabelK (double F, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (80.0, 24.0, f) * Lerp (1.10, 0.90, t)));
-}
-
-inline int
-RetrievalClusterLabelM (double F, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (5.0, 2.0, f) * Lerp (1.05, 0.95, t)));
-}
-
-inline int
-RetrievalClusterLabelN (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (12.0, 6.0, f) * Lerp (0.95, 1.08, s)
-                  * Lerp (1.05, 0.92, t)));
-}
-
-inline bool
-RetrievalClusterLabelEnabled (double F, double S, double T)
-{
-  return RetrievalClusterLabelK (F, T) > 0 && RetrievalClusterLabelM (F, T) > 0
-         && RetrievalClusterLabelN (F, S, T) > 0;
-}
-
-inline int
-STMLabelClusterIterations (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (30.0, 16.0, f) * Lerp (0.95, 1.08, s)
-                             * Lerp (1.05, 0.92, t),
-                         8.0, 40.0)));
-}
-
-inline int
-STMShadowTTLSteps (double T)
-{
-  return static_cast<int> (
-      std::round (Lerp (8.0, 32.0, RetrievalStabilityBias (T))));
-}
-
-inline int
-STMShadowCapacity (double T)
-{
-  return static_cast<int> (
-      std::round (Lerp (16.0, 64.0, RetrievalStabilityBias (T))));
-}
-
-// Section 4.4.3 - Boundary threshold
 inline double
 BoundaryThreshold (double F, double S);
 
-inline double
-STMShadowHardBoundaryThreshold (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double margin = Lerp (0.06, 0.14, f) * Lerp (1.05, 0.85, s)
-                        * Lerp (0.95, 1.10, t);
-  return Clamp (BoundaryThreshold (F, S) + margin, 0.55, 0.85);
-}
-
 inline int
-STMShadowHardBoundaryRetainSteps (double F, double S, double T)
+SoftAnchorHardBoundaryRetainSteps (double F, double S, double T)
 {
   const double f = FocusBias (F);
   const double s = SensitivityBias (S);
@@ -2352,216 +1270,6 @@ STMShadowHardBoundaryRetainSteps (double F, double S, double T)
       Clamp (Lerp (5.0, 2.0, f) * Lerp (1.10, 0.85, s)
                  * Lerp (0.85, 1.25, t),
              1.0, 8.0)));
-}
-
-inline int
-STMLabelRouterTopK (double F, double T)
-{
-  // Reuse the retrieval cluster breadth as the flat-router budget.
-  return RetrievalClusterLabelK (F, T);
-}
-
-inline double
-STMLabelMinScore (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.0, 0.05, f) * Lerp (1.0, 0.65, s)
-                    * Lerp (0.95, 1.05, t),
-                0.0, 0.08);
-}
-
-inline int
-STMLabelEdgeCapacity (double F, double S, double T)
-{
-  const int stm_capacity = STMShadowCapacity (T);
-  const int labels_per_cluster = RetrievalClusterLabelN (F, S, T);
-  return std::max (stm_capacity, stm_capacity * labels_per_cluster);
-}
-
-inline double
-STMLabelConsolidationMinSimilarity (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.82, 0.93, f) * Lerp (0.98, 1.02, t)
-                    * Lerp (0.98, 0.94, s),
-                0.75, 0.95);
-}
-
-inline int
-STMLabelConsolidationMaxLabels (double F, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (18.0, 8.0, f) * Lerp (1.05, 0.90, t)));
-}
-
-inline int
-STMLabelConsolidationMaxLabels (double F, double S, double T)
-{
-  const double s = RetrievalSensitivityBias (S);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double scale = Clamp (1.0 + 0.10 * (s - s0), 0.92, 1.12);
-  return std::max (
-      1, static_cast<int> (
-             std::round (scale
-                         * static_cast<double> (
-                             STMLabelConsolidationMaxLabels (F, T)))));
-}
-
-inline int
-STMLabelConsolidationMaxUngrounded (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (5.0, 1.0, f) * Lerp (0.85, 1.10, s)
-                  * Lerp (1.05, 0.85, t)));
-}
-
-inline int
-STMLTMSourceSpanCandidateLimit (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double f0 = FocusBias (0.5);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (21.0, -1.5, s) * Lerp (1.05, 0.95, t)
-                     * Clamp (1.0 - 0.20 * (f - f0), 0.88, 1.12);
-  return std::max (0, static_cast<int> (std::round (raw)));
-}
-
-inline int
-STMLTMDurableMinLabels (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (4.0, 1.0, f) * Lerp (0.95, 1.05, s)
-                     * Lerp (1.05, 0.90, t);
-  return std::max (1, static_cast<int> (std::round (raw)));
-}
-
-inline int
-STMLTMDurableMaxLabels (double F, double S, double T)
-{
-  const int min_labels = STMLTMDurableMinLabels (F, S, T);
-  const double f = FocusBias (F);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw_extra = Lerp (5.0, -1.0, f) * Lerp (1.05, 0.90, t);
-  const int extra = std::max (
-      0, static_cast<int> (std::round (raw_extra)));
-  return std::max (
-      min_labels, min_labels + extra);
-}
-
-inline int
-STMLTMLabelPromptMinWords (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (2.0, 3.0, f) * (1.0 - 0.06 * (s - SensitivityBias (0.5)))
-                     * (1.0 + 0.04 * (t - 0.5));
-  return static_cast<int> (std::round (Clamp (raw, 2.0, 3.0)));
-}
-
-inline int
-STMLTMLabelPromptMaxWords (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (6.0, 4.0, f) * (1.0 + 0.08 * (s - SensitivityBias (0.5)))
-                     * (1.0 - 0.06 * (t - 0.5));
-  return static_cast<int> (std::round (Clamp (raw, 3.0, 7.0)));
-}
-
-inline int
-STMLTMLabelCooccurrenceMaxLabels (double F, double S, double T)
-{
-  return STMLTMDurableMaxLabels (F, S, T);
-}
-
-struct STMLTMSourceSpanPolicy
-{
-  int contextual_min_width;
-  int contextual_max_width;
-  int contextual_min_content_tokens;
-  int action_object_max_tokens;
-  int subject_search_max_gap;
-  int proper_noun_max_parts;
-  int phrase_min_width;
-  int phrase_max_width;
-  int singleton_min_chars;
-};
-
-inline STMLTMSourceSpanPolicy
-STMLTMSourceSpanCandidatePolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double breadth_scale = 1.0 + 0.10 * (s - SensitivityBias (0.5))
-                               + 0.04 * (t - 0.5);
-  const double precision_scale = 1.0 - 0.08 * (s - SensitivityBias (0.5))
-                                 + 0.04 * (t - 0.5);
-
-  STMLTMSourceSpanPolicy policy;
-  policy.contextual_min_width = static_cast<int> (
-      std::round (Clamp (Lerp (3.0, 5.0, f) * precision_scale, 3.0, 6.0)));
-  policy.contextual_max_width = static_cast<int> (
-      std::round (Clamp (Lerp (6.0, 4.0, f) * breadth_scale, 3.0, 7.0)));
-  if (policy.contextual_max_width < policy.contextual_min_width)
-    {
-      policy.contextual_max_width = policy.contextual_min_width;
-    }
-  policy.contextual_min_content_tokens = static_cast<int> (
-      std::round (Clamp (Lerp (2.0, 4.0, f) * precision_scale, 2.0, 5.0)));
-  policy.action_object_max_tokens = static_cast<int> (
-      std::round (Clamp (Lerp (4.0, 2.0, f) * breadth_scale, 1.0, 5.0)));
-  policy.subject_search_max_gap = static_cast<int> (
-      std::round (Clamp (Lerp (4.0, 2.0, f) * breadth_scale, 1.0, 5.0)));
-  policy.proper_noun_max_parts = static_cast<int> (
-      std::round (Clamp (Lerp (4.0, 2.0, f) * breadth_scale, 1.0, 5.0)));
-  policy.phrase_min_width = static_cast<int> (
-      std::round (Clamp (Lerp (2.0, 3.0, f) * precision_scale, 2.0, 4.0)));
-  policy.phrase_max_width = static_cast<int> (
-      std::round (Clamp (Lerp (4.0, 2.0, f) * breadth_scale, 2.0, 5.0)));
-  if (policy.phrase_max_width < policy.phrase_min_width)
-    {
-      policy.phrase_max_width = policy.phrase_min_width;
-    }
-  policy.singleton_min_chars = static_cast<int> (
-      std::round (Clamp (Lerp (4.0, 6.0, f) * precision_scale, 4.0, 7.0)));
-  return policy;
-}
-
-inline int
-STMLTMRelationEndpointAliasMinSharedTokens (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (1.6, 2.6, f) * (1.0 - 0.10 * (s - SensitivityBias (0.5)))
-                     * (1.0 + 0.06 * (t - 0.5));
-  return static_cast<int> (std::round (Clamp (raw, 1.0, 3.0)));
-}
-
-inline double
-STMLTMRelationEndpointMinConfidence (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (0.42, 0.58, f) * Lerp (1.08, 0.92, s)
-                    * Lerp (0.98, 1.02, t),
-                0.35, 0.65);
 }
 
 // --- Soft Anchor continuity policy ---
@@ -3003,22 +1711,6 @@ RetrievalDiversificationWeights (double F, double S, double T)
 }
 
 inline double
-RetrievalTotDiversificationScale (double F, double S, double T,
-                                  double confidence_scale)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  const double base = Lerp (0.95, 0.75, Clamp (confidence_scale, 0.0, 1.0));
-  const double knob_scale = 1.0 - 0.05 * (f - f0) + 0.04 * (s - s0)
-                            - 0.04 * (t - t0);
-  return Clamp (base * knob_scale, 0.65, 1.0);
-}
-
-inline double
 RetrievalProceduralSeedMinScore (double F, double S, double T)
 {
   const double f = FocusBias (F);
@@ -3038,17 +1730,6 @@ AssociationBoost (double F, double S, double T)
   const double t = Clamp (T, 0.0, 1.0);
   // 0.015..0.06 scaled by Sensitivity; higher Focus reduces extra breadth.
   return Lerp (0.015, 0.06, s) * Lerp (1.0, 0.7, f) * Lerp (1.0, 0.9, t);
-}
-
-// Baseline salience for seeded label-bank entries.
-inline double
-LabelBankSalience (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double mix = 0.5 * f + 0.5 * s;
-  return Clamp (Lerp (0.35, 0.65, mix) * Lerp (1.0, 0.9, t), 0.0, 1.0);
 }
 
 inline double
@@ -3463,22 +2144,6 @@ IdleRequiredSeconds (double T)
       std::round (0.25 * static_cast<double> (WRateSeconds (T))));
 }
 
-// Extraction batch size — Algorithm 29c
-inline int
-ExtractionBatchSize (double T)
-{
-  // extraction_batch_size = round(lerp(8, 32, T))
-  return static_cast<int> (std::round (Lerp (8.0, 32.0, T)));
-}
-
-// Max extraction jobs per consolidation cycle — Algorithm 32
-inline int
-MaxExtractionsPerCycle (double T)
-{
-  // max_extractions_per_cycle = round(lerp(20, 5, T))
-  return static_cast<int> (std::round (Lerp (20.0, 5.0, Clamp (T, 0.0, 1.0))));
-}
-
 // Capacity trigger threshold — Algorithm 28 (capacity trigger).
 inline long long
 ConsolidationThresholdCount (double T)
@@ -3499,14 +2164,6 @@ ConsolidationRequiredCount (double T)
       = static_cast<double> (ConsolidationThresholdCount (T));
   const double scaled = base * ConsolidationEscalationMultiplier (T);
   return static_cast<long long> (std::max (1.0, std::round (scaled)));
-}
-
-// Minimum cluster size for extraction — Algorithm 29c
-inline int
-MinClusterSizeForExtraction (double F)
-{
-  // min_cluster_size_for_extraction = round(lerp(3, 10, F))
-  return static_cast<int> (std::round (Lerp (3.0, 10.0, FocusBias (F))));
 }
 
 inline int
@@ -3530,34 +2187,6 @@ ShallowConsolidationLabelMinSimilarity (double F, double S, double T)
   return Clamp (Lerp (0.30, 0.60, f) * Lerp (1.0, 1.1, t)
                     * Clamp (1.0 - 0.06 * (s - s0), 0.94, 1.04),
                 0.15, 0.95);
-}
-
-struct ConsolidationSummaryEvidenceBudget
-{
-  int max_source_texts;
-  int max_total_chars;
-  int max_text_chars;
-};
-
-inline ConsolidationSummaryEvidenceBudget
-ConsolidationSummaryEvidenceBudgetForKnobs (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double s0 = SensitivityBias (0.5);
-  const double breadth_scale = Clamp (1.0 + 0.12 * (s - s0), 0.88, 1.14);
-  return {
-    std::max (
-        2, static_cast<int> (
-               std::round (Lerp (3.0, 8.0, f) * breadth_scale))),
-    std::max (
-        256, static_cast<int> (
-                 std::round (Lerp (1200.0, 3600.0, t) * breadth_scale))),
-    std::max (
-        128, static_cast<int> (
-                 std::round (Lerp (300.0, 900.0, f) * breadth_scale)))
-  };
 }
 
 // --- Consolidation Clustering (Section 7.3-7.4) ---
@@ -3600,15 +2229,6 @@ LabelFrequencyThreshold (double T)
   // label_frequency_threshold(T) = round(lerp(5, 15, T))
   // Higher stability = higher frequency required for label to be notable
   return static_cast<int> (std::round (Lerp (5.0, 15.0, Clamp (T, 0.0, 1.0))));
-}
-
-// Extraction interval — Section 7.4
-inline int
-ExtractionIntervalSeconds (double T)
-{
-  // extraction_interval(T) = lerp(300, 3600, T)
-  // Section 7.4: 5 minutes to 1 hour based on stability
-  return static_cast<int> (std::round (Lerp (300.0, 3600.0, Clamp (T, 0.0, 1.0))));
 }
 
 // Retention window size (w_ret) — Algorithm 0.2
@@ -3831,15 +2451,6 @@ inline double
 PeripheryCutoff (double T)
 {
   return Lerp (0.03, 0.20, T);
-}
-
-// Fact-evidence eviction floor — memories supporting active facts are protected
-// proportionally to Stability. At T=0 no protection; at T=1 floor reaches
-// the periphery cutoff itself (near-immune).
-inline double
-FactEvictionFloor (double T)
-{
-  return Lerp (0.0, PeripheryCutoff (T), T);
 }
 
 // --- Stability prior helpers (Algorithm 5) ---
@@ -4155,10 +2766,10 @@ LambdaMood (double delta_seconds, double T)
 inline int
 WMBaseCapacity (double S, double F)
 {
-  // Ablation-arm override (wm_capacity_* arms in
-  // chat_replay_release_protocol_spec.json); cached once per process. The
-  // production default is the capacity-21 operating point from the live-judge
-  // sweep, while preserving the original F/S shape around that point.
+  // Explicit capacity override for controlled release sweeps; cached once per
+  // process. The production default is the capacity-21 operating point from
+  // the live-judge sweep, while preserving the original F/S shape around that
+  // point.
   static const int kCapacityOverride = [] {
     const char *value = std::getenv ("CORTEXT_WM_CAPACITY_OVERRIDE");
     const int parsed = value != nullptr ? std::atoi (value) : 0;
@@ -4181,9 +2792,9 @@ WMMaintenanceCostPerSlot (double S, double F)
 {
   // Per-slot maintenance shares a fixed total budget: a FULL working
   // memory always costs lerp(0.05, 0.15, S) x 7 (the neutral capacity),
-  // regardless of actual capacity. Capacity changes - including the
-  // wm_capacity_* ablation override - therefore do not change gate
-  // strictness; the size arms measure window value, not gate side effects.
+  // regardless of actual capacity. Capacity changes via the explicit override
+  // therefore do not change gate strictness; capacity sweeps measure window
+  // value, not gate side effects.
   constexpr double kNeutralCapacity = 7.0;
   const double per_slot_at_neutral = Lerp (0.05, 0.15, SensitivityBias (S));
   const int capacity = std::max (1, WMBaseCapacity (S, F));
@@ -4390,73 +3001,6 @@ DerivedSourceFallbackEdgeWeight (double F, double S, double T)
   return DerivedSourceEdgeWeight (F, S, T);
 }
 
-// --- Algorithm 25 (Metacognitive Monitoring) Helpers ---
-inline double
-FOKThreshold (double F)
-{
-  // FOK_threshold = lerp(0.2, 0.5, F)
-  return Lerp (0.2, 0.5, FocusBias (F));
-}
-
-inline double
-TOTFokCutoff (double F)
-{
-  // TOT FOK cutoff = lerp(0.5, 0.8, F)
-  return Lerp (0.5, 0.8, FocusBias (F));
-}
-
-inline double
-TOTRetrievalCutoff (double F)
-{
-  // TOT retrieval cutoff = lerp(0.4, 0.2, F)
-  return Lerp (0.4, 0.2, FocusBias (F));
-}
-
-inline double
-ConfidenceDecayRate (double T)
-{
-  // confidence_decay_rate = lerp(0.01, 0.1, 1 − T)
-  return Lerp (0.01, 0.1, 1.0 - T);
-}
-
-inline double
-UnknownThreshold (double F)
-{
-  // unknown_threshold = lerp(0.3, 0.1, F)
-  return Lerp (0.3, 0.1, FocusBias (F));
-}
-
-inline int
-StrategySwitchLatencyMs (double S)
-{
-  // strategy_switch_latency = lerp(500, 100, S) ms
-  return static_cast<int> (
-      std::round (Lerp (500.0, 100.0, SensitivityBias (S))));
-}
-
-inline double
-CertaintyRequirement (double T)
-{
-  // certainty_requirement = lerp(0.6, 0.9, T)
-  return Lerp (0.6, 0.9, T);
-}
-
-inline double
-RetrievalUnknownCautionCertaintyRequirement (double F, double S, double T,
-                                             double resurfacing_decay_scale)
-{
-  // Unknown-caution retrieval should primarily follow the memory knobs. Storage
-  // pressure can relax it slightly, but cannot become the certainty setting.
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double pressure_scale = Lerp (
-      0.92, 1.0, Clamp (resurfacing_decay_scale, 0.0, 1.0));
-  return Clamp (Lerp (0.52, 0.74, t) * Lerp (0.98, 1.04, f)
-                    * Lerp (1.04, 0.96, s) * pressure_scale,
-                0.45, 0.82);
-}
-
 // --- Section 5.5 (Adaptive Threshold Precision Modulation) ---
 inline double
 TargetPrecision (double F, double T)
@@ -4464,32 +3008,12 @@ TargetPrecision (double F, double T)
   // algorithms.md defines ΔThreshold_precision_t in terms of a
   // target_precision. The target itself is derived (not configurable).
   //
-  // We anchor it to the metacognitive certainty requirement (Alg 25) and
-  // scale it by focus to reflect that higher focus demands higher precision.
-  //
-  // target_precision = certainty_requirement(T) * (0.5 + 0.5*F)
+  // Higher stability and focus demand higher precision.
+  // target_precision = lerp(0.6, 0.9, T) * (0.5 + 0.5*F)
   const double f01 = FocusBias (F);
   const double t01 = Clamp (T, 0.0, 1.0);
-  const double certainty = CertaintyRequirement (t01);
+  const double certainty = Lerp (0.6, 0.9, t01);
   return Clamp (certainty * (0.5 + 0.5 * f01), 0.0, 1.0);
-}
-
-inline double
-MetacognitiveSensitivity (double F, double S)
-{
-  // metacognitive_sensitivity = F × (1 + 0.5 × S)
-  const double f01 = FocusBias (F);
-  const double s01 = SensitivityBias (S);
-  return f01 * (1.0 + 0.5 * s01);
-}
-
-inline double
-MetacognitiveConfidenceAlpha (double F, double S, double T)
-{
-  const double meta_sens = MetacognitiveSensitivity (F, S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp ((0.15 + 0.20 * meta_sens) * Lerp (1.08, 0.92, t),
-                0.12, 0.55);
 }
 
 struct NeuromodulatorPolicy

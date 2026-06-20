@@ -149,10 +149,7 @@ GetOptionalBoolProperty (napi_env env, napi_value obj, const char *name,
 }
 
 bool
-ParseConfigObject (napi_env env, napi_value value, cortext_config &cfg,
-                   std::string &label_bank_path,
-                   std::string &summarizer_provider_uri,
-                   std::string &extractor_provider_uri)
+ParseConfigObject (napi_env env, napi_value value, cortext_config &cfg)
 {
   if (!GetOptionalDoubleProperty (env, value, "focus", cfg.focus)
       || !GetOptionalDoubleProperty (env, value, "sensitivity",
@@ -168,28 +165,16 @@ ParseConfigObject (napi_env env, napi_value value, cortext_config &cfg,
                                    cfg.procedural_enabled)
       || !GetOptionalBoolProperty (env, value, "sequentialEdgesEnabled",
                                    cfg.sequential_edges_enabled)
-      || !GetOptionalStringProperty (env, value, "labelBankPath",
-                                     label_bank_path)
-      || !GetOptionalStringProperty (env, value, "summarizerProviderUri",
-                                     summarizer_provider_uri)
-      || !GetOptionalStringProperty (env, value, "extractorProviderUri",
-                                     extractor_provider_uri))
+      || !GetOptionalBoolProperty (env, value, "signalFilterAudioEnabled",
+                                   cfg.signal_filter_audio_enabled)
+      || !GetOptionalBoolProperty (env, value, "signalFilterImageEnabled",
+                                   cfg.signal_filter_image_enabled)
+      || !GetOptionalBoolProperty (env, value, "signalFilterTextEnabled",
+                                   cfg.signal_filter_text_enabled))
     {
       return false;
     }
 
-  if (!label_bank_path.empty ())
-    {
-      cfg.label_bank_path = label_bank_path.c_str ();
-    }
-  if (!summarizer_provider_uri.empty ())
-    {
-      cfg.summarizer_provider_uri = summarizer_provider_uri.c_str ();
-    }
-  if (!extractor_provider_uri.empty ())
-    {
-      cfg.extractor_provider_uri = extractor_provider_uri.c_str ();
-    }
   return true;
 }
 
@@ -315,9 +300,6 @@ CortextCtor (napi_env env, napi_callback_info info)
   cortext_config cfg{};
   cortext_config_init (&cfg);
 
-  std::string label_bank_path;
-  std::string summarizer_provider_uri;
-  std::string extractor_provider_uri;
   std::string db_path = ":memory:";
   std::string models_dir;
   bool first_arg_is_db_path = false;
@@ -337,9 +319,7 @@ CortextCtor (napi_env env, napi_callback_info info)
       else if (type != napi_undefined && type != napi_null)
         {
           if (type != napi_object
-              || !ParseConfigObject (env, args[0], cfg, label_bank_path,
-                                     summarizer_provider_uri,
-                                     extractor_provider_uri))
+              || !ParseConfigObject (env, args[0], cfg))
             {
               return ThrowTypeError (env, "config must be an object");
             }
@@ -615,31 +595,6 @@ ConsolidateJSON (napi_env env, napi_callback_info info)
 }
 
 napi_value
-ConsolidateModeJSON (napi_env env, napi_callback_info info)
-{
-  size_t argc = 1;
-  napi_value args[1];
-  napi_value jsthis;
-  NAPI_RETURN_IF_FAILED (
-      env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
-  BindingHandle *wrapped = UnwrapHandle (env, jsthis);
-  if (wrapped == nullptr)
-    {
-      return ThrowCortextError (env, "invalid Cortext handle");
-    }
-
-  int32_t mode = 0;
-  if (argc < 1 || napi_get_value_int32 (env, args[0], &mode) != napi_ok)
-    {
-      return ThrowTypeError (env, "consolidateModeJson(mode) expects a number");
-    }
-
-  return JSONStringResult (
-      env, cortext_consolidate_mode_json (wrapped->handle, mode),
-      "cortext_consolidate_mode_json failed");
-}
-
-napi_value
 Flush (napi_env env, napi_callback_info info)
 {
   napi_value jsthis;
@@ -721,8 +676,6 @@ Init (napi_env env, napi_value exports)
       napi_default, nullptr },
     { "consolidateJson", nullptr, ConsolidateJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
-    { "consolidateModeJson", nullptr, ConsolidateModeJSON, nullptr, nullptr,
-      nullptr, napi_default, nullptr },
     { "flush", nullptr, Flush, nullptr, nullptr, nullptr, napi_default,
       nullptr },
     { "reset", nullptr, Reset, nullptr, nullptr, nullptr, napi_default,
@@ -749,21 +702,6 @@ Init (napi_env env, napi_value exports)
                                    sizeof (exports_props)
                                        / sizeof (exports_props[0]),
                                    exports_props));
-
-  napi_value value;
-  NAPI_RETURN_IF_FAILED (
-      env, napi_create_int32 (env, CORTEXT_CONSOLIDATE_SHALLOW, &value));
-  NAPI_RETURN_IF_FAILED (
-      env, napi_set_named_property (env, exports, "CONSOLIDATE_SHALLOW", value));
-  NAPI_RETURN_IF_FAILED (
-      env, napi_create_int32 (env, CORTEXT_CONSOLIDATE_DEEP, &value));
-  NAPI_RETURN_IF_FAILED (
-      env, napi_set_named_property (env, exports, "CONSOLIDATE_DEEP", value));
-  NAPI_RETURN_IF_FAILED (
-      env, napi_create_int32 (env, CORTEXT_CONSOLIDATE_BOTH, &value));
-  NAPI_RETURN_IF_FAILED (
-      env, napi_set_named_property (env, exports, "CONSOLIDATE_BOTH", value));
-
   return exports;
 }
 

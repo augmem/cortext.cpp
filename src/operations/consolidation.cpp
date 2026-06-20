@@ -3,9 +3,7 @@
 #include "cortext/store/store.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
-#include "cortext/operations/extraction.hpp"
 #include "cortext/core/utils.hpp"
-#include "cortext/consolidation_mode.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
@@ -23,9 +21,8 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const uint64_t now_ts = context.GetSignal ().timestamp;
-  const auto mode = context.GetSignal ().consolidation_mode;
 
-  if (!mode.has_value ())
+  if (!context.GetSignal ().force_consolidation)
     {
       return;
     }
@@ -35,70 +32,7 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
   p_ctx.consolidation_count += 1;
   p_ctx.memories_since_consolidation = 0;
   telemetry::LogDebug ("cortext.evaluate_consolidation", {
-    telemetry::Attribute::Bool ("consolidation_start", true),
-    telemetry::Attribute::String ("mode", ConsolidationModeLabel (*mode))
-  });
-}
-
-void
-EnqueueExtractionJobs::Execute (OperationContext &context, Transaction &tx) const
-{
-  (void)tx;
-  if (!context.GetConsolidationShouldStart ())
-    {
-      context.SetExtractionRequests ({});
-      return;
-    }
-  const auto mode = context.GetSignal ().consolidation_mode.value_or (
-      ConsolidationMode::Both);
-  if (mode == ConsolidationMode::Shallow)
-    {
-      context.SetExtractionRequests ({});
-      return;
-    }
-
-  const auto &requests = context.GetExtractionRequests ();
-  if (requests.empty ())
-    {
-      return;
-    }
-
-  const auto &cfg = context.GetConfig ();
-  auto &p_ctx = context.GetProcessorContext ();
-  const uint64_t now_ts = context.GetSignal ().timestamp;
-
-  // Check interval since last extraction.
-  const int interval = core::ExtractionIntervalSeconds (cfg.stability);
-  if (p_ctx.last_extraction_ts > 0
-      && (now_ts - p_ctx.last_extraction_ts)
-             < static_cast<uint64_t> (std::max (interval, 0) * 1000))
-    {
-      context.SetExtractionRequests ({});
-      return;
-    }
-
-  // Respect both batch_size and max_per_cycle limits.
-  // ExtractionBatchSize(T): how many to process per batch (8-32)
-  // MaxExtractionsPerCycle(T): max extractions per consolidation cycle (20-5)
-  const int batch_size = core::ExtractionBatchSize (cfg.stability);
-  const int max_per_cycle = core::MaxExtractionsPerCycle (cfg.stability);
-  const int count = std::min ({ static_cast<int> (requests.size ()),
-                                batch_size, max_per_cycle });
-
-  // Invoke extraction callback if registered.
-  std::vector<operations::ExtractionRequest> batch (requests.begin (),
-                                                    requests.begin () + count);
-  auto *callback = context.GetExtractionCallback ();
-  if (callback)
-    {
-      (*callback) (batch);
-    }
-
-  context.SetExtractionRequests (std::move (batch));
-  p_ctx.last_extraction_ts = now_ts;
-
-  telemetry::LogDebug("cortext.enqueue_extraction_jobs", {
-    telemetry::Attribute::Int64("jobs_queued", count)
+    telemetry::Attribute::Bool ("consolidation_start", true)
   });
 }
 
@@ -113,12 +47,7 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   const double S_eff = core::SensitivityBias (S_raw);
   const uint64_t now_ts = context.GetSignal ().timestamp;
   (void)now_ts;
-  const bool force_consolidation
-      = context.GetSignal ().consolidation_mode.has_value ();
-  const auto mode = context.GetSignal ().consolidation_mode.value_or (
-      ConsolidationMode::Both);
-  const bool deep_mode = (mode != ConsolidationMode::Shallow);
-
+  const bool force_consolidation = context.GetSignal ().force_consolidation;
   // Floor derived from knobs (no magic numbers).
   const double floor_cutoff = core::PeripheryCutoff (T);
 
@@ -154,8 +83,6 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   // Uses unified memories table which contains per-memory state.
   const double tag_weight = core::ConsolidationCandidateTagWeight (
       F_raw, S_raw, T);
-  const std::string blob_filter
-      = deep_mode ? " AND m.blob_id IS NOT NULL " : " ";
   const std::string candidate_scope
       = "WHERE m.kind = 'LONG_TERM' "
         "  AND m.cluster_id IS NULL ";
@@ -173,7 +100,7 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
       "JOIN embeddings e ON m.embedding_id = e.embedding_id "
       )
       + candidate_scope
-      + blob_filter
+      + " "
       + "  AND ((?1 * COALESCE(m.strength, 1.0)) "
         "       - (?2 * COALESCE(m.redundancy, 0.0)) "
         "       + (?3 * COALESCE(m.connectivity, 0.0)) "
@@ -211,7 +138,7 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
           "  FROM memories m "
           )
           + candidate_scope
-          + blob_filter
+          + " "
           + "  ORDER BY computed_score ASC LIMIT ?7"
             ") "
             "SELECT ranked.embedding_id, ranked.computed_score, e.embedding "

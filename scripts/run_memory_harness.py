@@ -97,8 +97,6 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         "--no-cadence",
         "--semantic",
     ]
-    if args.label_bank:
-        cmd.append(f"--label-bank={args.label_bank}")
     if case.get("reuse", True):
         cmd.append("--reuse")
     if case.get("interleave", 1) > 1:
@@ -120,14 +118,6 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
     start_time = time.time()
     returncode = 1
     env = os.environ.copy()
-    if sys.platform == "darwin":
-        litert_lib = (Path("build") / "third_party" / "litert-lm-install" / "lib").resolve()
-        if litert_lib.exists():
-            dyld_path = env.get("DYLD_LIBRARY_PATH", "")
-            if str(litert_lib) not in dyld_path.split(":"):
-                env["DYLD_LIBRARY_PATH"] = (
-                    f"{litert_lib}:{dyld_path}" if dyld_path else str(litert_lib)
-                )
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
             proc = subprocess.Popen(
@@ -172,14 +162,6 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         "consolidation_failures": metrics.get("consolidation_failures", "0"),
         "consolidation_every_turns": metrics.get("consolidation_every_turns", "0"),
         "consolidation_association_created": metrics.get("consolidation_association_created", "0"),
-        "consolidation_label_created": metrics.get("consolidation_label_created", "0"),
-        "consolidation_summary_count": metrics.get("consolidation_summary_count", "0"),
-        "consolidation_summaries_with_model": metrics.get("consolidation_summaries_with_model", "0"),
-        "consolidation_summaries_fallback": metrics.get("consolidation_summaries_fallback", "0"),
-        "consolidation_extraction_jobs": metrics.get("consolidation_extraction_jobs", "0"),
-        "consolidation_extraction_results": metrics.get("consolidation_extraction_results", "0"),
-        "consolidation_labels_seen": metrics.get("consolidation_labels_seen", "0"),
-        "consolidation_relations_seen": metrics.get("consolidation_relations_seen", "0"),
         "reinforcement_edge_count": metrics.get("reinforcement_edge_count", "0"),
         "reinforcement_weight_mean": metrics.get("reinforcement_weight_mean", "0"),
         "memory_long_term_count": metrics.get("memory_long_term_count", "0"),
@@ -195,9 +177,7 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         "retrieval_semantic_overlap_mean": metrics.get("retrieval_semantic_overlap_mean", "0"),
         "retrieval_context_semantic_overlap_mean": metrics.get("retrieval_context_semantic_overlap_mean", "0"),
         "retrieval_association_candidate_rate": metrics.get("retrieval_association_candidate_rate", "0"),
-        "retrieval_label_candidate_rate": metrics.get("retrieval_label_candidate_rate", "0"),
         "retrieval_association_turn_rate": metrics.get("retrieval_association_turn_rate", "0"),
-        "retrieval_label_turn_rate": metrics.get("retrieval_label_turn_rate", "0"),
         "retrieval_summary_hit_rate": metrics.get("retrieval_summary_hit_rate", "0"),
         "retrieval_summary_only_turn_rate": metrics.get("retrieval_summary_only_turn_rate", "0"),
         "summary_hit_overlap_mean": metrics.get("summary_hit_overlap_mean", "0"),
@@ -280,7 +260,6 @@ def main() -> int:
     parser.add_argument("--binary", default="build/examples/topical_chat_analysis/cortext_topical_chat_analysis")
     parser.add_argument("--data", default="data/topical_chat/valid_freq.jsonl")
     parser.add_argument("--models", default="models")
-    parser.add_argument("--label-bank", default="")
     parser.add_argument("--extra-args", default="")
     parser.add_argument("--out", default="")
     parser.add_argument("--max-conversations", type=int, default=4)

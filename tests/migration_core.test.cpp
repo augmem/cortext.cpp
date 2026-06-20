@@ -133,12 +133,10 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     REQUIRE_FALSE(has_index("idx_memories_working"));
     REQUIRE(has_index("idx_memories_working_active"));
     REQUIRE(has_index("idx_memories_working_closed_end"));
-    REQUIRE(has_index("idx_fact_cache_embedding"));
     REQUIRE(has_index("idx_associations_edge_source_target"));
     REQUIRE(has_index("idx_associations_edge_target_source"));
     REQUIRE(has_index("idx_associations_source_weight"));
     REQUIRE(has_index("idx_associations_target_weight"));
-    REQUIRE(has_index("idx_fact_assertions_lifecycle_recorded"));
 
     auto last_access_sql_rows = store->Execute(
         "SELECT sql FROM sqlite_master WHERE type='index' "
@@ -169,7 +167,7 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     REQUIRE(preactivation_sql.find("pre_activation > 0.0") != std::string::npos);
 }
 
-TEST_CASE("Migrations neutralize role-derived source metadata and summary kind",
+TEST_CASE("Migrations normalize role-derived source metadata",
           "[schema][migration]") {
     auto unique_store = SQLiteStore::Create(":memory:");
     auto store = std::shared_ptr<Store>(std::move(unique_store));
@@ -190,8 +188,8 @@ TEST_CASE("Migrations neutralize role-derived source metadata and summary kind",
         "label, start_ts, n_signals, modality, source_origin, "
         "source_reliability, created_at) "
         "VALUES (?, ?, ?, 'ASSOCIATION', ?, 1000, 1, 'text', ?, ?, 1000)",
-        {100LL, 100LL, std::string("summary_1000_0"),
-         std::string("summary text"), std::string("assistant"), 0.6});
+        {100LL, 100LL, std::string("association_1000_0"),
+         std::string("association text"), std::string("assistant"), 0.6});
 
     store->Execute("DELETE FROM cortext_schema_migrations WHERE id = 8");
     cortext::store::ApplyMigrations(*store);
@@ -201,7 +199,7 @@ TEST_CASE("Migrations neutralize role-derived source metadata and summary kind",
         "FROM memories WHERE memory_id = ?",
         {100LL});
     REQUIRE(rows.size() == 1);
-    REQUIRE(std::any_cast<std::string>(rows[0].at("kind")) == "LONG_TERM");
+    REQUIRE(std::any_cast<std::string>(rows[0].at("kind")) == "ASSOCIATION");
     REQUIRE(std::any_cast<std::string>(rows[0].at("source_origin"))
             == "source");
     REQUIRE(std::any_cast<double>(rows[0].at("source_reliability"))

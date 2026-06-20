@@ -2,8 +2,8 @@
 """Benchmark-only open-name retrieval probe.
 
 This script tests whether a plain embedding encoder plus a large name vector
-bank can recover possible person/pet names from short memory-like text without
-an autoregressive extractor. It does not change production retrieval.
+bank can recover possible person/pet names from short memory-like text. It does
+not change production retrieval.
 """
 
 from __future__ import annotations

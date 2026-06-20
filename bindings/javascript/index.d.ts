@@ -7,15 +7,9 @@ export interface CortextConfig {
   reinforcementEnabled?: boolean;
   proceduralEnabled?: boolean;
   sequentialEdgesEnabled?: boolean;
-  labelBankPath?: string;
-  /**
-   * Inference-provider URI for the Summarizer role, e.g.
-   * "ollama://127.0.0.1:11435/gemma4:e2b". Omitted/empty keeps local
-   * model auto-discovery; an unresolvable URI makes construction throw.
-   */
-  summarizerProviderUri?: string;
-  /** Inference-provider URI for the Extractor role; same semantics. */
-  extractorProviderUri?: string;
+  signalFilterAudioEnabled?: boolean;
+  signalFilterImageEnabled?: boolean;
+  signalFilterTextEnabled?: boolean;
 }
 
 export type CortextContext = Record<string, unknown>;
@@ -24,18 +18,16 @@ export interface CortextEmbedding {
   dimension: number;
 }
 
-export declare const CONSOLIDATE_SHALLOW: number;
-export declare const CONSOLIDATE_DEEP: number;
-export declare const CONSOLIDATE_BOTH: number;
-
 export declare class Cortext {
   constructor(config?: CortextConfig, dbPath?: string, modelsDir?: string);
   processTextJson(text: string, sourceId: string): string;
   processText(text: string, sourceId: string): CortextContext;
   embedTextJson(text: string): string;
+  embedText(text: string): number[];
   processAudioJson(pcm: Float32Array, sourceId: string): string;
   processAudio(pcm: Float32Array, sourceId: string): CortextContext;
   embedAudioJson(pcm: Float32Array): string;
+  embedAudio(pcm: Float32Array): number[];
   processImageJson(
     data: Uint8Array,
     width: number,
@@ -56,10 +48,14 @@ export declare class Cortext {
     height: number,
     channels: number
   ): string;
+  embedImage(
+    data: Uint8Array,
+    width: number,
+    height: number,
+    channels: number
+  ): number[];
   consolidateJson(): string;
   consolidate(): CortextContext;
-  consolidateModeJson(mode: number): string;
-  consolidateMode(mode: number): CortextContext;
   flush(): void;
   reset(): void;
 }

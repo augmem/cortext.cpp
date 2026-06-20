@@ -18,7 +18,7 @@
 namespace
 {
 
-using BenchEncoder = cortext::benchmark::EmbeddingGemmaBenchEncoder;
+using BenchEncoder = cortext::benchmark::BenchmarkTextEncoder;
 namespace cognitive = cortext::operations::cognitive;
 
 class ScopedEnvVar
@@ -140,7 +140,7 @@ RunAttentionLedgerStudy (BenchEncoder &encoder)
   ScopedEnvVar guard (cognitive::kAttentionLedgerFlag, "1");
   cognitive::AttentionLedgerInput target;
   target.semantic_relevance = target_semantic;
-  target.fact_support = 0.95;
+  target.explicit_support = 0.95;
   target.source_confidence = 0.95;
   target.evidence_confidence = 0.92;
   target.used_count = 10.0;
@@ -170,16 +170,17 @@ RunPacketCompetitionStudy (BenchEncoder &encoder)
   const std::string query = "who owns cobalt rollback handoff";
   const double repeat_activation = SemanticScore (
       encoder, query, "cobalt rollback handoff generic recent packet");
-  const double fact_activation = SemanticScore (
+  const double explicit_activation = SemanticScore (
       encoder, query, "Nadia verified ownership evidence.");
   const std::vector<cognitive::PacketProposal> proposals{
     { "semantic_repeat", "same-source", repeat_activation, 0.72, 0.20, 2.0,
       2 },
-    { "fact_packet", "nadia-fact", fact_activation, 0.70, 0.40, 2.0, 2 },
+    { "explicit_packet", "nadia-explicit", explicit_activation, 0.70, 0.40,
+      2.0, 2 },
   };
 
   StudyResult result{ "lida_packet_competition", "LIDA" };
-  result.off_target = fact_activation;
+  result.off_target = explicit_activation;
   result.off_comparison = repeat_activation;
   result.off_winner = Winner (result.off_target, result.off_comparison);
 

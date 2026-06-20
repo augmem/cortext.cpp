@@ -56,27 +56,21 @@ add_executable(cortext_tests
   centroids.test.cpp
   operations_interrupt_gate.test.cpp
   operations_working_memory.test.cpp
-  operations_metacognitive.test.cpp
   operations_serial_position.test.cpp
   operations_serial_position_apply.test.cpp
   operations_embedding_prediction_error.test.cpp
   operations_precision_modulation.test.cpp
-  providers.test.cpp
 
   operations_graph_build.test.cpp
   operations_graph_retrieval.test.cpp
-  operations_graph_retrieval_bitemporal.test.cpp
   operations_emotion_cascade.test.cpp
 
   operations_consolidation.test.cpp
   operations_consolidation_cluster.test.cpp
-	  operations_extraction.test.cpp
-	  operations_bitemporal_facts.test.cpp
 	  operations_evidence_confidence.test.cpp
 	  operations_cognitive_mechanisms.test.cpp
 	  operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
-  operations_short_term_memory_shadow.test.cpp
   operations_soft_anchor.test.cpp
   operations_detect_memory_usage.test.cpp
   operations_streaming_pacing.test.cpp
@@ -90,14 +84,7 @@ add_executable(cortext_tests
   state_persistence.test.cpp
   implicit_feedback.test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/telemetry_noop_by_default.test.cpp
-  # Extractor and Summarizer tests
-  gemma_extractor.test.cpp
-  gemma_summarizer.test.cpp
-  deep_llm_factory.test.cpp
-  # Phase 5: Testing and Validation
   formula_validation.test.cpp
-  integration_consolidation.test.cpp
-  integration_chat_e2e.test.cpp
   integration_working_memory_manual.test.cpp
   regression_behavior.test.cpp
   chat_chunk_diagnostics.test.cpp
@@ -121,15 +108,8 @@ endif()
 if(EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
   target_sources(cortext_tests PRIVATE
     aist_gguf_encoder_integration.test.cpp
-    stm_labeling_integration.test.cpp
   )
   target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_AIST_MODEL=1)
-endif()
-
-# Deep-consolidation stack integration needs LiteRT and the Gemma4 model.
-if(NOT CORTEXT_DISABLE_LITERT AND EXISTS ${CMAKE_SOURCE_DIR}/models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm)
-  target_sources(cortext_tests PRIVATE deep_llm_factory_integration.test.cpp)
-  target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_GEMMA4_LITERT=1)
 endif()
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
@@ -141,39 +121,6 @@ target_include_directories(cortext_tests PRIVATE
 # does (pkg-config on native, vendored elsewhere).
 if(SQLITE3_INCLUDE_DIRS)
   target_include_directories(cortext_tests PRIVATE ${SQLITE3_INCLUDE_DIRS})
-endif()
-
-if(NOT CORTEXT_DISABLE_LITERT)
-  target_sources(cortext_tests PRIVATE json_schema_constraint.test.cpp)
-  target_include_directories(cortext_tests PRIVATE ${LITERT_INSTALL_DIR}/include)
-endif()
-
-# Ensure the ONNX Runtime and OGA dylibs can be found when Catch2 runs test
-# discovery during the build (macOS uses @rpath + LC_RPATH entries).
-if(CORTEXT_ENABLE_GEMMA_ORT)
-  if(APPLE)
-    # cortext_tests lives in <build>/tests; ORT is installed to
-    # <build>/third_party/onnxruntime-install/lib
-    set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
-      "@loader_path/../third_party/onnxruntime-install/lib"
-    )
-  elseif(UNIX)
-    set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
-      "$ORIGIN/../third_party/onnxruntime-install/lib"
-    )
-  endif()
-endif()
-# For LiteRT-LM enabled builds, add path to LiteRT-LM library
-if(NOT CORTEXT_DISABLE_LITERT)
-  if(APPLE)
-    set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
-      "@loader_path/../third_party/litert-lm-install/lib"
-    )
-  elseif(UNIX)
-    set_property(TARGET cortext_tests APPEND PROPERTY BUILD_RPATH
-      "$ORIGIN/../third_party/litert-lm-install/lib"
-    )
-  endif()
 endif()
 
 include(Catch)

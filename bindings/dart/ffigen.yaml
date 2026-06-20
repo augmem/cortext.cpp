@@ -18,6 +18,3 @@ structs:
 typedefs:
   include:
     - cortext_handle
-enums:
-  include:
-    - cortext_consolidation_mode

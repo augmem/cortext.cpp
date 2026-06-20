@@ -1,4 +1,4 @@
-#include "../../src/operations/eviction_ablation.hpp"
+#include "../../src/operations/eviction_policy_override.hpp"
 
 #include <cortext/core/knobs.hpp>
 #include <cortext/encoder/encoder.hpp>
@@ -118,11 +118,11 @@ int main ()
     pctx.half_life = cortext::core::BaseHalfLifePrior (cfg.stability);
     pctx.last_consolidation_ts = std::numeric_limits<uint64_t>::max ();
 
-    cortext::operations::eviction::EvictionAblationOverride override;
+    cortext::operations::eviction::EvictionPolicyOverride override;
     override.consolidation_gate_enabled = false;
     override.storage_gate_enabled = true;
     override.min_storage_bytes = 1LL << 30;
-    cortext::operations::eviction::ScopedEvictionAblationOverride scoped (override);
+    cortext::operations::eviction::ScopedEvictionPolicyOverride scoped (override);
     RunDecay (*store, cfg, pctx, 100LL);
     std::cout << "storage_gate_high_budget_count=" << CountMemory (*store, 100LL) << "\n";
     ok &= Check ("storage_gate_blocks_early_eviction", CountMemory (*store, 100LL) == 1);
@@ -137,11 +137,11 @@ int main ()
     pctx.half_life = cortext::core::BaseHalfLifePrior (cfg.stability);
     pctx.last_consolidation_ts = std::numeric_limits<uint64_t>::max ();
 
-    cortext::operations::eviction::EvictionAblationOverride override;
+    cortext::operations::eviction::EvictionPolicyOverride override;
     override.consolidation_gate_enabled = false;
     override.storage_gate_enabled = true;
     override.min_storage_bytes = 0;
-    cortext::operations::eviction::ScopedEvictionAblationOverride scoped (override);
+    cortext::operations::eviction::ScopedEvictionPolicyOverride scoped (override);
     RunDecay (*store, cfg, pctx, 101LL);
     std::cout << "storage_gate_zero_budget_count=" << CountMemory (*store, 101LL) << "\n";
     ok &= Check ("storage_gate_allows_eviction_after_limit", CountMemory (*store, 101LL) == 0);

@@ -1,36 +1,17 @@
 Note: All knob-derived parameters in online operations use the midpoint‑biased
 knobs F̃ and S̃ defined in Section 1. This does not change the schema, but it
 does affect the interpretation of threshold- and gate-related fields.
-Note: Deep consolidation requires a local summarization/extraction backend:
-Gemma 4 E2B via LiteRT-LM by default, or explicit LFM2/LFM2.5 GGUF overrides
-via llama.cpp. The LFM2 resolver prefers Q4_K_M when present but accepts other
-bundled quantizations. There is no embedding-only extractive fallback when no
-deep backend is available.
-Note: Deep consolidation candidates are limited to LONG_TERM memories with
-non-null blob_id so summarization always has source text. Shallow consolidation
-creates ASSOCIATION centroids without blobs.
+Note: Consolidation is shallow and embedding-only. It creates ASSOCIATION
+centroids without blobs and does not call a summarization, extraction, or
+provider backend.
 Note: This diagram emphasizes the core memory/signal/association schema. Later
-migrations also add fact assertion/evidence/cache tables, memory eviction and
-reconstruction tables, meta-learning coefficients, and soft-anchor state/link
-tables.
-Note: Summarization input is capped by knob-derived limits (max texts and
-total chars) to bound consolidation latency.
-Note: Summarization output length is enforced by streaming decode cancel at
-max_summary_words, not prompt instructions.
+migrations also add memory eviction and reconstruction tables, meta-learning
+coefficients, and soft-anchor state/link tables.
 Note: Consolidation is external-only; callers invoke `cortext.consolidate()`
 explicitly rather than scheduling it automatically.
-Note: Consolidation supports shallow (embedding-only) and deep
-(Gemma/LiteRT-LM or LFM2/llama.cpp-backed) phases; shallow creates
-ASSOCIATION centroids without blobs and attaches existing LABEL nodes by
-embedding similarity.
-Note: Extraction uses constrained decoding and currently runs on CPU to ensure
-host-memory logits for label/relation parsing; this does not change the schema.
-Note: Label embeddings are cached by normalized label key; cache hits reuse
-stored embeddings rather than re-encoding (schema unchanged).
-Note: Optional label-bank seeding inserts LABEL memories from a precomputed
-Hugging Face label dataset (metadata.json + labels.jsonl) at initialization,
-using configured text embeddings and a knob-derived baseline salience; this
-pre-seeds shallow consolidation without touching the schema.
+Note: Shallow consolidation may attach existing LABEL nodes by embedding
+similarity, but the engine no longer seeds a static label bank or refines labels
+with an internal LLM.
 Note: Interrupt gating uses a sensitivity-relaxed retrieval threshold
 retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S).
 Note: Non-boundary MU gating is relaxed by Sensitivity:
@@ -44,8 +25,8 @@ and memories.s_arousal_avg, scaled by an affect_drive computed from current
 arousal/emotion/salience.
 Note: Strength-based eviction only applies to LONG_TERM memories; ASSOCIATION
 and LABEL nodes are retained unless explicitly pruned.
-Note: Retrieval seeding includes a summary/label kNN pass and graph expansion
-follows derived_from/has_label edges to surface consolidated nodes.
+Note: Retrieval seeding scans LONG_TERM and ASSOCIATION embeddings, then graph
+expansion follows retained association edges to surface connected nodes.
 
 ```{mermaid}
 erDiagram
@@ -322,9 +303,6 @@ erDiagram
         int wm_slot_count "Section 6.1"
         int wm_last_accepted "Section 6.1"
         int wm_last_chunked "Section 6.1"
-        real fok_state "Section 6.2"
-        real retrieval_strength "Section 6.2"
-        real metacognitive_confidence "Section 6.2"
         int last_consolidation_ts "Section 7.1"
         int consolidation_count "Section 7.1"
         int memories_since_consolidation "Section 7.1"

@@ -24,7 +24,6 @@ compile_commands.json
 *.cmake
 !cmake/*.cmake
 !third_party/sqlite-objstore/cmake/**/*.cmake
-!third_party/litert-lm/**/*.cmake
 .ninja
 *.ninja
 
@@ -42,6 +41,9 @@ compile_commands.json
 *.manifest
 *.wasm
 *.js
+!bindings/javascript/index.js
+!bindings/wasm/*.js
+!examples/web/*.js
 !third_party/sqlite-objstore/tests/opfs_worker.js
 
 # Test executables and data
@@ -78,10 +80,11 @@ Thumbs.db
 # Rust artifacts (this is a C++ project)
 Cargo.lock
 !third_party/sqlite-objstore/tests/wasm/rust/Cargo.lock
-!third_party/litert-lm/**/Cargo.lock
 
 # Dart/Flutter files (this is a C++ project)
 analysis_options.yaml
+bindings/dart/.dart_tool/
+bindings/dart/pubspec.lock
 
 # Temporary files
 *.tmp
@@ -116,8 +119,6 @@ coverage.info
 objects/
 data/
 !data/
-!data/label_bank/
-!data/label_bank/label_bank.sqlite
 models/
 !include/cortext/models/
 !include/cortext/models/**
@@ -129,7 +130,6 @@ models/
 # Third-party build artifacts (if building locally)
 third_party/*/build/
 third_party/*build/
-third_party/litert-lm-build/
 build-ort/
 third_party/*/.git/
 poc/
@@ -179,6 +179,3 @@ dist/
 target/
 vendor/
 .cache/
-
-# Local build-output symlink (created by the Linux build recipe)
-third_party/litert-lm-install

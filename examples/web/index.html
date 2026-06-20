@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cortext WASM Demo</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <div class="topline">
+          <h1>Cortext</h1>
+          <span id="status">Loading module</span>
+        </div>
+
+        <label class="field">
+          <span>AIST GGUF</span>
+          <input id="model-file" type="file" accept=".gguf">
+        </label>
+
+        <label class="field">
+          <span>Signal</span>
+          <textarea id="signal" rows="5">browser demo memory signal</textarea>
+        </label>
+
+        <div class="actions">
+          <button id="create" type="button">Create</button>
+          <button id="process" type="button" disabled>Process</button>
+          <button id="embed" type="button" disabled>Embed</button>
+        </div>
+
+        <pre id="output">{}</pre>
+      </section>
+    </main>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

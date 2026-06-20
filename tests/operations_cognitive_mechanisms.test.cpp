@@ -19,7 +19,7 @@ TEST_CASE ("Bounded attention ledger separates transient and durable value",
 
   cognitive::AttentionLedgerInput durable;
   durable.semantic_relevance = 0.50;
-  durable.fact_support = 0.95;
+  durable.explicit_support = 0.95;
   durable.source_confidence = 0.95;
   durable.evidence_confidence = 0.90;
   durable.used_count = 12.0;
@@ -38,7 +38,7 @@ TEST_CASE ("Packet proposal competition applies refractory suppression",
 {
   std::vector<cognitive::PacketProposal> proposals{
     { "semantic-repeat", "same-source", 0.99, 0.72, 0.20, 2.0, 2 },
-    { "fact-novel", "new-source", 0.72, 0.70, 0.40, 2.0, 2 },
+    { "explicit-novel", "new-source", 0.72, 0.70, 0.40, 2.0, 2 },
   };
 
   const auto without_refractory

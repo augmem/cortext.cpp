@@ -2,7 +2,7 @@
 
 #include "cortext/core/knobs.hpp"
 #include "cortext/store/store.hpp"
-#include "eviction_ablation.hpp"
+#include "eviction_policy_override.hpp"
 #include "storage_pressure.hpp"
 
 #include <any>
@@ -20,36 +20,14 @@ struct EvictionFrontier
   long long storage_used_bytes = 0;
   long long storage_threshold_bytes = 0;
   double cutoff = 0.0;
-  double fact_floor = 0.0;
-  bool fact_floor_active = true;
   bool consolidation_gate_active = true;
   long long consolidation_ts = 0;
 };
 
 inline std::string
-ActiveFactEvidenceJoin (bool fact_floor_active)
-{
-  if (!fact_floor_active)
-    {
-      return {};
-    }
-  return " LEFT JOIN ("
-         "   SELECT DISTINCT fe.source_memory_id"
-         "   FROM fact_evidence fe"
-         "   JOIN fact_assertions fa ON fe.fact_id = fa.fact_id"
-         "   WHERE fa.lifecycle_state != 'archived'"
-         " ) fe_active ON fe_active.source_memory_id = m.memory_id";
-}
-
-inline std::string
 EvictionWhereClause (const EvictionFrontier &frontier)
 {
   std::string where = "WHERE m.strength < ? AND m.kind = 'LONG_TERM'";
-  if (frontier.fact_floor_active)
-    {
-      where += " AND (fe_active.source_memory_id IS NULL"
-               "      OR m.strength < ?)";
-    }
   if (frontier.consolidation_gate_active)
     {
       where += " AND m.created_at < ?";
@@ -61,10 +39,6 @@ inline std::vector<std::any>
 EvictionWhereParams (const EvictionFrontier &frontier)
 {
   std::vector<std::any> params = { frontier.cutoff };
-  if (frontier.fact_floor_active)
-    {
-      params.push_back (frontier.fact_floor);
-    }
   if (frontier.consolidation_gate_active)
     {
       params.push_back (frontier.consolidation_ts);
@@ -76,10 +50,6 @@ inline std::vector<std::any>
 EvictionInsertParams (long long evicted_at, const EvictionFrontier &frontier)
 {
   std::vector<std::any> params = { evicted_at, frontier.cutoff };
-  if (frontier.fact_floor_active)
-    {
-      params.push_back (frontier.fact_floor);
-    }
   if (frontier.consolidation_gate_active)
     {
       params.push_back (frontier.consolidation_ts);
@@ -90,16 +60,11 @@ EvictionInsertParams (long long evicted_at, const EvictionFrontier &frontier)
 inline EvictionFrontier
 ResolveEvictionFrontier (Transaction &tx, double T,
                          long long last_consolidation_ts,
-                         const eviction::EvictionAblationOverride &override)
+                         const eviction::EvictionPolicyOverride &override)
 {
   EvictionFrontier frontier;
   frontier.cutoff
       = override.periphery_cutoff.value_or (core::PeripheryCutoff (T));
-  frontier.fact_floor_active
-      = override.fact_floor_enabled.value_or (true);
-  frontier.fact_floor = frontier.fact_floor_active
-                            ? core::FactEvictionFloor (T)
-                            : 0.0;
   frontier.consolidation_gate_active
       = override.consolidation_gate_enabled.value_or (true);
   frontier.consolidation_ts = last_consolidation_ts;
@@ -118,16 +83,11 @@ ResolveEvictionFrontier (Transaction &tx, double T,
 inline EvictionFrontier
 ResolveEvictionFrontier (ProcessorContext &ctx, Transaction &tx, double T,
                          long long last_consolidation_ts,
-                         const eviction::EvictionAblationOverride &override)
+                         const eviction::EvictionPolicyOverride &override)
 {
   EvictionFrontier frontier;
   frontier.cutoff
       = override.periphery_cutoff.value_or (core::PeripheryCutoff (T));
-  frontier.fact_floor_active
-      = override.fact_floor_enabled.value_or (true);
-  frontier.fact_floor = frontier.fact_floor_active
-                            ? core::FactEvictionFloor (T)
-                            : 0.0;
   frontier.consolidation_gate_active
       = override.consolidation_gate_enabled.value_or (true);
   frontier.consolidation_ts = last_consolidation_ts;
@@ -175,10 +135,6 @@ LoadEvictableMemoryIds (Transaction &tx, const EvictionFrontier &frontier,
       params.push_back (id);
     }
   params.push_back (frontier.cutoff);
-  if (frontier.fact_floor_active)
-    {
-      params.push_back (frontier.fact_floor);
-    }
   if (frontier.consolidation_gate_active)
     {
       params.push_back (frontier.consolidation_ts);
@@ -187,19 +143,13 @@ LoadEvictableMemoryIds (Transaction &tx, const EvictionFrontier &frontier,
   std::string where = "WHERE m.memory_id IN ("
                       + MakePlaceholders (memory_ids.size ())
                       + ") AND m.strength < ? AND m.kind = 'LONG_TERM'";
-  if (frontier.fact_floor_active)
-    {
-      where += " AND (fe_active.source_memory_id IS NULL"
-               "      OR m.strength < ?)";
-    }
   if (frontier.consolidation_gate_active)
     {
       where += " AND m.created_at < ?";
     }
 
   auto rows = tx.Execute (
-      "SELECT m.memory_id FROM memories m"
-          + ActiveFactEvidenceJoin (frontier.fact_floor_active) + " " + where,
+      "SELECT m.memory_id FROM memories m " + where,
       params);
   for (const auto &row : rows)
     {

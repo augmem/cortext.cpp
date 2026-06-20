@@ -15,7 +15,7 @@ namespace cortext::core
 /// @param v The std::any value (expected to be vector<char> or vector<unsigned char>).
 /// @param data Output pointer to the raw data.
 /// @param len Output length of the data.
-/// @return True if extraction succeeded, false otherwise.
+/// @return True if decoding succeeded, false otherwise.
 inline bool
 AnyToBytes (const std::any &v, const unsigned char *&data, size_t &len)
 {
@@ -91,4 +91,3 @@ StartsWith (const std::string &s, const char *prefix)
 }
 
 } // namespace cortext::core
-

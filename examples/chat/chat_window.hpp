@@ -270,21 +270,6 @@ struct DatabaseEpisodeRow {
   uint64_t created_at = 0;
 };
 
-struct DatabaseFactRow {
-  long long fact_id = 0;
-  std::string subject;
-  std::string predicate;
-  std::string object;
-  uint64_t valid_start_ts = 0;
-  uint64_t valid_end_ts = 0;
-  uint64_t recorded_at_ts = 0;
-  uint64_t superseded_at_ts = 0;
-  double confidence = 0.0;
-  long long summary_memory_id = 0;
-  std::string lifecycle_state;
-  std::string severity_class;
-};
-
 struct DatabaseEvictionRow {
   long long eviction_id = 0;
   long long memory_id = 0;
@@ -313,13 +298,11 @@ struct DatabaseExplorerState {
   std::vector<DatabaseSignalRow> signals;
   std::vector<DatabaseAssociationRow> associations;
   std::vector<DatabaseEpisodeRow> episodes;
-  std::vector<DatabaseFactRow> facts;
   std::vector<DatabaseEvictionRow> evictions;
   long long total_memories = 0;
   long long total_signals = 0;
   long long total_associations = 0;
   long long total_episodes = 0;
-  long long total_facts = 0;
   long long total_evictions = 0;
   uint64_t refreshed_at = 0;
   bool refresh_requested = false;

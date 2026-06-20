@@ -32,7 +32,7 @@ constexpr const char *kMemoriesLongTermDefaults =
 constexpr const char *kMemoriesWorkingDefaults =
     "?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?";
 
-// Default values for ASSOCIATION (consolidation summaries)
+// Default values for ASSOCIATION (consolidation centroids)
 constexpr const char *kMemoriesAssociationDefaults =
     "?, ?, 'ASSOCIATION', ?, ?, ?, ?, ?, ?, ?, ?, ?";
 

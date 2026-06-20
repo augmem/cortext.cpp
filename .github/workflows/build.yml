@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
+  ubuntu-native:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,13 +21,51 @@ jobs:
         sudo apt-get install -y cmake build-essential pkg-config libsqlite3-dev
 
     - name: Configure CMake
-      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_SHERPA_ONNX=ON -DCORTEXT_DISABLE_OPENTELEMETRY=ON
 
     - name: Build
       run: cmake --build build -j8
 
     - name: Test
-      run: ctest --test-dir build -R cortext_tests --output-on-failure
+      run: ./build/tests/cortext_tests '~[aist]' --reporter compact
+
+  arch-native:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Build and test on Arch Linux
+      run: |
+        docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel bash -lc '
+          pacman -Syu --noconfirm cmake make gcc pkgconf sqlite git
+          git config --global --add safe.directory /workspace
+          cmake -S . -B build-arch -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_SHERPA_ONNX=ON -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+          cmake --build build-arch -j"$(nproc)"
+          ./build-arch/tests/cortext_tests "~[aist]" --reporter compact
+        '
+
+  wasm-browser:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - uses: mymindstorm/setup-emsdk@v14
+      with:
+        version: 3.1.74
+
+    - name: Build browser WebAssembly bundle
+      run: ./build-wasm.sh
+
+    - name: Check browser artifacts
+      run: |
+        test -s build-wasm/dist/wasm/cortext.js
+        test -s build-wasm/dist/wasm/cortext.wasm
 
   zig-smoke:
     runs-on: ubuntu-latest

@@ -41,7 +41,7 @@ struct AttentionLedgerInput
   double semantic_relevance = 0.0;
   double context_relevance = 0.0;
   double graph_support = 0.0;
-  double fact_support = 0.0;
+  double explicit_support = 0.0;
   double source_confidence = 0.0;
   double evidence_confidence = 0.0;
   double retrieved_count = 0.0;
@@ -73,7 +73,7 @@ BuildBoundedAttentionLedger (const AttentionLedgerInput &input)
                     + 2.0 * std::max (0.0, input.used_count))
         / std::log1p (24.0);
   ledger.durable_importance = core::Clamp (
-      0.45 * core::Clamp (input.fact_support, 0.0, 1.0)
+      0.45 * core::Clamp (input.explicit_support, 0.0, 1.0)
           + 0.25 * core::Clamp (input.source_confidence, 0.0, 1.0)
           + 0.30 * core::Clamp (use_mass, 0.0, 1.0),
       0.0, 1.0);
@@ -254,13 +254,13 @@ UsefulnessRankScore (double base_score, double usefulness, double weight = 0.28)
 }
 
 inline double
-FuseExplicitImplicitEvidence (double explicit_fact_confidence,
+FuseExplicitImplicitEvidence (double explicit_confidence,
                               double implicit_semantic_score,
                               double procedural_score,
                               double source_confidence)
 {
   const double explicit_lane
-      = core::Clamp (explicit_fact_confidence, 0.0, 1.0)
+      = core::Clamp (explicit_confidence, 0.0, 1.0)
         * core::Clamp (source_confidence, 0.0, 1.0);
   const double implicit_lane = core::Clamp (implicit_semantic_score, 0.0, 1.0);
   const double procedural_lane = core::Clamp (procedural_score, 0.0, 1.0);

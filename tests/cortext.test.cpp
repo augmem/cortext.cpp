@@ -175,7 +175,7 @@ TEST_CASE ("Cortext embed-only API returns vectors without storing signals",
 }
 
 TEST_CASE ("internal replay ingress preserves media event timestamps",
-           "[cortext][replay][media]")
+           "[cortext][replay][media][aist]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -387,15 +387,14 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
 
   const std::uint64_t consolidation_ts = source_ts + 86400000ULL;
   REQUIRE_NOTHROW (
-      cortext::internal::ReplayIngress::ConsolidateAt (
-          *ctx, consolidation_ts, cortext::ConsolidationMode::Shallow));
+      cortext::internal::ReplayIngress::ConsolidateAt (*ctx, consolidation_ts));
   ctx->Flush ();
 
   auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
   auto rows = store->Execute (
       "SELECT start_ts, created_at, source_id, kind FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'shallow_%' "
+      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'association_%' "
       "ORDER BY memory_id DESC LIMIT 1");
   REQUIRE (rows.size () == 1);
   REQUIRE (AnyToLongLong (rows[0].at ("start_ts"))
@@ -411,39 +410,10 @@ TEST_CASE ("Cortext::Create succeeds even when models dir is missing",
 {
   cortext::Cortext::Config cfg;
   std::unique_ptr<cortext::Cortext> ctx;
-#if defined(CORTEXT_DISABLE_LITERT)
   REQUIRE_NOTHROW (
       ctx = cortext::Cortext::Create (cfg, ":memory:", "models/does-not-exist"));
   REQUIRE (ctx != nullptr);
-  REQUIRE_THROWS (ctx->ProcessText ("hello", "test"));
-#else
-  REQUIRE_THROWS (
-      ctx = cortext::Cortext::Create (cfg, ":memory:", "models/does-not-exist"));
-#endif
 }
-
-// Injected-store construction without local models only exists in
-// CORTEXT_DISABLE_LITERT builds; the case is gated at compile time rather
-// than runtime-skipped.
-#if defined(CORTEXT_DISABLE_LITERT)
-TEST_CASE ("Cortext can initialize with caller supplied store",
-           "[cortext][store]")
-{
-  auto unique_store = cortext::SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
-
-  cortext::Cortext::Config cfg;
-  std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (
-      ctx = cortext::Cortext::Create (cfg, store, "models/does-not-exist"));
-  REQUIRE (ctx != nullptr);
-
-  auto rows = store->Execute (
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='state'",
-      {});
-  REQUIRE (rows.size () == 1);
-}
-#endif
 
 TEST_CASE ("Cortext C ABI stubs return success", "[cortext][capi][stub]")
 {
@@ -871,72 +841,6 @@ TEST_CASE ("Cortext expands durable association retrieval nodes even when the cu
   REQUIRE (cue_hydrated.retrieved_memory.size () == 1);
   REQUIRE (cue_hydrated.retrieved_memory[0].id == 100LL);
   REQUIRE (TextFromMemory (cue_hydrated.retrieved_memory[0]) == source_text);
-}
-
-TEST_CASE ("Cortext surfaces deep consolidated summaries as LTM content",
-           "[cortext][hydration][retrieval][consolidation]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto unique_store = cortext::SQLiteStore::Create (db_path);
-  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
-  cortext::testing::InitializeCoreSchema (*store);
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> embedding (kEmbeddingDim, 0.0f);
-  embedding[0] = 1.0f;
-
-  const std::string source_text = "Jamie asked about a package delivery.";
-  const std::string summary_text
-      = "Jamie and Quinn discussed a package delivery.";
-  const std::vector<unsigned char> source_payload (source_text.begin (),
-                                                   source_text.end ());
-  const std::vector<unsigned char> summary_payload (summary_text.begin (),
-                                                    summary_text.end ());
-  auto source_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                          { source_payload });
-  auto summary_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                           { summary_payload });
-  REQUIRE (source_blob_rows.size () == 1);
-  REQUIRE (summary_blob_rows.size () == 1);
-  const auto source_blob_id = BlobFromAny (source_blob_rows[0].at ("id"));
-  const auto summary_blob_id = BlobFromAny (summary_blob_rows[0].at ("id"));
-  REQUIRE (!source_blob_id.empty ());
-  REQUIRE (!summary_blob_id.empty ());
-
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?), (?, ?, ?)",
-      { 100LL, embedding, 1000LL, 200LL, embedding, 2000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
-      "blob_id, start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, "
-      "created_at) "
-      "VALUES (?, ?, 'stream/package', 'LONG_TERM', NULL, ?, 1000, 1000, 1, 'text', "
-      "0.5, 0.5, 1.0, 1000), "
-      "(?, ?, 'summary_2000_0', 'LONG_TERM', ?, ?, 2000, 2000, 1, 'text', "
-      "0.5, 0.5, 1.0, 2000)",
-      { 100LL, 100LL, source_blob_id, 200LL, 200LL, summary_text,
-        summary_blob_id });
-  store->Execute (
-      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-      "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'stream/package', 1000, 'text', 'text/plain', ?, 0, 1000)",
-      { 100LL, 100LL, source_blob_id });
-  store->Execute (
-      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
-      "VALUES (?, ?, 'derived_from', 1.0)",
-      { 200LL, 100LL });
-
-  cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, store, RepoModelsDir ());
-  REQUIRE (ctx != nullptr);
-
-  auto summary_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
-  REQUIRE (summary_hydrated.retrieved_memory.size () == 1);
-  REQUIRE (summary_hydrated.retrieved_memory[0].id == 200LL);
-  REQUIRE (TextFromMemory (summary_hydrated.retrieved_memory[0])
-           == summary_text);
 }
 
 TEST_CASE ("Cortext expands durable label retrieval nodes through association sources",
@@ -1410,8 +1314,7 @@ TEST_CASE ("C API handles NULL inputs correctly", "[cortext][capi][safety]")
     REQUIRE (parsed.at ("output").at ("stored_signal_id").is_number_integer ());
     cortext_string_free (json_ptr);
 
-    json_ptr
-        = cortext_consolidate_mode_json (h, CORTEXT_CONSOLIDATE_SHALLOW);
+    json_ptr = cortext_consolidate_json (h);
     REQUIRE (json_ptr != nullptr);
 
     parsed = nlohmann::json::parse (json_ptr);

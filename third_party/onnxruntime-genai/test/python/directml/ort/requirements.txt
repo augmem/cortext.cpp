@@ -1,1 +1,0 @@
-onnxruntime-directml==1.23.0

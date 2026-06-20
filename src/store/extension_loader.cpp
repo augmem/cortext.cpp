@@ -67,10 +67,14 @@ ObjstoreBackendFromEnv ()
   const std::string backend = LowerEnv ("CORTEXT_OBJSTORE_BACKEND");
   if (backend.empty ())
     {
+#if defined(__EMSCRIPTEN__)
+      return OBJSTORE_BACKEND_AUTO;
+#else
       // The SQLite backend shares the main database transaction and avoids the
       // file backend's per-message manifest fsync on small text payloads. Large
       // media-heavy deployments can opt back into file/auto with the env knob.
       return OBJSTORE_BACKEND_SQLITE;
+#endif
     }
   if (backend == "file")
     {

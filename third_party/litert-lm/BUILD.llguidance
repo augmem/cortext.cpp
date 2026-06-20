@@ -1,6 +1,0 @@
-cc_library(
-    name = "llguidance_cc",
-    hdrs = ["llguidance.h"],
-    deps = [":llguidance"],
-    visibility = ["//visibility:public"],
-)

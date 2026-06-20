@@ -1,4 +1,4 @@
-#include "../../src/operations/eviction_ablation.hpp"
+#include "../../src/operations/eviction_policy_override.hpp"
 
 #include <cortext/encoder/encoder.hpp>
 #include <cortext/operations/memory_strength.hpp>
@@ -198,7 +198,7 @@ RunScenario (const SleepProfile &profile, long long storage_floor_bytes,
   pctx.half_life = kHumanHalfLifeSeconds;
   pctx.last_consolidation_ts = 1;
 
-  cortext::operations::eviction::EvictionAblationOverride override;
+  cortext::operations::eviction::EvictionPolicyOverride override;
   override.consolidation_gate_enabled = false;
   override.storage_gate_enabled = true;
   override.min_storage_bytes = storage_floor_bytes;
@@ -227,7 +227,7 @@ RunScenario (const SleepProfile &profile, long long storage_floor_bytes,
 
       synthetic_used_bytes += kGrowthPerHourBytes;
       override.used_storage_bytes = synthetic_used_bytes;
-      cortext::operations::eviction::ScopedEvictionAblationOverride scoped (
+      cortext::operations::eviction::ScopedEvictionPolicyOverride scoped (
           override);
 
       cortext::Signal signal;

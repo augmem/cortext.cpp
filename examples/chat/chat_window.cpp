@@ -299,11 +299,6 @@ bool MatchesDatabaseExplorerFilter(const DatabaseMemoryRow& row,
   return true;
 }
 
-std::string FormatFactTitle(const DatabaseFactRow& row) {
-  return "#" + std::to_string(row.fact_id) + " "
-         + row.subject + " " + row.predicate + " " + row.object;
-}
-
 std::string FormatEvictionTitle(const DatabaseEvictionRow& row) {
   std::string title = "#" + std::to_string(row.memory_id) + " ";
   if (!row.label.empty()) {
@@ -2492,13 +2487,11 @@ void ChatWindow::RenderDatabaseTab() {
   std::vector<DatabaseSignalRow> signals;
   std::vector<DatabaseAssociationRow> associations;
   std::vector<DatabaseEpisodeRow> episodes;
-  std::vector<DatabaseFactRow> facts;
   std::vector<DatabaseEvictionRow> evictions;
   long long total_memories = 0;
   long long total_signals = 0;
   long long total_associations = 0;
   long long total_episodes = 0;
-  long long total_facts = 0;
   long long total_evictions = 0;
   uint64_t refreshed_at = 0;
   bool db_audio_playing = false;
@@ -2512,13 +2505,11 @@ void ChatWindow::RenderDatabaseTab() {
     signals = state_.db_explorer->signals;
     associations = state_.db_explorer->associations;
     episodes = state_.db_explorer->episodes;
-    facts = state_.db_explorer->facts;
     evictions = state_.db_explorer->evictions;
     total_memories = state_.db_explorer->total_memories;
     total_signals = state_.db_explorer->total_signals;
     total_associations = state_.db_explorer->total_associations;
     total_episodes = state_.db_explorer->total_episodes;
-    total_facts = state_.db_explorer->total_facts;
     total_evictions = state_.db_explorer->total_evictions;
     refreshed_at = state_.db_explorer->refreshed_at;
     db_audio_playing = state_.db_explorer->audio_playing;
@@ -2590,12 +2581,11 @@ void ChatWindow::RenderDatabaseTab() {
   ImGui::Separator();
 
   ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                     "Totals: memories=%lld signals=%lld associations=%lld episodes=%lld facts=%lld evictions=%lld",
+                     "Totals: memories=%lld signals=%lld associations=%lld episodes=%lld evictions=%lld",
                      total_memories,
                      total_signals,
                      total_associations,
                      total_episodes,
-                     total_facts,
                      total_evictions);
   ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Last refresh: %s",
                      NullOrValue(refreshed_at).c_str());
@@ -2790,34 +2780,6 @@ void ChatWindow::RenderDatabaseTab() {
               ImGui::PopID();
             }
           }
-        }
-      }
-    }
-    ImGui::EndChild();
-  }
-
-  if (show_temporal
-      && ImGui::CollapsingHeader("Temporal Facts", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::BeginChild("DbFacts", ImVec2(0, 220), true);
-    if (facts.empty()) {
-      ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "(no temporal facts)");
-    } else {
-      for (const auto& row : facts) {
-        if (ImGui::CollapsingHeader(FormatFactTitle(row).c_str())) {
-          ImGui::TextColored(ImVec4(0.3f, 1.0f, 1.0f, 1.0f),
-                             "summary=#%lld lifecycle=%s severity=%s",
-                             row.summary_memory_id,
-                             row.lifecycle_state.c_str(),
-                             row.severity_class.c_str());
-          ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f),
-                             "confidence=%s recorded=%s superseded=%s",
-                             FormatDouble(row.confidence).c_str(),
-                             NullOrValue(row.recorded_at_ts).c_str(),
-                             NullOrValue(row.superseded_at_ts).c_str());
-          ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f),
-                             "valid_start=%s valid_end=%s",
-                             NullOrValue(row.valid_start_ts).c_str(),
-                             NullOrValue(row.valid_end_ts).c_str());
         }
       }
     }

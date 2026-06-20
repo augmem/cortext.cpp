@@ -34,15 +34,11 @@ Planned integration:
 - preserve existing association/label seeding and diversification behavior
 - fall back to current dense scoring for non-text or missing-text candidates
 
-### Phase 2: Consolidation Evidence Scoring
+### Deferred Semantic Evidence Scoring
 
-Candidate insertion points:
-- `src/operations/process_extraction_results.cpp`
-- `src/operations/consolidation_summarize.cpp`
-
-Planned integration:
-- rerank extracted labels and relations by source-text support
-- rerank source passages before summarization so the strongest evidence is selected first
+Do not plan label, relation, or summary reranking until a production semantic
+evidence subsystem is explicitly reintroduced. The v1 runtime intentionally has
+no semantic extraction or summarization pass to hook into.
 
 ## Explicitly Deferred
 
@@ -66,16 +62,19 @@ Do not accept the change if it materially degrades:
 
 ## Release Positioning
 
-Cortext should be treated as an `alpha` release.
+Cortext should be treated as a v1 release candidate.
 
-The current priority is shipping the existing architecture cleanly, documenting it clearly, and learning from real usage before taking on larger runtime substitutions.
+The current priority is shipping the existing architecture cleanly, documenting
+it clearly, and learning from real usage before taking on larger runtime
+substitutions.
 
-## v1 Architecture Direction
+## Post-v1 Architecture Direction
 
-`v1` is expected to make two major infrastructure moves:
+Post-v1 work is expected to make two major infrastructure moves:
 
 - move the event-driven system to `stateforward/sml.cpp`
 - use that change to improve system structure and memory safety
 - move inference to `stateforward/emel.cpp` once that library is complete and production-ready
 
-These are `v1` goals, not alpha goals. The alpha roadmap remains biased toward shipping, measurement, documentation quality, and targeted model/runtime improvements that do not require a full architectural reset.
+These are follow-on goals. They should not block the v1 release unless the
+current architecture shows a concrete release-blocking defect.

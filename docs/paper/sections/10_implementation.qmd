@@ -2,105 +2,126 @@
 
 ## Embedding-First Operations
 
-In the current alpha, online scoring, boundary detection, gating, graph updates, and the primary retrieval path are embedding- and graph-first. Raw text/audio/image content is used to generate embeddings and to hydrate returned memories. The exception is a bounded text-bearing rescue route inside retrieval: when durable source blobs, facts, or labels already contain text, a token-overlap seed can admit source/fact/label candidates before graph expansion. That overlap blend, its admission floors, and the downstream source/fact boosts are all F/S/T-derived, so text does not bypass knob control or create a separate application-specific path.
+The current runtime is embedding- and graph-first. Online scoring, boundary
+detection, write gating, graph updates, retrieval, working-memory maintenance,
+and soft-anchor formation all operate over embeddings, bounded processor state,
+and SQLite graph rows. Raw text, audio, and image payloads are used to produce
+embeddings and to hydrate returned memories for applications; hydrated payloads
+do not feed back into online ranking.
 
-Retrieved memories are hydrated only after core online scoring has completed. Hydration is used for inspection, evaluation, and application prompt surfaces such as the chat demo; it does not feed back into embedding-space scoring. When a memory has no signal-level blobs (e.g., consolidation summaries), the system loads the summary payload from `memories.blob_id` so summary nodes can participate in analysis without affecting online computations. Internal retrieval nodes that are intentionally non-renderable, such as `LABEL` nodes and associative cue anchors, remain graph-routing products: when one is selected for the public retrieval surface, hydration resolves a bounded set of linked source memories with actual payloads instead of exposing empty label/cue records to applications. That linked-source fan-out is bounded by the same F/T-derived compact item limit used by graph-expanded retrieval, so applications do not receive an unbounded expansion from a single internal label or cue node.
+The hard-cut runtime no longer contains an internal generative model stack.
+There is no semantic batch stack, adapter registry, mode-selected replay,
+attached static taxonomy, persistent confidence monitor, bitemporal fact store,
+or short-term shadow graph. The remaining model dependency in the core loop is
+the configured embedding path. Text encoder resolution still
+prefers the AAIT/ES-AIST GGUF path when enabled and otherwise falls back through
+the supported embedding encoders. Audio speaker embedding in the chat example is
+part of sherpa-onnx speaker attribution and is not a Cortext semantic decoder.
 
-## Model Stack (Local Inference)
+Retrieved memories are hydrated only after retrieval has selected a compact
+ranked set. Internal routing nodes such as `LABEL` or `ASSOCIATION` rows are not
+treated as user-facing payloads. When such a row reaches the retrieval surface,
+hydration resolves bounded linked source memories where possible so callers see
+concrete source-backed context instead of empty routing artifacts.
 
-* **Embedding resolution:** text encoder resolution currently prefers the AAIT/ES-AIST GGUF path when enabled, then EmbeddingGemma where available. Embedding-first online operations consume the resolved vectors as the primary signal; bounded text overlap is limited to the retrieval rescue routes described above.
-* **Consolidation LLM:** summarization and labeling are the only generative steps and run only during consolidation. Cortext resolves a local backend internally: **Gemma 4 E2B** via `third_party/litert_lm`, **LFM2/LFM2.5** via `llama.cpp` GGUFs, or a **mixed** Gemma+Liquid path. Auto resolution now requires `models/gemma4-e2b-litert/gemma-4-E2B-it.litertlm`; it does not silently fall back to older Gemma variants because multimodal label refinement and summarization require the Gemma 4 path. The Liquid path remains available by explicit override and prefers `LFM2.5-350M-GGUF` for extraction and `LFM2.5-1.2B-Instruct-GGUF` for summarization, preferring `Q4_K_M` when present and otherwise accepting other shipped GGUF quantizations. The mixed path uses Gemma 4 for summarization and the preferred Liquid extractor path for labeling. If no deep backend is available, deep consolidation raises an error rather than silently degrading. Label extraction is anchored on `associative_cue_*` association nodes and now carries the current cue labels plus source payload descriptors into the extraction request. For Gemma 4, consolidation can refine labels from source text, float32 PCM audio blobs, or image blobs; the model output is interpreted as the replacement label set for that cue, so missing labels are inserted and stale `has_label` edges are pruned from the long-term graph. Summary nodes are compact retrieval artifacts created during deep consolidation when the summarizer is available; destructive eviction remains separately storage-gated. Empty label arrays are valid, transcript filler labels are rejected before persistence, and cue-backed labels must be supported by source evidence. The summarization prompt favors direct fact-oriented memory notes, preserves named people, projects, technologies, and chronological ordering, and does not infer speaker roles or trust from `source_id`. The Liquid GGUF path is text-only; audio/image label refinement is Gemma-only.
-* **Offline label-classifier prototype:** we now also ship a research-only Python pipeline that trains span typing / promotion models from WordNet, multilingual name priors, and sentence context. The current study path builds those priors from `data/surnames/{forenames,surnames}.csv` plus U.S. Census surnames. When external embeddings are enabled, the prototype reuses the repo's preferred text encoder through the rebuilt `cortext_text_embedder`, so offline studies can run on `EmbeddingGemma/llama.cpp` without changing the online runtime path.
+## Durable Memory Surface
 
-No other model runtimes are required for the online loop; all operational decisions are embedding-space computations derived from F/S/T.
+The current v1 runtime uses two durable graph layers plus one bounded live layer:
 
-## Alpha Scope and Structured-Fact Foundation
+* **Working memory:** active coherent memories used for recent-turn continuity,
+  overlap suppression, and prompt reconstruction.
+* **Long-term graph memory:** persisted `memories`, `signals`, `embeddings`,
+  `associations`, reconstruction rows, eviction audit rows, and optional
+  soft-anchor state.
+* **Soft anchors:** uncertainty-preserving continuity links formed at ingress
+  and exposed as optional memory metadata.
 
-The current alpha organizes live and durable memory as a three-tier graph surface:
+Long-term graph memory is the durable substrate. `memories` stores working,
+long-term, label, and association nodes; `associations` stores graph edges such
+as `derived_from`, `has_label`, `similar_to`, `co_occurs`, `causes`, and
+`reinforces`. Existing `LABEL` nodes can still participate in shallow
+consolidation and hydration, but Cortext no longer creates labels from an
+internal decoder or an attached static taxonomy.
 
-* **Working memory:** active coherent memories used for immediate chat/prompt state and overlap suppression.
-* **Short-term graph memory:** a bounded processor-local STM graph over recent signal embeddings and provisional clustered label edges.
-* **Long-term graph memory:** the persisted SQLite graph of memory nodes, associative cue nodes, label nodes, relations, facts, and consolidation products. Long-term memory is this graph: `memories` stores durable nodes, `associations` stores durable edges, and fact tables store bitemporal structured claims.
+`source_id` is treated as opaque provenance and exact-equality grouping only.
+Cortext does not infer application roles, speaker names, modalities, maintenance
+commands, or consolidation behavior from reserved source strings. Explicit
+maintenance is driven by API calls and `Signal::force_consolidation`, not magic
+source identifiers.
 
-Only LTM graph memory is durable. STM graph labels are treated as proposals carried into consolidation as `current_labels`; consolidation then confirms, removes, or adds durable `has_label` edges from source evidence. The current production prompt surface uses WM directly and LTM retrieval directly; STM remains a bounded proposal/read substrate unless a downstream consumer passes the experimental transfer gates. Active WM slots also act as **temporal source anchors** for LTM retrieval: their opaque `source_id` and prior timestamps seed the same temporal expansion used by durable source seeds, so nearby durable memories from the same source stream can be recovered when the immediate WM tail is short. `source_id` is treated as provenance and exact equality grouping only; Cortext does not parse application roles, speaker names, maintenance commands, or modality semantics from it. Scheduled/explicit consolidation is signaled by `Signal::consolidation_mode`; the maintenance signal is stored with neutral provenance and no caller-provided source string can trigger a different Cortext behavior by matching a reserved literal. Temporal neighbors are also restricted to rows earlier than the current signal timestamp. `WORKING`, `LABEL`, and `ASSOCIATION` rows are excluded from the returned temporal neighbors, and final candidates still pass write-exclusion and WM-overlap filtering. The path is controlled by the existing F/S/T-derived graph-expanded temporal window, temporal weight, durable-source weight, and compact output cap, and it is disabled by the source-seed graph-expansion ablation. This preserves the core online invariant: the live loop remains embedding-based, while durable semantic edits happen at consolidation boundaries.
+## Current Operation Pipeline
 
-Runtime reinforcement edges are also part of the long-term graph, but their
-online plasticity is bounded. `DetectMemoryUsage` maps retrieved embeddings back
-to durable memory ids and updates only pairwise `reinforces` edges among the
-current retrieved packet. The increment is F/S/T-derived, contextual-gain
-weighted, and fanout-damped; pairs involving the selected/used memory receive
-the full scaled increment, while unselected co-retrieval pairs receive only a
-small F/S/T-derived fraction. Reinforcement decay and pruning use the same knob
-surface: decay slows with Stability, while the prune floor is derived from the
-anchored co-retrieval increment and a Focus/Sensitivity/Stability evidence
-requirement rather than a fixed edge-weight cutoff. This prevents noisy compact
-packets from quickly saturating durable graph hubs while preserving
-reinforcement as a learnable graph signal.
+The production operation chain is:
 
-The current alpha stores temporality primarily at the episodic level:
+```text
+CoreStage:
+  embedded centroid init, priors, coherence, accumulation, drift,
+  uncertainty, focus/sensitivity/mood, metrics, neuromodulators,
+  adaptive metric weights, thresholding, recent context, boundary/write gate
 
-* episodic memories have event timestamps,
-* retrieval and decay are recency-aware,
-* consolidation produces summaries, labels, and graph structure.
+StorageStage:
+  memory storage, soft-anchor update, synaptic tagging, signal metrics
 
-This is sufficient for long-horizon continuity, but it is not enough on its own for changing structured facts such as residence, caregiver, routine, diagnosis, medication, or appointment state.
+RetrievalStage:
+  streaming pacing, graph-augmented retrieval, rate/MNI gating,
+  memory-usage detection
 
-The current phase adds an additive **bitemporal structured-fact layer** populated during consolidation rather than during the live loop. A minimal fact record includes:
-
+FeedbackStage:
+  retrieval competition, predictive pre-activation, reconsolidation,
+  focus/sensitivity/stability feedback, influence feedback,
+  serial-position effects, memory strength/eviction, emotional consolidation,
+  working memory, accumulator reset, consolidation gate/cluster/shallow,
+  graph build, emotional cascade, meta-learning
 ```
-fact_id
-subject
-predicate
-object_or_value
-valid_start, valid_end
-recorded_at, superseded_at
-confidence
-source_memory_ids
-source_associative_cue_ids
-source_summary_ids
-```
 
-This layer is additive, not a replacement for the existing episodic graph. The division of responsibility is:
+Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so replay
+probes can inspect retrieval without mutating the durable store.
 
-* **episodic memories:** preserve raw experience and provenance,
-* **associative cue nodes:** anchor labels and associative retrieval for raw memory clusters,
-* **summaries:** provide optional semantic compression when storage pressure justifies it,
-* **bitemporal facts:** answer changing factual questions with explicit world-time and system-time semantics.
+## Consolidation Implementation
 
-Under this design, deep extraction in consolidation emits assertions with valid-time and transaction-time boundaries. The fact store supports three query modes:
+Consolidation is explicit. The runtime does not schedule it automatically and
+does not expose mode variants. Callers invoke `Consolidate()` or inject a
+signal with `force_consolidation=true`; the same production pipeline then runs
+the knob-derived consolidation gate, clusterer, shallow consolidation, and graph
+builder.
 
-* current truth (`what is true now?`)
-* historical truth (`what was true at world time τ?`)
-* historical belief (`what would Cortext have answered at system time τ?`)
+Shallow consolidation is embedding-only. It clusters eligible long-term
+memories, writes an `ASSOCIATION` centroid node for each cluster, assigns source
+memories to the cluster, and emits `derived_from` edges. If durable `LABEL`
+nodes already exist, shallow consolidation can attach the closest labels to the
+association centroid with F/S/T-derived limits and similarity thresholds. It
+does not synthesize payload summaries, extract relations, create fact
+assertions, call a decoder, or attach a read-only external taxonomy.
 
-Crucially, this preserves the alpha architecture: the live control loop remains embedding-first, with embeddings and graph state as the primary scoring substrate, while bounded F/S/T-derived text, fact, label, and source-evidence routes can admit durable candidates when that evidence already exists. Structured temporal reasoning is added as a higher-level memory product derived from consolidation outputs. The current branch uses those facts in the core retrieval and lifecycle path rather than exposing a separate fact payload in the chat example.
+This keeps replay close to the current product target: consolidation behaves
+like low-latency sleep replay over stored embeddings and graph edges, not a
+batch semantic extraction job.
 
-The three user-facing knobs still shape the core behavior:
+## Retrieval Implementation
 
-* **Focus** increases fact-linked retrieval influence and strengthens stale-conflict suppression during ranking.
-* **Sensitivity** increases preference for newly confirmed caregiver, location, and schedule changes when current evidence conflicts with older routine summaries.
-* **Stability** contributes a lighter routine-preservation bias in the core retrieval path and broader memory dynamics.
+Production retrieval discovers a broad but bounded vector seed set from durable
+memory embeddings, expands through retained graph edges, applies temporal rank
+and source-backed ordering signals, and returns a compact selected set. Current
+writes are excluded by timestamp, and working-memory overlap filters prevent the
+retrieval result from echoing the active memory tail. Association edges are used
+as graph evidence; they do not bypass final scoring or output caps.
 
-Phase 6 hardens the **core** bitemporal layer before any additional chat integration. Two changes were necessary in the retrieval pipeline. First, current-mode ranking now penalizes stale same-pair evidence even when an older fact has the same object string as the current winner (for example, `Austin -> Denver -> Austin` no longer lets the old `Austin` memory outrank the current one merely because it is semantically closer to the query vector). Second, fact seeding now over-fetches from the shared embedding table before temporal filtering so that current fact embeddings are not crowded out by nearby non-fact memory embeddings. On the ingestion side, conflicting low-confidence assertions are no longer allowed to supersede stronger current facts; they are stored as immediately superseded evidence until a sufficiently strong correction arrives.
-
-Phase 7 adds a second internal experiment layer on top of that hardened core: a thread-local **retrieval ablation override** used only by deterministic tests and benchmarks. It can disable the fact layer entirely, collapse historical queries to current-only behavior, scale fact boosts and stale penalties, relax provenance from direct evidence links to unrestricted semantic fact matches, and apply a routine-versus-recency preset in the core scoring path. Phase 8 extends that layer with a broader deterministic matrix: explicit `current` / `valid_at` / `known_at` reporting, a wider predicate/severity scenario set, and a representative `3 x 3 x 3` F/S/T sweep. The key implementation constraint remains unchanged: the override changes only internal core behavior; no public headers, C API surfaces, or chat-path controls are introduced.
-
-Phase 9 adds the missing **fact lifecycle** layer. Fact assertions now persist internal support traces such as support mass, source diversity, contradiction mass, confirmation count, severity class, and lifecycle state (`active`, `weak`, `archived`). Consolidation still inserts or supersedes fact assertions, but it now also updates those support traces and then runs a bounded lifecycle maintenance sweep. That sweep decays unsupported facts, compresses repeated confirmations into support statistics, archives low-support facts, and physically deletes only low-severity archived facts by default. High-severity historical facts are retained even after evidence loss so that deterministic `valid_at` and `known_at` queries remain correct.
-
-This leaves the architecture in the intended order: the fact store, temporal queries, fact-aware retrieval, and lifecycle maintenance are now benchmark-gated at the core level and causally ablated there, while the chat example remains a consumer of the normal memory-return surface rather than a separate fact-grounding path.
-
-Lower-level temporal retrieval modes (`current`, `valid_at`, `known_at`) remain implemented for deterministic tests and benchmarks. Explicit user-facing temporal controls and any application-specific grounding or reply templating remain later work.
+The retrieval debug path records a ranking ledger for selected and rejected
+candidates. The debug schema reports the active scalar components that still
+exist in the implementation: relevance, processor score, predictive bonus,
+pre-activation, durable-source boost, temporal/evidence annotations, and the
+ACT-R-inspired activation ledger. Deleted label-graph and fact-layer fields are
+not emitted.
 
 ## Soft Anchor Implementation Status
 
-Soft Anchor (@sec-soft-anchor) is now wired into the engine as an always-on
-ingress formation path. Production retrieval is unchanged: online retrieval
-still consumes the normal memory-return surface and does not create or promote
-anchors from retrieved candidates. The operation runs after `MemoryStorage`,
-consumes the stored memory id and current representative embedding, and compares
-the current signal only against prior `SoftAnchorState` objects.
+Soft Anchor (@sec-soft-anchor) is wired into the engine as an always-on ingress
+formation path. It is not a hard referent resolver and it is not a retrieval-time
+reranker. The operation runs after memory storage, consumes the stored memory id
+and current representative embedding, and compares the current signal only
+against prior soft-anchor state.
 
-Schema migration 6 adds two optional tables:
+Schema migration 6 adds:
 
 ```text
 soft_anchors(anchor_id, status, semantic_centroid, entity_centroid,
@@ -115,164 +136,22 @@ soft_anchor_links(memory_id, anchor_id, anchor_strength, anchor_label,
                   updated_step, created_at)
 ```
 
-These tables store the formed soft-anchor state. Retrieval does not read them
-for ranking in the current branch. The public memory-return surface now exposes
-them as optional memory metadata: `Context::Memory::soft_anchors` contains up to
-three `SoftAnchor` entries, and the C API JSON mirrors those entries under each
-memory's `soft_anchors` field. The fields are `id`, `strength`, `likelihood`,
-`label`, `tier`, `score`, `margin`, and `entropy`.
-The demo chat mirrors the same metadata in memory events and emits nested
-`<soft_anchor>` elements under retrieved memories in the prompt snapshot.
-
-The benchmark implementation still writes the richer audit artifacts:
-
-```
-ingress_adaptive_anchor_cases.csv
-ingress_adaptive_anchor_candidates.csv
-ingress_adaptive_anchor_links.csv
-ingress_adaptive_anchor_soft_links.csv
-ingress_adaptive_anchor_states.csv
-```
-
-The production line is intentionally split. Soft Anchor formation is in the
-engine and hydrated memories carry optional SoftAnchor context. The engine still
-does not use those links for ranking, hard referent binding, or durable fact
-formation.
-
-The implementation target is a bounded state update at ingestion:
-
-```
-cost_soft_anchor = O(K_state × d_view)
-```
-
-where `K_state` is the bounded number of prior non-rejected soft-anchor states
-held in processor context and `d_view` is the sum of the active signal-view
-dimensions. This cost is separate from retrieval and should remain lower than
-the retrieval path before any production use.
-
-Current implementation verification:
-
-```bash
-cmake --build build -j 8 --target cortext
-cmake --build build -j 8 --target cortext_tests
-cmake --build build -j 8 --target cortext_chat
-./build/tests/cortext_tests "[cortext][hydration][soft_anchor]"
-./build/tests/cortext_tests "[operations][soft_anchor]"
-```
-
-The focused Soft Anchor operation tests cover default formation, first ES-style
-signal creation, continued-link update, hydration, and chat-surface metadata.
-Broader tag-level test slices can include unrelated experimental failures during
-active development, so this section reports focused verification rather than
-claiming the entire `[operations]` slice as a Soft Anchor gate.
-Soft Anchor continuity gates are no longer standalone literals: view blending,
-single-view entity quality, source affinity, recency/support/contradiction
-saturation, none-versus-new scoring, active TTL and non-durable decay grace,
-recent-memory retention, support admission, contradiction admission, and durable
-promotion thresholds are all named F/S/T-derived policies.
+Hydrated memories expose up to three soft-anchor entries through
+`Context::Memory::soft_anchors`, and the C API JSON mirrors those entries under
+each returned memory. The chat demo emits matching `<soft_anchor>` elements in
+the prompt snapshot.
 
 ## Computational Complexity
 
-The primary per-stimulus cost is the k-nearest-neighbors (kNN) search for metrics and retrieval. With `N` stored memories, naive search is `O(N)`. We recommend maintaining an HNSW index [@malkov2018efficient] to achieve `O(log N)` retrieval.
+The dominant per-signal cost is retrieval over the durable SQLite embedding and
+association surface. With `N` stored memories, naive vector seed discovery is
+`O(N)` before sqlite-vec pruning; graph expansion is bounded by F/S/T-derived
+row and fanout limits. Working-memory and soft-anchor updates operate over
+bounded live state and remain independent of total store size.
 
-Production retrieval now separates candidate discovery from prompt breadth. The first pass retrieves a broad source/blob seed set with `RetrievalMaxResults(F)` so concrete source memories remain reachable even when consolidated summaries are present. Those seeds are read from the durable SQLite memory and embedding tables, so retrieval after process restart or benchmark checkpoint replay does not depend on the processor-local `memory_stream` being populated. Those seeds are then expanded and scored through existing durable graph structure: `derived_from` source links, durable `has_label` labels, label relation/co-occurrence edges, bitemporal fact evidence, temporal neighbors, recency, affect, procedural priors, and ordinary embedding/context similarity. Retrieval and STM-label routing use retrieval-specific midpoint biases derived from the mixed-media knob matrix: neutral `F=0.50` maps to the previously best effective high-Focus retrieval point, neutral `S=0.50` maps to the previously best low-Sensitivity retrieval point, and neutral `T=0.50` maps to the previously best higher-Stability compact retrieval point, while the public knobs and endpoints remain unchanged. Procedural seed admission, sparse-key breadth, fact vector/text seed breadth, same-event graph continuity, contradiction admission, causal drift edge weighting, label co-occurrence edge weight, streaming retrieval-bias gating, and STM hard-boundary retention are also expressed as F/S/T-derived policies rather than standalone thresholds. The same rule now covers the remaining retrieval constants that previously lived inline: token-overlap query/source weighting and token-length floors, vector-distance score shaping for sqlite-vec routes including fact-vector seeding, fact stale and boost mixtures including ablation override strength multipliers, routine-vs-recency fact adjustment, predicate-class routine-affinity and criticality priors, metacognitive TOT expansion and diversification damping, low-pressure resurfacing scales, durable-source support saturation, source freshness half-life/weight, source-confidence thresholds, contradiction penalties, temporal rank half-life/weight, temporal-neighbor rank decay, AnyFactMatch fallback support/caps, unknown-caution cutoffs, context-reinstatement alpha, procedural reserve/fanout, memory-affect scoring, shared affect-drive weighting, and constructive-reconstruction blending. New memory writes also supply an F/S/T-derived `source_reliability` prior at insertion time; the SQLite `0.7` default remains only a migration/backstop value, and retrieval uses the same prior if old rows lack explicit reliability. High Stability therefore preserves source confidence and low-pressure resurfacing longer, high Focus asks for cleaner source evidence, and high Sensitivity admits weaker supported routes without adding a fourth tuning surface. The final ranker adds a bounded temporal score from the memory event timestamp, so recent relevant source memories receive a recency prior while strongly relevant older memories can still win on embedding, graph, fact, and source evidence. The final selected output is compacted by `RetrievalGraphExpandedRagMaxItems(F,T)`, currently `round(lerp(20, 8, RetrievalFocusBias(F)) * lerp(1.08, 0.92, RetrievalStabilityBias(T)))`. This gives Cortext a RAG-style narrowing path inside the production operation: broad source/blob seeds first, graph/fact/temporal expansion second, compact source-backed output last.
-
-Static label seeds are selected from the attached read-only SQLite label bank (`cortext_label_bank.label_bank_vec`) through sqlite-vec search; dynamic label/association seeds still come from ordinary durable memory and association state created by consolidation. The retrieval scorer also consumes preconsolidated labels as a bounded soft graph signal by default: the current query is projected into attached label-bank vectors and durable `LABEL` nodes, candidate memories receive a knob-derived boost when their `has_label` links overlap those query labels, and the boost is combined with ordinary embedding, context, recency, affect, procedural, fact, durable-source, and graph-expansion scores. Clustered label selection and token-overlap label text routing are production policy, not opt-in experiment gates; K/M/N, route breadth, token floors, and admission scores all derive from F/S/T. This path does not persist new labels and does not treat provisional labels as truth. It can be disabled for regression isolation with `CORTEXT_DISABLE_PRECONSOLIDATED_LABEL_GRAPH=1`; otherwise its weights, admission floors, label breadth, source-seed breadth, degree damping, and label-relation fanout derive from F/S/T. Retrieval rank is preserved through hydration, and linked-source hydration from internal routing nodes is capped by the F/T-derived compact item limit, so applications consume the production-ranked compact LTM surface rather than a wide display expansion.
-
-The retrieval debug path now records an ACT-R-inspired activation ledger for each ranked candidate without changing the rank expression. The ledger partitions the existing score into base-level availability, spreading activation, partial-match penalty, recent-inhibition, utility, exploration-noise, and total-activation fields; the first instrumentation phase maps only existing score terms into those buckets and leaves recent-inhibition and exploration-noise at zero. Production ordering still uses the same scalar expression as before, while telemetry and benchmark debug JSON can inspect why a retrieved candidate won without introducing ACT-R chunk structures, production rules, or a second retrieval architecture. The same debug path also records rejected candidates with their ledger, rejection stage, reason, observed value, and threshold, so benchmark probes can distinguish filter exclusions from candidates that survived admission but lost final selection. A second, opt-in phase gates recent retrieval inhibition behind `CORTEXT_ENABLE_RECENT_RETRIEVAL_INHIBITION=1`: when a candidate has existing `last_access` metadata older than the current signal timestamp, a knob-shaped decaying negative term is written into the ledger's recent-inhibition bucket and included in the same total activation. A third, opt-in phase gates ACT-R-style base-level availability behind `CORTEXT_ENABLE_BASE_LEVEL_AVAILABILITY=1`: candidates with persisted `retrieved_count`, `used_count`, and `last_access` metadata receive a bounded, F/S/T-shaped count-saturation and recency contribution inside the ledger's base-level bucket. A fourth, opt-in phase gates metadata partial matching behind `CORTEXT_ENABLE_PARTIAL_MATCHING_PENALTY=1`: candidates keep their embedding reachability, but contradiction count, source mismatch, modality mismatch, and stale fact validity can add a bounded negative term to the partial-match bucket. A fifth, opt-in phase gates evidence blending behind `CORTEXT_ENABLE_EVIDENCE_BLENDING=1`: after primary selection and sorting, near-tied selected candidates within an F/S/T-derived activation margin are converted into a weighted evidence packet for `constructive_recall_summary` consumers. The packet stores member rank, memory id, embedding id, normalized weight, score, and activation ledger, and the constructive-recall ledger receives an `evidence_blend` reconstruction for the packet anchor when constructive recall is enabled. A sixth, opt-in phase gates evidence-weighted confidence behind `CORTEXT_ENABLE_EVIDENCE_CONFIDENCE=1`: linked fact evidence is projected into bounded support/conflict/source-diversity estimates, packet members carry those annotations, and constructive-recall source confidence can use the packet confidence without changing candidate rank or packet membership. Evidence packets are exported in replay/debug JSON and telemetry as packet/member counts and confidence/weight/contradiction means, but they do not replace the primary ranker and do not add candidates to the retrieved-memory list. With all ACT-R behavior flags unset, the new behavior terms remain zero except for pre-existing fact stale penalties, evidence packets remain empty, and the phase-one ranking-preservation invariant holds.
-
-The live short-term graph memory surface mirrors the same separation between proposal and commitment. On ingress, STM is one bounded per-source graph: recent signal embeddings are graph nodes, and attached label-bank vector matches become provisional edges. The label edges are built by querying the attached label-bank vector table with knob-derived breadth and score floors rather than by copying the label bank into the user database. These STM label edges remain processor-local. During consolidation, source embeddings in each cluster are matched back to the STM graph, and matching labels are passed as `current_labels` to the multimodal refinement request. Gemma then confirms, removes, or adds labels from raw text/audio/image evidence before durable `has_label` edges are written to LTM graph memory. Thus the realtime label graph narrows the candidate set, while consolidation remains the pruning and commitment stage. Current STM cost measurements keep the substrate inside the realtime budget: TTL12/cap24 reached p95 size **13** and p95 update **9.75 µs**, while TTL16/cap64 reached p95 size **17** and p95 update **10.208 µs**. Those numbers justify preserving STM as a small ordered substrate, but STM readout does not currently change production retrieval ranking.
-
-Working-memory maintenance uses the same knob discipline: benefit scoring,
-base strength, passive strength flooring, cost saturation, rehearsal boost
-increments, eviction recency decay, and capacity pressure now derive from F/S/T
-rather than fixed local constants. Signal filtering, threshold score-history
-retention/rate shape, boundary normalization and inactivity pressure,
-accumulator drift gain, interrupt candidate scoring/refractory scaling, shallow
-consolidation label fanout, consolidation tag weighting, fact supersession
-margin, and deep consolidation evidence budgets now follow the same rule.
-Consolidation cluster caps, STM/LTM source-span breadth, relation-endpoint
-repair strictness, label-refinement prompt counts, memory trace initialization,
-trace half-life ratios, trace coupling, and trace mixture weights are likewise
-named F/S/T policies. The default midpoint remains close to the previous
-behavior, but release tuning can now move these policies through the three
-public knobs.
-
-A subsequent hardening pass applied the same rule to adaptive blender cadence
-and RLS forgetting, predictive pre-activation horizons/decays, reconsolidation
-drift and ripple gates, emotional cascade floors, reinforcement fallback
-support, graph sequential-edge temporal weighting, stored-trace fallbacks, and
-Soft Anchor information scoring. A follow-up scalar-policy audit moved the same
-class of hidden constants for focus/stability bootstrap priors, affect threshold
-gain, rarity/utility metric scaling, retrieval-competition winner/radius/recovery
-policy, working-memory strength cap and initial slot strength, influence-feedback
-sustain/weighting, threshold high-tail quantile, primary reconsolidation drift,
-and consolidation `derived_from` source-edge weight into `core::knobs`. These
-values previously appeared as local
-calibration constants inside operation implementations; they are now named
-F/S/T-derived policies in the core knob layer so the production midpoint remains
-auditable while off-midpoint sweeps can move the behavior without adding new
-settings.
-
-The same audit also moved remaining neutral behavior fallbacks out of operation
-files and into named knob policies: missing label/summary embeddings now use
-`LabelSalienceFallback(F,S,T)`, absent working-memory task context uses
-`WMTaskRelevanceFallback(F,S,T)`, unknown bootstrap blend metrics use
-`BlendBootstrapFallback(F,S,T)`, and synaptic-tagging surprisal/arousal
-thresholds, tag window, and tag decay are supplied by
-`SynapticTaggingPolicyForKnobs(F,S,T)`. The neuromodulator base values,
-stream-statistic gains, retrieval-pressure divisor, oscillation rate, and
-encode-bias blend are likewise supplied by
-`NeuromodulatorPolicyForKnobs(F,S,T)`, and serial-position middle-zone
-suppression uses `SerialMiddleMultiplierFloor(F,S)` instead of an operation
-literal. These helpers preserve the neutral
-midpoint behavior while making the off-midpoint response visible to tests and
-release ablations. Processor state restore uses the same rule: empty state rows,
-single-signal state rows, and per-field legacy placeholders are seeded from the
-active knobs before learned persisted values overlay them, so a stale SQLite
-default cannot masquerade as learned policy. Working-memory reload also uses the
-same F/S/T-derived passive strength floor as live working-memory maintenance, so
-an active WM slot is not dropped merely because elapsed wall time would decay it
-below zero on restart. New durable and working-memory rows also supply explicit
-F/S/T-derived scalar `strength`, `stability`, and source-reliability baselines
-alongside the multi-timescale trace vector, leaving schema defaults as migration
-backstops rather than live policy.
-
-Recursive graph expansion adds overhead but is bounded by F/S/T-derived depth,
-per-node fanout, row, label, fact, and durable-source limits. Fact evidence
-expansion now orders by support and caps rows by matched-fact count; stale fact
-expansion is similarly capped by confidence, support, and recorded time. Durable
-source text routing reads only a knob-derived byte slice per source blob, and
-durable-source label/association scoring caps source links by candidate count.
-The vector lookup path is indexed and sublinear when the configured vector index
-is available; the SQLite schema also carries ordinary lookup indexes for signal
-embedding fallbacks, kind/source memory lookup, source/time temporal expansion,
-last-access recency views, label-created recency scans, fact-cache embedding
-joins, and edge-type-first association traversal so realtime retrieval does not
-depend on table scans as the durable graph grows. Constructive-reconstruction
-lookup is candidate-scoped through the latest reconstruction for each candidate
-memory rather than a global `memory_reconstructions` materialization inside every
-seed query. Text/fact/label/durable-source rescue routes are bounded SQL scans or
-indexed lookups rather than unbounded table walks. A follow-up fanout audit
-remains open for helper paths where only the final output is capped or where
-payload hydration can still be expensive: sparse-key expansion, temporal-anchor
-neighbor scans, multi-hop label/cue relation joins, and whole-memory signal-blob
-hydration. The
-practical per-stimulus cost is therefore "indexed seed lookup plus bounded
-expansion", not pure
-`O(log N)`; latency and throughput claims should be read from the benchmark runs
-for the active storage/index configuration.
-
-## Memory Footprint
-
-The system stores:
-*   `signal_stream`: `n_ctx` accumulator centroids (256d float32 = 1KB each).
-*   `score_stream`: Scalar history.
-*   `short_term_graphs`: bounded processor-local STM nodes and provisional edges.
-*   `ltm_graph`: persisted `memories` nodes, `associations` edges, and fact claims.
-
-For long-running instances, the persisted LTM graph dominates. Pruning low-strength memories and their associated edges (@sec-memory-strength) is essential for bounding growth.
-
-## Numerical Stability
-
-Exponential decays and probability computations can suffer from underflow. We use `log-space` arithmetic where appropriate and clamp all potentially divergent values (e.g., division by small sums) with ε = 10⁻⁶.
+The retained long-horizon optimization target is that mean process latency
+stays approximately flat as the database grows. Recent profiling moved the
+largest known costs out of per-row reconstruction, repeated parse work, and
+unbounded deleted feature paths. Further gains now primarily depend on SQLite
+row-materialization overhead, vector blob copies, and vector-index internals
+rather than hidden decoder calls.

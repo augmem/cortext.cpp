@@ -2,7 +2,7 @@
 // processing sequence. Drives the exact production operation set (BuildRootOperationSet)
 // through one long-lived store with deterministic synthetic embeddings, so
 // CPU profiles concentrate on the memory algorithms rather than per-scenario
-// setup, encoder inference, or LLM consolidation backends.
+// setup, encoder inference, or model backends.
 //
 // Output is fully deterministic: aggregate counters and checksums are
 // printed so before/after comparisons can assert bit-identical semantics
@@ -218,7 +218,7 @@ main (int argc, char **argv)
 
       if ((i + 1) % kConsolidationInterval == 0)
         {
-          signal.consolidation_mode = cortext::ConsolidationMode::Shallow;
+          signal.force_consolidation = true;
         }
 
       const auto out = processor.Process (signal);

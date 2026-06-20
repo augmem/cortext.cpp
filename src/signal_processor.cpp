@@ -100,9 +100,8 @@ ExtractInt64Column (const std::vector<std::map<std::string, std::any>> &rows,
 
 struct DetachedProcessorCaches
 {
-  std::unordered_map<std::string, std::vector<float>> label_embedding_cache;
-  std::vector<ProcessorContext::SummaryCacheEntry> summary_cache;
-  std::unordered_map<long long, size_t> summary_cache_index;
+  std::vector<ProcessorContext::AssociationCacheEntry> association_cache;
+  std::unordered_map<long long, size_t> association_cache_index;
   std::vector<ProcessorContext::RetrievalSurfaceEntry>
       retrieval_surface_cache;
   std::unordered_map<long long, size_t> retrieval_surface_index;
@@ -112,11 +111,6 @@ struct DetachedProcessorCaches
       std::vector<ProcessorContext::RetrievalSurfaceSourceIndexEntry>>
       retrieval_surface_source_index;
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
-  std::unordered_map<long long, ProcessorContext::FactEmbeddingCacheEntry>
-      fact_embedding_cache;
-  ProcessorContext::DurableSourceTextSeedCache durable_source_text_seed_cache;
-  ProcessorContext::LabelClusterCache label_cluster_cache;
-  ProcessorContext::LabelGraphRelationCache label_graph_relation_cache;
   ProcessorContext::AssociationFanoutCache association_fanout_cache;
   std::unordered_set<long long> predictive_pre_activation_embedding_ids;
   std::unordered_set<long long> retrieval_suppression_embedding_ids;
@@ -129,18 +123,13 @@ struct DetachedProcessorCaches
 void
 ClearRebuildableProcessorCaches (ProcessorContext &ctx)
 {
-  ctx.label_embedding_cache = {};
-  ctx.summary_cache = {};
-  ctx.summary_cache_index = {};
+  ctx.association_cache = {};
+  ctx.association_cache_index = {};
   ctx.retrieval_surface_cache = {};
   ctx.retrieval_surface_index = {};
   ctx.retrieval_surface_embedding_index = {};
   ctx.retrieval_surface_source_index = {};
   ctx.retrieval_surface_source_index_dirty = {};
-  ctx.fact_embedding_cache = {};
-  ctx.durable_source_text_seed_cache = {};
-  ctx.label_cluster_cache = {};
-  ctx.label_graph_relation_cache = {};
   ctx.association_fanout_cache = {};
   ctx.predictive_pre_activation_embedding_ids = {};
   ctx.retrieval_suppression_embedding_ids = {};
@@ -153,9 +142,8 @@ DetachedProcessorCaches
 DetachRebuildableProcessorCaches (ProcessorContext &ctx)
 {
   DetachedProcessorCaches caches;
-  caches.label_embedding_cache = std::move (ctx.label_embedding_cache);
-  caches.summary_cache = std::move (ctx.summary_cache);
-  caches.summary_cache_index = std::move (ctx.summary_cache_index);
+  caches.association_cache = std::move (ctx.association_cache);
+  caches.association_cache_index = std::move (ctx.association_cache_index);
   caches.retrieval_surface_cache = std::move (ctx.retrieval_surface_cache);
   caches.retrieval_surface_index = std::move (ctx.retrieval_surface_index);
   caches.retrieval_surface_embedding_index
@@ -164,12 +152,6 @@ DetachRebuildableProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.retrieval_surface_source_index);
   caches.retrieval_surface_source_index_dirty
       = std::move (ctx.retrieval_surface_source_index_dirty);
-  caches.fact_embedding_cache = std::move (ctx.fact_embedding_cache);
-  caches.durable_source_text_seed_cache
-      = std::move (ctx.durable_source_text_seed_cache);
-  caches.label_cluster_cache = std::move (ctx.label_cluster_cache);
-  caches.label_graph_relation_cache
-      = std::move (ctx.label_graph_relation_cache);
   caches.association_fanout_cache
       = std::move (ctx.association_fanout_cache);
   caches.predictive_pre_activation_embedding_ids
@@ -187,9 +169,8 @@ void
 RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
                                    DetachedProcessorCaches &caches)
 {
-  ctx.label_embedding_cache = std::move (caches.label_embedding_cache);
-  ctx.summary_cache = std::move (caches.summary_cache);
-  ctx.summary_cache_index = std::move (caches.summary_cache_index);
+  ctx.association_cache = std::move (caches.association_cache);
+  ctx.association_cache_index = std::move (caches.association_cache_index);
   ctx.retrieval_surface_cache = std::move (caches.retrieval_surface_cache);
   ctx.retrieval_surface_index = std::move (caches.retrieval_surface_index);
   ctx.retrieval_surface_embedding_index
@@ -198,12 +179,6 @@ RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
       = std::move (caches.retrieval_surface_source_index);
   ctx.retrieval_surface_source_index_dirty
       = std::move (caches.retrieval_surface_source_index_dirty);
-  ctx.fact_embedding_cache = std::move (caches.fact_embedding_cache);
-  ctx.durable_source_text_seed_cache
-      = std::move (caches.durable_source_text_seed_cache);
-  ctx.label_cluster_cache = std::move (caches.label_cluster_cache);
-  ctx.label_graph_relation_cache
-      = std::move (caches.label_graph_relation_cache);
   ctx.association_fanout_cache = std::move (caches.association_fanout_cache);
   ctx.predictive_pre_activation_embedding_ids
       = std::move (caches.predictive_pre_activation_embedding_ids);
@@ -242,7 +217,7 @@ private:
 void
 DeleteStaleWorkingMemoryRows (Transaction &tx,
                               const std::vector<long long> &memory_ids,
-                              bool deep_cleanup)
+                              bool delete_payloads)
 {
   if (memory_ids.empty ())
     {
@@ -252,7 +227,7 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
   const std::string placeholders = Placeholders (memory_ids.size ());
   const auto memory_params = MakeParams (memory_ids);
   std::vector<long long> embedding_ids;
-  if (deep_cleanup)
+  if (delete_payloads)
     {
       embedding_ids = ExtractInt64Column (
           tx.Execute ("SELECT embedding_id FROM memories "
@@ -275,7 +250,7 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
           embedding_ids.end ());
     }
 
-  if (deep_cleanup)
+  if (delete_payloads)
     {
       std::vector<std::any> assoc_params;
       assoc_params.reserve (memory_ids.size () * 2);
@@ -294,7 +269,7 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
     }
   tx.Execute ("DELETE FROM signals WHERE memory_id IN (" + placeholders + ")",
               memory_params);
-  if (deep_cleanup)
+  if (delete_payloads)
     {
       tx.Execute ("DELETE FROM current_memory_embeddings "
                   "WHERE memory_id IN (" + placeholders + ")",
@@ -322,10 +297,6 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
           "  AND NOT EXISTS ("
           "    SELECT 1 FROM memory_reconstructions mr "
           "    WHERE mr.embedding_id = embeddings.embedding_id"
-          "  ) "
-          "  AND NOT EXISTS ("
-          "    SELECT 1 FROM fact_cache fc "
-          "    WHERE fc.embedding_id = embeddings.embedding_id"
           "  )",
           MakeParams (embedding_ids));
     }
@@ -347,10 +318,6 @@ DeleteUnreferencedEmbeddings (Transaction &tx)
       "  AND NOT EXISTS ("
       "    SELECT 1 FROM memory_reconstructions mr "
       "    WHERE mr.embedding_id = embeddings.embedding_id"
-      "  ) "
-      "  AND NOT EXISTS ("
-      "    SELECT 1 FROM fact_cache fc "
-      "    WHERE fc.embedding_id = embeddings.embedding_id"
       "  )",
       {});
 }
@@ -418,7 +385,7 @@ MaybeRunPassiveWalCheckpoint (Store *store, const Signal &signal,
     {
       return;
     }
-  if (signal.consolidation_mode.has_value ())
+  if (signal.force_consolidation)
     {
       return;
     }
@@ -494,20 +461,6 @@ AssembleOutputFields (const OperationContext &op_context,
   out.stored_memory_id = op_context.GetStoredMemoryId ();
   out.stored_signal_id = op_context.GetStoredSignalId ();
   const auto &processor_context = op_context.GetProcessorContext ();
-  out.shadow_stm_enabled = processor_context.shadow_stm_enabled;
-  out.shadow_stm_size = processor_context.shadow_stm_last_size;
-  out.shadow_stm_max_size = processor_context.shadow_stm_max_size;
-  out.shadow_stm_update_count = processor_context.shadow_stm_update_count;
-  out.shadow_stm_compaction_count
-      = processor_context.shadow_stm_compaction_count;
-  out.shadow_stm_last_update_us
-      = processor_context.shadow_stm_last_update_us;
-  out.shadow_stm_mean_update_us
-      = processor_context.shadow_stm_update_count > 0
-            ? processor_context.shadow_stm_total_update_us
-                  / static_cast<double> (
-                      processor_context.shadow_stm_update_count)
-            : 0.0;
   out.soft_anchor_enabled = processor_context.soft_anchor_enabled;
   out.soft_anchor_state_count = processor_context.soft_anchor_last_state_count;
   out.soft_anchor_link_count = processor_context.soft_anchor_last_link_count;
@@ -529,7 +482,7 @@ ApplyConsolidationHint (const Signal &signal, const SignalProcessor::Config &cfg
                         const ProcessorContext &ctx,
                         SignalProcessor::Output &out)
 {
-  if (signal.consolidation_mode.has_value ())
+  if (signal.force_consolidation)
     {
       out.consolidation_recommended = false;
       out.consolidation_required = false;
@@ -1136,12 +1089,6 @@ LoadState (Store &store, ProcessorContext &ctx,
           = ExtractInt64 (row, "wm_last_accepted", 0) != 0;
       ctx.wm_last_chunked
           = ExtractInt64 (row, "wm_last_chunked", 0) != 0;
-
-      ctx.fok_state = ExtractDouble (row, "fok_state", 0.0);
-      ctx.retrieval_strength
-          = ExtractDouble (row, "retrieval_strength", 0.0);
-      ctx.metacognitive_confidence
-          = ExtractDouble (row, "metacognitive_confidence", 0.0);
 
       // Sensitivity state
       ctx.weight_novelty = ExtractPolicyDouble (
@@ -1964,7 +1911,7 @@ SignalProcessor::SignalProcessor (const Config &config,
   if (!config_.encoder)
     {
       throw std::invalid_argument (
-          "SignalProcessor requires a non-null Encoder (embeddinggemma fallback expected)");
+          "SignalProcessor requires a non-null Encoder");
     }
   // Initialize rate observation window capacity derived from Stability knob.
   if (context_)
@@ -1977,10 +1924,6 @@ SignalProcessor::SignalProcessor (const Config &config,
           static_cast<size_t> (std::max (
               1, core::RecentRetrievedIdWindow (
                      config_.focus, config_.sensitivity, config_.stability))));
-
-      // Initialize LLM components from config
-      context_->extractor = config_.extractor;
-      context_->summarizer = config_.summarizer;
     }
   // Apply schema migrations exactly once during initialization.
   bool loaded_state = false;
@@ -2077,7 +2020,6 @@ SignalProcessor::Process (const Signal &signal)
   };
   auto restore_context_snapshot = [&] {
     *context_ = std::move (context_snapshot);
-    context_->label_bank_loaded = false;
     if (store_)
       {
         LoadPredictivePreActivationIds (*store_, *context_);
@@ -2138,8 +2080,7 @@ SignalProcessor::Process (const Signal &signal)
               ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
           op_context.SetCurrentOperationType ("PersistWorkingMemory");
           op_start = std::chrono::steady_clock::now ();
-          PersistWorkingMemory (*tx, signal.consolidation_mode.has_value (),
-                                &op_context);
+          PersistWorkingMemory (*tx, signal.force_consolidation, &op_context);
           op_context.AddOperationTiming (
               "SignalProcessor.persist_working_memory",
               ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
@@ -2158,7 +2099,7 @@ SignalProcessor::Process (const Signal &signal)
           op_context.AddOperationTiming (
               "SignalProcessor.commit_transaction",
               ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
-          if (signal.consolidation_mode.has_value ())
+          if (signal.force_consolidation)
             {
               CheckpointSQLiteStore (
                   store_.get (), true, &op_context,
@@ -2454,8 +2395,6 @@ SignalProcessor::PersistState (Transaction &tx)
       "last_embedding, x_pred_ema, delta_half_life_adj, sustained_influence, "
       // Working memory
       "wm_maintenance_cost, wm_slot_count, wm_last_accepted, wm_last_chunked, "
-      // Metacognition
-      "fok_state, retrieval_strength, metacognitive_confidence, "
       // Consolidation
       "last_consolidation_ts, consolidation_count, memories_since_consolidation, is_processing_signal, last_retrieval_ts, "
       // Episode tracking
@@ -2477,7 +2416,6 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, ?, ?, ?, "  // Uncertainty + modulators
       "?, ?, ?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
-      "?, ?, ?, "  // Metacognition
       "?, ?, ?, ?, ?, "  // Consolidation
       "?, ?, ?, ?, ?, "  // Episode tracking + write_rate_timestamps
       "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Blender weights (12)
@@ -2529,10 +2467,6 @@ SignalProcessor::PersistState (Transaction &tx)
         wm_slot_count,
         context_->wm_last_accepted ? 1 : 0,
         context_->wm_last_chunked ? 1 : 0,
-        // Metacognition
-        context_->fok_state,
-        context_->retrieval_strength,
-        context_->metacognitive_confidence,
         // Consolidation
         static_cast<long long> (context_->last_consolidation_ts),
         context_->consolidation_count,

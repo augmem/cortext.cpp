@@ -105,7 +105,7 @@ CanonicalLabelTokenKey (const std::string &label_key)
 // auxiliaries, interjections, and conversational acknowledgments, plus
 // chat-transcript role artifacts. This set is frozen - it encodes grammar,
 // not corpus tuning. Content-word filtering is the job of corpus-derived
-// signals (label-bank similarity contrast, document frequency), never of
+// signals (corpus contrast, document frequency), never of
 // this list. See docs: a phrase is rejected here only when EVERY token is
 // closed-class.
 inline const std::unordered_set<std::string_view> &

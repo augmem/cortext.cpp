@@ -566,7 +566,6 @@ TEST_CASE ("High Focus affects all selectivity parameters consistently",
   REQUIRE (MaxResults (F) <= 24);               // Fewer results, but no longer single digits
   REQUIRE (MergeThreshold (F) > 0.93);          // Stricter merging
   REQUIRE (WMGateThreshold (F) > 0.35);         // Stricter WM entry
-  REQUIRE (FOKThreshold (F) > 0.45);            // Stricter FOK
   REQUIRE (MaxWaitDrift (F) < 0.7);             // More aggressive pacing
   REQUIRE (MinClusterSize (F) > 8);             // Larger min clusters
 }

@@ -85,7 +85,6 @@ def main() -> int:
     parser.add_argument("--stability", type=float, default=0.5)
     parser.add_argument("--replay-timezone", default="")
     parser.add_argument("--daily-consolidation", action="store_true")
-    parser.add_argument("--deep", action="store_true")
     args = parser.parse_args()
     if args.timeline_skip_messages < 0:
         raise RuntimeError("--timeline-skip-messages must be non-negative")
@@ -141,7 +140,6 @@ def main() -> int:
             "stability": args.stability,
         },
         "daily_consolidation": args.daily_consolidation,
-        "deep_consolidation": args.deep,
         "source_id_policy": (
             "User and Contact are opaque conversation provenance source IDs; "
             "media is not encoded into source_id"
