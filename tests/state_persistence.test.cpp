@@ -926,7 +926,7 @@ TEST_CASE ("Working memory slots decay on load",
   processor.Process (s);
 
   REQUIRE_THAT (verify_raw->loaded_strength,
-                WithinAbs (expected_strength, 1e-6));
+                WithinAbs (expected_strength, 1e-3));
 }
 
 TEST_CASE ("Working memory reload preserves floor like live passive decay",

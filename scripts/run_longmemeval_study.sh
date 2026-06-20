@@ -16,14 +16,10 @@ fi
 
 mkdir -p "${ROOT}"
 
-export CORTEXT_EMBEDDINGGEMMA_BACKEND=llama.cpp
-export CORTEXT_DEEP_LLM_BACKEND=auto
-
 "${PYTHON_BIN}" "${HARNESS}" \
   --binary build/examples/topical_chat_analysis/cortext_topical_chat_analysis \
   --models "${MODELS_DIR}" \
   --data "${DATA}" \
-  --label-bank "" \
   --out "${ROOT}/retrieval_smoke" \
   --no-multi \
   --no-sweep \

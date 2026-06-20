@@ -8,16 +8,6 @@ import 'package:meta/meta.dart';
 
 import 'cortext_bindings.dart';
 
-enum ConsolidationMode {
-  shallow(0),
-  deep(1),
-  both(2);
-
-  const ConsolidationMode(this.value);
-
-  final int value;
-}
-
 final class CortextError implements Exception {
   const CortextError(this.message);
 
@@ -38,9 +28,9 @@ final class Config {
     this.reinforcementEnabled = true,
     this.proceduralEnabled = true,
     this.sequentialEdgesEnabled = true,
-    this.labelBankPath,
-    this.summarizerProviderUri,
-    this.extractorProviderUri,
+    this.signalFilterAudioEnabled = true,
+    this.signalFilterImageEnabled = true,
+    this.signalFilterTextEnabled = false,
   });
 
   final double focus;
@@ -51,16 +41,9 @@ final class Config {
   final bool reinforcementEnabled;
   final bool proceduralEnabled;
   final bool sequentialEdgesEnabled;
-  final String? labelBankPath;
-
-  /// Inference-provider URI for the Summarizer role, e.g.
-  /// `ollama://127.0.0.1:11435/gemma4:e2b`. Null/empty keeps local model
-  /// auto-discovery; an unresolvable URI makes construction throw.
-  final String? summarizerProviderUri;
-
-  /// Inference-provider URI for the Extractor role; same semantics as
-  /// [summarizerProviderUri].
-  final String? extractorProviderUri;
+  final bool signalFilterAudioEnabled;
+  final bool signalFilterImageEnabled;
+  final bool signalFilterTextEnabled;
 }
 
 final class CortextLibrary {
@@ -170,9 +153,6 @@ final class Cortext {
     CortextLibrary? library,
   }) : _library = library ?? CortextLibrary.open(libraryPath: libraryPath) {
     final nativeConfig = calloc<cortext_config>();
-    Pointer<Utf8>? labelBankPathPointer;
-    Pointer<Utf8>? summarizerProviderUriPointer;
-    Pointer<Utf8>? extractorProviderUriPointer;
     Pointer<Utf8>? dbPathPointer;
     Pointer<Utf8>? modelsDirPointer;
 
@@ -190,27 +170,16 @@ final class Cortext {
           ..procedural_enabled = _boolToInt(configValue.proceduralEnabled)
           ..sequential_edges_enabled = _boolToInt(
             configValue.sequentialEdgesEnabled,
+          )
+          ..signal_filter_audio_enabled = _boolToInt(
+            configValue.signalFilterAudioEnabled,
+          )
+          ..signal_filter_image_enabled = _boolToInt(
+            configValue.signalFilterImageEnabled,
+          )
+          ..signal_filter_text_enabled = _boolToInt(
+            configValue.signalFilterTextEnabled,
           );
-
-        final labelBankPath = configValue.labelBankPath;
-        if (labelBankPath != null) {
-          labelBankPathPointer = labelBankPath.toNativeUtf8();
-          nativeConfig.ref.label_bank_path = labelBankPathPointer.cast();
-        }
-
-        final summarizerProviderUri = configValue.summarizerProviderUri;
-        if (summarizerProviderUri != null) {
-          summarizerProviderUriPointer = summarizerProviderUri.toNativeUtf8();
-          nativeConfig.ref.summarizer_provider_uri = summarizerProviderUriPointer
-              .cast();
-        }
-
-        final extractorProviderUri = configValue.extractorProviderUri;
-        if (extractorProviderUri != null) {
-          extractorProviderUriPointer = extractorProviderUri.toNativeUtf8();
-          nativeConfig.ref.extractor_provider_uri = extractorProviderUriPointer
-              .cast();
-        }
       }
 
       dbPathPointer = dbPath.toNativeUtf8();
@@ -228,15 +197,6 @@ final class Cortext {
       }
     } finally {
       calloc.free(nativeConfig);
-      if (labelBankPathPointer != null) {
-        malloc.free(labelBankPathPointer);
-      }
-      if (summarizerProviderUriPointer != null) {
-        malloc.free(summarizerProviderUriPointer);
-      }
-      if (extractorProviderUriPointer != null) {
-        malloc.free(extractorProviderUriPointer);
-      }
       if (dbPathPointer != null) {
         malloc.free(dbPathPointer);
       }
@@ -442,17 +402,6 @@ final class Cortext {
 
   Map<String, dynamic> consolidate() {
     return _decodeJsonObject(consolidateJson());
-  }
-
-  String consolidateModeJson(ConsolidationMode mode) {
-    _ensureOpen();
-    return _takeJsonString(
-      _library.bindings.cortext_consolidate_mode_json(_handle, mode.value),
-    );
-  }
-
-  Map<String, dynamic> consolidateMode(ConsolidationMode mode) {
-    return _decodeJsonObject(consolidateModeJson(mode));
   }
 
   void flush() {

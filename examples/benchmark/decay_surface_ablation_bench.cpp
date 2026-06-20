@@ -1,4 +1,4 @@
-#include "../../src/operations/eviction_ablation.hpp"
+#include "../../src/operations/eviction_policy_override.hpp"
 #include "../../src/operations/retrieval_debug_state.hpp"
 
 #include <cortext/core/knobs.hpp>
@@ -251,13 +251,13 @@ RunScenario (const Scenario &scenario, int gap_hours,
   SeedMemory (*store, kDistractorMemoryId, distractor, 1000LL, 1.0);
   SeedMemory (*store, kIrrelevantMemoryId, irrelevant, 1000LL, 1.0);
 
-  cortext::operations::eviction::EvictionAblationOverride override;
+  cortext::operations::eviction::EvictionPolicyOverride override;
   override.half_life = scenario.half_life_seconds;
   override.consolidation_gate_enabled = false;
   override.storage_gate_enabled = true;
   override.min_storage_bytes = scenario.min_storage_bytes;
   override.used_storage_bytes = 0;
-  cortext::operations::eviction::ScopedEvictionAblationOverride scoped (
+  cortext::operations::eviction::ScopedEvictionPolicyOverride scoped (
       override);
 
   const long long gap_ms

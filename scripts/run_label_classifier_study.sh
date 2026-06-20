@@ -5,7 +5,6 @@ ROOT="${1:-logs/label_classifier_realdata_$(date +%Y%m%d_%H%M%S)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 MODELS_DIR="${MODELS_DIR:-models}"
 EMBEDDER_BIN="${EMBEDDER_BIN:-./build/tools/text_embedder/cortext_text_embedder}"
-EMBEDDER_BACKEND="${EMBEDDER_BACKEND:-llama.cpp}"
 NAME_PRIORS_PATH="${NAME_PRIORS_PATH:-}"
 OPENAI_LABEL_MODEL="${OPENAI_LABEL_MODEL:-gpt-5.4-mini-2026-03-17}"
 OPENAI_LABEL_SENTENCES="${OPENAI_LABEL_SENTENCES:-120}"
@@ -233,9 +232,9 @@ SMOKE_EVAL_ARGS=(
 )
 
 if [[ -x "${EMBEDDER_BIN}" ]]; then
-  TRAIN_ARGS+=(--embedder-bin "${EMBEDDER_BIN}" --embedder-backend "${EMBEDDER_BACKEND}")
-  EVAL_ARGS+=(--embedder-bin "${EMBEDDER_BIN}" --embedder-backend "${EMBEDDER_BACKEND}")
-  SMOKE_EVAL_ARGS+=(--embedder-bin "${EMBEDDER_BIN}" --embedder-backend "${EMBEDDER_BACKEND}")
+  TRAIN_ARGS+=(--embedder-bin "${EMBEDDER_BIN}")
+  EVAL_ARGS+=(--embedder-bin "${EMBEDDER_BIN}")
+  SMOKE_EVAL_ARGS+=(--embedder-bin "${EMBEDDER_BIN}")
 fi
 
 "${PYTHON_BIN}" scripts/train_label_classifier.py "${TRAIN_ARGS[@]}" \

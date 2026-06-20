@@ -1,5 +1,5 @@
 #include "cortext/models/aist_gguf_encoder.hpp"
-#include "../deep_llm/llama_cpp_support.hpp"
+#include "llama_cpp_support.hpp"
 
 #include <algorithm>
 #include <array>

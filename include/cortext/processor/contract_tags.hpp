@@ -6,11 +6,10 @@
 /// aggregation (see operation_set.hpp).
 ///
 /// Scope: tags cover the per-signal dataflow through OperationContext.
-/// Ambient inputs (Config, Signal, ProcessorContext, Store, providers,
-/// transactions) are constructor- or call-injected, not dataflow, and are
-/// deliberately untagged. Long-lived ProcessorContext state is likewise
-/// unmodeled here; contracts prove per-signal ordering, not cross-signal
-/// state evolution.
+/// Ambient inputs (Config, Signal, ProcessorContext, Store, transactions) are
+/// constructor- or call-injected, not dataflow, and are deliberately untagged.
+/// Long-lived ProcessorContext state is likewise unmodeled here; contracts
+/// prove per-signal ordering, not cross-signal state evolution.
 ///
 /// Values that are produced together by one operation and consumed as a
 /// family share one tag (e.g. BoundaryDecision). A value read before any
@@ -91,9 +90,6 @@ struct MemoryUsageEvents;
 struct SerialPositionPolicy;  ///< primacy/recency windows, suppression, ...
 struct SerialPositionMultiplier;
 
-// MetacognitiveMonitoring
-struct MetacognitiveState;  ///< feeling-of-knowing + metacog_* values
-
 // ApplyStabilityFeedback
 struct DeltaHalfLifeAdjustment;
 
@@ -101,6 +97,5 @@ struct DeltaHalfLifeAdjustment;
 struct ConsolidationShouldStart;
 struct ConsolidationCandidates;
 struct ConsolidationClusters;
-struct ExtractionRequests;
 
 } // namespace cortext::tags

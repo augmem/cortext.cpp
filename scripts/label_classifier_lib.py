@@ -241,10 +241,9 @@ def hashed_text_vector(text: str, dim: int = 128) -> np.ndarray:
 
 
 class ExternalTextEmbedder:
-    def __init__(self, binary: str, models_dir: str = "models", backend: str | None = None):
+    def __init__(self, binary: str, models_dir: str = "models"):
         self.binary = binary
         self.models_dir = models_dir
-        self.backend = backend
         self.cache: dict[str, np.ndarray] = {}
 
     def prefetch(self, texts: Iterable[str]) -> None:
@@ -263,8 +262,6 @@ class ExternalTextEmbedder:
                     f"--out={output_path}",
                     f"--models={self.models_dir}",
                 ]
-                if self.backend:
-                    command.append(f"--backend={self.backend}")
                 subprocess.run(command, check=True, capture_output=True, text=True)
                 with output_path.open("r", encoding="utf-8") as handle:
                     for line in handle:

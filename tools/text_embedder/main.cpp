@@ -54,7 +54,6 @@ main (int argc, char **argv)
   fs::path input_path;
   fs::path models_dir = "models";
   fs::path out_path;
-  std::optional<std::string> backend_override;
 
   for (int i = 1; i < argc; ++i)
     {
@@ -79,31 +78,18 @@ main (int argc, char **argv)
         {
           out_path = *v;
         }
-      else if (auto v = take ("--backend="))
-        {
-          backend_override = *v;
-        }
     }
 
   if (input_path.empty () || out_path.empty ())
     {
       std::cerr << "Usage: cortext_text_embedder --input=FILE --out=FILE "
-                   "[--models=DIR] [--backend=llama.cpp|litert|onnx]\n";
+                   "[--models=DIR]\n";
       return 1;
     }
   if (!fs::exists (input_path))
     {
       std::cerr << "Input file not found: " << input_path << "\n";
       return 1;
-    }
-
-  if (backend_override.has_value ())
-    {
-#if defined(_WIN32)
-      _putenv_s ("CORTEXT_EMBEDDINGGEMMA_BACKEND", backend_override->c_str ());
-#else
-      setenv ("CORTEXT_EMBEDDINGGEMMA_BACKEND", backend_override->c_str (), 1);
-#endif
     }
 
   auto selection = cortext::internal::CreatePreferredTextEncoder (

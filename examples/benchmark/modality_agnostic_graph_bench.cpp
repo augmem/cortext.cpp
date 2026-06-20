@@ -1550,8 +1550,6 @@ main (int argc, char **argv)
       std::vector<EmbeddingSurfaceRow> all_embedding_rows;
       nlohmann::json scenario_json = nlohmann::json::array ();
       int total_runtime_label_rows = 0;
-      int total_fact_assertion_rows = 0;
-      int total_fact_evidence_rows = 0;
 
       for (const auto &scenario : BuildScenarios (opts.assets_dir,
                                                   opts.video_dir))
@@ -1604,13 +1602,7 @@ main (int argc, char **argv)
               *store,
               "SELECT COUNT(*) FROM memories "
               "WHERE label IS NOT NULL AND label <> ''");
-          const int fact_assertion_rows
-              = CountQuery (*store, "SELECT COUNT(*) FROM fact_assertions");
-          const int fact_evidence_rows
-              = CountQuery (*store, "SELECT COUNT(*) FROM fact_evidence");
           total_runtime_label_rows += runtime_label_rows;
-          total_fact_assertion_rows += fact_assertion_rows;
-          total_fact_evidence_rows += fact_evidence_rows;
           int signal_evidence_edges = 0;
           int memories_without_blob = 0;
           int non_text_blob_risk = 0;
@@ -1738,8 +1730,6 @@ main (int argc, char **argv)
             { "memories_without_blob", memories_without_blob },
             { "non_text_blob_risk", non_text_blob_risk },
             { "runtime_label_rows", runtime_label_rows },
-            { "fact_assertion_rows", fact_assertion_rows },
-            { "fact_evidence_rows", fact_evidence_rows },
           });
         }
 
@@ -1896,8 +1886,6 @@ main (int argc, char **argv)
         { "production_consolidation_called", false },
         { "runtime_labeling_disabled", true },
         { "runtime_label_rows", total_runtime_label_rows },
-        { "fact_assertion_rows", total_fact_assertion_rows },
-        { "fact_evidence_rows", total_fact_evidence_rows },
         { "offline_group_annotations_used_for_scoring_only", true },
         { "engine_api_path",
           "Cortext::ProcessImage/ProcessAudio/ProcessText" },

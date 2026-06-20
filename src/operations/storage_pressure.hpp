@@ -1,6 +1,6 @@
 #pragma once
 
-#include "eviction_ablation.hpp"
+#include "eviction_policy_override.hpp"
 
 namespace cortext
 {
@@ -20,12 +20,12 @@ struct StoragePressureState
 
 StoragePressureState
 ComputeStoragePressureState (Transaction &tx,
-                             const eviction::EvictionAblationOverride &override);
+                             const eviction::EvictionPolicyOverride &override);
 
 StoragePressureState
 ComputeCachedStoragePressureState (
     ProcessorContext &ctx, Transaction &tx,
-    const eviction::EvictionAblationOverride &override,
+    const eviction::EvictionPolicyOverride &override,
     int refresh_interval_signals = 64);
 
 double

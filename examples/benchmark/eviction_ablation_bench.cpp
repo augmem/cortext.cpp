@@ -1,4 +1,4 @@
-#include "../../src/operations/eviction_ablation.hpp"
+#include "../../src/operations/eviction_policy_override.hpp"
 #include "include/benchmark_text_encoder.hpp"
 
 #include <cortext/core/knobs.hpp>
@@ -31,7 +31,7 @@
 namespace
 {
 
-using BenchEncoder = cortext::benchmark::EmbeddingGemmaBenchEncoder;
+using BenchEncoder = cortext::benchmark::BenchmarkTextEncoder;
 
 cortext::Signal
 MakeSignal (BenchEncoder &encoder, const std::string &text, std::uint64_t ts)
@@ -154,7 +154,7 @@ struct EvictionAblationConfig
   double sensitivity = 0.5;
   double stability = 0.5;
   bool representative_subset_only = false;
-  cortext::operations::eviction::EvictionAblationOverride override;
+  cortext::operations::eviction::EvictionPolicyOverride override;
 };
 
 // --- Metrics ---
@@ -181,8 +181,6 @@ struct EvictionAggregateMetrics
   double steady_state_count = 0.0;
   double eviction_rate_per_hour = 0.0;
   double oldest_surviving_age_hours = 0.0;
-  // Fact evidence
-  double fact_linked_eviction_rate = 0.0;
   // Distribution
   double strength_mean = 0.0;
   double strength_std = 0.0;
@@ -554,76 +552,7 @@ RunLongHorizon (EvictionAggregateMetrics &metrics,
     }
 }
 
-// Scenario 6: Fact-Linked Eviction
-void
-RunFactLinkedEviction (EvictionAggregateMetrics &metrics,
-                       const EvictionAblationConfig &config,
-                       BenchEncoder &encoder)
-{
-  auto unique_store = cortext::SQLiteStore::Create (":memory:");
-  auto &store = *unique_store;
-  cortext::store::ApplyMigrations (store);
-
-  cortext::SignalProcessor::Config cfg;
-  cfg.encoder = &encoder;
-  cfg.focus = config.focus;
-  cfg.sensitivity = config.sensitivity;
-  cfg.stability = config.stability;
-
-  auto pctx = MakeProcessorContext (config.stability);
-  constexpr int kLinked = 10;
-  constexpr int kUnlinked = 10;
-  // 250 steps × 60s: non-linked evict around step 220 while
-  // fact-linked survive longer via fact_floor(T) protection.
-  constexpr int kSteps = 250;
-  constexpr long long kIntervalMs = 60000;
-
-  // Seed memories
-  for (int i = 1; i <= kLinked + kUnlinked; ++i)
-    SeedMemory (store, encoder, i, 1.0, 0);
-
-  // Link first 10 to facts
-  for (int i = 1; i <= kLinked; ++i)
-    {
-      store.Execute (
-          "INSERT INTO fact_assertions "
-          "(fact_id, subject, predicate, object, canonical_subject, "
-          " canonical_predicate, canonical_object, recorded_at_ts, "
-          " confidence, summary_memory_id, created_at) "
-          "VALUES (?, 'alice', 'caregiver', 'emily', 'alice', 'caregiver', "
-          "'emily', 0, 0.9, ?, 0)",
-          { static_cast<long long> (i), static_cast<long long> (i) });
-      store.Execute (
-          "INSERT INTO fact_evidence "
-          "(fact_id, source_memory_id, evidence_type, support_weight) "
-          "VALUES (?, ?, 'episodic', 1.0)",
-          { static_cast<long long> (i), static_cast<long long> (i) });
-    }
-
-  // Decay all without use
-  for (int step = 1; step <= kSteps; ++step)
-    {
-      const auto ts = static_cast<std::uint64_t> (step * kIntervalMs);
-      std::vector<cortext::OperationContext::MemoryUsageEvent> events;
-      for (int i = 1; i <= kLinked + kUnlinked; ++i)
-        {
-          if (CountMemoryById (store, i) > 0)
-            events.push_back ({ static_cast<long long> (i), false });
-        }
-      if (!events.empty ())
-        RunStrengthUpdate (store, encoder, cfg, events, ts, pctx);
-    }
-
-  int linked_evicted = 0;
-  for (int i = 1; i <= kLinked; ++i)
-    {
-      if (CountMemoryById (store, i) == 0)
-        ++linked_evicted;
-    }
-  metrics.fact_linked_eviction_rate = SafeRatio (linked_evicted, kLinked);
-}
-
-// Scenario 7: Strength Distribution
+// Scenario 6: Strength Distribution
 void
 RunStrengthDistribution (EvictionAggregateMetrics &metrics,
                          const EvictionAblationConfig &config,
@@ -781,7 +710,7 @@ EvaluateConfig (const EvictionAblationConfig &config, BenchEncoder &encoder)
   EvictionAggregateMetrics metrics;
   metrics.name = config.name;
 
-  cortext::operations::eviction::ScopedEvictionAblationOverride guard (
+  cortext::operations::eviction::ScopedEvictionPolicyOverride guard (
       config.override);
 
   RunPureDecay (metrics, config, encoder);
@@ -792,7 +721,6 @@ EvaluateConfig (const EvictionAblationConfig &config, BenchEncoder &encoder)
   if (!config.representative_subset_only)
     {
       RunLongHorizon (metrics, config, encoder);
-      RunFactLinkedEviction (metrics, config, encoder);
       RunStrengthDistribution (metrics, config, encoder);
       RunCrowdingPressure (metrics, config, encoder);
       metrics.update_ms_mean = MeasureUpdateLatency (config, encoder);
@@ -823,8 +751,6 @@ PrintMetrics (const EvictionAggregateMetrics &m)
   std::cout << "eviction_rate_per_hour=" << m.eviction_rate_per_hour << "\n";
   std::cout << "oldest_surviving_age_hours="
             << m.oldest_surviving_age_hours << "\n";
-  std::cout << "fact_linked_eviction_rate="
-            << m.fact_linked_eviction_rate << "\n";
   std::cout << "strength_mean=" << m.strength_mean << "\n";
   std::cout << "strength_std=" << m.strength_std << "\n";
   std::cout << "strength_min=" << m.strength_min << "\n";
@@ -874,81 +800,74 @@ main (int argc, char **argv)
 
   // Coupling ablations
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.coupling_enabled = false;
     configs.push_back ({ "coupling_off", 0.5, 0.5, 0.5, false, o });
   }
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.coupling_strength = 0.25;
     configs.push_back ({ "coupling_strong", 0.5, 0.5, 0.5, false, o });
   }
 
   // Reinforcement ablations
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.reinforcement = ReinforcementStrength::Off;
     configs.push_back ({ "boost_off", 0.5, 0.5, 0.5, false, o });
   }
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.reinforcement = ReinforcementStrength::Weak;
     configs.push_back ({ "boost_weak", 0.5, 0.5, 0.5, false, o });
   }
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.reinforcement = ReinforcementStrength::Strong;
     configs.push_back ({ "boost_strong", 0.5, 0.5, 0.5, false, o });
   }
 
   // Cutoff ablations
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.periphery_cutoff = 0.03;
     configs.push_back ({ "cutoff_low", 0.5, 0.5, 0.5, false, o });
   }
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.periphery_cutoff = 0.20;
     configs.push_back ({ "cutoff_high", 0.5, 0.5, 0.5, false, o });
   }
 
   // Half-life ablations
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.half_life = 60.0;
     configs.push_back ({ "halflife_short", 0.5, 0.5, 0.5, false, o });
   }
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.half_life = 7200.0;
     configs.push_back ({ "halflife_long", 0.5, 0.5, 0.5, false, o });
   }
 
   // Flashbulb ablation
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.flashbulb_enabled = false;
     configs.push_back ({ "flashbulb_off", 0.5, 0.5, 0.5, false, o });
   }
 
   // Weight distribution ablation
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.weights = WeightDistribution::Equal;
     configs.push_back ({ "equal_weights", 0.5, 0.5, 0.5, false, o });
   }
 
-  // Fact-evidence floor ablation
-  {
-    EvictionAblationOverride o;
-    o.fact_floor_enabled = false;
-    configs.push_back ({ "fact_floor_off", 0.5, 0.5, 0.5, false, o });
-  }
-
   // Consolidation gate ablation
   {
-    EvictionAblationOverride o;
+    EvictionPolicyOverride o;
     o.consolidation_gate_enabled = false;
     configs.push_back ({ "consolidation_gate_off", 0.5, 0.5, 0.5, false, o });
   }
@@ -1049,30 +968,6 @@ main (int argc, char **argv)
                 << baseline.mean_eviction_step
                 << ") <= single_trace ("
                 << single_trace_it->mean_eviction_step << ")\n";
-      gates_pass = false;
-    }
-
-  // Fact floor should protect fact-linked memories
-  if (baseline.fact_linked_eviction_rate >= 1.0)
-    {
-      std::cerr << "GATE FAIL: fact_linked_eviction_rate "
-                << baseline.fact_linked_eviction_rate
-                << " >= 1.0 (fact floor not working)\n";
-      gates_pass = false;
-    }
-
-  // fact_floor_off should have higher fact eviction than default
-  const auto fact_floor_off_it = std::find_if (
-      results.begin (), results.end (),
-      [] (const auto &r) { return r.name == "fact_floor_off"; });
-  if (fact_floor_off_it != results.end ()
-      && fact_floor_off_it->fact_linked_eviction_rate
-             <= baseline.fact_linked_eviction_rate)
-    {
-      std::cerr << "GATE FAIL: fact_floor_off eviction rate ("
-                << fact_floor_off_it->fact_linked_eviction_rate
-                << ") <= default ("
-                << baseline.fact_linked_eviction_rate << ")\n";
       gates_pass = false;
     }
 

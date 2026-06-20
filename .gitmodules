@@ -1,21 +1,12 @@
 [submodule "third_party/sqlite-vec"]
 	path = third_party/sqlite-vec
 	url = https://github.com/asg017/sqlite-vec
-[submodule "third_party/onnxruntime"]
-	path = third_party/onnxruntime
-	url = https://github.com/microsoft/onnxruntime
 [submodule "third_party/sqlite"]
 	path = third_party/sqlite
 	url = https://github.com/sqlite/sqlite.git
 [submodule "third_party/sqlite-objstore"]
 	path = third_party/sqlite-objstore
 	url = https://github.com/augmem/sqlite-objstore.git
-[submodule "third_party/onnxruntime-genai"]
-	path = third_party/onnxruntime-genai
-	url = https://github.com/microsoft/onnxruntime-genai.git
-[submodule "third_party/litert-lm"]
-	path = third_party/litert-lm
-	url = https://github.com/google-ai-edge/LiteRT-LM.git
 [submodule "third_party/sherpa-onnx"]
 	path = third_party/sherpa-onnx
 	url = https://github.com/k2-fsa/sherpa-onnx.git

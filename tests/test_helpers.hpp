@@ -345,7 +345,7 @@ SeedMatureLabelContrastBank (ProcessorContext &p_ctx, int dim = 256,
       Eigen::VectorXf v = Eigen::VectorXf::Zero (dim);
       v (dim - 1 - i) = 1.0f;
       const long long id = 900000 + i;
-      p_ctx.UpsertSummaryCache (id, id, v, false, true);
+      p_ctx.UpsertAssociationCache (id, id, v, false);
     }
 }
 

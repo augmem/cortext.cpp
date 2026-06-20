@@ -230,7 +230,7 @@ Cosine (const std::vector<float> &a, const std::vector<float> &b)
 }
 
 double
-SemanticScore (cortext::benchmark::EmbeddingGemmaBenchEncoder &encoder,
+SemanticScore (cortext::benchmark::BenchmarkTextEncoder &encoder,
                const std::string &query, const std::string &candidate)
 {
   std::vector<float> q;
@@ -340,7 +340,7 @@ RareQuery (const TokenStats &stats, const Message &msg)
 }
 
 Features
-BuildFeatures (cortext::benchmark::EmbeddingGemmaBenchEncoder &encoder,
+BuildFeatures (cortext::benchmark::BenchmarkTextEncoder &encoder,
                const TokenStats &stats, const std::vector<Message> &messages,
                const std::string &query, const Message &msg)
 {
@@ -377,7 +377,7 @@ ProductScore (const Features &features,
 }
 
 std::vector<Trial>
-GenerateTrials (cortext::benchmark::EmbeddingGemmaBenchEncoder &encoder,
+GenerateTrials (cortext::benchmark::BenchmarkTextEncoder &encoder,
                 const std::vector<Message> &messages, const TokenStats &stats)
 {
   std::vector<Trial> trials;
@@ -445,7 +445,7 @@ GenerateTrials (cortext::benchmark::EmbeddingGemmaBenchEncoder &encoder,
 
 Metrics
 Evaluate (const std::vector<Trial> &trials, int fold,
-          cortext::benchmark::EmbeddingGemmaBenchEncoder &encoder,
+          cortext::benchmark::BenchmarkTextEncoder &encoder,
           const std::vector<Message> &messages, const TokenStats &stats,
           bool product)
 {
@@ -514,7 +514,7 @@ Evaluate (const std::vector<Trial> &trials, int fold,
 
 Metrics
 AverageFolds (const std::vector<Trial> &trials,
-              cortext::benchmark::EmbeddingGemmaBenchEncoder &encoder,
+              cortext::benchmark::BenchmarkTextEncoder &encoder,
               const std::vector<Message> &messages, const TokenStats &stats,
               bool product)
 {
@@ -581,7 +581,7 @@ main (int argc, char **argv)
           throw std::runtime_error ("no Julie messages parsed");
         }
       const auto stats = BuildStats (messages);
-      cortext::benchmark::EmbeddingGemmaBenchEncoder encoder (models_dir);
+      cortext::benchmark::BenchmarkTextEncoder encoder (models_dir);
       std::cout << "encoder_backend=" << encoder.backend_name ()
                 << " model=" << encoder.resolved_model_path ().string ()
                 << " messages=" << messages.size () << "\n";

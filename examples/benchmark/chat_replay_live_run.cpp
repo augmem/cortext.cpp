@@ -1,10 +1,7 @@
 #include <cortext/clock.hpp>
-#include <cortext/consolidation_mode.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/cortext.hpp>
 #include <cortext/internal/replay_ingress.hpp>
-#include <cortext/providers/adapters.hpp>
-#include <cortext/providers/registry.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
 
@@ -58,12 +55,7 @@ struct Config
   fs::path transcript;
   fs::path db_path = "build/chat_replay_live_run.sqlite";
   fs::path output_path = "build/chat_replay_live_run_summary.json";
-  fs::path label_bank_path = "data/label_bank/metadata.json";
   std::string models_dir = "models";
-  // Provider URIs for the deep-LLM roles (e.g. ollama://127.0.0.1:11435/
-  // gemma4:e4b). Empty means the library's local model auto-discovery.
-  std::string summarizer_provider;
-  std::string extractor_provider;
   int skip_messages = 0;
   int max_messages = 1000;
   int media_limit = 0;
@@ -75,8 +67,8 @@ struct Config
   double focus = 0.5;
   double sensitivity = 0.5;
   double stability = 0.5;
-  bool deep_consolidation = false;
   bool daily_consolidation = false;
+  bool skip_final_consolidation = false;
   int daily_consolidation_hour = 2;
   std::string replay_timezone;
   bool append = false;
@@ -628,10 +620,6 @@ RetrievalDebugJson ()
         { "proc_score", candidate.proc_score },
         { "predictive_bonus", candidate.predictive_bonus },
         { "pre_activation", candidate.pre_activation },
-        { "fact_boost", candidate.fact_boost },
-        { "fact_stale_penalty", candidate.fact_stale_penalty },
-        { "linked_fact_count", candidate.linked_fact_count },
-        { "label_graph_boost", candidate.label_graph_boost },
         { "label_match_count", candidate.label_match_count },
         { "durable_source_boost", candidate.durable_source_boost },
         { "durable_source_count", candidate.durable_source_count },
@@ -666,10 +654,6 @@ RetrievalDebugJson ()
         { "proc_score", candidate.proc_score },
         { "predictive_bonus", candidate.predictive_bonus },
         { "pre_activation", candidate.pre_activation },
-        { "fact_boost", candidate.fact_boost },
-        { "fact_stale_penalty", candidate.fact_stale_penalty },
-        { "linked_fact_count", candidate.linked_fact_count },
-        { "label_graph_boost", candidate.label_graph_boost },
         { "label_match_count", candidate.label_match_count },
         { "durable_source_boost", candidate.durable_source_boost },
         { "durable_source_count", candidate.durable_source_count },
@@ -741,21 +725,9 @@ RetrievalDebugJson ()
     }
 
   return {
-    { "fact_layer_enabled", summary.fact_layer_enabled },
-    { "fact_seed_count", summary.fact_seed_count },
-    { "candidate_fact_link_memory_count",
-      summary.candidate_fact_link_memory_count },
-    { "candidate_fact_link_row_count",
-      summary.candidate_fact_link_row_count },
-    { "selected_fact_linked_count", summary.selected_fact_linked_count },
     { "text_query_token_count", summary.text_query_token_count },
     { "text_query_wm_slots", summary.text_query_wm_slots },
     { "text_query_wm_chars", summary.text_query_wm_chars },
-    { "fact_text_candidate_count", summary.fact_text_candidate_count },
-    { "fact_text_rejected_low_score_count",
-      summary.fact_text_rejected_low_score_count },
-    { "fact_text_match_count", summary.fact_text_match_count },
-    { "fact_text_best_score", summary.fact_text_best_score },
     { "rejected_candidate_count", summary.rejected_candidate_count },
     { "rejected_filter_count", summary.rejected_filter_count },
     { "rejected_selection_count", summary.rejected_selection_count },
@@ -1484,12 +1456,6 @@ ParseArgs (int argc, char **argv)
         cfg.output_path = require_value ();
       else if (arg == "--models")
         cfg.models_dir = require_value ();
-      else if (arg == "--label-bank")
-        cfg.label_bank_path = require_value ();
-      else if (arg == "--summarizer-provider")
-        cfg.summarizer_provider = require_value ();
-      else if (arg == "--extractor-provider")
-        cfg.extractor_provider = require_value ();
       else if (arg == "--max-messages")
         cfg.max_messages = std::stoi (require_value ());
       else if (arg == "--skip-messages")
@@ -1517,6 +1483,8 @@ ParseArgs (int argc, char **argv)
           cfg.daily_consolidation = true;
           cfg.consolidate_every = 0;
         }
+      else if (arg == "--skip-final-consolidation")
+        cfg.skip_final_consolidation = true;
       else if (arg == "--daily-consolidation-hour")
         {
           cfg.daily_consolidation_hour = std::stoi (require_value ());
@@ -1527,8 +1495,6 @@ ParseArgs (int argc, char **argv)
         }
       else if (arg == "--replay-timezone")
         cfg.replay_timezone = require_value ();
-      else if (arg == "--deep")
-        cfg.deep_consolidation = true;
       else if (arg == "--append")
         cfg.append = true;
       else if (arg == "--resume-from-existing")
@@ -1648,7 +1614,6 @@ main (int argc, char **argv)
       cortext_cfg.focus = cfg.focus;
       cortext_cfg.sensitivity = cfg.sensitivity;
       cortext_cfg.stability = cfg.stability;
-      cortext_cfg.label_bank_path = cfg.label_bank_path.string ();
 
       if (cfg.checkpoint_eval_only && cfg.checkpoint_after_timestamp == 0)
         {
@@ -1664,38 +1629,8 @@ main (int argc, char **argv)
           clock = fixed_clock;
         }
 
-      cortext::Cortext::InferenceOverrides inference;
-      auto resolve_role = [] (const std::string &uri,
-                              cortext::providers::Role role) {
-        std::string error;
-        auto provider = cortext::providers::ResolveProvider (uri, role,
-                                                             &error);
-        if (provider == nullptr)
-          {
-            throw std::runtime_error ("provider " + uri
-                                      + " could not be resolved: " + error);
-          }
-        return std::shared_ptr<cortext::providers::InferenceProvider> (
-            std::move (provider));
-      };
-      if (!cfg.summarizer_provider.empty ())
-        {
-          inference.summarizer
-              = std::make_unique<cortext::providers::ProviderSummarizer> (
-                  resolve_role (cfg.summarizer_provider,
-                                cortext::providers::Role::Summarizer));
-        }
-      if (!cfg.extractor_provider.empty ())
-        {
-          inference.extractor
-              = std::make_unique<cortext::providers::ProviderExtractor> (
-                  resolve_role (cfg.extractor_provider,
-                                cortext::providers::Role::Extractor));
-        }
-
       auto engine = cortext::Cortext::Create (cortext_cfg, cfg.db_path.string (),
-                                              cfg.models_dir, clock,
-                                              std::move (inference));
+                                              cfg.models_dir, clock);
       auto rag_encoder_selection
           = cortext::internal::CreatePreferredTextEncoder (cfg.models_dir);
       auto vector_rag_store
@@ -2079,16 +2014,7 @@ main (int argc, char **argv)
           out["input_dir"] = cfg.input_dir.string ();
           out["db_path"] = cfg.db_path.string ();
           out["sqlite_profile"] = sqlite_profile;
-          out["label_bank_path"] = cfg.label_bank_path.string ();
           out["models_dir"] = cfg.models_dir;
-          out["summarizer_provider"]
-              = cfg.summarizer_provider.empty ()
-                    ? "local_auto_discovery"
-                    : cfg.summarizer_provider;
-          out["extractor_provider"]
-              = cfg.extractor_provider.empty ()
-                    ? "local_auto_discovery"
-                    : cfg.extractor_provider;
           out["append"] = cfg.append;
           out["checkpoint_eval_only"] = true;
           out["checkpoint_after_timestamp"]
@@ -2200,7 +2126,6 @@ main (int argc, char **argv)
                           "WHERE source_id = 'cortext/maintenance'");
           out["consolidation_ms_total"] = 0.0;
           out["wall_ms_excluding_consolidation"] = wall_ms;
-          out["deep_consolidation"] = cfg.deep_consolidation;
           out["daily_consolidation"] = cfg.daily_consolidation;
           out["daily_consolidation_hour_local"]
               = cfg.daily_consolidation_hour;
@@ -2390,16 +2315,7 @@ main (int argc, char **argv)
           out["input_dir"] = cfg.input_dir.string ();
           out["db_path"] = cfg.db_path.string ();
           out["sqlite_profile"] = sqlite_profile;
-          out["label_bank_path"] = cfg.label_bank_path.string ();
           out["models_dir"] = cfg.models_dir;
-          out["summarizer_provider"]
-              = cfg.summarizer_provider.empty ()
-                    ? "local_auto_discovery"
-                    : cfg.summarizer_provider;
-          out["extractor_provider"]
-              = cfg.extractor_provider.empty ()
-                    ? "local_auto_discovery"
-                    : cfg.extractor_provider;
           out["profile_probes_only"] = true;
           out["append"] = cfg.append;
           out["warmup_events"] = cfg.warmup_events;
@@ -2529,10 +2445,6 @@ main (int argc, char **argv)
                                         nlohmann::json::error_handler_t::replace)
                     << "\n";
         }
-      auto consolidation_mode = [&] {
-        return cfg.deep_consolidation ? cortext::ConsolidationMode::Both
-                                      : cortext::ConsolidationMode::Shallow;
-      };
       auto record_consolidation_event = [&] (const char *trigger,
                                              std::uint64_t timestamp,
                                              double elapsed_ms,
@@ -2548,7 +2460,6 @@ main (int argc, char **argv)
           { "elapsed_ms", elapsed_ms },
           { "processed_text_messages", processed_text },
           { "media_processed", media_processed },
-          { "mode", cfg.deep_consolidation ? "both" : "shallow" },
           { "encode_ms", ctx.encode_ms },
           { "process_ms", ctx.process_ms },
           { "hydrate_ms", ctx.hydrate_ms },
@@ -2572,7 +2483,7 @@ main (int argc, char **argv)
                 = std::chrono::steady_clock::now ();
             auto consolidation_ctx
                 = cortext::internal::ReplayIngress::ConsolidateAt (
-                *engine, checkpoint_timestamp, consolidation_mode ());
+                *engine, checkpoint_timestamp);
             const auto consolidation_ended = std::chrono::steady_clock::now ();
             consolidation_ms_total
                 += std::chrono::duration<double, std::milli> (
@@ -2824,7 +2735,7 @@ main (int argc, char **argv)
                       = std::chrono::steady_clock::now ();
                   auto consolidation_ctx
                       = cortext::internal::ReplayIngress::ConsolidateAt (
-                      *engine, msg.timestamp, consolidation_mode ());
+                      *engine, msg.timestamp);
                   const auto consolidation_ended
                       = std::chrono::steady_clock::now ();
                   consolidation_ms_total
@@ -2937,13 +2848,14 @@ main (int argc, char **argv)
             }
         }
 
-      if ((processed_text > 0 || media_processed > 0)
+      if (!cfg.skip_final_consolidation
+          && (processed_text > 0 || media_processed > 0)
           && last_processed_timestamp > 0)
         {
           const auto consolidation_started = std::chrono::steady_clock::now ();
           auto consolidation_ctx
               = cortext::internal::ReplayIngress::ConsolidateAt (
-              *engine, last_processed_timestamp, consolidation_mode ());
+              *engine, last_processed_timestamp);
           const auto consolidation_ended = std::chrono::steady_clock::now ();
           consolidation_ms_total
               += std::chrono::duration<double, std::milli> (
@@ -2975,16 +2887,7 @@ main (int argc, char **argv)
       out["input_dir"] = cfg.input_dir.string ();
       out["db_path"] = cfg.db_path.string ();
       out["sqlite_profile"] = sqlite_profile;
-      out["label_bank_path"] = cfg.label_bank_path.string ();
       out["models_dir"] = cfg.models_dir;
-          out["summarizer_provider"]
-              = cfg.summarizer_provider.empty ()
-                    ? "local_auto_discovery"
-                    : cfg.summarizer_provider;
-          out["extractor_provider"]
-              = cfg.extractor_provider.empty ()
-                    ? "local_auto_discovery"
-                    : cfg.extractor_provider;
       out["append"] = cfg.append;
       out["resume_from_existing"] = resume.enabled;
       out["resume"] = {
@@ -3090,12 +2993,12 @@ main (int argc, char **argv)
       out["consolidation_runs"] = consolidation_runs;
       out["consolidation_ms_total"] = consolidation_ms_total;
       out["consolidation_events"] = consolidation_events;
+      out["skip_final_consolidation"] = cfg.skip_final_consolidation;
       out["final_window_consolidated"] = final_window_consolidated;
       out["daily_final_window_consolidated"]
           = cfg.daily_consolidation && final_window_consolidated;
       out["wall_ms_excluding_consolidation"]
           = static_cast<double> (wall_ms) - consolidation_ms_total;
-      out["deep_consolidation"] = cfg.deep_consolidation;
       out["daily_consolidation"] = cfg.daily_consolidation;
       out["daily_consolidation_hour_local"] = cfg.daily_consolidation_hour;
       out["daily_consolidation_policy"] = "source_time_sleep_checkpoint";
@@ -3148,8 +3051,7 @@ main (int argc, char **argv)
       out["db_association_count"]
           = SqlCount (cfg.db_path, "SELECT COUNT(*) FROM associations");
       out["behavior_note"]
-          = "Live Cortext-only run: labels are loaded by LoadLabelBank via "
-            "Config::label_bank_path; text/media are fed chronologically "
+          = "Live Cortext-only run: text/media are fed chronologically "
             "through Cortext ingress, with timestamped internal replay ingress "
             "for media and consolidation; no custom retrieval or scoring is "
             "used.";

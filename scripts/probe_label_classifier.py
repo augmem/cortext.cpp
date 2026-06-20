@@ -88,7 +88,6 @@ def main() -> int:
     parser.add_argument("--text", action="append", default=[], help="Input sentence to probe.")
     parser.add_argument("--embedder-bin", default="")
     parser.add_argument("--models-dir", default="models")
-    parser.add_argument("--embedder-backend", default="")
     parser.add_argument("--limit", type=int, default=3)
     parser.add_argument("--threshold", type=float, default=0.30)
     args = parser.parse_args()
@@ -102,7 +101,6 @@ def main() -> int:
         embedder = ExternalTextEmbedder(
             binary=args.embedder_bin,
             models_dir=args.models_dir,
-            backend=args.embedder_backend or None,
         )
 
     texts: list[str] = []

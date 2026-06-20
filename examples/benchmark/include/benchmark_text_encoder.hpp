@@ -17,10 +17,10 @@
 namespace cortext::benchmark
 {
 
-class EmbeddingGemmaBenchEncoder final : public Encoder
+class BenchmarkTextEncoder final : public Encoder
 {
 public:
-  explicit EmbeddingGemmaBenchEncoder (std::string models_dir = "models")
+  explicit BenchmarkTextEncoder (std::string models_dir = "models")
       : models_dir_ (std::move (models_dir))
   {
     auto selection = internal::CreatePreferredTextEncoder (models_dir_);
@@ -46,19 +46,19 @@ public:
   void
   EncodeAudio (const float * /*pcm*/, std::size_t /*num_samples*/,
                std::vector<float> & /*out_embedding*/) override
-  {
-    throw std::runtime_error (
-        "EmbeddingGemma benchmark encoder does not support audio inputs");
-  }
+      {
+        throw std::runtime_error (
+            "Benchmark text encoder does not support audio inputs");
+      }
 
   void
   EncodeImage (const std::uint8_t * /*data*/, int /*width*/, int /*height*/,
                int /*channels*/,
                std::vector<float> & /*out_embedding*/) override
-  {
-    throw std::runtime_error (
-        "EmbeddingGemma benchmark encoder does not support image inputs");
-  }
+      {
+        throw std::runtime_error (
+            "Benchmark text encoder does not support image inputs");
+      }
 
   Eigen::VectorXf
   EncodeTextEigen (const std::string &text)

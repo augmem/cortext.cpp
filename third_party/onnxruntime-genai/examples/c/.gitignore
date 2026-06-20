@@ -1,9 +1,0 @@
-build
-include/*
-lib/*
-*.vcxproj
-*.vcxproj.filters
-*.sln
-*.zip
-*.tar.gz
-

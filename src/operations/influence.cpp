@@ -53,11 +53,12 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
       const Eigen::VectorXf u_m = Unit (it->second);
       const double contextual_gain
           = core::Clamp (e.contextual_gain.value_or (0.0), -1.0, 1.0);
-      const double sim_gen = 0.0;
+      const double predictive_similarity = 0.0;
       const double drift_contrib = 0.0;
       const double influence
           = influence_policy.contextual_gain_weight * contextual_gain
-            + influence_policy.generative_similarity_weight * sim_gen
+            + influence_policy.predictive_similarity_weight
+                  * predictive_similarity
             - influence_policy.drift_weight * drift_contrib;
       influences.push_back (influence);
 

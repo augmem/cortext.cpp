@@ -1,6 +1,6 @@
 // tests/operations_memory_strength.test.cpp
 #include "test_helpers.hpp"
-#include "../src/operations/eviction_ablation.hpp"
+#include "../src/operations/eviction_policy_override.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/operations/memory_strength.hpp>
 #include <cortext/processor.hpp>
@@ -173,9 +173,9 @@ TEST_CASE ("Algorithm 14 decays and evicts below cutoff", "[op14]")
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
-  cortext::operations::eviction::EvictionAblationOverride override;
+  cortext::operations::eviction::EvictionPolicyOverride override;
   override.consolidation_gate_enabled = false;
-  cortext::operations::eviction::ScopedEvictionAblationOverride gate_override (
+  cortext::operations::eviction::ScopedEvictionPolicyOverride gate_override (
       override);
 
   // Process multiple signals to ensure decay crosses cutoff.
@@ -336,9 +336,9 @@ TEST_CASE ("Algorithm 18 writes an eviction audit row before deleting long-term 
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
-  cortext::operations::eviction::EvictionAblationOverride override;
+  cortext::operations::eviction::EvictionPolicyOverride override;
   override.consolidation_gate_enabled = false;
-  cortext::operations::eviction::ScopedEvictionAblationOverride gate_override (
+  cortext::operations::eviction::ScopedEvictionPolicyOverride gate_override (
       override);
   for (int i = 0; i < 240; ++i)
     {
@@ -389,11 +389,11 @@ TEST_CASE ("Algorithm 18 does not evict before storage budget is reached",
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
-  cortext::operations::eviction::EvictionAblationOverride override;
+  cortext::operations::eviction::EvictionPolicyOverride override;
   override.consolidation_gate_enabled = false;
   override.storage_gate_enabled = true;
   override.min_storage_bytes = 1LL << 30;
-  cortext::operations::eviction::ScopedEvictionAblationOverride storage_override (
+  cortext::operations::eviction::ScopedEvictionPolicyOverride storage_override (
       override);
 
   for (int i = 0; i < 240; ++i)
@@ -443,11 +443,11 @@ TEST_CASE ("Algorithm 18 evicts once storage budget is below threshold",
       std::move (set_events), std::move (update_strength));
 
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
-  cortext::operations::eviction::EvictionAblationOverride override;
+  cortext::operations::eviction::EvictionPolicyOverride override;
   override.consolidation_gate_enabled = false;
   override.storage_gate_enabled = true;
   override.min_storage_bytes = 0;
-  cortext::operations::eviction::ScopedEvictionAblationOverride storage_override (
+  cortext::operations::eviction::ScopedEvictionPolicyOverride storage_override (
       override);
 
   for (int i = 0; i < 240; ++i)

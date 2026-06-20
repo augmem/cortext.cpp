@@ -186,31 +186,6 @@ TEST_CASE ("IdleRequiredSeconds follows spec: 0.25 * WRateSeconds(T)",
     }
 }
 
-TEST_CASE ("ExtractionBatchSize follows spec: lerp(8, 32, T)",
-           "[formula][knobs][rate]")
-{
-  // ExtractionBatchSize = round(lerp(8, 32, T))
-  REQUIRE (ExtractionBatchSize (0.0) == 8);
-  REQUIRE (ExtractionBatchSize (1.0) == 32);
-  REQUIRE (ExtractionBatchSize (0.5) == 20);
-
-  // Monotonic
-  REQUIRE (ExtractionBatchSize (0.3) < ExtractionBatchSize (0.7));
-}
-
-TEST_CASE ("MaxExtractionsPerCycle follows spec: lerp(20, 5, T)",
-           "[formula][knobs][rate]")
-{
-  // MaxExtractionsPerCycle = round(lerp(20, 5, T))
-  // Higher stability = fewer extractions per cycle
-  REQUIRE (MaxExtractionsPerCycle (0.0) == 20);
-  REQUIRE (MaxExtractionsPerCycle (1.0) == 5);
-  REQUIRE (MaxExtractionsPerCycle (0.5) == 13); // round(12.5) = 13 (rounds up)
-
-  // Monotonic: higher T means fewer extractions
-  REQUIRE (MaxExtractionsPerCycle (0.3) > MaxExtractionsPerCycle (0.7));
-}
-
 // =============================================================================
 // 5.1.3 Learning Rate Functions (3 functions)
 // =============================================================================
@@ -492,21 +467,6 @@ TEST_CASE ("LambdaMood follows spec: exp(-ln2 * Δt / half_life)",
   REQUIRE (LambdaMood (30.0, 0.3) < LambdaMood (30.0, 0.7));
 }
 
-TEST_CASE ("ConfidenceDecayRate follows spec: lerp(0.01, 0.1, 1-T)",
-           "[formula][knobs][decay]")
-{
-  // ConfidenceDecayRate = lerp(0.01, 0.1, 1-T)
-  // At T=0: lerp(0.01, 0.1, 1) = 0.1
-  REQUIRE (ConfidenceDecayRate (0.0) == Catch::Approx (0.1));
-  // At T=1: lerp(0.01, 0.1, 0) = 0.01
-  REQUIRE (ConfidenceDecayRate (1.0) == Catch::Approx (0.01));
-  // At T=0.5: lerp(0.01, 0.1, 0.5) = 0.055
-  REQUIRE (ConfidenceDecayRate (0.5) == Catch::Approx (0.055));
-
-  // Monotonic: higher T (more stable) means slower decay
-  REQUIRE (ConfidenceDecayRate (0.3) > ConfidenceDecayRate (0.7));
-}
-
 TEST_CASE ("EmotionalHalfLifeBonus follows spec",
            "[formula][knobs][decay]")
 {
@@ -624,19 +584,6 @@ TEST_CASE ("WM rehearsal and eviction pressure derive from F/S/T",
            > WMCapacityPressureExponent (0.5, 0.5, 0.0));
 }
 
-TEST_CASE ("StrategySwitchLatencyMs follows spec: lerp(500, 100, S)",
-           "[formula][knobs][working_memory]")
-{
-  // StrategySwitchLatencyMs = round(lerp(500, 100, S))
-  REQUIRE (StrategySwitchLatencyMs (0.0) == 500);
-  REQUIRE (StrategySwitchLatencyMs (1.0) == 100);
-  REQUIRE (StrategySwitchLatencyMs (0.5)
-           == SensitivityExpectedRound (500.0, 100.0, 0.5));
-
-  // Monotonic: higher S means faster switching (lower latency)
-  REQUIRE (StrategySwitchLatencyMs (0.3) > StrategySwitchLatencyMs (0.7));
-}
-
 // =============================================================================
 // 5.1.7 Clustering & Consolidation Functions (10 functions)
 // =============================================================================
@@ -691,20 +638,6 @@ TEST_CASE ("MinClusterSize follows spec: lerp(3, 10, F)",
   REQUIRE (MinClusterSize (0.3) < MinClusterSize (0.7));
 }
 
-TEST_CASE ("MinClusterSizeForExtraction follows spec: lerp(3, 10, F)",
-           "[formula][knobs][consolidation]")
-{
-  // Same formula as MinClusterSize
-  REQUIRE (MinClusterSizeForExtraction (0.0) == 3);
-  REQUIRE (MinClusterSizeForExtraction (1.0) == 10);
-
-  // Should equal MinClusterSize
-  for (double F : { 0.0, 0.25, 0.5, 0.75, 1.0 })
-    {
-      REQUIRE (MinClusterSizeForExtraction (F) == MinClusterSize (F));
-    }
-}
-
 TEST_CASE ("LabelFrequencyThreshold follows spec: lerp(5, 15, T)",
            "[formula][knobs][consolidation]")
 {
@@ -715,18 +648,6 @@ TEST_CASE ("LabelFrequencyThreshold follows spec: lerp(5, 15, T)",
 
   // Monotonic
   REQUIRE (LabelFrequencyThreshold (0.3) < LabelFrequencyThreshold (0.7));
-}
-
-TEST_CASE ("ExtractionIntervalSeconds follows spec: lerp(300, 3600, T)",
-           "[formula][knobs][consolidation]")
-{
-  // ExtractionIntervalSeconds = round(lerp(300, 3600, T))
-  REQUIRE (ExtractionIntervalSeconds (0.0) == 300);
-  REQUIRE (ExtractionIntervalSeconds (1.0) == 3600);
-  REQUIRE (ExtractionIntervalSeconds (0.5) == 1950);
-
-  // Monotonic
-  REQUIRE (ExtractionIntervalSeconds (0.3) < ExtractionIntervalSeconds (0.7));
 }
 
 TEST_CASE ("WRet follows spec: lerp(10, 50, T)",
@@ -766,95 +687,7 @@ TEST_CASE ("CoOccurrenceThreshold equals MergeThreshold",
 }
 
 // =============================================================================
-// 5.1.8 Metacognitive Functions (6 functions)
-// =============================================================================
-
-TEST_CASE ("FOKThreshold follows spec: lerp(0.2, 0.5, F)",
-           "[formula][knobs][metacognitive]")
-{
-  // FOKThreshold = lerp(0.2, 0.5, F)
-  REQUIRE (FOKThreshold (0.0) == Catch::Approx (0.2));
-  REQUIRE (FOKThreshold (1.0) == Catch::Approx (0.5));
-  REQUIRE (FOKThreshold (0.5)
-           == Catch::Approx (FocusExpected (0.2, 0.5, 0.5)));
-
-  // Monotonic
-  REQUIRE (FOKThreshold (0.3) < FOKThreshold (0.7));
-}
-
-TEST_CASE ("TOTFokCutoff follows spec: lerp(0.5, 0.8, F)",
-           "[formula][knobs][metacognitive]")
-{
-  // TOTFokCutoff = lerp(0.5, 0.8, F)
-  REQUIRE (TOTFokCutoff (0.0) == Catch::Approx (0.5));
-  REQUIRE (TOTFokCutoff (1.0) == Catch::Approx (0.8));
-  REQUIRE (TOTFokCutoff (0.5)
-           == Catch::Approx (FocusExpected (0.5, 0.8, 0.5)));
-
-  // Monotonic
-  REQUIRE (TOTFokCutoff (0.3) < TOTFokCutoff (0.7));
-}
-
-TEST_CASE ("TOTRetrievalCutoff follows spec: lerp(0.4, 0.2, F)",
-           "[formula][knobs][metacognitive]")
-{
-  // TOTRetrievalCutoff = lerp(0.4, 0.2, F)
-  REQUIRE (TOTRetrievalCutoff (0.0) == Catch::Approx (0.4));
-  REQUIRE (TOTRetrievalCutoff (1.0) == Catch::Approx (0.2));
-  REQUIRE (TOTRetrievalCutoff (0.5)
-           == Catch::Approx (FocusExpected (0.4, 0.2, 0.5)));
-
-  // Monotonic: higher F means lower cutoff
-  REQUIRE (TOTRetrievalCutoff (0.3) > TOTRetrievalCutoff (0.7));
-}
-
-TEST_CASE ("UnknownThreshold follows spec: lerp(0.3, 0.1, F)",
-           "[formula][knobs][metacognitive]")
-{
-  // UnknownThreshold = lerp(0.3, 0.1, F)
-  REQUIRE (UnknownThreshold (0.0) == Catch::Approx (0.3));
-  REQUIRE (UnknownThreshold (1.0) == Catch::Approx (0.1));
-  REQUIRE (UnknownThreshold (0.5)
-           == Catch::Approx (FocusExpected (0.3, 0.1, 0.5)));
-
-  // Monotonic: higher F means lower threshold
-  REQUIRE (UnknownThreshold (0.3) > UnknownThreshold (0.7));
-}
-
-TEST_CASE ("CertaintyRequirement follows spec: lerp(0.6, 0.9, T)",
-           "[formula][knobs][metacognitive]")
-{
-  // CertaintyRequirement = lerp(0.6, 0.9, T)
-  REQUIRE (CertaintyRequirement (0.0) == Catch::Approx (0.6));
-  REQUIRE (CertaintyRequirement (1.0) == Catch::Approx (0.9));
-  REQUIRE (CertaintyRequirement (0.5) == Catch::Approx (0.75));
-
-  // Monotonic
-  REQUIRE (CertaintyRequirement (0.3) < CertaintyRequirement (0.7));
-}
-
-TEST_CASE ("MetacognitiveSensitivity follows spec: F * (1 + 0.5 * S)",
-           "[formula][knobs][metacognitive]")
-{
-  // MetacognitiveSensitivity = F * (1 + 0.5 * S)
-
-  // At F=0, always 0 regardless of S
-  REQUIRE (MetacognitiveSensitivity (0.0, 0.0) == Catch::Approx (0.0));
-  REQUIRE (MetacognitiveSensitivity (0.0, 1.0) == Catch::Approx (0.0));
-
-  // At F=1, S=0: 1 * 1 = 1
-  REQUIRE (MetacognitiveSensitivity (1.0, 0.0) == Catch::Approx (1.0));
-
-  // At F=1, S=1: 1 * 1.5 = 1.5
-  REQUIRE (MetacognitiveSensitivity (1.0, 1.0) == Catch::Approx (1.5));
-
-  REQUIRE (MetacognitiveSensitivity (0.5, 0.5)
-           == Catch::Approx (FocusBias (0.5)
-                             * (1.0 + 0.5 * SensitivityBias (0.5))));
-}
-
-// =============================================================================
-// 5.1.9 Serial Position Effects (8 functions)
+// 5.1.8 Serial Position Effects (8 functions)
 // =============================================================================
 
 TEST_CASE ("SerialPrimacyWindow follows spec: lerp(5, 2, F)",
@@ -1155,11 +988,11 @@ TEST_CASE ("TPrior follows spec: lerp(0.10, 0.30, T) * (1 - 0.3 * S)",
                              * (1.0 - 0.3 * SensitivityBias (0.5))));
 }
 
-TEST_CASE ("TargetPrecision follows spec: CertaintyRequirement(T) * (0.5 + "
+TEST_CASE ("TargetPrecision follows spec: lerp(0.6, 0.9, T) * (0.5 + "
            "0.5*F)",
            "[formula][knobs][multi]")
 {
-  // TargetPrecision = CertaintyRequirement(T) * (0.5 + 0.5*F)
+  // TargetPrecision = lerp(0.6, 0.9, T) * (0.5 + 0.5*F)
 
   // At T=0, F=0: 0.6 * 0.5 = 0.3
   REQUIRE (TargetPrecision (0.0, 0.0) == Catch::Approx (0.3));
@@ -1168,16 +1001,16 @@ TEST_CASE ("TargetPrecision follows spec: CertaintyRequirement(T) * (0.5 + "
   REQUIRE (TargetPrecision (1.0, 1.0) == Catch::Approx (0.9));
 
   REQUIRE (TargetPrecision (0.5, 0.5)
-           == Catch::Approx (CertaintyRequirement (0.5)
+           == Catch::Approx (Lerp (0.6, 0.9, 0.5)
                              * (0.5 + 0.5 * FocusBias (0.5))));
 
-  // Verify it uses CertaintyRequirement
+  // Verify it uses the retained stability/focus formula.
   for (double T : { 0.0, 0.5, 1.0 })
     {
       for (double F : { 0.0, 0.5, 1.0 })
         {
           double expected
-              = CertaintyRequirement (T) * (0.5 + 0.5 * FocusBias (F));
+              = Lerp (0.6, 0.9, T) * (0.5 + 0.5 * FocusBias (F));
           REQUIRE (TargetPrecision (F, T) == Catch::Approx (expected));
         }
     }
@@ -1291,7 +1124,6 @@ TEST_CASE ("High Focus + Low Sensitivity interactions",
   REQUIRE (StreamingPacingThreshold (S) > 0.25);
 
   // Multi-parameter: high F mitigates S
-  REQUIRE (MetacognitiveSensitivity (F, S) > 0.8);
   REQUIRE (DetailSuppression (S, F) < 0.01);
 }
 

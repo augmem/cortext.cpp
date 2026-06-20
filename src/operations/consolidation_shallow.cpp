@@ -1,7 +1,6 @@
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/consolidation_shallow.hpp"
 
-#include "cortext/consolidation_mode.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -31,7 +30,7 @@ std::string
 GenerateShallowId (uint64_t ts, int counter)
 {
   std::ostringstream ss;
-  ss << "shallow_" << ts << "_" << counter;
+  ss << "association_" << ts << "_" << counter;
   return ss.str ();
 }
 
@@ -87,13 +86,6 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
-  const auto mode = context.GetSignal ().consolidation_mode.value_or (
-      ConsolidationMode::Both);
-  if (mode != ConsolidationMode::Shallow)
-    {
-      return;
-    }
-
   const auto &clusters = context.GetConsolidationClusters ();
   if (clusters.empty ())
     {
@@ -118,7 +110,7 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
   auto label_nodes = LoadLabelNodes (tx, expected_dim);
 
   const uint64_t now_ts = context.GetSignal ().timestamp;
-  int summary_counter = 0;
+  int association_counter = 0;
   long long labels_attached = 0;
 
   for (const auto &cluster : clusters)
@@ -128,7 +120,8 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
         {
           continue;
         }
-      std::string summary_id = GenerateShallowId (now_ts, summary_counter++);
+      std::string association_id = GenerateShallowId (now_ts,
+                                                      association_counter++);
 
       // Insert centroid embedding.
       std::vector<float> centroid_blob = cluster.centroid;
@@ -155,7 +148,7 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
                 "INSERT INTO memories "
                 "(embedding_id, source_id, kind, label, start_ts, n_signals, created_at) "
                 "VALUES (?, ?, 'ASSOCIATION', ?, ?, ?, ?)",
-                { centroid_embedding_id, summary_id, std::string (),
+                { centroid_embedding_id, association_id, std::string (),
                   static_cast<long long> (now_ts),
                   static_cast<long long> (cluster.embedding_ids.size ()),
                   static_cast<long long> (now_ts) });
@@ -191,8 +184,8 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
       if (has_centroid_vec && centroid_memory_id > 0
           && centroid_embedding_id > 0)
         {
-          context.GetProcessorContext ().UpsertSummaryCache (
-              centroid_memory_id, centroid_embedding_id, centroid_vec, true, false);
+          context.GetProcessorContext ().UpsertAssociationCache (
+              centroid_memory_id, centroid_embedding_id, centroid_vec, true);
         }
 
       // Update cluster_id and derived_from edges.

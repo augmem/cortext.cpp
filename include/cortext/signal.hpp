@@ -5,7 +5,6 @@
 #include <string>
 #include <vector>
 
-#include "cortext/consolidation_mode.hpp"
 #include "cortext/retention.hpp"
 
 namespace cortext
@@ -36,7 +35,7 @@ struct Signal
   bool force_write = false;
   // Internal maintenance hint. When set, the signal drives consolidation
   // without giving behavioral meaning to the opaque source_id string.
-  std::optional<ConsolidationMode> consolidation_mode;
+  bool force_consolidation = false;
   // Durable by default. Ephemeral signals update live processing state and
   // retrieval context, but the write path must not persist them as memories.
   Retention retention = Retention::Durable;

@@ -64,7 +64,6 @@
 #include "cortext/operations/influence.hpp"
 #include "cortext/operations/interrupt_gate.hpp"
 #include "cortext/operations/memory_strength.hpp"
-#include "cortext/operations/metacognitive.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/operations/neuromodulators.hpp"
 #include "cortext/operations/predictive.hpp"
@@ -76,7 +75,6 @@
 #include "cortext/operations/signal_metrics_persistence.hpp"
 #include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
-#include "cortext/operations/short_term_memory_shadow.hpp"
 #include "cortext/operations/soft_anchor.hpp"
 #include "cortext/operations/memory_storage.hpp"
 #include "cortext/operations/stability_feedback.hpp"
@@ -98,14 +96,9 @@
 #include "cortext/operations/consolidation_cluster.hpp"
 #include "cortext/operations/consolidation_gate.hpp"
 #include "cortext/operations/consolidation_shallow.hpp"
-#include "cortext/operations/consolidation_summarize.hpp"
-#include "cortext/operations/label_bank.hpp"
-#include "cortext/operations/process_extraction_results.hpp"
 // Phase 4: Knowledge Graph Enhancement
 #include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
-
-#include "deep_llm/deep_llm_factory.hpp"
 
 namespace cortext
 {
@@ -1071,10 +1064,8 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ComputeWriteGate;
   using cortext::operations::ConsolidationCluster;
   using cortext::operations::ConsolidationGate;
-  using cortext::operations::ConsolidationSummarize;
   using cortext::operations::DetectBoundary;
   using cortext::operations::DetectMemoryUsage;
-  using cortext::operations::EnqueueExtractionJobs;
   using cortext::operations::EvaluateConsolidation;
   using cortext::operations::FitMetricWeightsRLS;
   using cortext::operations::GraphAugmentedRetrieveCandidates;
@@ -1084,13 +1075,10 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::InitializeStabilityPriors;
   using cortext::operations::MemoryStorage;
   using cortext::operations::ApplyMetaLearning;
-  using cortext::operations::MetacognitiveMonitoring;
   using cortext::operations::PersistSignalMetrics;
-  using cortext::operations::ProcessExtractionResults;
   using cortext::operations::PropagateEmotionalCascade;
   using cortext::operations::ResetAccumulatorAfterFlush;
   using cortext::operations::ResetAccumulatorOnInterrupt;
-  using cortext::operations::LoadLabelBank;
   using cortext::operations::UpdateAccumulator;
   using cortext::operations::UpdateAccumulatorScores;
   using cortext::operations::UpdateDriftAccumulation;
@@ -1103,7 +1091,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::UpdateRateState;
   using cortext::operations::UpdateRecentContext;
   using cortext::operations::UpdateSensitivity;
-  using cortext::operations::UpdateShortTermMemoryShadow;
   using cortext::operations::UpdateSoftAnchor;
   using cortext::operations::UpdateStability;
   using cortext::operations::UpdateThreshold;
@@ -1113,7 +1100,7 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::OperationSet;
 
   using CoreStage = OperationSet<
-      InitializeEmbeddedCentroids, LoadLabelBank,
+      InitializeEmbeddedCentroids,
 
       InitializeFocusPriors, InitializeSensitivityPriors,
       InitializeStabilityPriors,
@@ -1128,8 +1115,7 @@ BuildRootOperationSet (bool probe_mode)
 
       UpdatePrecisionDelta, UpdateThreshold, UpdateRecentContext,
 
-      DetectBoundary, UpdateShortTermMemoryShadow, CheckSpikeBypass,
-      ComputeWriteGate>;
+      DetectBoundary, CheckSpikeBypass, ComputeWriteGate>;
 
   using StorageStage = OperationSet<MemoryStorage, UpdateSoftAnchor,
                                     ApplySynapticTagging,
@@ -1147,9 +1133,8 @@ BuildRootOperationSet (bool probe_mode)
       ApplySerialPositionEffects, ApplySerialPositionMultiplier,
       UpdateMemoryStrength, ApplyEmotionalConsolidation, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
-      MetacognitiveMonitoring, EvaluateConsolidation, ConsolidationGate,
+      EvaluateConsolidation, ConsolidationGate,
       ConsolidationCluster, cortext::operations::ConsolidationShallow,
-      ConsolidationSummarize, EnqueueExtractionJobs, ProcessExtractionResults,
       BuildGraphFromConsolidation, PropagateEmotionalCascade,
       ApplyMetaLearning>;
 
@@ -1268,15 +1253,11 @@ struct Cortext::Impl
   std::unique_ptr<cortext::IOperation> root_operations;
   std::unique_ptr<cortext::SignalProcessor> processor;
 
-  std::unique_ptr<Extractor> extractor_instance;
-  std::unique_ptr<Summarizer> summarizer_instance;
-  std::string deep_llm_backend_name;
   std::string embedding_model_pin;
 
   Impl (const Config &c, std::shared_ptr<cortext::Store> supplied_store,
         std::shared_ptr<cortext::ObjectStore> supplied_object_store,
-        std::string models, std::shared_ptr<cortext::Clock> supplied_clock,
-        Cortext::InferenceOverrides inference = {})
+        std::string models, std::shared_ptr<cortext::Clock> supplied_clock)
       : cfg (c), signal_filter (MakeSignalFilterConfig (c)),
         models_dir (std::move (models)),
         clock (std::move (supplied_clock)),
@@ -1306,47 +1287,6 @@ struct Cortext::Impl
     VerifyEmbeddingModel (*store, embedding_model_pin);
     encoder = std::move (text_encoder.encoder);
 
-    // Injected dependencies are contract-checked at composition time like
-    // registry-resolved providers; the check available at this layer is
-    // liveness (the capability half is verified when the adapter is built).
-    if (inference.summarizer != nullptr
-        && !inference.summarizer->IsAvailable ())
-      {
-        throw std::invalid_argument (
-            "injected Summarizer reports unavailable");
-      }
-    if (inference.extractor != nullptr
-        && !inference.extractor->IsAvailable ())
-      {
-        throw std::invalid_argument (
-            "injected Extractor reports unavailable");
-      }
-    if (inference.summarizer != nullptr && inference.extractor != nullptr)
-      {
-        deep_llm_backend_name = "injected";
-        summarizer_instance = std::move (inference.summarizer);
-        extractor_instance = std::move (inference.extractor);
-      }
-    else
-      {
-        auto deep_llm = internal::CreateDeepLlmSelection (models_dir);
-        deep_llm_backend_name = deep_llm.backend_name;
-        extractor_instance = std::move (deep_llm.extractor);
-        summarizer_instance = std::move (deep_llm.summarizer);
-        // Partial injection composes with the factory result, mirroring how
-        // a caller-supplied ObjectStore composes with the default Store.
-        if (inference.summarizer != nullptr)
-          {
-            deep_llm_backend_name += "+injected_summarizer";
-            summarizer_instance = std::move (inference.summarizer);
-          }
-        if (inference.extractor != nullptr)
-          {
-            deep_llm_backend_name += "+injected_extractor";
-            extractor_instance = std::move (inference.extractor);
-          }
-      }
-
     root_operations = BuildRootOperationSet (false);
     processor = std::make_unique<cortext::SignalProcessor> (
         MakeProcessorConfig (), store, std::move (root_operations),
@@ -1359,18 +1299,6 @@ struct Cortext::Impl
                      cortext::SQLiteStore::Create (db.c_str ())),
               nullptr,
               std::move (models), std::move (supplied_clock))
-  {
-    db_path = std::move (db);
-  }
-
-  Impl (const Config &c, std::string db, std::string models,
-        std::shared_ptr<cortext::Clock> supplied_clock,
-        Cortext::InferenceOverrides inference)
-      : Impl (c, std::shared_ptr<cortext::Store> (
-                     cortext::SQLiteStore::Create (db.c_str ())),
-              nullptr,
-              std::move (models), std::move (supplied_clock),
-              std::move (inference))
   {
     db_path = std::move (db);
   }
@@ -1393,12 +1321,9 @@ struct Cortext::Impl
     pcfg.reinforcement_enabled = cfg.reinforcement_enabled;
     pcfg.procedural_enabled = cfg.procedural_enabled;
     pcfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
-    pcfg.label_bank_path = cfg.label_bank_path;
     pcfg.encoder = encoder.get ();
     pcfg.clock = clock;
 
-    pcfg.extractor = extractor_instance.get ();
-    pcfg.summarizer = summarizer_instance.get ();
     return pcfg;
   }
 
@@ -1468,8 +1393,7 @@ struct Cortext::Impl
   cortext::SignalProcessor::Output
   ProcessEmbedding (const Eigen::VectorXf &embedding, std::uint64_t timestamp,
                     const std::string &source_id,
-                    std::optional<ConsolidationMode> consolidation_mode
-                    = std::nullopt)
+                    bool force_consolidation = false)
   {
     const auto encoded = ToStdVector (embedding);
     cortext::Signal s;
@@ -1477,13 +1401,12 @@ struct Cortext::Impl
     s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp;
     s.source_id = source_id;
-    s.consolidation_mode = consolidation_mode;
+    s.force_consolidation = force_consolidation;
     return processor->Process (s);
   }
 
   Cortext::Context
-  ConsolidateAt (StopToken stop_token, ConsolidationMode mode,
-                 std::uint64_t timestamp)
+  ConsolidateAt (StopToken stop_token, std::uint64_t timestamp)
   {
     internal::ScopedStopToken scoped_stop (stop_token);
     auto *sqlite_store = dynamic_cast<SQLiteStore *> (store.get ());
@@ -1513,7 +1436,7 @@ struct Cortext::Impl
         = ToEigen (RetrievalEmbeddingView (v));
     auto out = ProcessEmbedding (consolidation_embedding,
                                  timestamp != 0 ? timestamp : NowMillis (),
-                                 kMaintenanceSourceId, mode);
+                                 kMaintenanceSourceId, true);
     const auto process_end = std::chrono::steady_clock::now ();
     span.SetAttribute (
         "cortext.candidate_memory_count",
@@ -1832,26 +1755,6 @@ Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
                    models_dir, std::move (clock)));
 }
 
-std::unique_ptr<Cortext>
-Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
-                 std::shared_ptr<ObjectStore> object_store,
-                 const std::string &models_dir, std::shared_ptr<Clock> clock,
-                 InferenceOverrides inference)
-{
-  return std::unique_ptr<Cortext> (
-      new Cortext (cfg, std::move (store), std::move (object_store),
-                   models_dir, std::move (clock), std::move (inference)));
-}
-
-std::unique_ptr<Cortext>
-Cortext::Create (const Config &cfg, const std::string &db_path,
-                 const std::string &models_dir, std::shared_ptr<Clock> clock,
-                 InferenceOverrides inference)
-{
-  return std::unique_ptr<Cortext> (new Cortext (
-      cfg, db_path, models_dir, std::move (clock), std::move (inference)));
-}
-
 Cortext::Cortext (const Config &cfg, const std::string &db_path,
                   const std::string &models_dir)
     : Cortext (cfg, db_path, models_dir, nullptr)
@@ -1914,26 +1817,6 @@ Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
     : impl_ (std::make_unique<Impl> (cfg, std::move (store),
                                      std::move (object_store), models_dir,
                                      std::move (clock)))
-{
-}
-
-Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
-                  std::shared_ptr<ObjectStore> object_store,
-                  const std::string &models_dir,
-                  std::shared_ptr<Clock> clock, InferenceOverrides inference)
-    : impl_ (std::make_unique<Impl> (cfg, std::move (store),
-                                     std::move (object_store), models_dir,
-                                     std::move (clock),
-                                     std::move (inference)))
-{
-}
-
-Cortext::Cortext (const Config &cfg, const std::string &db_path,
-                  const std::string &models_dir,
-                  std::shared_ptr<Clock> clock, InferenceOverrides inference)
-    : impl_ (std::make_unique<Impl> (cfg, db_path, models_dir,
-                                     std::move (clock),
-                                     std::move (inference)))
 {
 }
 
@@ -2447,30 +2330,29 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
 
 Cortext::Context
 internal::ReplayIngress::ConsolidateAt (Cortext &cortext,
-                                        std::uint64_t timestamp,
-                                        ConsolidationMode mode)
+                                        std::uint64_t timestamp)
 {
   if (!cortext.impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
     }
-  return cortext.impl_->ConsolidateAt (StopToken {}, mode, timestamp);
+  return cortext.impl_->ConsolidateAt (StopToken {}, timestamp);
 }
 
 Cortext::Context
-Cortext::Consolidate (ConsolidationMode mode)
+Cortext::Consolidate ()
 {
-  return Consolidate (StopToken {}, mode);
+  return Consolidate (StopToken {});
 }
 
 Cortext::Context
-Cortext::Consolidate (StopToken stop_token, ConsolidationMode mode)
+Cortext::Consolidate (StopToken stop_token)
 {
   if (!impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
     }
-  return impl_->ConsolidateAt (stop_token, mode, impl_->NowMillis ());
+  return impl_->ConsolidateAt (stop_token, impl_->NowMillis ());
 }
 
 void

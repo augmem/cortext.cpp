@@ -167,12 +167,6 @@ def audit_db(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[dic
             "memory_blob_rows": sum(1 for row in memory_rows if row["blob_id"] is not None),
             "signal_blob_rows": sum(1 for row in signal_rows if row["blob_id"] is not None),
             "runtime_label_rows": sum(1 for row in memory_rows if row["label"]),
-            "fact_assertion_rows": scalar(con, "SELECT COUNT(*) FROM fact_assertions")
-            if table_exists(con, "fact_assertions")
-            else 0,
-            "fact_evidence_rows": scalar(con, "SELECT COUNT(*) FROM fact_evidence")
-            if table_exists(con, "fact_evidence")
-            else 0,
             "soft_anchor_rows": scalar(con, "SELECT COUNT(*) FROM soft_anchors")
             if table_exists(con, "soft_anchors")
             else 0,
@@ -242,8 +236,6 @@ def main() -> int:
         "memory_blob_rows",
         "signal_blob_rows",
         "runtime_label_rows",
-        "fact_assertion_rows",
-        "fact_evidence_rows",
         "soft_anchor_rows",
         "soft_anchor_link_rows",
         "multi_modal_memory_units",

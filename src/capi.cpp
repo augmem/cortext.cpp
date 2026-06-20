@@ -7,9 +7,6 @@
 ///   2 = internal error (exception caught during processing)
 #include "cortext/capi.h"
 #include "cortext/cortext.hpp"
-#include "cortext/providers/adapters.hpp"
-#include "cortext/providers/provider.hpp"
-#include "cortext/providers/registry.hpp"
 #include "cortext/store/object_store.hpp"
 #include "cortext/store/sqlite_store.hpp"
 #include "cortext/store/store.hpp"
@@ -73,7 +70,6 @@ config_from_c (const cortext_config *cfg)
   cpp_cfg.reinforcement_enabled = cfg->reinforcement_enabled != 0;
   cpp_cfg.procedural_enabled = cfg->procedural_enabled != 0;
   cpp_cfg.sequential_edges_enabled = cfg->sequential_edges_enabled != 0;
-  cpp_cfg.label_bank_path = cfg->label_bank_path ? cfg->label_bank_path : "";
   if (cfg->struct_size
       >= offsetof (cortext_config, signal_filter_audio_enabled)
              + sizeof (cfg->signal_filter_audio_enabled))
@@ -96,90 +92,6 @@ config_from_c (const cortext_config *cfg)
           = cfg->signal_filter_text_enabled != 0;
     }
   return cpp_cfg;
-}
-
-/// Provider URIs read from the binding-facing config. Empty means local
-/// auto-discovery (the pre-provider behavior); they are not consumed by
-/// cortext::Cortext::Config and therefore travel separately.
-struct ProviderUris
-{
-  std::string summarizer;
-  std::string extractor;
-
-  bool
-  Any () const
-  {
-    return !summarizer.empty () || !extractor.empty ();
-  }
-};
-
-ProviderUris
-provider_uris_from_c (const cortext_config *cfg)
-{
-  ProviderUris uris;
-  if (!cfg)
-    {
-      return uris;
-    }
-  if (cfg->struct_size
-          >= offsetof (cortext_config, summarizer_provider_uri)
-                 + sizeof (cfg->summarizer_provider_uri)
-      && cfg->summarizer_provider_uri)
-    {
-      uris.summarizer = cfg->summarizer_provider_uri;
-    }
-  if (cfg->struct_size
-          >= offsetof (cortext_config, extractor_provider_uri)
-                 + sizeof (cfg->extractor_provider_uri)
-      && cfg->extractor_provider_uri)
-    {
-      uris.extractor = cfg->extractor_provider_uri;
-    }
-  return uris;
-}
-
-/// Resolve provider URIs into Cortext::InferenceOverrides. A URI that
-/// cannot be resolved or fails contract verification is a hard creation
-/// error (no silent fallback to local discovery).
-cortext::Cortext::InferenceOverrides
-resolve_inference_overrides (const ProviderUris &uris)
-{
-  cortext::Cortext::InferenceOverrides overrides;
-  if (!uris.summarizer.empty ())
-    {
-      std::string error;
-      auto provider = cortext::providers::ResolveProvider (
-          uris.summarizer, cortext::providers::Role::Summarizer, &error);
-      if (!provider)
-        {
-          throw std::runtime_error (
-              "summarizer_provider_uri '" + uris.summarizer
-              + "' failed to resolve: "
-              + (error.empty () ? "unknown error" : error));
-        }
-      overrides.summarizer
-          = std::make_unique<cortext::providers::ProviderSummarizer> (
-              std::shared_ptr<cortext::providers::InferenceProvider> (
-                  std::move (provider)));
-    }
-  if (!uris.extractor.empty ())
-    {
-      std::string error;
-      auto provider = cortext::providers::ResolveProvider (
-          uris.extractor, cortext::providers::Role::Extractor, &error);
-      if (!provider)
-        {
-          throw std::runtime_error (
-              "extractor_provider_uri '" + uris.extractor
-              + "' failed to resolve: "
-              + (error.empty () ? "unknown error" : error));
-        }
-      overrides.extractor
-          = std::make_unique<cortext::providers::ProviderExtractor> (
-              std::shared_ptr<cortext::providers::InferenceProvider> (
-                  std::move (provider)));
-    }
-  return overrides;
 }
 
 std::any
@@ -1003,20 +915,6 @@ embedding_result_to_json (const std::vector<float> &embedding)
           .dump ());
 }
 
-cortext::ConsolidationMode
-parse_mode_or_default (int mode)
-{
-  if (mode == CORTEXT_CONSOLIDATE_SHALLOW)
-    {
-      return cortext::ConsolidationMode::Shallow;
-    }
-  if (mode == CORTEXT_CONSOLIDATE_DEEP)
-    {
-      return cortext::ConsolidationMode::Deep;
-    }
-  return cortext::ConsolidationMode::Both;
-}
-
 template <typename Fn>
 int
 invoke_status_only (Fn &&fn)
@@ -1138,7 +1036,6 @@ extern "C"
     cfg->reinforcement_enabled = defaults.reinforcement_enabled ? 1 : 0;
     cfg->procedural_enabled = defaults.procedural_enabled ? 1 : 0;
     cfg->sequential_edges_enabled = defaults.sequential_edges_enabled ? 1 : 0;
-    cfg->label_bank_path = nullptr;
     if (field_fits (offsetof (cortext_config, signal_filter_audio_enabled),
                     sizeof (cfg->signal_filter_audio_enabled)))
       cfg->signal_filter_audio_enabled
@@ -1151,12 +1048,6 @@ extern "C"
                     sizeof (cfg->signal_filter_text_enabled)))
       cfg->signal_filter_text_enabled
           = defaults.signal_filter_text_enabled ? 1 : 0;
-    if (field_fits (offsetof (cortext_config, summarizer_provider_uri),
-                    sizeof (cfg->summarizer_provider_uri)))
-      cfg->summarizer_provider_uri = nullptr;
-    if (field_fits (offsetof (cortext_config, extractor_provider_uri),
-                    sizeof (cfg->extractor_provider_uri)))
-      cfg->extractor_provider_uri = nullptr;
     clear_last_error ();
   }
 
@@ -1172,21 +1063,9 @@ extern "C"
 
     try
       {
-        const auto uris = provider_uris_from_c (cfg);
-        std::unique_ptr<cortext::Cortext> inst;
-        if (uris.Any ())
-          {
-            inst = cortext::Cortext::Create (
-                config_from_c (cfg), std::string (db_path),
-                std::string (models_dir ? models_dir : "models"), nullptr,
-                resolve_inference_overrides (uris));
-          }
-        else
-          {
-            inst = cortext::Cortext::Create (
-                config_from_c (cfg), std::string (db_path),
-                std::string (models_dir ? models_dir : "models"));
-          }
+        auto inst = cortext::Cortext::Create (
+            config_from_c (cfg), std::string (db_path),
+            std::string (models_dir ? models_dir : "models"));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }
@@ -1222,21 +1101,9 @@ extern "C"
     try
       {
         auto store = std::make_shared<CallbackStore> (*callbacks, user_data);
-        const auto uris = provider_uris_from_c (cfg);
-        std::unique_ptr<cortext::Cortext> inst;
-        if (uris.Any ())
-          {
-            inst = cortext::Cortext::Create (
-                config_from_c (cfg), std::move (store), nullptr,
-                std::string (models_dir ? models_dir : "models"), nullptr,
-                resolve_inference_overrides (uris));
-          }
-        else
-          {
-            inst = cortext::Cortext::Create (
-                config_from_c (cfg), std::move (store),
-                std::string (models_dir ? models_dir : "models"));
-          }
+        auto inst = cortext::Cortext::Create (
+            config_from_c (cfg), std::move (store),
+            std::string (models_dir ? models_dir : "models"));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }
@@ -1285,23 +1152,9 @@ extern "C"
             = std::make_shared<CallbackStore> (*db_callbacks, db_user_data);
         auto object_store = std::make_shared<CallbackObjectStore> (
             *object_callbacks, object_user_data);
-        const auto uris = provider_uris_from_c (cfg);
-        std::unique_ptr<cortext::Cortext> inst;
-        if (uris.Any ())
-          {
-            inst = cortext::Cortext::Create (
-                config_from_c (cfg), std::move (store),
-                std::move (object_store),
-                std::string (models_dir ? models_dir : "models"), nullptr,
-                resolve_inference_overrides (uris));
-          }
-        else
-          {
-            inst = cortext::Cortext::Create (
-                config_from_c (cfg), std::move (store),
-                std::move (object_store),
-                std::string (models_dir ? models_dir : "models"));
-          }
+        auto inst = cortext::Cortext::Create (
+            config_from_c (cfg), std::move (store), std::move (object_store),
+            std::string (models_dir ? models_dir : "models"));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }
@@ -1343,28 +1196,10 @@ extern "C"
       {
         auto object_store = std::make_shared<CallbackObjectStore> (
             *object_callbacks, object_user_data);
-        const auto uris = provider_uris_from_c (cfg);
-        std::unique_ptr<cortext::Cortext> inst;
-        if (uris.Any ())
-          {
-            // No db_path Create overload carries both an ObjectStore and
-            // InferenceOverrides; open the SQLite store here exactly as the
-            // db_path constructors do and use the fully injected overload.
-            auto store = std::shared_ptr<cortext::Store> (
-                cortext::SQLiteStore::Create (db_path));
-            inst = cortext::Cortext::Create (
-                config_from_c (cfg), std::move (store),
-                std::move (object_store),
-                std::string (models_dir ? models_dir : "models"), nullptr,
-                resolve_inference_overrides (uris));
-          }
-        else
-          {
-            inst = cortext::Cortext::Create (
-                config_from_c (cfg), std::string (db_path),
-                std::move (object_store),
-                std::string (models_dir ? models_dir : "models"));
-          }
+        auto inst = cortext::Cortext::Create (
+            config_from_c (cfg), std::string (db_path),
+            std::move (object_store),
+            std::string (models_dir ? models_dir : "models"));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }
@@ -1515,20 +1350,6 @@ extern "C"
   }
 
   int
-  cortext_consolidate_mode (cortext_handle h, int mode)
-  {
-    auto *p = cast_handle (h);
-    if (!p)
-      {
-        set_last_error ("handle must not be NULL");
-        return 1;
-      }
-
-    return invoke_status_only (
-        [&] { (void)p->Consolidate (parse_mode_or_default (mode)); });
-  }
-
-  int
   cortext_flush (cortext_handle h)
   {
     auto *p = cast_handle (h);
@@ -1631,20 +1452,6 @@ extern "C"
       }
 
     return invoke_json ([&] { return p->Consolidate (); });
-  }
-
-  char *
-  cortext_consolidate_mode_json (cortext_handle h, int mode)
-  {
-    auto *p = cast_handle (h);
-    if (!p)
-      {
-        set_last_error ("handle must not be NULL");
-        return nullptr;
-      }
-
-    return invoke_json (
-        [&] { return p->Consolidate (parse_mode_or_default (mode)); });
   }
 
 } // extern "C"

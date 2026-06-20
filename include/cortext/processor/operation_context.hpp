@@ -1,6 +1,5 @@
 #pragma once
 
-#include "cortext/operations/extraction.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor.hpp" // For SignalProcessor::Config
 #include "cortext/processor/operation_fork.hpp"
@@ -26,7 +25,8 @@ class ObjectTransaction;
 
 /// @brief Information about a cluster of memories from consolidation.
 ///
-/// Created by ConsolidationCluster and consumed by ConsolidationSummarize.
+/// Created by ConsolidationCluster and consumed by shallow consolidation and
+/// graph construction.
 struct ClusterInfo
 {
   int cluster_id;
@@ -638,92 +638,6 @@ public:
     return observed_retention_sec_;
   }
 
-  // ======================================================================
-  // Metacognitive Monitoring API (Algorithm 25)
-  // ======================================================================
-  
-  void
-  SetFeelingOfKnowing (std::optional<double> v)
-  {
-    feeling_of_knowing_ = v;
-  }
-  std::optional<double>
-  GetFeelingOfKnowing () const
-  {
-    return feeling_of_knowing_;
-  }
-  void
-  SetMetacogFOKThreshold (double v)
-  {
-    metacog_fok_threshold_ = v;
-  }
-  double
-  GetMetacogFOKThreshold () const
-  {
-    return metacog_fok_threshold_;
-  }
-  void
-  SetMetacogTOTDetected (bool v)
-  {
-    metacog_tot_detected_ = v;
-  }
-  bool
-  GetMetacogTOTDetected () const
-  {
-    return metacog_tot_detected_;
-  }
-  void
-  SetMetacogUnknownDetected (bool v)
-  {
-    metacog_unknown_detected_ = v;
-  }
-  bool
-  GetMetacogUnknownDetected () const
-  {
-    return metacog_unknown_detected_;
-  }
-  void
-  SetMetacogConfidenceDecayRate (double v)
-  {
-    metacog_confidence_decay_rate_ = v;
-  }
-  double
-  GetMetacogConfidenceDecayRate () const
-  {
-    return metacog_confidence_decay_rate_;
-  }
-  void
-  SetMetacogStrategySwitchLatencyMs (int v)
-  {
-    metacog_strategy_switch_latency_ms_ = v;
-  }
-  int
-  GetMetacogStrategySwitchLatencyMs () const
-  {
-    return metacog_strategy_switch_latency_ms_;
-  }
-  void
-  SetMetacogCertaintyRequirement (double v)
-  {
-    metacog_certainty_requirement_ = v;
-  }
-  double
-  GetMetacogCertaintyRequirement () const
-  {
-    return metacog_certainty_requirement_;
-  }
-  void
-  SetMetacogSensitivity (double v)
-  {
-    metacog_sensitivity_ = v;
-  }
-  double
-  GetMetacogSensitivity () const
-  {
-    return metacog_sensitivity_;
-  }
-
-  // ======================================================================
   // Serial Position Effects API (Algorithm 26)
   // ======================================================================
   
@@ -1155,46 +1069,6 @@ public:
     return consolidation_candidates_;
   }
 
-  void
-  SetExtractionRequests (std::vector<operations::ExtractionRequest> requests)
-  {
-    extraction_requests_ = std::move (requests);
-  }
-  const std::vector<operations::ExtractionRequest> &
-  GetExtractionRequests () const
-  {
-    return extraction_requests_;
-  }
-
-  void
-  SetExtractionCallback (operations::ExtractionCallback *cb)
-  {
-    extraction_callback_ = cb;
-  }
-  operations::ExtractionCallback *
-  GetExtractionCallback () const
-  {
-    return extraction_callback_;
-  }
-
-  // ======================================================================
-  // LLM Components API (OGA/Phi-4)
-  // ======================================================================
-
-  /// @brief Gets the extractor (may be null if OGA disabled).
-  Extractor *
-  GetExtractor () const
-  {
-    return context_.extractor;
-  }
-
-  /// @brief Gets the summarizer (may be null if OGA disabled).
-  Summarizer *
-  GetSummarizer () const
-  {
-    return context_.summarizer;
-  }
-
   // --- Fork/Join state (see processor/operation_fork.hpp) ---
 
   /// @brief Registers an outstanding Fork. Joins pair FIFO.
@@ -1278,16 +1152,6 @@ private:
   // Selected candidate ID from interrupt gate (if any)
   std::optional<long long> selected_candidate_id_;
 
-  // Metacognitive monitoring (Algorithm 25) fields
-  std::optional<double> feeling_of_knowing_;
-  double metacog_fok_threshold_ = 0.0;
-  bool metacog_tot_detected_ = false;
-  bool metacog_unknown_detected_ = false;
-  double metacog_confidence_decay_rate_ = 0.0;
-  int metacog_strategy_switch_latency_ms_ = 0;
-  double metacog_certainty_requirement_ = 0.0;
-  double metacog_sensitivity_ = 0.0;
-
   // Serial Position Effects (Algorithm 26) fields
   int serial_primacy_window_ = 0;
   int serial_recency_window_ = 0;
@@ -1342,9 +1206,6 @@ private:
   std::vector<ClusterInfo> consolidation_clusters_;
   // In-Memory Consolidation Candidates
   std::vector<ConsolidationCandidate> consolidation_candidates_;
-
-  std::vector<operations::ExtractionRequest> extraction_requests_;
-  operations::ExtractionCallback *extraction_callback_ = nullptr;
 
   // Memory Accumulation fields (Section 4.4)
   std::optional<double> boundary_score_;

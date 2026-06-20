@@ -1,7 +1,6 @@
 #pragma once
 
 #include "cortext/data/centroids.hpp"
-#include "cortext/operations/extraction.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/signal.hpp"
@@ -42,10 +41,6 @@ struct BoundaryDiagnostics
   bool should_flush = false;
 };
 
-// Forward declarations for LLM components
-class Extractor;
-class Summarizer;
-
 /// @brief Holds the long-lived, evolving state of the SignalProcessor.
 ///
 /// This includes all dynamic variables such as EWMAs, rolling windows,
@@ -67,13 +62,6 @@ class Summarizer;
 /// but this would be a breaking change requiring updates to all operations.
 struct ProcessorContext
 {
-  enum class MetacognitiveMode
-  {
-    Normal,
-    TotRecovery,
-    UnknownCaution
-  };
-
   // --- Observed write-rate window ---
   class WriteRateWindow
   {
@@ -255,7 +243,6 @@ struct ProcessorContext
   bool focus_priors_initialized = false;
   bool sensitivity_priors_initialized = false;
   bool stability_priors_initialized = false;
-  bool label_bank_loaded = false;
   int last_interrupt_tick = -1000000;
   int blender_update_count = 0;
   WriteRateWindow write_rate_window_;
@@ -396,24 +383,6 @@ struct ProcessorContext
   long long storage_pressure_cache_threshold_bytes = 0;
 
   // ======================================================================
-  // Metacognitive State (Section 6.2)
-  // ======================================================================
-  double fok_state = 0.0;
-  double retrieval_strength = 0.0;
-  double metacognitive_confidence = 0.0;
-  MetacognitiveMode metacognitive_mode = MetacognitiveMode::Normal;
-  uint64_t metacognitive_mode_expires_at = 0;
-  bool metacognitive_certainty_satisfied = false;
-  int metacognitive_tot_trigger_count = 0;
-  int metacognitive_unknown_trigger_count = 0;
-
-  // ======================================================================
-  // Extraction State (Section 7.4)
-  // ======================================================================
-  uint64_t last_extraction_ts = 0;
-  std::vector<operations::ExtractionResult> pending_extraction_results;
-
-  // ======================================================================
   // Episode Tracking State (Algorithm 12)
   // ======================================================================
   uint64_t episode_start_ts = 0;
@@ -485,47 +454,6 @@ struct ProcessorContext
   std::deque<Eigen::VectorXf> recent_memory_centroids;
 
   // ======================================================================
-  // Short-Term Graph Memory
-  // ======================================================================
-  struct ShadowSTMItem
-  {
-    std::string source_id;
-    uint64_t timestamp = 0;
-    int step_index = 0;
-    Eigen::VectorXf embedding;
-    double boundary_score = 0.0;
-    BoundaryDiagnostics boundary_diagnostics;
-    std::optional<std::string> boundary_type;
-  };
-
-  struct ShadowLabelEdge
-  {
-    std::string source_id;
-    uint64_t timestamp = 0;
-    int step_index = 0;
-    long long label_memory_id = 0;
-    std::string label;
-    double weight = 0.0;
-    Eigen::VectorXf signal_embedding;
-  };
-
-  struct ShortTermGraph
-  {
-    std::deque<ShadowSTMItem> items;
-    std::deque<ShadowLabelEdge> label_edges;
-  };
-
-  std::unordered_map<std::string, ShortTermGraph> short_term_graphs;
-  bool shadow_stm_enabled = false;
-  int shadow_stm_last_size = 0;
-  int shadow_stm_max_size = 0;
-  int shadow_stm_update_count = 0;
-  int shadow_stm_compaction_count = 0;
-  double shadow_stm_last_update_us = 0.0;
-  double shadow_stm_total_update_us = 0.0;
-  std::deque<double> shadow_stm_recent_update_us;
-
-  // ======================================================================
   // Soft Anchor State (ingress-time formation)
   // ======================================================================
   struct SoftAnchorState
@@ -584,14 +512,13 @@ struct ProcessorContext
   // ======================================================================
   // Index and Procedural Stores (CLS extensions)
   // ======================================================================
-  struct SummaryCacheEntry
+  struct AssociationCacheEntry
   {
     long long memory_id = 0;
     long long embedding_id = 0;
     Eigen::VectorXf embedding;
     float embedding_norm = 0.0f;
     bool is_association = false;
-    bool is_label = false;
   };
 
   struct RetrievalSurfaceEntry
@@ -613,7 +540,6 @@ struct ProcessorContext
     double arousal_avg = 0.0;
     double pre_activation = 0.0;
     bool is_association = false;
-    bool is_label = false;
     bool vector_seed_eligible = true;
     Eigen::VectorXf embedding;
     Eigen::VectorXf context_embedding;
@@ -631,111 +557,6 @@ struct ProcessorContext
     {
       return memory_id == other.memory_id && start_ts == other.start_ts;
     }
-  };
-
-  struct DurableSourceTextSeedEntry
-  {
-    long long source_id = 0;
-    long long cue_id = 0;
-    long long label_id = 0;
-    int label_count = 0;
-    long long start_ts = 0;
-    std::vector<std::string> source_tokens;
-  };
-
-  struct DurableSourceTextSeedMetadataEntry
-  {
-    long long source_id = 0;
-    long long cue_id = 0;
-    long long label_id = 0;
-    int label_count = 0;
-    long long start_ts = 0;
-    std::string blob_key;
-  };
-
-  struct DurableSourceTextSeedCache
-  {
-    bool valid = false;
-    bool entries_complete = true;
-    long long edge_count = 0;
-    long long source_sum = 0;
-    long long target_sum = 0;
-    long long source_max = 0;
-    long long target_max = 0;
-    int search_limit = 0;
-    int max_bytes = 0;
-    int route_token_min_chars = 0;
-    int last_metadata_refresh_signal = -1;
-    std::vector<DurableSourceTextSeedEntry> entries;
-    std::vector<DurableSourceTextSeedMetadataEntry> metadata_entries;
-    size_t metadata_cursor = 0;
-    std::unordered_map<std::string, std::vector<std::string>> token_cache;
-    std::deque<std::string> token_cache_order;
-    int token_cache_max_bytes = 0;
-    int token_cache_route_token_min_chars = 0;
-  };
-
-  struct FactEmbeddingCacheEntry
-  {
-    long long embedding_id = 0;
-    Eigen::VectorXf embedding;
-  };
-
-  struct LabelClusterCache
-  {
-    bool valid = false;
-    int requested_clusters = 0;
-    int embedding_dim = 0;
-    size_t summary_cache_size = 0;
-    std::vector<Eigen::VectorXf> centroids;
-    std::vector<std::vector<size_t>> members;
-  };
-
-  struct LabelGraphRelationCache
-  {
-    struct SourceSeedRoute
-    {
-      long long memory_id = 0;
-      long long cue_id = 0;
-      double score = 0.0;
-    };
-
-    bool valid = false;
-    long long edge_count = 0;
-    long long source_sum = 0;
-    long long target_sum = 0;
-    long long source_max = 0;
-    long long target_max = 0;
-    long long weight_sum_micros = 0;
-    long long last_reinforced_sum = 0;
-    int last_fingerprint_check_signal = -1;
-    int consolidation_count = -1;
-    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
-        labels_by_source;
-    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
-        label_sources_by_target;
-    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
-        derived_sources_by_target;
-    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
-        derived_cues_by_target;
-    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
-        derived_targets_by_cue;
-    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
-        label_relations_out;
-    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
-        label_relations_in;
-    std::unordered_map<long long, long long> label_degree;
-    int candidate_label_route_top_labels = 0;
-    int candidate_label_route_fanout = 0;
-    long long candidate_label_route_relation_weight_micros = 0;
-    std::unordered_map<long long, std::vector<std::pair<long long, double>>>
-        candidate_label_routes;
-    int source_seed_route_top_labels = 0;
-    int source_seed_route_relation_fanout = 0;
-    int source_seed_route_target_fanout = 0;
-    long long source_seed_route_relation_weight_micros = 0;
-    std::unordered_map<long long, std::vector<SourceSeedRoute>>
-        source_seed_label_routes;
   };
 
   struct AssociationFanoutEdge
@@ -766,9 +587,9 @@ struct ProcessorContext
   };
 
   void
-  UpsertSummaryCache (long long memory_id, long long embedding_id,
-                      const Eigen::VectorXf &embedding,
-                      bool is_association, bool is_label)
+  UpsertAssociationCache (long long memory_id, long long embedding_id,
+                          const Eigen::VectorXf &embedding,
+                          bool is_association)
   {
     if (memory_id <= 0 || embedding_id <= 0 || embedding.size () == 0)
       {
@@ -779,34 +600,24 @@ struct ProcessorContext
       {
         return;
       }
-    auto it = summary_cache_index.find (memory_id);
-    if (it != summary_cache_index.end ())
+    auto it = association_cache_index.find (memory_id);
+    if (it != association_cache_index.end ())
       {
-        auto &entry = summary_cache[it->second];
+        auto &entry = association_cache[it->second];
         entry.embedding_id = embedding_id;
         entry.embedding = embedding;
         entry.embedding_norm = norm;
         entry.is_association = is_association;
-        entry.is_label = is_label;
-        if (is_label)
-          {
-            label_cluster_cache.valid = false;
-          }
         return;
       }
-    SummaryCacheEntry entry;
+    AssociationCacheEntry entry;
     entry.memory_id = memory_id;
     entry.embedding_id = embedding_id;
     entry.embedding = embedding;
     entry.embedding_norm = norm;
     entry.is_association = is_association;
-    entry.is_label = is_label;
-    summary_cache_index[memory_id] = summary_cache.size ();
-    summary_cache.push_back (std::move (entry));
-    if (is_label)
-      {
-        label_cluster_cache.valid = false;
-      }
+    association_cache_index[memory_id] = association_cache.size ();
+    association_cache.push_back (std::move (entry));
   }
 
   void
@@ -823,7 +634,6 @@ struct ProcessorContext
         return;
       }
     entry.is_association = (entry.kind == "ASSOCIATION");
-    entry.is_label = (entry.kind == "LABEL");
     auto it = retrieval_surface_index.find (entry.memory_id);
     if (it != retrieval_surface_index.end ())
       {
@@ -896,7 +706,7 @@ struct ProcessorContext
   {
     return entry.memory_id > 0 && entry.start_ts > 0
            && !entry.source_id.empty () && !entry.is_association
-           && !entry.is_label && entry.kind != "WORKING";
+           && entry.kind != "WORKING";
   }
 
   void
@@ -1084,10 +894,8 @@ struct ProcessorContext
   std::unordered_map<std::string, std::vector<long long>> index_store;
   std::unordered_map<long long, std::string> index_reverse;
   std::unordered_map<std::string, std::unordered_map<long long, double>> procedural_store;
-  // Cache label embeddings by normalized label key to avoid re-encoding.
-  std::unordered_map<std::string, std::vector<float>> label_embedding_cache;
-  std::vector<SummaryCacheEntry> summary_cache;
-  std::unordered_map<long long, size_t> summary_cache_index;
+  std::vector<AssociationCacheEntry> association_cache;
+  std::unordered_map<long long, size_t> association_cache_index;
   std::vector<RetrievalSurfaceEntry> retrieval_surface_cache;
   std::uint32_t retrieval_surface_seed_visit_epoch = 0;
   std::unordered_map<long long, size_t> retrieval_surface_index;
@@ -1096,19 +904,8 @@ struct ProcessorContext
                      std::vector<RetrievalSurfaceSourceIndexEntry>>
       retrieval_surface_source_index;
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
-  std::unordered_map<long long, FactEmbeddingCacheEntry> fact_embedding_cache;
-  DurableSourceTextSeedCache durable_source_text_seed_cache;
-  LabelClusterCache label_cluster_cache;
-  LabelGraphRelationCache label_graph_relation_cache;
   AssociationFanoutCache association_fanout_cache;
 
-  // ======================================================================
-  // LLM Components (OGA/Phi-4)
-  // ======================================================================
-  /// @brief Extractor for label/relation extraction (optional, may be null)
-  Extractor *extractor = nullptr;
-  /// @brief Summarizer for text/audio summarization (optional, may be null)
-  Summarizer *summarizer = nullptr;
 };
 
 } // namespace cortext

@@ -34,7 +34,7 @@ std::optional<AudioData> LoadWav (const std::string &path);
 
 /// @brief Load raw PCM data from file.
 /// @param path Path to .pcm file (raw float32 samples)
-/// @param sample_rate Sample rate (default: 16000 for LLM audio)
+/// @param sample_rate Sample rate (default: 16000 for speech/audio models)
 /// @param num_channels Number of channels (default: 1)
 /// @return AudioData on success, std::nullopt on failure
 std::optional<AudioData> LoadPcmFloat32 (const std::string &path,
@@ -62,7 +62,7 @@ AudioData ResampleTo (const AudioData &audio, uint32_t target_rate);
 /// @return Mono audio data
 AudioData ConvertToMono (const AudioData &audio);
 
-/// @brief Resample and convert to 16kHz mono (standard for LLM audio).
+/// @brief Resample and convert to 16kHz mono for speech/audio models.
 /// @param audio Input audio data
 /// @return Normalized 16kHz mono audio
 AudioData NormalizeTo16kMono (const AudioData &audio);

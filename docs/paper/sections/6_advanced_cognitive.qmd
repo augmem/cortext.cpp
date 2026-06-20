@@ -1,7 +1,7 @@
 # Advanced Cognitive Processes {#sec-advanced}
 
 This section presents algorithms modeling higher-order cognitive phenomena:
-working memory maintenance, soft anchor formation, metacognitive monitoring,
+working memory maintenance, soft anchor formation, retrieval uncertainty,
 reconsolidation dynamics, and serial position effects.
 
 **Knob note:** Unless explicitly stated otherwise, F and S in this section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
@@ -115,29 +115,31 @@ if |similar_memories| > 0:
     merge_into_chunk(similar_memories, memory)
 ```
 
-**Implementation note:** durable ingress inputs preserve an ordered working-memory trace independent of the literal `source_id` string. `source_id` is still used for opaque provenance and exact same-source grouping, but Cortext does not parse roles such as user, assistant, speaker, or device from it. Internal maintenance work follows the same rule: consolidation is driven by an explicit `Signal::consolidation_mode` hint rather than by a magic `source_id` value. Prompt hydration orders active slots by insertion/start time rather than `last_access`; otherwise rehearsal or retrieval touches can scramble the visible recent context even when the underlying memories are correct.
+**Implementation note:** durable ingress inputs preserve an ordered working-memory trace independent of the literal `source_id` string. `source_id` is still used for opaque provenance and exact same-source grouping, but Cortext does not parse roles such as user, assistant, speaker, or device from it. Internal maintenance work follows the same rule: explicit consolidation is driven by a force flag on the signal, not by a magic `source_id` value. Prompt hydration orders active slots by insertion/start time rather than `last_access`; otherwise rehearsal or retrieval touches can scramble the visible recent context even when the underlying memories are correct.
 
-## Three-Tier Graph Memory Surface {#sec-three-tier-graph-memory}
+## Two-Layer Graph Memory Surface {#sec-three-tier-graph-memory}
 
-Cortext now separates live memory state into three graph-compatible tiers. The tiers differ by latency, commitment, and pruning authority rather than by modality:
+Cortext now separates live memory state into two graph-compatible layers. The
+layers differ by latency and commitment rather than by modality:
 
-1. **Working memory (WM):** the bounded active slot set used for immediate prompt reconstruction, overlap suppression, and recent-turn continuity. WM stores coherent memories and preserves their ordered evidence packets. It is the most volatile tier and is optimized for exact recent context rather than broad semantic search.
-2. **Short-term graph memory (STM):** a processor-local graph substrate over recent signal embeddings. STM is represented as one bounded per-source graph: recent signal items are the nodes, and clustered label matches are provisional edges. The label edges are produced from cached label embeddings by clustered retrieval: the current signal selects nearby label clusters, then takes the top labels from each selected cluster. STM graph edges are candidates, not durable facts.
-3. **Long-term graph memory (LTM):** the persisted graph of memories, associative cue nodes, label nodes, relations, facts, and consolidation products. LTM is not separate from the long-term graph: durable memory nodes live in the `memories` table, durable edges live in `associations`, and structured factual claims live in the fact tables. LTM is the only tier that stores durable `has_label`, `derived_from`, relation, and fact edges.
+1. **Working memory (WM):** the bounded active slot set used for immediate prompt reconstruction, overlap suppression, and recent-turn continuity. WM stores coherent memories and preserves their ordered evidence packets. It is the most volatile layer and is optimized for exact recent context rather than broad semantic search.
+2. **Long-term graph memory (LTM):** the persisted graph of long-term memories, association centroids, optional label nodes, and durable association edges. Durable memory nodes live in the `memories` table and durable edges live in `associations`. There is no processor-local STM shadow graph and no separate fact assertion store.
 
 The intended control flow is:
 
 ```
 signal embedding
   -> WM active-slot update
-  -> STM graph proposal (recent embeddings + clustered label candidates)
-  -> LTM retrieval boost from existing durable graph edges
+  -> LTM retrieval from memories and association centroids
   -> explicit consolidation
-  -> Gemma/text-audio-image refinement
-  -> durable LTM graph edge insert/update/delete
+  -> shallow association centroid insert/update
+  -> durable LTM graph edge insert/update
 ```
 
-This keeps the online loop fast and modality-agnostic while allowing the graph to form before consolidation. The STM graph narrows the candidate label space, but it does not decide truth. Consolidation remains the commitment step: it receives STM labels as `current_labels`, checks them against raw source evidence, prunes unsupported edges, and adds missing durable labels to the LTM graph. The current experimental gate treats STM as a bounded ordered substrate/read surface, not as a promoted retrieval consumer: STM retains useful delayed evidence at small bounded sizes, but scalar STM scores and direct STM attention have not passed held-out transfer and topic-shift controls.
+This keeps the online loop fast and modality-agnostic. Consolidation is a
+shallow, embedding-only commitment step: it clusters mature long-term memories,
+creates association centroids, connects member memories with `derived_from`, and
+optionally attaches already-existing label nodes by embedding similarity.
 
 ## Soft Anchor Formation {#sec-soft-anchor}
 
@@ -407,51 +409,28 @@ binds at zero on the repaired slice, but it is not yet finished human subject
 anchoring because wrong-active distinct-anchor preservation remains incomplete.
 The engine integration follows the same formation rule: `UpdateSoftAnchor` runs
 at ingress after memory storage and writes soft anchor state and links by
-default. Production retrieval does not rank from these links yet, and chat/LLM
-surfacing is limited to optional continuity hints in chat and benchmark prompt
-snapshots. The next open question is consumption: formed anchors may become
-useful uncertain context only after replay and manual-review experiments show
-that possible-continuity hints help more often than they harm, without converting
-tentative or ambiguous evidence into durable facts.
+default. Production retrieval does not rank from these links yet, and
+application surfacing is limited to optional continuity hints in chat and
+benchmark context snapshots. The next open question is consumption: formed
+anchors may become useful uncertain context only after replay and manual-review
+experiments show that possible-continuity hints help more often than they harm,
+without converting tentative or ambiguous evidence into durable facts.
 
-## Metacognitive Monitoring
+## Retrieval Uncertainty
 
-The system implements feeling-of-knowing (FOK) and tip-of-tongue (TOT) detection following @hart1965memory framework:
-
-```
-FOK_threshold = lerp(0.2, 0.5, F)
-TOT_detection = (FOK > lerp(0.5, 0.8, F)) AND
-                 (retrieval_strength < lerp(0.4, 0.2, F))
-```
-
-TOT occurs when metacognitive confidence is high but retrieval strength is low—the characteristic experience of knowing one knows something but being unable to access it.
-
-Additional metacognitive parameters:
+The current engine does not maintain a persistent higher-order confidence state.
+Uncertainty is expressed directly through retrieval scores, rank margins,
+coverage, candidate diversity, and source/evidence metadata:
 
 ```
-confidence_decay_rate = lerp(0.01, 0.1, 1 − T)
-unknown_threshold = lerp(0.3, 0.1, F)
-strategy_switch_latency = lerp(500, 100, S)  # ms
-certainty_requirement = lerp(0.6, 0.9, T)
-metacognitive_sensitivity = F × (1 + 0.5 × S)
+rank_margin(q) = score_1(q) - score_2(q)
+retrieval_uncertainty(q) = 1 - clamp(rank_margin(q) / margin_ref(F,S,T), 0, 1)
 ```
 
-Current implementation note: these metacognitive states are no longer diagnostic-only. The branch now maintains a persistent metacognitive confidence state that decays between signals:
-
-```
-Δt_meta = now_s − last_signal_s
-confidence_retained = confidence_{t−1} × exp(−confidence_decay_rate × Δt_meta)
-confidence_t = max(FOK_t, EWMA(confidence_retained, FOK_t, α_meta))
-```
-
-where `α_meta` is a bounded function of `metacognitive_sensitivity`.
-
-That decayed confidence now affects two downstream policies:
-
-* a detected **TOT** state still arms a **next-turn retrieval recovery mode**, but the extra graph depth, candidate budget, and diversification relaxation are scaled by the retained confidence instead of being an all-or-nothing switch
-* a detected **unknown** state still arms a **next-turn caution mode**, and lower retained confidence makes the certainty cutoff stricter before a candidate can be returned
-
-The switch duration still follows `strategy_switch_latency`, but the behavioral effect is now a bounded retrieval-policy change rather than a same-turn retry loop, and `confidence_decay_rate` is part of that behavior rather than a paper-only parameter.
+This keeps uncertainty local to the retrieval event. Callers can use the ranked
+candidate packet and evidence surfaces to decide whether to answer, ask for
+clarification, or expose multiple possible memories without the engine carrying
+a separate persistent confidence machine.
 
 ## Memory Reconsolidation
 

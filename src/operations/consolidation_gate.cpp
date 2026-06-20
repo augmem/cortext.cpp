@@ -1,6 +1,6 @@
 #include "cortext/internal/cancellation.hpp"
-#include "cortext/operations/consolidation_gate.hpp"
 #include "cortext/operations/consolidation.hpp"
+#include "cortext/operations/consolidation_gate.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
@@ -19,13 +19,9 @@ ConsolidationGate::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
   internal::ThrowIfStopRequested ();
-  // Run scoring and enqueue extraction jobs when start signal is present.
+  // Run embedding-only consolidation scoring when start signal is present.
   ScoreConsolidation scorer;
   scorer.Execute (context, tx);
-
-  internal::ThrowIfStopRequested ();
-  EnqueueExtractionJobs jobs;
-  jobs.Execute (context, tx);
 
   telemetry::LogDebug("cortext.consolidation_gate", {
     telemetry::Attribute::Bool("gate_open", true)

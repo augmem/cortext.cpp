@@ -122,7 +122,7 @@ GetCoreMigrations ()
               // LONG-TERM GRAPH MEMORY NODES
               //
               // The durable LTM is the persisted graph. This table stores graph
-              // nodes: episodic memories, summaries/cues, labels, and working
+              // nodes: episodic memories, associations, labels, and working
               // memory records. Per-node adaptive state from memory_feedback,
               // rif_state, and emotional_tags is folded into the same row.
               // ------------------------------------------------------------------
@@ -345,10 +345,6 @@ GetCoreMigrations ()
               "  wm_slot_count INTEGER NOT NULL DEFAULT 0,"
               "  wm_last_accepted INTEGER NOT NULL DEFAULT 0,"
               "  wm_last_chunked INTEGER NOT NULL DEFAULT 0,"
-              // Metacognition
-              "  fok_state REAL NOT NULL DEFAULT 0.0,"
-              "  retrieval_strength REAL NOT NULL DEFAULT 0.0,"
-              "  metacognitive_confidence REAL NOT NULL DEFAULT 0.0,"
               // Consolidation
               "  last_consolidation_ts INTEGER NOT NULL DEFAULT 0,"
               "  consolidation_count INTEGER NOT NULL DEFAULT 0,"
@@ -466,103 +462,6 @@ GetCoreMigrations ()
               "  AND kind != 'WORKING' "
               "ORDER BY last_access DESC "
               "LIMIT 128",
-          },
-      },
-      {
-          1,
-          "Bitemporal fact assertions and retrieval cache",
-          {
-              "CREATE TABLE IF NOT EXISTS fact_assertions ("
-              "  fact_id INTEGER PRIMARY KEY,"
-              "  subject TEXT NOT NULL,"
-              "  predicate TEXT NOT NULL,"
-              "  object TEXT NOT NULL,"
-              "  canonical_subject TEXT NOT NULL,"
-              "  canonical_predicate TEXT NOT NULL,"
-              "  canonical_object TEXT NOT NULL,"
-              "  valid_start_ts INTEGER,"
-              "  valid_end_ts INTEGER,"
-              "  recorded_at_ts INTEGER NOT NULL,"
-              "  superseded_at_ts INTEGER,"
-              "  confidence REAL NOT NULL DEFAULT 0.5,"
-              "  summary_memory_id INTEGER NOT NULL,"
-              "  created_at INTEGER NOT NULL"
-              ")",
-
-              "CREATE TABLE IF NOT EXISTS fact_evidence ("
-              "  fact_id INTEGER NOT NULL,"
-              "  source_memory_id INTEGER NOT NULL,"
-              "  evidence_type TEXT NOT NULL,"
-              "  support_weight REAL NOT NULL DEFAULT 1.0,"
-              "  PRIMARY KEY (fact_id, source_memory_id, evidence_type)"
-              ")",
-
-              "CREATE TABLE IF NOT EXISTS fact_cache ("
-              "  fact_id INTEGER PRIMARY KEY,"
-              "  embedding_id INTEGER,"
-              "  fact_text TEXT NOT NULL,"
-              "  is_current INTEGER NOT NULL DEFAULT 0,"
-              "  valid_start_ts INTEGER,"
-              "  valid_end_ts INTEGER,"
-              "  recorded_at_ts INTEGER NOT NULL,"
-              "  superseded_at_ts INTEGER,"
-              "  updated_at INTEGER NOT NULL"
-              ")",
-
-              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_canonical "
-              "ON fact_assertions(canonical_subject, canonical_predicate, canonical_object)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_open "
-              "ON fact_assertions(canonical_subject, canonical_predicate, superseded_at_ts, valid_end_ts)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_valid "
-              "ON fact_assertions(valid_start_ts, valid_end_ts)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_recorded "
-              "ON fact_assertions(recorded_at_ts, superseded_at_ts)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_summary "
-              "ON fact_assertions(summary_memory_id)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_evidence_source "
-              "ON fact_evidence(source_memory_id, evidence_type)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_cache_current "
-              "ON fact_cache(is_current, recorded_at_ts)",
-          },
-      },
-      {
-          2,
-          "Fact lifecycle support, archival, and bounded retention",
-          {
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN support_mass REAL NOT NULL DEFAULT 0.0",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN source_diversity INTEGER NOT NULL DEFAULT 0",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN contradiction_mass REAL NOT NULL DEFAULT 0.0",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN confirmation_count INTEGER NOT NULL DEFAULT 0",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN challenge_count INTEGER NOT NULL DEFAULT 0",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN compressed_support_count INTEGER NOT NULL DEFAULT 0",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN last_confirmation_ts INTEGER NOT NULL DEFAULT 0",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN last_challenge_ts INTEGER",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN severity_class TEXT NOT NULL DEFAULT 'medium'",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active'",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN archived_at INTEGER",
-              "ALTER TABLE fact_assertions "
-              "ADD COLUMN last_maintenance_ts INTEGER NOT NULL DEFAULT 0",
-              "ALTER TABLE fact_cache "
-              "ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active'",
-              "ALTER TABLE fact_cache "
-              "ADD COLUMN support_mass REAL NOT NULL DEFAULT 0.0",
-              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_lifecycle "
-              "ON fact_assertions(lifecycle_state, severity_class, archived_at)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_maintenance "
-              "ON fact_assertions(last_maintenance_ts, recorded_at_ts)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_cache_lifecycle "
-              "ON fact_cache(lifecycle_state, is_current, updated_at)",
           },
       },
       {
@@ -696,16 +595,13 @@ GetCoreMigrations ()
       },
       {
           8,
-          "Neutral source metadata and LTM deep summaries",
+          "Normalize memory source metadata",
           {
               "UPDATE memories "
               "SET source_origin = 'source', source_reliability = 0.7 "
               "WHERE source_origin IS NULL "
               "   OR source_origin != 'source' "
               "   OR source_reliability IN (0.5, 0.6, 0.8, 0.9)",
-              "UPDATE memories "
-              "SET kind = 'LONG_TERM' "
-              "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'summary_%'",
           },
       },
       {
@@ -731,14 +627,10 @@ GetCoreMigrations ()
           10,
           "Realtime graph retrieval query indexes",
           {
-              "CREATE INDEX IF NOT EXISTS idx_fact_cache_embedding "
-              "ON fact_cache(embedding_id)",
               "CREATE INDEX IF NOT EXISTS idx_associations_edge_source_target "
               "ON associations(edge_type, source_memory_id, target_memory_id)",
               "CREATE INDEX IF NOT EXISTS idx_associations_edge_target_source "
               "ON associations(edge_type, target_memory_id, source_memory_id)",
-              "CREATE INDEX IF NOT EXISTS idx_fact_assertions_lifecycle_recorded "
-              "ON fact_assertions(lifecycle_state, recorded_at_ts DESC, fact_id DESC)",
           },
       },
       {

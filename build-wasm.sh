@@ -1,7 +1,8 @@
 #!/bin/bash
-# Build script for WebAssembly version using Emscripten
+# Build script for the browser WebAssembly bundle using Emscripten.
 
 set -e
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Check if emscripten is available
 if ! command -v emcc &> /dev/null; then
@@ -10,20 +11,10 @@ if ! command -v emcc &> /dev/null; then
     exit 1
 fi
 
-# Create build directory
-BUILD_DIR="build-wasm"
-mkdir -p "$BUILD_DIR"
-cd "$BUILD_DIR"
-
-# Configure with Emscripten toolchain
-emcmake cmake .. \
-    -DCMAKE_TOOLCHAIN_FILE=../cmake/EmscriptenToolchain.cmake \
-    -DBUILD_TESTING=OFF \
-    -DCMAKE_BUILD_TYPE=Release
-
-# Build
-cmake --build . --config Release
+cmake --preset wasm "$@"
+cmake --build --preset wasm
 
 echo "WebAssembly build complete!"
-echo "Output files are in: $BUILD_DIR/"
-ls -la *.wasm *.js 2>/dev/null || echo "No .wasm/.js files found - check build output"
+echo "Output files are in: ${ROOT_DIR}/build-wasm/dist/wasm/"
+ls -la "${ROOT_DIR}/build-wasm/dist/wasm/"*.wasm "${ROOT_DIR}/build-wasm/dist/wasm/"*.js 2>/dev/null \
+  || echo "No .wasm/.js files found - check build output"

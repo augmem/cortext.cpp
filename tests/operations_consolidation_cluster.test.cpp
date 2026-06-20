@@ -7,7 +7,6 @@
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/consolidation_cluster.hpp>
-#include <cortext/operations/consolidation_summarize.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
@@ -17,7 +16,6 @@
 
 using namespace cortext;
 using cortext::operations::ConsolidationCluster;
-using cortext::operations::ConsolidationSummarize;
 
 namespace
 {
@@ -30,14 +28,6 @@ MakeSignal (uint64_t ts)
   s.timestamp = ts;
   s.source_id = "test";
   return s;
-}
-
-/// @brief Helper to encode a float vector as blob.
-std::vector<unsigned char>
-EncodeFloatBlob (const std::vector<float> &v)
-{
-  const auto *src = reinterpret_cast<const unsigned char *> (v.data ());
-  return std::vector<unsigned char> (src, src + v.size () * sizeof (float));
 }
 
 /// @brief Op to seed consolidation_candidates and embeddings.
@@ -106,44 +96,6 @@ struct AssertClustersOp : IOperation
   {
     const auto &clusters = ctx.GetConsolidationClusters ();
     REQUIRE (static_cast<int> (clusters.size ()) == expected_cluster_count_);
-  }
-};
-
-/// @brief Op to verify consolidation_summaries table.
-struct AssertSummariesOp : IOperation
-{
-  int expected_count_;
-
-  explicit AssertSummariesOp (int expected) : expected_count_ (expected) {}
-
-  void
-  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
-  {
-    auto *store = ctx.GetStore ();
-    auto rows
-        = store->Execute ("SELECT COUNT(*) AS c FROM consolidation_summaries",
-                          {});
-    REQUIRE (!rows.empty ());
-    REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == expected_count_);
-  }
-};
-
-/// @brief Op to verify consolidation_sources table.
-struct AssertSourcesOp : IOperation
-{
-  int expected_count_;
-
-  explicit AssertSourcesOp (int expected) : expected_count_ (expected) {}
-
-  void
-  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
-  {
-    auto *store = ctx.GetStore ();
-    auto rows
-        = store->Execute ("SELECT COUNT(*) AS c FROM consolidation_sources",
-                          {});
-    REQUIRE (!rows.empty ());
-    REQUIRE (std::any_cast<long long> (rows[0].at ("c")) == expected_count_);
   }
 };
 

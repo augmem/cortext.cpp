@@ -149,11 +149,6 @@ def main() -> int:
         help="Models directory passed to the embedder tool.",
     )
     parser.add_argument(
-        "--embedder-backend",
-        default="",
-        help="Optional embedder backend override (llama.cpp|onnx|litert).",
-    )
-    parser.add_argument(
         "--epochs",
         type=int,
         default=220,
@@ -191,7 +186,6 @@ def main() -> int:
         embedder = ExternalTextEmbedder(
             binary=args.embedder_bin,
             models_dir=args.models_dir,
-            backend=args.embedder_backend or None,
         )
         prefetch_example_embeddings(train_examples + valid_examples, embedder)
 
@@ -229,7 +223,6 @@ def main() -> int:
         "train_examples": len(train_examples),
         "valid_examples": len(valid_examples),
         "embedder_bin": args.embedder_bin,
-        "embedder_backend": args.embedder_backend or "default",
         "type_class_weights": type_class_weights,
         "promotion_class_weights": promotion_class_weights,
         "type_metrics": type_metrics,

@@ -16,20 +16,6 @@ import (
 	"unsafe"
 )
 
-type ConsolidationMode int
-
-const (
-	ConsolidateShallow ConsolidationMode = ConsolidateShallowValue
-	ConsolidateDeep    ConsolidationMode = ConsolidateDeepValue
-	ConsolidateBoth    ConsolidationMode = ConsolidateBothValue
-)
-
-const (
-	ConsolidateShallowValue ConsolidationMode = 0
-	ConsolidateDeepValue    ConsolidationMode = 1
-	ConsolidateBothValue    ConsolidationMode = 2
-)
-
 type Config struct {
 	Focus                  float64
 	Sensitivity            float64
@@ -39,15 +25,9 @@ type Config struct {
 	ReinforcementEnabled   bool
 	ProceduralEnabled      bool
 	SequentialEdgesEnabled bool
-	LabelBankPath          string
-	// SummarizerProviderURI routes the Summarizer role to an external
-	// inference provider (e.g. "ollama://127.0.0.1:11435/gemma4:e2b").
-	// Empty keeps local model auto-discovery; a URI that cannot be
-	// resolved and verified makes New fail.
-	SummarizerProviderURI string
-	// ExtractorProviderURI routes the Extractor role; same semantics as
-	// SummarizerProviderURI.
-	ExtractorProviderURI string
+	SignalFilterAudio      bool
+	SignalFilterImage      bool
+	SignalFilterText       bool
 }
 
 type Handle struct {
@@ -80,9 +60,6 @@ func New(dbPath string, modelsDir string, cfg *Config) (*Handle, error) {
 	var nativeCfg C.cortext_config
 	C.cortext_config_init(&nativeCfg)
 
-	var labelBankCleanup func()
-	var summarizerURICleanup func()
-	var extractorURICleanup func()
 	if cfg != nil {
 		nativeCfg.focus = C.double(cfg.Focus)
 		nativeCfg.sensitivity = C.double(cfg.Sensitivity)
@@ -92,36 +69,9 @@ func New(dbPath string, modelsDir string, cfg *Config) (*Handle, error) {
 		nativeCfg.reinforcement_enabled = boolToCInt(cfg.ReinforcementEnabled)
 		nativeCfg.procedural_enabled = boolToCInt(cfg.ProceduralEnabled)
 		nativeCfg.sequential_edges_enabled = boolToCInt(cfg.SequentialEdgesEnabled)
-		if cfg.LabelBankPath != "" {
-			labelBankPath := C.CString(cfg.LabelBankPath)
-			nativeCfg.label_bank_path = labelBankPath
-			labelBankCleanup = func() {
-				C.free(unsafe.Pointer(labelBankPath))
-			}
-		}
-		if cfg.SummarizerProviderURI != "" {
-			summarizerURI := C.CString(cfg.SummarizerProviderURI)
-			nativeCfg.summarizer_provider_uri = summarizerURI
-			summarizerURICleanup = func() {
-				C.free(unsafe.Pointer(summarizerURI))
-			}
-		}
-		if cfg.ExtractorProviderURI != "" {
-			extractorURI := C.CString(cfg.ExtractorProviderURI)
-			nativeCfg.extractor_provider_uri = extractorURI
-			extractorURICleanup = func() {
-				C.free(unsafe.Pointer(extractorURI))
-			}
-		}
-	}
-	if labelBankCleanup != nil {
-		defer labelBankCleanup()
-	}
-	if summarizerURICleanup != nil {
-		defer summarizerURICleanup()
-	}
-	if extractorURICleanup != nil {
-		defer extractorURICleanup()
+		nativeCfg.signal_filter_audio_enabled = boolToCInt(cfg.SignalFilterAudio)
+		nativeCfg.signal_filter_image_enabled = boolToCInt(cfg.SignalFilterImage)
+		nativeCfg.signal_filter_text_enabled = boolToCInt(cfg.SignalFilterText)
 	}
 
 	handle := C.cortext_create_with_config(&nativeCfg, cDBPath, cModelsDir)
@@ -264,15 +214,6 @@ func (h *Handle) ConsolidateJSON() ([]byte, error) {
 
 func (h *Handle) Consolidate() (map[string]any, error) {
 	return decodeJSONObject(h.ConsolidateJSON())
-}
-
-func (h *Handle) ConsolidateModeJSON(mode ConsolidationMode) ([]byte, error) {
-	raw := C.cortext_consolidate_mode_json(h.ptr, C.int(mode))
-	return takeJSONString(raw)
-}
-
-func (h *Handle) ConsolidateMode(mode ConsolidationMode) (map[string]any, error) {
-	return decodeJSONObject(h.ConsolidateModeJSON(mode))
 }
 
 func (h *Handle) Flush() error {

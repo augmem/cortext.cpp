@@ -185,28 +185,10 @@ extern "C"
     int reinforcement_enabled;
     int procedural_enabled;
     int sequential_edges_enabled;
-    const char *label_bank_path;
     int signal_filter_audio_enabled;
     int signal_filter_image_enabled;
     int signal_filter_text_enabled;
-    /// Optional inference-provider URI for the Summarizer role, e.g.
-    /// "ollama://127.0.0.1:11435/gemma4:e2b". NULL or empty keeps the
-    /// default local model auto-discovery. If set but the provider cannot
-    /// be resolved, verified, or reached, creation fails (NULL handle,
-    /// details via cortext_last_error()).
-    const char *summarizer_provider_uri;
-    /// Optional inference-provider URI for the Extractor role. Same
-    /// semantics as summarizer_provider_uri.
-    const char *extractor_provider_uri;
   } cortext_config;
-
-  /// @brief Consolidation mode for cortext_consolidate_mode.
-  typedef enum cortext_consolidation_mode
-  {
-    CORTEXT_CONSOLIDATE_SHALLOW = 0,
-    CORTEXT_CONSOLIDATE_DEEP = 1,
-    CORTEXT_CONSOLIDATE_BOTH = 2
-  } cortext_consolidation_mode;
 
   /// @brief Creates a Cortext instance with default models directory.
   /// @param focus Focus knob value in [0.0, 1.0].
@@ -353,25 +335,13 @@ extern "C"
                                                  int width, int height,
                                                  int channels);
 
-  /// @brief Triggers consolidation evaluation.
+  /// @brief Runs one explicit shallow consolidation pass.
   /// @param h Handle to a Cortext instance.
   /// @return 0 on success, 1 if invalid handle, 2 on internal error.
   ///
-  /// This evaluates whether background consolidation should start based on
-  /// system conditions. Changes are buffered until cortext_flush().
+  /// This replays stored embeddings through the v1 graph/label consolidation
+  /// path. Changes are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_consolidate (cortext_handle h);
-
-  /// @brief Triggers consolidation with explicit mode.
-  /// @param h Handle to a Cortext instance.
-  /// @param mode Consolidation mode (shallow, deep, or both).
-  /// @return 0 on success, 1 if invalid handle, 2 on internal error.
-  ///
-  /// Shallow runs embedding-only labeling/graphing; deep runs the configured
-  /// local summarization/extraction backend. Auto requires Gemma 4 E2B via
-  /// LiteRT-LM for multimodal labeling and summarization; LFM2/llama.cpp and
-  /// mixed Gemma+LFM2 paths are explicit overrides. Both defaults to the full
-  /// deep path.
-  CORTEXT_EXPORT int cortext_consolidate_mode (cortext_handle h, int mode);
 
   /// @brief Commits all buffered database writes.
   /// @param h Handle to a Cortext instance.
@@ -417,12 +387,8 @@ extern "C"
                                                    int channels,
                                                    const char *source_id);
 
-  /// @brief Triggers consolidation and returns the resulting Context as JSON.
+  /// @brief Runs shallow consolidation and returns the resulting Context as JSON.
   CORTEXT_EXPORT char *cortext_consolidate_json (cortext_handle h);
-
-  /// @brief Triggers consolidation with explicit mode and returns JSON.
-  CORTEXT_EXPORT char *cortext_consolidate_mode_json (cortext_handle h,
-                                                      int mode);
 
 #ifdef __cplusplus
 }

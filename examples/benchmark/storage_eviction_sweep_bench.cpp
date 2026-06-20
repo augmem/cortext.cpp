@@ -1,4 +1,4 @@
-#include "../../src/operations/eviction_ablation.hpp"
+#include "../../src/operations/eviction_policy_override.hpp"
 
 #include <cortext/core/knobs.hpp>
 #include <cortext/encoder/encoder.hpp>
@@ -189,12 +189,12 @@ RunScenario (const std::string &name,
   pctx.half_life = cortext::core::BaseHalfLifePrior (cfg.stability);
   pctx.last_consolidation_ts = std::numeric_limits<uint64_t>::max ();
 
-  cortext::operations::eviction::EvictionAblationOverride override;
+  cortext::operations::eviction::EvictionPolicyOverride override;
   override.consolidation_gate_enabled = false;
   override.storage_gate_enabled = true;
   override.min_storage_bytes = threshold_bytes;
   override.min_storage_fraction_of_available = 0.0;
-  cortext::operations::eviction::ScopedEvictionAblationOverride scoped (
+  cortext::operations::eviction::ScopedEvictionPolicyOverride scoped (
       override);
 
   SweepResult result;

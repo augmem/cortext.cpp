@@ -183,22 +183,7 @@ target_include_directories(cortext_chat_profile PRIVATE
   ${CMAKE_SOURCE_DIR}/src
 )
 
-# Ensure the runtime loader can find vendored dylibs on macOS.
-if(APPLE)
-  set(ORT_LIB_DIR "${CMAKE_BINARY_DIR}/third_party/onnxruntime-install/lib")
-  set(LITERT_LIB_DIR "${CMAKE_BINARY_DIR}/third_party/litert-lm-install/lib")
-  set_target_properties(cortext_chat PROPERTIES
-    BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
-  )
-  set_target_properties(cortext_chat_profile PROPERTIES
-    BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
-  )
-  set_target_properties(cortext_voice_backend_bench PROPERTIES
-    BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
-  )
-  set_target_properties(cortext_planum_bridge_smoke PROPERTIES
-    BUILD_RPATH "${ORT_LIB_DIR};${LITERT_LIB_DIR}"
-  )
+  if(APPLE)
   # macOS frameworks needed by GLFW
   find_library(COCOA_LIBRARY Cocoa REQUIRED)
   find_library(FOUNDATION_LIBRARY Foundation REQUIRED)

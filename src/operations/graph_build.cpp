@@ -398,7 +398,7 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
   // V2 schema: Nodes are MEMORIES, edges are ASSOCIATIONS
   // No need to create graph_nodes or graph_edges tables - using V2 tables
 
-  // 1) Build edges from MEMORIES with cluster_id (set by ConsolidationSummarize)
+  // 1) Build edges from MEMORIES with cluster_id.
   if (store)
     {
       auto clusters = LoadClusterMemories (store);

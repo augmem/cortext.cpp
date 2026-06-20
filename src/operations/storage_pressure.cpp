@@ -115,7 +115,7 @@ AppendOptionalKey (std::ostringstream &out, const char *name,
 
 std::string
 StoragePressureCacheKey (
-    const eviction::EvictionAblationOverride &override)
+    const eviction::EvictionPolicyOverride &override)
 {
   std::ostringstream out;
   AppendOptionalKey (out, "gate", override.storage_gate_enabled);
@@ -134,7 +134,7 @@ StoragePressureCacheKey (
 
 StoragePressureState
 ComputeStoragePressureState (Transaction &tx,
-                             const eviction::EvictionAblationOverride &override)
+                             const eviction::EvictionPolicyOverride &override)
 {
   StoragePressureState info;
 
@@ -203,7 +203,7 @@ ComputeStoragePressureState (Transaction &tx,
 StoragePressureState
 ComputeCachedStoragePressureState (
     ProcessorContext &ctx, Transaction &tx,
-    const eviction::EvictionAblationOverride &override,
+    const eviction::EvictionPolicyOverride &override,
     int refresh_interval_signals)
 {
   const int interval = std::max (1, refresh_interval_signals);

@@ -6,7 +6,6 @@
 #include <cmath>
 #include <vector>
 
-#include <cortext/consolidation_mode.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/consolidation.hpp>
 #include <cortext/operations/graph_build.hpp>
@@ -31,7 +30,7 @@ MakeSignal (uint64_t ts)
   s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
   s.timestamp = ts;
   s.source_id = "test/consolidation";
-  s.consolidation_mode = ConsolidationMode::Both;
+  s.force_consolidation = true;
   return s;
 }
 
@@ -71,7 +70,7 @@ TEST_CASE ("V2: GraphBuild creates co-occurrence edges for similar memories in s
                   "VALUES (?, ?, ?)",
                   { 2LL, emb2, 0LL });
 
-  // Insert memories with same cluster_id (as set by ConsolidationSummarize)
+  // Insert memories with the same consolidation cluster_id.
   store->Execute ("INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
                   "start_ts, cluster_id, created_at) "
                   "VALUES (?, ?, 'test', 'LONG_TERM', 0, ?, 0)",

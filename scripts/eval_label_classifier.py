@@ -163,11 +163,6 @@ def main() -> int:
         help="Models directory passed to the embedder tool.",
     )
     parser.add_argument(
-        "--embedder-backend",
-        default="",
-        help="Optional embedder backend override.",
-    )
-    parser.add_argument(
         "--out-dir",
         default="logs/label_classifier_eval",
         help="Output directory for evaluation reports.",
@@ -182,7 +177,6 @@ def main() -> int:
         embedder = ExternalTextEmbedder(
             binary=args.embedder_bin,
             models_dir=args.models_dir,
-            backend=args.embedder_backend or None,
         )
         prefetch_example_embeddings(examples, embedder)
 

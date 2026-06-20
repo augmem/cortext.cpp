@@ -1,7 +1,6 @@
 #include <cortext/cortext.hpp>
 #include <cortext/core/knobs.hpp>
 
-#include "encoder/embeddinggemma_profile.hpp"
 #include "encoder/text_encoder_factory.hpp"
 #include "streaming_text_probe.hpp"
 
@@ -632,8 +631,6 @@ main (int argc, char **argv)
           const auto end = std::chrono::steady_clock::now ();
           seed_wall_ms += ElapsedMillis (start, end);
         }
-      cortext::internal::ResetEmbeddingGemmaTextEncodeProfile ();
-
       const std::string user_prompt = ProfileUserPrompt ();
       const std::string assistant_reply = ProfileAssistantReply ();
       const auto chunks
@@ -706,8 +703,6 @@ main (int argc, char **argv)
       const double create_ms = ElapsedMillis (create_start, create_end);
       const double local_chat_wall_ms
           = user_phase.wall_ms + stream_phase.wall_ms + final_phase.wall_ms;
-      const auto gemma_profile
-          = cortext::internal::GetEmbeddingGemmaTextEncodeProfileSnapshot ();
       std::string resolved_backend = "unknown";
       try
         {
@@ -753,44 +748,6 @@ main (int argc, char **argv)
                 << (100.0 * stream_phase.total_ms / safe_total) << "%)\n";
       std::cout << "  phase3_final_ctx_ms=" << final_phase.total_ms << " ("
                 << (100.0 * final_phase.total_ms / safe_total) << "%)\n";
-      auto print_breakdown = [&] (const char *label, std::uint64_t calls,
-                                  double ensure_initialized_ms,
-                                  double tokenize_ms,
-                                  double tensor_create_ms, double run_ms,
-                                  double copy_ms, double normalize_ms) {
-        if (calls == 0)
-          {
-            return;
-          }
-        const double total_ms = ensure_initialized_ms + tokenize_ms
-                                + tensor_create_ms + run_ms + copy_ms
-                                + normalize_ms;
-        const double safe_encode_total = total_ms > 0.0 ? total_ms : 1.0;
-        std::cout << "\n[" << label << "]\n";
-        std::cout << "  calls=" << calls << "\n";
-        std::cout << "  ensure_initialized_ms=" << ensure_initialized_ms
-                  << " ("
-                  << (100.0 * ensure_initialized_ms / safe_encode_total)
-                  << "%)\n";
-        std::cout << "  tokenize_ms=" << tokenize_ms << " ("
-                  << (100.0 * tokenize_ms / safe_encode_total) << "%)\n";
-        std::cout << "  tensor_create_ms=" << tensor_create_ms << " ("
-                  << (100.0 * tensor_create_ms / safe_encode_total)
-                  << "%)\n";
-        std::cout << "  run_ms=" << run_ms << " ("
-                  << (100.0 * run_ms / safe_encode_total) << "%)\n";
-        std::cout << "  copy_ms=" << copy_ms << " ("
-                  << (100.0 * copy_ms / safe_encode_total) << "%)\n";
-        std::cout << "  normalize_ms=" << normalize_ms << " ("
-                  << (100.0 * normalize_ms / safe_encode_total) << "%)\n";
-      };
-      print_breakdown ("embeddinggemma_text_encode_breakdown",
-                       gemma_profile.calls,
-                       gemma_profile.ensure_initialized_ms,
-                       gemma_profile.tokenize_ms,
-                       gemma_profile.tensor_create_ms, gemma_profile.run_ms,
-                       gemma_profile.copy_ms, gemma_profile.normalize_ms);
-
       if (!options.keep_db)
         {
           cortext_ctx.reset ();

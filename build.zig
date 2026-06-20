@@ -7,10 +7,10 @@ const cortext_cpp_sources = &.{
     "src/store/extension_loader.cpp",
     "src/store/object_store.cpp",
     "src/store/schema.cpp",
-    "src/store/facts.cpp",
     "src/internal/cancellation.cpp",
     "src/processor/operation_context.cpp",
     "src/signal_processor.cpp",
+    "src/signal_filter.cpp",
     "src/cortext.cpp",
     "src/core/thread_config.cpp",
     "src/capi.cpp",
@@ -40,7 +40,6 @@ const cortext_cpp_sources = &.{
     "src/operations/predictive.cpp",
     "src/operations/emotion.cpp",
     "src/operations/working_memory.cpp",
-    "src/operations/metacognitive.cpp",
     "src/operations/serial_position.cpp",
     "src/operations/serial_position_apply.cpp",
     "src/operations/interrupt_gate.cpp",
@@ -48,17 +47,13 @@ const cortext_cpp_sources = &.{
     "src/operations/consolidation_cluster.cpp",
     "src/operations/consolidation_gate.cpp",
     "src/operations/consolidation_shallow.cpp",
-    "src/operations/label_bank.cpp",
-    "src/operations/consolidation_summarize.cpp",
-    "src/operations/process_extraction_results.cpp",
     "src/operations/embedding_prediction_error.cpp",
     "src/operations/precision.cpp",
     "src/operations/constructive_recall_internal.cpp",
     "src/operations/meta_learning_internal.cpp",
     "src/operations/graph_build.cpp",
     "src/operations/graph_retrieval.cpp",
-    "src/operations/temporal_retrieval.cpp",
-    "src/operations/eviction_ablation.cpp",
+    "src/operations/eviction_policy_override.cpp",
     "src/operations/retrieval_debug_state.cpp",
     "src/operations/neuromodulators.cpp",
     "src/operations/emotion_cascade.cpp",
@@ -69,15 +64,13 @@ const cortext_cpp_sources = &.{
     "src/operations/synaptic_tagging.cpp",
     "src/operations/drift_accumulation.cpp",
     "src/operations/streaming_pacing.cpp",
+    "src/operations/soft_anchor.cpp",
     "src/operations/accumulator_scores.cpp",
     "src/operations/accumulator.cpp",
     "src/operations/accumulator_reset.cpp",
     "src/operations/spike_bypass.cpp",
-    "src/extractor/gemma_extractor.cpp",
-    "src/summarizer/gemma_summarizer.cpp",
-    "src/deep_llm/deep_llm_factory.cpp",
-    "src/generator/json_decoder.cpp",
-    "src/audio/gemma_audio.cpp",
+    "src/models/embedding_model_pin.cpp",
+    "src/models/aist_gguf_encoder.cpp",
 };
 
 const objstore_c_sources = &.{
@@ -169,7 +162,7 @@ pub fn build(b: *std.Build) void {
         .name = "cortext",
         .linkage = if (shared) .dynamic else .static,
         .root_module = mod,
-        .version = .{ .major = 0, .minor = 1, .patch = 0 },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
     });
 
     mod.addIncludePath(b.path("include"));
@@ -191,8 +184,6 @@ pub fn build(b: *std.Build) void {
     mod.addCMacro("SQLITE_VEC_OMIT_FS", "1");
     mod.addCMacro("CORTEXT_EMBED_OBJSTORE", "1");
     mod.addCMacro("CORTEXT_DISABLE_OPENTELEMETRY", "1");
-    mod.addCMacro("CORTEXT_DISABLE_OGA", "1");
-    mod.addCMacro("CORTEXT_DISABLE_LITERT", "1");
     mod.addCMacro("CORTEXT_DISABLE_SHERPA_ONNX", "1");
     mod.addCMacro("BLAKE3_NO_SSE2", "1");
     mod.addCMacro("BLAKE3_NO_SSE41", "1");

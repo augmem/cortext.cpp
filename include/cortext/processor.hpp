@@ -38,11 +38,7 @@ public:
     bool reinforcement_enabled = true;
     bool procedural_enabled = true;
     bool sequential_edges_enabled = true;
-    std::string label_bank_path;
 
-    // LLM components (extractor/summarizer may be null)
-    Extractor *extractor = nullptr;
-    Summarizer *summarizer = nullptr;
     Encoder *encoder = nullptr; // Required for embedding-based operations
     std::shared_ptr<Clock> clock;
   };
@@ -123,16 +119,6 @@ public:
 
     // Per-operation timings (ms) for this signal
     std::unordered_map<std::string, double> operation_ms;
-
-    // Short-term graph diagnostics. The STM graph maintains a bounded
-    // processor-local substrate; set CORTEXT_STM_SHADOW_DISABLE=1 to suppress it.
-    bool shadow_stm_enabled = false;
-    int shadow_stm_size = 0;
-    int shadow_stm_max_size = 0;
-    int shadow_stm_update_count = 0;
-    int shadow_stm_compaction_count = 0;
-    double shadow_stm_last_update_us = 0.0;
-    double shadow_stm_mean_update_us = 0.0;
 
     // Soft Anchor diagnostics. Formation runs at ingress; retrieval/chat
     // consumption is not changed by these fields.

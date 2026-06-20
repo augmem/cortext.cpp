@@ -266,7 +266,6 @@ RunPredictiveRankingStudy ()
                   << " predictive_bonus=" << candidate.predictive_bonus
                   << " durable_boost=" << candidate.durable_source_boost
                   << " durable_count=" << candidate.durable_source_count
-                  << " label_boost=" << candidate.label_graph_boost
                   << "\n";
       }
   }

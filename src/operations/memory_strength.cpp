@@ -10,9 +10,8 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/summarizer/summarizer.hpp"
 #include "cortext/telemetry/telemetry.hpp"
-#include "eviction_ablation.hpp"
+#include "eviction_policy_override.hpp"
 #include "eviction_policy.hpp"
 #include <cmath>
 #include <functional>
@@ -82,7 +81,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
 
-  const auto eviction_override = eviction::GetEvictionAblationOverride ();
+  const auto eviction_override = eviction::GetEvictionPolicyOverride ();
 
   const double F_raw = cfg.focus;
   const double S_raw = cfg.sensitivity;
@@ -373,10 +372,8 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       ++update_count;
     }
 
-  // Evict weak memories below periphery cutoff (v2: memories table)
+  // Evict weak memories below periphery cutoff (v2: memories table).
   // Also delete corresponding signals, graph edges, and embeddings.
-  // Fact-evidence floor: memories supporting active facts are protected
-  // when their strength >= fact_floor(T), scaled by Stability.
   const long long evicted_at
       = static_cast<long long> (context.GetSignal ().timestamp);
   const auto frontier_start = SteadyClock::now ();
@@ -389,32 +386,11 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   context.AddOperationTiming ("MemoryStrength.eviction_frontier",
                               ElapsedMillis (frontier_start));
 
-  // Eviction condition: strength < cutoff AND either (a) not fact-linked
-  // or (b) strength < fact_floor. Expressed in SQL as a LEFT JOIN that
-  // excludes protected memories.
   // Consolidation gate: no memory is evicted until it has existed through
   // at least one consolidation cycle (created_at < last_consolidation_ts).
   // When last_consolidation_ts == 0, no memories are evictable.
   std::string eviction_where
       = eviction_policy::EvictionWhereClause (frontier);
-  const bool summary_guard_active
-      = context.GetSummarizer () && context.GetSummarizer ()->IsAvailable ();
-  if (summary_guard_active)
-    {
-      eviction_where +=
-          " AND m.source_id NOT LIKE 'summary_%'"
-          " AND EXISTS ("
-          "   SELECT 1 FROM associations summary_edge"
-          "   JOIN memories summary_memory"
-          "     ON summary_memory.memory_id = summary_edge.source_memory_id"
-          "   WHERE summary_edge.target_memory_id = m.memory_id"
-          "     AND summary_edge.edge_type = 'derived_from'"
-          "     AND summary_memory.kind = 'LONG_TERM'"
-          " )";
-    }
-  const std::string fact_join
-      = eviction_policy::ActiveFactEvidenceJoin (
-          frontier.fact_floor_active);
   const std::vector<std::any> delete_params
       = eviction_policy::EvictionWhereParams (frontier);
 
@@ -488,7 +464,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   auto evictable_rows = tx.Execute (
       "SELECT m.memory_id, m.embedding_id "
       "FROM memories m INDEXED BY idx_memories_ltm_strength_created"
-          + fact_join + " " + eviction_where
+          " " + eviction_where
           + " ORDER BY m.strength ASC, m.created_at ASC LIMIT ?",
       select_params);
   context.AddOperationTiming ("MemoryStrength.eviction_select_ids_sql",
@@ -591,7 +567,6 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   context.AddOperationTiming ("MemoryStrength.eviction_delete_associations_sql",
                               ElapsedMillis (assoc_delete_start));
   p_ctx.association_fanout_cache.valid = false;
-  p_ctx.label_graph_relation_cache.valid = false;
 
   const auto signal_delete_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),
