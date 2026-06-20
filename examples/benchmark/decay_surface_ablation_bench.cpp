@@ -1,5 +1,5 @@
 #include "../../src/operations/eviction_policy_override.hpp"
-#include "../../src/operations/retrieval_debug_state.hpp"
+#include "../../src/operations/retrieval_trace_state.hpp"
 
 #include <cortext/core/knobs.hpp>
 #include <cortext/encoder/encoder.hpp>
@@ -184,8 +184,8 @@ RunRetrieval (std::shared_ptr<cortext::Store> store,
       std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
   cortext::SignalProcessor processor (cfg, store, std::move (ops));
 
-  cortext::operations::retrieval_debug::ClearLastSelectedEmbeddingOrder ();
-  cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+  cortext::operations::retrieval_trace::ClearLastSelectedEmbeddingOrder ();
+  cortext::operations::retrieval_trace::ClearLastRankedCandidates ();
 
   cortext::Signal signal;
   signal.embedding = query;
@@ -195,9 +195,9 @@ RunRetrieval (std::shared_ptr<cortext::Store> store,
 
   RetrievalOutcome out;
   const auto &order
-      = cortext::operations::retrieval_debug::GetLastSelectedEmbeddingOrder ();
+      = cortext::operations::retrieval_trace::GetLastSelectedEmbeddingOrder ();
   const auto &ranked
-      = cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+      = cortext::operations::retrieval_trace::GetLastRankedCandidates ();
   if (!order.empty ())
     {
       out.top1 = order.front ();

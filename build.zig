@@ -54,7 +54,7 @@ const cortext_cpp_sources = &.{
     "src/operations/graph_build.cpp",
     "src/operations/graph_retrieval.cpp",
     "src/operations/eviction_policy_override.cpp",
-    "src/operations/retrieval_debug_state.cpp",
+    "src/operations/retrieval_trace_state.cpp",
     "src/operations/neuromodulators.cpp",
     "src/operations/emotion_cascade.cpp",
     "src/operations/signal_metrics_persistence.cpp",

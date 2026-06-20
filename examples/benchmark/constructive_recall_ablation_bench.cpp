@@ -1,5 +1,5 @@
 #include "../../src/operations/constructive_recall_internal.hpp"
-#include "../../src/operations/retrieval_debug_state.hpp"
+#include "../../src/operations/retrieval_trace_state.hpp"
 
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/utils.hpp>
@@ -344,14 +344,14 @@ RunRetrievalAblationStudy ()
   cfg.stability = 0.5;
 
   auto run = [&] {
-    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    cortext::operations::retrieval_trace::ClearLastRankedCandidates ();
     auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
     cortext::SignalProcessor processor (cfg, store, std::move (ops));
     processor.Process (MakeSignal (query, 10));
     processor.Flush ();
-    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+    return cortext::operations::retrieval_trace::GetLastRankedCandidates ();
   };
 
   long long top_off = 0;

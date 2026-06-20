@@ -1,6 +1,6 @@
 #include "test_helpers.hpp"
 #include "../src/operations/constructive_recall_internal.hpp"
-#include "../src/operations/retrieval_debug_state.hpp"
+#include "../src/operations/retrieval_trace_state.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -453,14 +453,14 @@ TEST_CASE ("Constructive recall retrieval uses the latest reconstruction and app
       "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
 
   auto run = [&] {
-    operations::retrieval_debug::ClearLastRankedCandidates ();
+    operations::retrieval_trace::ClearLastRankedCandidates ();
     auto ops = std::make_unique<DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<operations::GraphAugmentedRetrieveCandidates> ());
     SignalProcessor processor (cfg, store, std::move (ops));
     processor.Process (MakeSignal (query, 10));
     processor.Flush ();
-    return operations::retrieval_debug::GetLastRankedCandidates ();
+    return operations::retrieval_trace::GetLastRankedCandidates ();
   };
 
   {

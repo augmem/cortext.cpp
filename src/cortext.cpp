@@ -9,7 +9,7 @@
 #include "encoder/text_encoder_factory.hpp"
 #include "operations/constructive_recall_internal.hpp"
 #include "operations/meta_learning_internal.hpp"
-#include "operations/retrieval_debug_state.hpp"
+#include "operations/retrieval_trace_state.hpp"
 #include "signal_filter.hpp"
 #include "streaming_text_probe.hpp"
 
@@ -256,7 +256,7 @@ MakeFilteredContext (const internal::SignalFilterDecision &decision,
 void
 ApplyRetrievalScore (Cortext::Context::Memory &memory,
                      const std::unordered_map<long long,
-                                              operations::retrieval_debug::RankedCandidate>
+                                              operations::retrieval_trace::RankedCandidate>
                          &ranked_by_memory_id)
 {
   auto it = ranked_by_memory_id.find (memory.id);
@@ -1574,10 +1574,10 @@ struct Cortext::Impl
     seen_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
     std::unordered_set<long long> seen_output_memory_ids;
     seen_output_memory_ids.reserve (out.candidate_memory_ids.size ());
-    std::unordered_map<long long, operations::retrieval_debug::RankedCandidate>
+    std::unordered_map<long long, operations::retrieval_trace::RankedCandidate>
         ranked_by_memory_id;
     for (const auto &candidate :
-         operations::retrieval_debug::GetLastRankedCandidates ())
+         operations::retrieval_trace::GetLastRankedCandidates ())
       {
         if (candidate.memory_id > 0)
           {
@@ -1613,7 +1613,7 @@ struct Cortext::Impl
     std::unordered_set<long long> output_candidate_embedding_ids (
         out.candidate_memory_ids.begin (), out.candidate_memory_ids.end ());
     for (const auto &candidate :
-         operations::retrieval_debug::GetLastRankedCandidates ())
+         operations::retrieval_trace::GetLastRankedCandidates ())
       {
         if (candidate.embedding_id > 0
             && output_candidate_embedding_ids.count (candidate.embedding_id) != 0
@@ -2169,7 +2169,7 @@ internal::ReplayIngress::ProcessTextAt (Cortext &cortext,
   s.modality = "text";
   s.mimetype = "text/plain";
 
-  operations::retrieval_debug::ScopedCapture retrieval_debug_capture (
+  operations::retrieval_trace::ScopedCapture retrieval_trace_capture (
       hydrate_context);
   auto out = cortext.impl_->processor->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();

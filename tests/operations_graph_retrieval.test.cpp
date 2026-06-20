@@ -1,5 +1,5 @@
 #include "test_helpers.hpp"
-#include "../src/operations/retrieval_debug_state.hpp"
+#include "../src/operations/retrieval_trace_state.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -87,7 +87,7 @@ TEST_CASE ("Graph retrieval returns nearest retained memory",
 
   const auto out = processor.Process (MakeSignal (UnitVec (0), 2000));
   const auto selected
-      = operations::retrieval_debug::GetLastSelectedEmbeddingOrder ();
+      = operations::retrieval_trace::GetLastSelectedEmbeddingOrder ();
   REQUIRE_FALSE (out.candidate_memory_ids.empty ());
   REQUIRE_FALSE (selected.empty ());
   REQUIRE (selected.front () == 100);

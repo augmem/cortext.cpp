@@ -106,8 +106,8 @@ writes are excluded by timestamp, and working-memory overlap filters prevent the
 retrieval result from echoing the active memory tail. Association edges are used
 as graph evidence; they do not bypass final scoring or output caps.
 
-The retrieval debug path records a ranking ledger for selected and rejected
-candidates. The debug schema reports the active scalar components that still
+The retrieval trace path records a ranking ledger for selected and rejected
+candidates. The trace schema reports the active scalar components that still
 exist in the implementation: relevance, processor score, predictive bonus,
 pre-activation, durable-source boost, temporal/evidence annotations, and the
 ACT-R-inspired activation ledger. Deleted label-graph and fact-layer fields are

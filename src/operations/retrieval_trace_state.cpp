@@ -1,6 +1,6 @@
-#include "retrieval_debug_state.hpp"
+#include "retrieval_trace_state.hpp"
 
-namespace cortext::operations::retrieval_debug
+namespace cortext::operations::retrieval_trace
 {
 
 namespace
@@ -122,4 +122,4 @@ ScopedCapture::~ScopedCapture ()
   g_capture_enabled = previous_;
 }
 
-} // namespace cortext::operations::retrieval_debug
+} // namespace cortext::operations::retrieval_trace

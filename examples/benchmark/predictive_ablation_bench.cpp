@@ -1,4 +1,4 @@
-#include "../../src/operations/retrieval_debug_state.hpp"
+#include "../../src/operations/retrieval_trace_state.hpp"
 
 #include <cortext/operations/predictive.hpp>
 #include <cortext/operations/graph_retrieval.hpp>
@@ -232,14 +232,14 @@ RunPredictiveRankingStudy ()
   cfg.encoder = &GetBenchEncoder ();
 
   auto run = [&] {
-    cortext::operations::retrieval_debug::ClearLastRankedCandidates ();
+    cortext::operations::retrieval_trace::ClearLastRankedCandidates ();
     auto ops = std::make_unique<cortext::DynamicOperationSet> (
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<cortext::operations::GraphAugmentedRetrieveCandidates> ());
     cortext::SignalProcessor processor (cfg, store, std::move (ops));
     processor.Process (MakeSignal (query, 10));
     processor.Flush ();
-    return cortext::operations::retrieval_debug::GetLastRankedCandidates ();
+    return cortext::operations::retrieval_trace::GetLastRankedCandidates ();
   };
 
   long long top_on = 0;
