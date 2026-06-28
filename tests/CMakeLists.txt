@@ -101,7 +101,7 @@ endif()
 
 # AIST encoder integration needs the model under models/ and the default
 # tri-modal build contract.
-if(EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF
+if((CORTEXT_FETCH_AIST_MODEL OR EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
    AND CORTEXT_ENABLE_AUDIO
    AND CORTEXT_ENABLE_IMAGE)
   target_sources(cortext_tests PRIVATE

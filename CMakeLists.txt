@@ -39,7 +39,11 @@ option(CORTEXT_FETCH_GGML
        "Fetch and build bundled ggml when CORTEXT_GGML_SOURCE_DIR is unset" ON)
 option(CORTEXT_USE_SYSTEM_GGML
        "Use preinstalled ggml headers/libraries instead of bundled ggml" OFF)
+option(CORTEXT_FETCH_AIST_MODEL
+       "Download the required AIST GGUF runtime model during the default build" ON)
 option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
+option(CORTEXT_OPENTELEMETRY_EXPORTERS
+       "Build optional OpenTelemetry exporter dependencies" OFF)
 set(CORTEXT_GGML_SOURCE_DIR "" CACHE PATH
     "Optional local ggml checkout")
 set(CORTEXT_GGML_GIT_REPOSITORY "https://github.com/ggml-org/ggml.git"
@@ -54,6 +58,11 @@ option(CORTEXT_GGML_OPENMP
        "Enable OpenMP in the bundled ggml backend" ${CORTEXT_GGML_OPENMP_DEFAULT})
 set(CORTEXT_WASM_PRELOAD_MODELS_DIR "" CACHE PATH
     "Optional model directory to embed into the browser WASM bundle at /models")
+set(CORTEXT_MODELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models" CACHE PATH
+    "Directory where Cortext runtime model assets are stored")
+set(CORTEXT_AIST_MODEL_QUANT "q8_0" CACHE STRING
+    "AIST GGUF quantization to download by default: q8_0, q5_1, or all")
+set_property(CACHE CORTEXT_AIST_MODEL_QUANT PROPERTY STRINGS q8_0 q5_1 all)
 
 if(DEFINED CORTEXT_DISABLE_AUDIO AND CORTEXT_DISABLE_AUDIO)
   set(CORTEXT_ENABLE_AUDIO OFF CACHE BOOL
@@ -98,6 +107,23 @@ if(BUILD_WASM AND NOT EMSCRIPTEN)
 endif()
 
 include(FetchContent)
+
+if(NOT CORTEXT_AIST_MODEL_QUANT MATCHES "^(q8_0|q5_1|all)$")
+  message(FATAL_ERROR
+    "CORTEXT_AIST_MODEL_QUANT must be one of: q8_0, q5_1, all")
+endif()
+
+if(CORTEXT_FETCH_AIST_MODEL)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_custom_target(cortext_aist_model ALL
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/download_aist_model.py"
+            --models-dir "${CORTEXT_MODELS_DIR}"
+            --quant "${CORTEXT_AIST_MODEL_QUANT}"
+    COMMENT "Ensuring Cortext AIST GGUF model is present"
+    VERBATIM
+  )
+endif()
 
 # Temporarily disable third-party tests while configuring dependencies.
 set(_cortext_saved_dependency_build_testing "${BUILD_TESTING}")
@@ -145,11 +171,21 @@ if(NOT EMSCRIPTEN AND NOT CORTEXT_DISABLE_OPENTELEMETRY AND NOT CORTEXT_TARGET_I
   set(_cortext_saved_build_testing "${BUILD_TESTING}")
   set(BUILD_TESTING OFF CACHE BOOL "Disable tests while configuring deps" FORCE)
 
-  # Keep the dependency lightweight (API only is linked, but the upstream build
-  # still supports optional components).
+  # Keep the default dependency lightweight: Cortext links only the OTel API.
+  # Exporter SDK plumbing belongs to embedding applications and is opt-in.
+  if(CORTEXT_OPENTELEMETRY_EXPORTERS)
+    set(WITH_API_ONLY OFF CACHE BOOL "Build OpenTelemetry SDK/exporters" FORCE)
+  else()
+    set(WITH_API_ONLY ON CACHE BOOL "Build only the OpenTelemetry API" FORCE)
+  endif()
+  set(WITH_BENCHMARK OFF CACHE BOOL "Disable OTel benchmarks" FORCE)
+  set(WITH_FUNC_TESTS OFF CACHE BOOL "Disable OTel functional tests" FORCE)
   set(WITH_EXAMPLES OFF CACHE BOOL "Disable OTel examples" FORCE)
-  set(WITH_OTLP_FILE ON CACHE BOOL "Enable OTLP file exporters" FORCE)
-  set(WITH_OTLP_GRPC ON CACHE BOOL "Enable OTLP gRPC exporters" FORCE)
+  set(WITH_OTLP_FILE ${CORTEXT_OPENTELEMETRY_EXPORTERS}
+      CACHE BOOL "Enable OTLP file exporters" FORCE)
+  set(WITH_OTLP_GRPC ${CORTEXT_OPENTELEMETRY_EXPORTERS}
+      CACHE BOOL "Enable OTLP gRPC exporters" FORCE)
+  set(WITH_OTLP_HTTP OFF CACHE BOOL "Disable OTLP HTTP exporters" FORCE)
   set(WITH_PROMETHEUS OFF CACHE BOOL "Disable Prometheus exporter" FORCE)
   set(WITH_JAEGER OFF CACHE BOOL "Disable Jaeger exporter" FORCE)
   set(WITH_ZIPKIN OFF CACHE BOOL "Disable Zipkin exporter" FORCE)
@@ -239,6 +275,10 @@ add_library(cortext
     # Embedding-model pin (precomputed vectors hard-fail on encoder mismatch)
     src/models/embedding_model_pin.cpp
 )
+
+if(TARGET cortext_aist_model)
+  add_dependencies(cortext cortext_aist_model)
+endif()
 
 function(cortext_resolve_ggml_source_dir input_dir output_dir)
   if(EXISTS "${input_dir}/include/ggml.h"
