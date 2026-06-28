@@ -74,7 +74,11 @@ ComputeWriteGate::Execute (OperationContext &context,
   const double tau_refrac = core::WriteRefractoryTau (config.stability);
   const double k_refrac = core::WriteRefractoryK (config.stability);
   const double dt_write
-      = static_cast<double> (signal.timestamp - acc.last_write_ts) / 1000.0;
+      = std::max (
+          0.0,
+          (static_cast<double> (signal.timestamp)
+           - static_cast<double> (acc.last_write_ts))
+              / 1000.0);
 
   double M_write_refrac = 1.0;
   if (acc.last_write_ts > 0)

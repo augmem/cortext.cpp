@@ -7,6 +7,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <deque>
+#include <unordered_map>
 #include <vector>
 
 namespace cortext::operations
@@ -58,6 +59,19 @@ ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) c
 
   const int window = static_cast<int> (core::NCtx (cfg.stability));
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
+  const auto &retrieved_records = context.GetRetrievedMemoryCandidates ();
+  std::unordered_map<long long, const Eigen::VectorXf *> retrieved_by_memory;
+  if (!retrieved_records.empty ())
+    {
+      retrieved_by_memory.reserve (retrieved_records.size ());
+      for (const auto &candidate : retrieved_records)
+        {
+          if (candidate.memory_id > 0 && candidate.embedding.size () > 0)
+            {
+              retrieved_by_memory[candidate.memory_id] = &candidate.embedding;
+            }
+        }
+    }
 
   double redundancy_mean = 0.0;
   double weight_novelty_delta = 0.0;
@@ -70,14 +84,30 @@ ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) c
         {
           continue;
         }
-      auto it = retrieved.find (e.embedding_id);
-      if (it == retrieved.end ())
+      const Eigen::VectorXf *retrieved_embedding = nullptr;
+      if (!retrieved_by_memory.empty () && e.memory_id > 0)
+        {
+          auto it = retrieved_by_memory.find (e.memory_id);
+          if (it != retrieved_by_memory.end ())
+            {
+              retrieved_embedding = it->second;
+            }
+        }
+      else
+        {
+          auto it = retrieved.find (e.embedding_id);
+          if (it != retrieved.end ())
+            {
+              retrieved_embedding = &it->second;
+            }
+        }
+      if (!retrieved_embedding)
         {
           continue;
         }
       const double cg = *e.contextual_gain; // may be negative
       const double redundancy = ComputeRedundancyToContext (
-          p_ctx.recent_context_embeddings, it->second, window);
+          p_ctx.recent_context_embeddings, *retrieved_embedding, window);
       const double novelty_reward
           = core::Clamp (constants::kNormalizedMax - redundancy,
                          constants::kNormalizedMin,
@@ -94,8 +124,16 @@ ApplySensitivityFeedback::Execute (OperationContext &context, Transaction &tx) c
 
       // v2: Store computed redundancy in memories for consolidation scoring
       // (Section 9.2: score = T*strength - F*redundancy + S*connectivity + T*stability)
-      tx.Execute ("UPDATE memories SET redundancy = ? WHERE embedding_id = ?",
-                  { redundancy, e.embedding_id });
+      if (e.memory_id > 0)
+        {
+          tx.Execute ("UPDATE memories SET redundancy = ? WHERE memory_id = ?",
+                      { redundancy, e.memory_id });
+        }
+      else
+        {
+          tx.Execute ("UPDATE memories SET redundancy = ? WHERE embedding_id = ?",
+                      { redundancy, e.embedding_id });
+        }
     }
 
   if (event_count > 0)

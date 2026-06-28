@@ -24,7 +24,6 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Python 3.10+ - FFI package metadata is in `bindings/python/pyproject.toml`; experiment and data/model tooling live in `scripts/*.py` and `tools/**/*.py`.
 - Go 1.24 - Go bindings are declared in `bindings/go/go.mod`.
 - JavaScript/TypeScript - Node addon packaging lives in `bindings/javascript/package.json` and native addon source lives in `bindings/javascript/src/addon.cpp`.
-- Objective-C++ - macOS voice chat integration lives in `examples/chat/voice_session.mm`.
 - CMake - Build orchestration lives in `CMakeLists.txt`, `CMakePresets.json`, `tests/CMakeLists.txt`, `examples/**/CMakeLists.txt`, and `cmake/*.cmake`.
 ## Runtime
 - Native host runtime on macOS/Linux is the default build path in `CMakeLists.txt` and `CMakePresets.json`.
@@ -34,21 +33,18 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Lockfile: missing at the repo root and in `bindings/`.
 ## Frameworks
 - CMake 3.16+ - primary native build system in `CMakeLists.txt`; presets require CMake 3.21+ in `CMakePresets.json`.
-- SQLite 3 - primary persistence layer via system `sqlite3` on native builds and vendored `third_party/sqlite` for WASM in `CMakeLists.txt` and `include/cortext/store/sqlite_store.hpp`.
+- SQLite 3 - primary persistence layer built from vendored `third_party/sqlite` sources in `CMakeLists.txt` and `include/cortext/store/sqlite_store.hpp`.
 - Eigen 3.4.0 - numeric/vector math dependency fetched in `CMakeLists.txt`.
 - nlohmann/json v3.12.0 - JSON handling for C API responses, binding helpers, and tests in `CMakeLists.txt` and `src/capi.cpp`.
 - Catch2 v3.5.3 - unit/integration test framework fetched in `tests/CMakeLists.txt`.
 - CTest - test registration and execution live in `CMakeLists.txt` and `tests/CMakeLists.txt`.
-- pkg-config - required to discover system SQLite on native builds in `CMakeLists.txt`.
 - Emscripten - optional WASM toolchain in `cmake/EmscriptenToolchain.cmake`.
 ## Key Dependencies
-- `opentelemetry-cpp` v1.24.0 - tracing/metrics/logging API dependency fetched in `CMakeLists.txt` and used in `src/telemetry/telemetry.cpp`.
-- `llama.cpp` system library - optional GGUF embedding backend for AIST in `CMakeLists.txt`, `src/models/aist_gguf_encoder.cpp`, and `src/models/llama_cpp_support.hpp`.
-- `sherpa-onnx` - offline ASR/TTS integration in `CMakeLists.txt`, `src/audio/sherpa_onnx.cpp`, and `include/cortext/audio/sherpa_onnx.hpp`.
+- `opentelemetry-cpp` v1.24.0 - opt-out tracing/metrics/logging API dependency fetched in `CMakeLists.txt` and used in `src/telemetry/telemetry.cpp`.
+- `ggml` - required AIST GGUF kernel backend for audio/image-capable native builds in `CMakeLists.txt`, `src/models/aist_gguf_encoder.cpp`, and `src/models/ggml_support.hpp`.
 - `sqlite-vec` - embedded vector index for 256-dim embeddings in `CMakeLists.txt`, `src/store/schema.cpp`, and `src/store/extension_loader.cpp`.
 - `sqlite-objstore` - blob/object payload storage in `CMakeLists.txt`, `src/store/schema.cpp`, `src/store/extension_loader.cpp`, and `src/operations/memory_storage.cpp`.
 - Node.js headers / N-API v8 - optional Node addon build path in `CMakeLists.txt` and `bindings/javascript/src/addon.cpp`.
-- Desktop UI stack for chat example:
 ## Configuration
 - Build toggles are controlled through CMake options in `CMakeLists.txt` and presets in `CMakePresets.json`.
 - Runtime model discovery is driven by the `models_dir` argument on `cortext::Cortext::Create()` in `include/cortext/cortext.hpp` and by encoder/backend resolution in `src/encoder/text_encoder_factory.hpp`.
@@ -61,12 +57,9 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 ## Model and Runtime Assets
 - AIST GGUF release model in `models/AIST-87M-GGUF/`
 - Optional fallback/demo embedding assets in `models/mdbr-leaf-ir/`
-- sherpa-onnx ASR/TTS assets in `models/sherpa-onnx/`
 - Preferred text encoder resolution is implemented in `src/encoder/text_encoder_factory.hpp`.
 ## Platform Requirements
-- C++20-capable compiler, CMake, pkg-config, and SQLite development headers are required by `README.md`, `CMakeLists.txt`, and `.github/workflows/build.yml`.
-- Native chat example additionally needs `glfw3`, OpenGL, and libcurl per `examples/chat/CMakeLists.txt`.
-- macOS voice/chat extras rely on Cocoa, Foundation, AVFoundation, IOKit, and CoreVideo in `examples/chat/CMakeLists.txt` and `examples/chat/voice_session.mm`.
+- C++20-capable compiler and CMake are required by `README.md`, `CMakeLists.txt`, and `.github/workflows/build.yml`; SQLite is built from `third_party/sqlite`.
 - No hosted deployment target is defined in the repo.
 - The shipping artifact is a native shared/static library plus optional examples/bindings built locally from `CMakeLists.txt`.
 - CI only verifies Linux native build/test on GitHub Actions in `.github/workflows/build.yml`.
@@ -93,14 +86,14 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - No repo-level formatter config was detected. `.clang-format`, `.clang-tidy`, and `.editorconfig` are not present at the repository root.
 - The dominant library style in `src/` and `include/` uses 2-space indentation, opening braces on the next line, and spaces before parentheses: see `src/store.cpp`, `src/cortext.cpp`, `src/operations/focus.cpp`, and `include/cortext/cortext.hpp`.
 - Tests in `tests/operations_focus.test.cpp`, `tests/store.test.cpp`, and `tests/integration_consolidation.test.cpp` generally follow the same Allman-style formatting as the library.
-- Some example and app-facing code uses a different local dialect with tighter spacing and same-line braces. Preserve the local file style when editing `examples/topical_chat_analysis/main.cpp` and `tests/chat_chunk_diagnostics.test.cpp` instead of normalizing them to the core style.
+- Some example and app-facing code uses a different local dialect with tighter spacing and same-line braces. Preserve the local file style when editing `examples/topical_chat_analysis/main.cpp` instead of normalizing it to the core style.
 - Formatting is enforced mostly by review and by matching nearby code, not by a checked-in formatter.
 - Compiler warnings are the practical style gate. `CMakeLists.txt` enables `-Wall -Wextra -Wpedantic` for non-MSVC builds and `/W4` for MSVC.
 - `CORTEXT_WARNINGS_AS_ERRORS` defaults to `ON` in `CMakeLists.txt`, so library changes should be written as warning-clean by default.
 - Sanitizers are opt-in quality checks in `CMakeLists.txt`: `CORTEXT_ENABLE_ASAN`, `CORTEXT_ENABLE_UBSAN`, and `CORTEXT_ENABLE_MSAN`.
 ## Import Organization
 - Public headers are included with the installed-style prefix, for example `<cortext/processor.hpp>`, `<cortext/store/sqlite_store.hpp>`, and `<cortext/operations/focus.hpp>`.
-- Internal-only test coverage sometimes reaches into non-public code with relative includes when there is no public seam. Examples include `tests/chat_chunk_diagnostics.test.cpp` including `../examples/chat/chunk_diagnostics.hpp`.
+- Internal-only test coverage sometimes reaches into non-public code with relative includes when there is no public seam.
 - There are no alias macros or umbrella headers acting as barrel files. Include the exact header you need.
 ## Error Handling
 - Throw typed or standard exceptions for hard failures in low-level components. `src/store.cpp` throws `StoreError` on SQLite prepare/open failures.
@@ -144,7 +137,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Location: `include/cortext/cortext.hpp`, `include/cortext/capi.h`, `src/capi.cpp`
 - Contains: `cortext::Cortext`, the `Context` DTO, config structs, C ABI wrappers, JSON serialization helpers.
 - Depends on: `SignalProcessor`, encoder factory, store implementation.
-- Used by: `examples/topical_chat_analysis/main.cpp`, `examples/chat/main.cpp`, `bindings/python/cortext/__init__.py`, `bindings/go/cortext.go`, `bindings/javascript/src/addon.cpp`, tests such as `tests/cortext.test.cpp`.
+- Used by: `examples/topical_chat_analysis/main.cpp`, `bindings/python/cortext/__init__.py`, `bindings/go/cortext.go`, `bindings/javascript/src/addon.cpp`, tests such as `tests/cortext.test.cpp`.
 - Purpose: Build the runtime graph and choose local model backends.
 - Location: `src/cortext.cpp`, `src/encoder/text_encoder_factory.hpp`
 - Contains: `Cortext::Impl`, operation-pipeline assembly, text encoder selection, context hydration.
@@ -165,14 +158,14 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Contains: `Store`, `Transaction`, `SQLiteStore`, schema migrations, sqlite extension loading, fact queries/helpers.
 - Depends on: SQLite C API, bundled sqlite extensions, telemetry.
 - Used by: `SignalProcessor`, `Cortext` hydration, store-focused tests such as `tests/store.test.cpp` and `tests/migration_core.test.cpp`.
-- Purpose: Encoders and local audio adapters.
-- Location: `include/cortext/encoder/*.hpp`, `include/cortext/models/*.hpp`, `include/cortext/audio/*.hpp`, `src/encoder/*.hpp`, `src/models/*.cpp`, and `src/audio/*.cpp`
-- Contains: `Encoder`, AIST GGUF embedding support, sherpa-onnx audio integration, and local model pinning.
-- Depends on: model assets under `models/`, third-party runtimes configured in `CMakeLists.txt`.
+- Purpose: Encoders and local model adapters.
+- Location: `include/cortext/encoder/*.hpp`, `include/cortext/models/*.hpp`, `src/encoder/*.hpp`, and `src/models/*.cpp`
+- Contains: `Encoder`, AIST GGUF embedding support, and local model pinning.
+- Depends on: model assets under `models/`.
 - Used by: the composition layer in `src/cortext.cpp` and targeted AIST/model-pin tests.
 - Purpose: Optional binaries for manual use, experiments, telemetry smoke tests, and research sweeps.
 - Location: `examples/`, `tools/`, `scripts/`
-- Contains: chat UI, benchmark programs, topical-chat analysis, sqlite telemetry smoke test, offline label/text tools, Python/bash experiment harnesses.
+- Contains: benchmark programs, topical-chat analysis, sqlite telemetry smoke test, offline label/text tools, Python/bash experiment harnesses.
 - Depends on: `cortext::cortext`, and in several cases private headers under `src/`.
 - Used by: local development and experiment workflows, not by the core library.
 ## Data Flow
@@ -208,9 +201,9 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Location: `tests/CMakeLists.txt`
 - Triggers: `cortext_tests` executable and `ctest`.
 - Responsibilities: Build a single Catch2 binary that exercises both public APIs and internal/private subsystems.
-- Location: `examples/chat/main.cpp`, `examples/topical_chat_analysis/main.cpp`, `examples/otel_sqlite_smoketest/main.cpp`, `examples/benchmark/*.cpp`
+- Location: `examples/topical_chat_analysis/main.cpp`, `examples/otel_sqlite_smoketest/main.cpp`, `examples/benchmark/*.cpp`
 - Triggers: Optional `CORTEXT_BUILD_EXAMPLES=ON` builds.
-- Responsibilities: Manual UI, telemetry analysis, smoke tests, and research benchmarking.
+- Responsibilities: Telemetry analysis, smoke tests, and research benchmarking.
 ## Error Handling
 - Store and schema code throw `StoreError`-derived exceptions from `include/cortext/store/store.hpp` and log failures in `src/store.cpp` / `src/store/schema.cpp`.
 - `src/cortext.cpp` and `src/signal_processor.cpp` catch selected failures around hydration/state restore and log warnings through telemetry instead of crashing the caller.
@@ -225,21 +218,6 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 
 No project skills found. Add skills to any of: `.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, or `.github/skills/` with a `SKILL.md` index file.
 <!-- GSD:skills-end -->
-
-<!-- GSD:workflow-start source:GSD defaults -->
-## GSD Workflow Enforcement
-
-Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
-
-Use these entry points:
-- `/gsd-quick` for small fixes, doc updates, and ad-hoc tasks
-- `/gsd-debug` for investigation and bug fixing
-- `/gsd-execute-phase` for planned phase work
-
-Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
-<!-- GSD:workflow-end -->
-
-
 
 <!-- GSD:profile-start -->
 ## Developer Profile

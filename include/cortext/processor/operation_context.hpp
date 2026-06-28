@@ -29,17 +29,19 @@ class ObjectTransaction;
 /// graph construction.
 struct ClusterInfo
 {
-  int cluster_id;
+  int cluster_id = 0;
+  std::vector<long long> memory_ids;
   std::vector<long long> embedding_ids;
   std::vector<float> centroid;
-  double avg_score;
+  double avg_score = 0.0;
 };
 
 /// @brief Represents a candidate memory for consolidation.
 struct ConsolidationCandidate
 {
-  long long embedding_id;
-  double score;
+  long long memory_id = 0;
+  long long embedding_id = 0;
+  double score = 0.0;
   Eigen::VectorXf embedding;
 };
 
@@ -60,6 +62,14 @@ public:
     std::optional<double>
         contextual_gain; // Cosine similarity to input; std::nullopt if unknown
     long long memory_id = 0;
+  };
+
+  struct RetrievedMemoryCandidate
+  {
+    long long memory_id = 0;
+    long long embedding_id = 0;
+    Eigen::VectorXf embedding;
+    double score = 0.0;
   };
 
   /// @brief Constructs an OperationContext.
@@ -180,6 +190,17 @@ public:
   GetRetrievedMemoryEmbeddings () const
   {
     return retrieved_memory_embeddings_;
+  }
+  void
+  SetRetrievedMemoryCandidates (
+      std::vector<RetrievedMemoryCandidate> candidates)
+  {
+    retrieved_memory_candidates_ = std::move (candidates);
+  }
+  const std::vector<RetrievedMemoryCandidate> &
+  GetRetrievedMemoryCandidates () const
+  {
+    return retrieved_memory_candidates_;
   }
 
   // Track the candidate selected by the interrupt gate (if any).
@@ -465,6 +486,16 @@ public:
   GetConsolidationShouldStart () const
   {
     return consolidation_should_start_;
+  }
+  void
+  SetConsolidationPersisted (bool v)
+  {
+    consolidation_persisted_ = v;
+  }
+  bool
+  GetConsolidationPersisted () const
+  {
+    return consolidation_persisted_;
   }
   // Diagnostics for Algorithm 27 (for testing/telemetry)
   void
@@ -1149,6 +1180,7 @@ private:
   std::vector<MemoryUsageEvent> memory_usage_events_;
   // Retrieved memory embeddings attached to this signal
   std::unordered_map<long long, Eigen::VectorXf> retrieved_memory_embeddings_;
+  std::vector<RetrievedMemoryCandidate> retrieved_memory_candidates_;
   // Selected candidate ID from interrupt gate (if any)
   std::optional<long long> selected_candidate_id_;
 
@@ -1197,6 +1229,7 @@ private:
   int tokens_in_flight_ = 0;
   int retrieval_queue_depth_ = 0;
   bool consolidation_should_start_ = false;
+  bool consolidation_persisted_ = false;
 
   // Streaming Pacing fields (Section 10.4)
   bool should_check_retrieval_ = true;

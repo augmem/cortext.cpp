@@ -26,6 +26,10 @@ class SQLiteStoreQueryInterrupter
 public:
   static bool Interrupt (SQLiteStore &store);
 };
+
+#if defined(CORTEXT_TESTING)
+class SQLiteStoreStatementCacheInspector;
+#endif
 }
 
 /// @brief Configuration options for SQLite connection.
@@ -243,6 +247,9 @@ private:
 
   friend class SQLiteTransaction;
   friend class internal::SQLiteStoreQueryInterrupter;
+#if defined(CORTEXT_TESTING)
+  friend class internal::SQLiteStoreStatementCacheInspector;
+#endif
 };
 
 } // namespace cortext

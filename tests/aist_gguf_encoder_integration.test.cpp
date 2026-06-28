@@ -75,6 +75,8 @@ TEST_CASE ("AIST GGUF executes native text image and audio kernels",
   cortext::AistGgufEncoder encoder (config);
   CHECK (encoder.IsLoaded ());
   REQUIRE (encoder.IsRuntimeAvailable ());
+  REQUIRE (encoder.UsesKernelOps ());
+  CHECK (encoder.KernelOpsGranularity () != "none");
 
   std::vector<float> text_embedding;
   encoder.EncodeText ("Jared has a huge in-ground pool.", text_embedding);

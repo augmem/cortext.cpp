@@ -136,6 +136,71 @@ SourceBlobsDisabled ()
   return EnvFlag ("CORTEXT_DISABLE_SOURCE_BLOBS");
 }
 
+#if !defined(CORTEXT_DISABLE_IMAGE)
+std::string
+RawImageMime (int width, int height, int channels)
+{
+  return "image/raw;width=" + std::to_string (width)
+         + ";height=" + std::to_string (height)
+         + ";channels=" + std::to_string (channels);
+}
+#endif
+
+#if !defined(CORTEXT_DISABLE_AUDIO) || !defined(CORTEXT_DISABLE_IMAGE)
+void
+ValidateMedia (const Cortext::Media &media)
+{
+  if (media.size == 0)
+    {
+      return;
+    }
+  if (!media.data)
+    {
+      throw std::invalid_argument (
+          "media.data must not be NULL when media.size is non-zero");
+    }
+  if (media.mimetype.empty ())
+    {
+      throw std::invalid_argument (
+          "media.mimetype must not be empty when media data is provided");
+    }
+}
+
+void
+ApplyStoredMedia (Signal &signal, const Cortext::Media &media)
+{
+  ValidateMedia (media);
+  if (media.size == 0)
+    {
+      return;
+    }
+
+  signal.payload = std::vector<unsigned char> (media.data,
+                                               media.data + media.size);
+  signal.mimetype = media.mimetype;
+}
+#endif
+
+#if defined(CORTEXT_DISABLE_AUDIO)
+[[noreturn]] void
+ThrowAudioSupportDisabled ()
+{
+  throw std::runtime_error (
+      "Cortext audio support was disabled at build time; configure with "
+      "CORTEXT_ENABLE_AUDIO=ON.");
+}
+#endif
+
+#if defined(CORTEXT_DISABLE_IMAGE)
+[[noreturn]] void
+ThrowImageSupportDisabled ()
+{
+  throw std::runtime_error (
+      "Cortext image support was disabled at build time; configure with "
+      "CORTEXT_ENABLE_IMAGE=ON.");
+}
+#endif
+
 std::string
 RowString (const std::map<std::string, std::any> &row, const char *key)
 {
@@ -493,16 +558,7 @@ LoadSoftAnchors (
             auto it = row.find (k);
             if (it == row.end () || !it->second.has_value ())
               return def;
-            if (it->second.type () == typeid (double))
-              return std::any_cast<double> (it->second);
-            if (it->second.type () == typeid (float))
-              return static_cast<double> (std::any_cast<float> (it->second));
-            if (it->second.type () == typeid (int))
-              return static_cast<double> (std::any_cast<int> (it->second));
-            if (it->second.type () == typeid (long long))
-              return static_cast<double> (
-                  std::any_cast<long long> (it->second));
-            return def;
+            return store::AnyToDouble (it->second, def);
           };
 
           Cortext::Context::Memory::SoftAnchor anchor;
@@ -592,15 +648,7 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             auto it = row.find (k);
             if (it == row.end () || !it->second.has_value ())
               return def;
-            if (it->second.type () == typeid (double))
-              return std::any_cast<double> (it->second);
-            if (it->second.type () == typeid (float))
-              return static_cast<double> (std::any_cast<float> (it->second));
-            if (it->second.type () == typeid (int))
-              return static_cast<double> (std::any_cast<int> (it->second));
-            if (it->second.type () == typeid (long long))
-              return static_cast<double> (std::any_cast<long long> (it->second));
-            return def;
+            return store::AnyToDouble (it->second, def);
           };
 
           [[maybe_unused]] auto get_blob = [&row] (const char *k) {
@@ -965,15 +1013,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
             auto it = row.find (k);
             if (it == row.end () || !it->second.has_value ())
               return def;
-            if (it->second.type () == typeid (double))
-              return std::any_cast<double> (it->second);
-            if (it->second.type () == typeid (float))
-              return static_cast<double> (std::any_cast<float> (it->second));
-            if (it->second.type () == typeid (int))
-              return static_cast<double> (std::any_cast<int> (it->second));
-            if (it->second.type () == typeid (long long))
-              return static_cast<double> (std::any_cast<long long> (it->second));
-            return def;
+            return store::AnyToDouble (it->second, def);
           };
 
           auto get_blob = [&row] (const char *k) {
@@ -1465,6 +1505,10 @@ struct Cortext::Impl
                   bool hydrate_retrieved_memory = true)
   {
     Cortext::Context result;
+    if (query_embedding)
+      {
+        result.embedding = ToStdVector (*query_embedding);
+      }
     result.should_interrupt = out.interrupt_allowed;
     result.interrupt_aborted = out.interrupt_aborted;
     result.at_boundary = out.at_boundary;
@@ -1491,7 +1535,7 @@ struct Cortext::Impl
     result.output.threshold = out.threshold_T_dynamic;
     result.output.decision = out.write_decision;
     result.output.effective_focus = out.effective_focus;
-    result.output.coherence = cfg.focus; // Placeholder - coherence not in Output yet
+    result.output.coherence = out.coherence;
     result.output.emotion_intensity = out.emotion_intensity;
     result.output.valence = out.valence;
     result.output.arousal = out.arousal;
@@ -1541,30 +1585,38 @@ struct Cortext::Impl
         return result;
       }
 
-    // Hydrate retrieved memory (long-term retrieval results)
-    auto lookup_memory_id = [&](long long embedding_id) -> long long {
-      long long memory_id = 0;
+    auto resolve_candidate_memory_id = [&](long long candidate_id) -> long long {
+      if (candidate_id <= 0)
+        {
+          return 0;
+        }
+      auto memory_rows = store->Execute (
+          "SELECT memory_id FROM memories WHERE memory_id = ?",
+          { candidate_id });
+      if (!memory_rows.empty () && memory_rows[0].count ("memory_id") == 1)
+        {
+          return cortext::store::AnyToLongLong (
+                     memory_rows[0].at ("memory_id"))
+              .value_or (0);
+        }
       auto rows = store->Execute (
           "SELECT memory_id FROM memories WHERE embedding_id = ?",
-          { embedding_id });
+          { candidate_id });
       if (!rows.empty () && rows[0].count ("memory_id") == 1)
         {
-          memory_id = cortext::store::AnyToLongLong (rows[0].at ("memory_id"))
-                          .value_or (0);
+          return cortext::store::AnyToLongLong (rows[0].at ("memory_id"))
+              .value_or (0);
         }
-      if (memory_id == 0)
+      auto sig_rows = store->Execute (
+          "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
+          { candidate_id });
+      if (!sig_rows.empty () && sig_rows[0].count ("memory_id") == 1)
         {
-          auto sig_rows = store->Execute (
-              "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
-              { embedding_id });
-          if (!sig_rows.empty () && sig_rows[0].count ("memory_id") == 1)
-            {
-              memory_id = cortext::store::AnyToLongLong (
-                              sig_rows[0].at ("memory_id"))
-                              .value_or (0);
-            }
+          return cortext::store::AnyToLongLong (
+                     sig_rows[0].at ("memory_id"))
+              .value_or (0);
         }
-      return memory_id;
+      return 0;
     };
 
     const int max_expanded_display_memories_per_node = std::max (
@@ -1606,42 +1658,41 @@ struct Cortext::Impl
       return true;
     };
 
-    std::vector<long long> ordered_candidate_embedding_ids;
-    ordered_candidate_embedding_ids.reserve (out.candidate_memory_ids.size ());
-    std::unordered_set<long long> seen_ordered_embedding_ids;
-    seen_ordered_embedding_ids.reserve (out.candidate_memory_ids.size ());
-    std::unordered_set<long long> output_candidate_embedding_ids (
+    std::vector<long long> ordered_candidate_memory_ids;
+    ordered_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
+    std::unordered_set<long long> seen_ordered_memory_ids;
+    seen_ordered_memory_ids.reserve (out.candidate_memory_ids.size ());
+    std::unordered_set<long long> output_candidate_memory_ids (
         out.candidate_memory_ids.begin (), out.candidate_memory_ids.end ());
     for (const auto &candidate :
          operations::retrieval_trace::GetLastRankedCandidates ())
       {
-        if (candidate.embedding_id > 0
-            && output_candidate_embedding_ids.count (candidate.embedding_id) != 0
-            && seen_ordered_embedding_ids.insert (candidate.embedding_id).second)
+        if (candidate.memory_id > 0
+            && output_candidate_memory_ids.count (candidate.memory_id) != 0
+            && seen_ordered_memory_ids.insert (candidate.memory_id).second)
           {
-            ordered_candidate_embedding_ids.push_back (candidate.embedding_id);
+            ordered_candidate_memory_ids.push_back (candidate.memory_id);
           }
       }
-    for (const long long embedding_id : out.candidate_memory_ids)
+    for (const long long candidate_id : out.candidate_memory_ids)
       {
-        if (seen_ordered_embedding_ids.insert (embedding_id).second)
+        const long long memory_id = resolve_candidate_memory_id (candidate_id);
+        if (memory_id > 0 && seen_ordered_memory_ids.insert (memory_id).second)
           {
-            ordered_candidate_embedding_ids.push_back (embedding_id);
+            ordered_candidate_memory_ids.push_back (memory_id);
           }
       }
-
-    for (const long long embedding_id : ordered_candidate_embedding_ids)
+    for (const long long memory_id : ordered_candidate_memory_ids)
       {
-        const long long memory_id = lookup_memory_id (embedding_id);
         if (memory_id <= 0
             || !seen_candidate_memory_ids.insert (memory_id).second)
           {
             continue;
           }
-	        Cortext::Context::Memory m;
-	        m.id = memory_id;
-	        HydrateMemory (store.get (), object_store.get (), memory_id, m,
-	                       max_hydrated_soft_anchors);
+        Cortext::Context::Memory m;
+        m.id = memory_id;
+        HydrateMemory (store.get (), object_store.get (), memory_id, m,
+                       max_hydrated_soft_anchors);
         ApplyRetrievalScore (m, ranked_by_memory_id);
         const bool has_content = HasHydratedContent (m);
         const bool prefer_linked_sources
@@ -1657,12 +1708,11 @@ struct Cortext::Impl
           }
 
         int expanded_count = 0;
-	        for (const long long linked_memory_id :
-	             ResolveDisplayMemoryIdsForEmptyRetrieval (store.get (),
-	                                                       memory_id,
-	                                                       query_embedding,
-	                                                       max_linked_hydration_candidates,
-	                                                       linked_hydration_ordering_weights))
+        for (const long long linked_memory_id :
+             ResolveDisplayMemoryIdsForEmptyRetrieval (
+                 store.get (), memory_id, query_embedding,
+                 max_linked_hydration_candidates,
+                 linked_hydration_ordering_weights))
           {
             if (append_hydrated_memory (linked_memory_id, true))
               {
@@ -1682,6 +1732,7 @@ struct Cortext::Impl
               }
           }
       }
+
     return result;
   }
 };
@@ -1941,7 +1992,14 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   if (!impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
-  }
+    }
+#if defined(CORTEXT_DISABLE_AUDIO)
+  (void)pcm;
+  (void)num_samples;
+  (void)source_id;
+  (void)retention;
+  ThrowAudioSupportDisabled ();
+#else
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
@@ -1976,7 +2034,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.payload = std::vector<unsigned char> (byte_len);
   std::memcpy (s.payload->data (), pcm, byte_len);
   s.modality = "audio";
-  s.mimetype = "audio/pcm;format=f32";
+  s.mimetype = MakeAudioMimePcmF32 ();
   s.sample_rate = 16000; // Public audio ingress contract is 16 kHz mono PCM.
   s.num_samples = num_samples;
 
@@ -1998,6 +2056,79 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   result.total_ms = ToMillis (hydrate_end - total_start);
   ApplySignalFilterDecision (result.output, filter_decision);
   return result;
+#endif
+}
+
+Cortext::Context
+Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
+                       const std::string &source_id, const Media &media,
+                       Retention retention)
+{
+  if (!impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
+#if defined(CORTEXT_DISABLE_AUDIO)
+  (void)pcm;
+  (void)num_samples;
+  (void)source_id;
+  (void)media;
+  (void)retention;
+  ThrowAudioSupportDisabled ();
+#else
+  ValidateMedia (media);
+  telemetry::ScopedSpan span ("cortext.api.process_audio");
+  const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision
+      = impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetAttribute ("cortext.signal_filter.modality",
+                         filter_decision.modality);
+      span.SetAttribute ("cortext.signal_filter.reason",
+                         filter_decision.reason);
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
+  std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
+  impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
+
+  const auto process_start = std::chrono::steady_clock::now ();
+  cortext::Signal s;
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
+  s.timestamp = impl_->NowMillis ();
+  s.source_id = source_id;
+  s.force_boundary = ShouldPreserveDurableInput (retention);
+  s.force_write = ShouldPreserveDurableInput (retention);
+  s.retention = retention;
+  s.modality = "audio";
+  ApplyStoredMedia (s, media);
+  s.sample_rate = 16000;
+  s.num_samples = num_samples;
+
+  auto out = impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
+  span.SetAttribute ("cortext.candidate_memory_count",
+                     static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
+  span.SetAttribute ("cortext.used_memory_count",
+                     static_cast<std::int64_t> (out.used_memory_ids.size ()));
+  span.SetStatusOk ();
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
+  hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
+  return result;
+#endif
 }
 
 Cortext::Context
@@ -2008,7 +2139,16 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   if (!impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
-  }
+    }
+#if defined(CORTEXT_DISABLE_IMAGE)
+  (void)data;
+  (void)width;
+  (void)height;
+  (void)channels;
+  (void)source_id;
+  (void)retention;
+  ThrowImageSupportDisabled ();
+#else
   telemetry::ScopedSpan span ("cortext.api.process_image");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
@@ -2041,9 +2181,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.payload = std::vector<unsigned char> (byte_len);
   std::memcpy (s.payload->data (), data, byte_len);
   s.modality = "image";
-  s.mimetype = "image/raw;width=" + std::to_string (width)
-               + ";height=" + std::to_string (height)
-               + ";channels=" + std::to_string (channels);
+  s.mimetype = RawImageMime (width, height, channels);
   s.width = width;
   s.height = height;
   s.channels = channels;
@@ -2066,6 +2204,78 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   result.total_ms = ToMillis (hydrate_end - total_start);
   ApplySignalFilterDecision (result.output, filter_decision);
   return result;
+#endif
+}
+
+Cortext::Context
+Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
+                       int channels, const std::string &source_id,
+                       const Media &media, Retention retention)
+{
+  if (!impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
+#if defined(CORTEXT_DISABLE_IMAGE)
+  (void)data;
+  (void)width;
+  (void)height;
+  (void)channels;
+  (void)source_id;
+  (void)media;
+  (void)retention;
+  ThrowImageSupportDisabled ();
+#else
+  ValidateMedia (media);
+  telemetry::ScopedSpan span ("cortext.api.process_image");
+  const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision
+      = impl_->signal_filter.EvaluateImage (data, width, height, channels);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
+  std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
+  impl_->encoder->EncodeImage (data, width, height, channels, v);
+  encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
+
+  const auto process_start = std::chrono::steady_clock::now ();
+  cortext::Signal s;
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
+  s.timestamp = impl_->NowMillis ();
+  s.source_id = source_id;
+  s.force_boundary = ShouldPreserveDurableInput (retention);
+  s.force_write = ShouldPreserveDurableInput (retention);
+  s.retention = retention;
+  s.modality = "image";
+  ApplyStoredMedia (s, media);
+  s.width = width;
+  s.height = height;
+  s.channels = channels;
+
+  auto out = impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
+  span.SetAttribute ("cortext.candidate_memory_count",
+                     static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
+  span.SetAttribute ("cortext.used_memory_count",
+                     static_cast<std::int64_t> (out.used_memory_ids.size ()));
+  span.SetStatusOk ();
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
+  hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
+  return result;
+#endif
 }
 
 std::vector<float>
@@ -2091,6 +2301,11 @@ Cortext::EmbedAudio (const float *pcm, std::size_t num_samples) const
     {
       throw std::runtime_error ("Cortext not initialized");
     }
+#if defined(CORTEXT_DISABLE_AUDIO)
+  (void)pcm;
+  (void)num_samples;
+  ThrowAudioSupportDisabled ();
+#else
   if (pcm == nullptr)
     {
       throw std::invalid_argument ("pcm must not be NULL");
@@ -2102,6 +2317,7 @@ Cortext::EmbedAudio (const float *pcm, std::size_t num_samples) const
                      static_cast<std::int64_t> (embedding.size ()));
   span.SetStatusOk ();
   return embedding;
+#endif
 }
 
 std::vector<float>
@@ -2112,6 +2328,13 @@ Cortext::EmbedImage (const std::uint8_t *data, int width, int height,
     {
       throw std::runtime_error ("Cortext not initialized");
     }
+#if defined(CORTEXT_DISABLE_IMAGE)
+  (void)data;
+  (void)width;
+  (void)height;
+  (void)channels;
+  ThrowImageSupportDisabled ();
+#else
   if (data == nullptr)
     {
       throw std::invalid_argument ("data must not be NULL");
@@ -2128,6 +2351,7 @@ Cortext::EmbedImage (const std::uint8_t *data, int width, int height,
                      static_cast<std::int64_t> (embedding.size ()));
   span.SetStatusOk ();
   return embedding;
+#endif
 }
 
 Cortext::Context
@@ -2205,6 +2429,14 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
     {
       throw std::runtime_error ("Cortext not initialized");
     }
+#if defined(CORTEXT_DISABLE_AUDIO)
+  (void)pcm;
+  (void)num_samples;
+  (void)source_id;
+  (void)timestamp;
+  (void)retention;
+  ThrowAudioSupportDisabled ();
+#else
   telemetry::ScopedSpan span ("cortext.internal.replay.process_audio_at");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
@@ -2256,6 +2488,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   result.total_ms = ToMillis (hydrate_end - total_start);
   ApplySignalFilterDecision (result.output, filter_decision);
   return result;
+#endif
 }
 
 Cortext::Context
@@ -2270,6 +2503,16 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
     {
       throw std::runtime_error ("Cortext not initialized");
     }
+#if defined(CORTEXT_DISABLE_IMAGE)
+  (void)data;
+  (void)width;
+  (void)height;
+  (void)channels;
+  (void)source_id;
+  (void)timestamp;
+  (void)retention;
+  ThrowImageSupportDisabled ();
+#else
   telemetry::ScopedSpan span ("cortext.internal.replay.process_image_at");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision = cortext.impl_->signal_filter.EvaluateImage (
@@ -2326,6 +2569,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   result.total_ms = ToMillis (hydrate_end - total_start);
   ApplySignalFilterDecision (result.output, filter_decision);
   return result;
+#endif
 }
 
 Cortext::Context

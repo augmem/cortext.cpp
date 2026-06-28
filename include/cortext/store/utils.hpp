@@ -44,4 +44,26 @@ AnyToLongLong (const std::any &v)
   return std::nullopt;
 }
 
+/// @brief Extract double from std::any (handles double, float, int, long long).
+inline std::optional<double>
+AnyToDouble (const std::any &v)
+{
+  if (v.type () == typeid (double))
+    return std::any_cast<double> (v);
+  if (v.type () == typeid (float))
+    return static_cast<double> (std::any_cast<float> (v));
+  if (v.type () == typeid (int))
+    return static_cast<double> (std::any_cast<int> (v));
+  if (v.type () == typeid (long long))
+    return static_cast<double> (std::any_cast<long long> (v));
+  return std::nullopt;
+}
+
+/// @brief Extract double from std::any or return fallback when unsupported.
+inline double
+AnyToDouble (const std::any &v, double fallback)
+{
+  return AnyToDouble (v).value_or (fallback);
+}
+
 } // namespace cortext::store

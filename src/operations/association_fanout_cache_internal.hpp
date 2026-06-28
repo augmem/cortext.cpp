@@ -22,28 +22,6 @@ struct Fingerprint
   long long last_reinforced_sum = 0;
 };
 
-inline double
-AnyToDouble (const std::any &value, double fallback = 0.0)
-{
-  if (value.type () == typeid (double))
-    {
-      return std::any_cast<double> (value);
-    }
-  if (value.type () == typeid (float))
-    {
-      return static_cast<double> (std::any_cast<float> (value));
-    }
-  if (value.type () == typeid (int))
-    {
-      return static_cast<double> (std::any_cast<int> (value));
-    }
-  if (value.type () == typeid (long long))
-    {
-      return static_cast<double> (std::any_cast<long long> (value));
-    }
-  return fallback;
-}
-
 inline Fingerprint
 LoadFingerprint (Store &store)
 {
@@ -96,6 +74,25 @@ Matches (const ProcessorContext::AssociationFanoutCache &cache,
 }
 
 inline void
+SortFanoutEdges (
+    std::vector<ProcessorContext::AssociationFanoutEdge> &edges)
+{
+  std::sort (
+      edges.begin (), edges.end (),
+      [] (const auto &a, const auto &b) {
+    if (a.weight != b.weight)
+      {
+        return a.weight > b.weight;
+      }
+    if (a.last_reinforced != b.last_reinforced)
+      {
+        return a.last_reinforced > b.last_reinforced;
+      }
+    return a.memory_id < b.memory_id;
+  });
+}
+
+inline void
 SortFanoutMap (
     std::unordered_map<long long,
                        std::vector<ProcessorContext::AssociationFanoutEdge>>
@@ -104,19 +101,83 @@ SortFanoutMap (
   for (auto &[memory_id, edges] : edges_by_memory)
     {
       (void)memory_id;
-      std::sort (
-          edges.begin (), edges.end (),
-          [] (const auto &a, const auto &b) {
-        if (a.weight != b.weight)
-          {
-            return a.weight > b.weight;
-          }
-        if (a.last_reinforced != b.last_reinforced)
-          {
-            return a.last_reinforced > b.last_reinforced;
-          }
-        return a.memory_id < b.memory_id;
-      });
+      SortFanoutEdges (edges);
+    }
+}
+
+inline bool
+UpsertFanoutEdge (
+    std::vector<ProcessorContext::AssociationFanoutEdge> &edges,
+    long long memory_id, long long embedding_id, const std::string &edge_type,
+    double weight, long long last_reinforced, double *old_weight,
+    long long *old_last_reinforced)
+{
+  for (auto &edge : edges)
+    {
+      if (edge.memory_id == memory_id && edge.edge_type == edge_type)
+        {
+          if (old_weight)
+            {
+              *old_weight = edge.weight;
+            }
+          if (old_last_reinforced)
+            {
+              *old_last_reinforced = edge.last_reinforced;
+            }
+          edge.embedding_id = embedding_id;
+          edge.weight = weight;
+          edge.last_reinforced = last_reinforced;
+          SortFanoutEdges (edges);
+          return false;
+        }
+    }
+  edges.push_back (
+      { memory_id, embedding_id, edge_type, weight, last_reinforced });
+  SortFanoutEdges (edges);
+  return true;
+}
+
+inline void
+UpsertAssociation (ProcessorContext::AssociationFanoutCache &cache,
+                   long long source_memory_id, long long target_memory_id,
+                   long long source_embedding_id, long long target_embedding_id,
+                   const std::string &edge_type, double weight,
+                   long long last_reinforced)
+{
+  if (!cache.valid || source_memory_id <= 0 || target_memory_id <= 0
+      || source_embedding_id <= 0 || target_embedding_id <= 0)
+    {
+      return;
+    }
+  double old_weight = 0.0;
+  long long old_last_reinforced = 0;
+  auto &out_edges = cache.out_by_source[source_memory_id];
+  const bool inserted = UpsertFanoutEdge (
+      out_edges, target_memory_id, target_embedding_id, edge_type, weight,
+      last_reinforced, &old_weight, &old_last_reinforced);
+
+  auto &in_edges = cache.in_by_target[target_memory_id];
+  (void)UpsertFanoutEdge (in_edges, source_memory_id, source_embedding_id,
+                          edge_type, weight, last_reinforced, nullptr,
+                          nullptr);
+
+  if (inserted)
+    {
+      cache.edge_count += 1;
+      cache.source_sum += source_memory_id;
+      cache.target_sum += target_memory_id;
+      cache.source_max = std::max (cache.source_max, source_memory_id);
+      cache.target_max = std::max (cache.target_max, target_memory_id);
+      cache.weight_sum_micros += static_cast<long long> (
+          std::llround (weight * 1000000.0));
+      cache.last_reinforced_sum += last_reinforced;
+    }
+  else
+    {
+      cache.weight_sum_micros += static_cast<long long> (
+          std::llround (weight * 1000000.0)
+          - std::llround (old_weight * 1000000.0));
+      cache.last_reinforced_sum += last_reinforced - old_last_reinforced;
     }
 }
 
@@ -179,7 +240,8 @@ Ensure (Store *store, ProcessorContext &p_ctx)
           = row.at ("edge_type").type () == typeid (std::string)
                 ? std::any_cast<std::string> (row.at ("edge_type"))
                 : std::string ();
-      const double weight = AnyToDouble (row.at ("weight"), 1.0);
+      const double weight = cortext::store::AnyToDouble (row.at ("weight"),
+                                                        1.0);
       const long long last_reinforced
           = store::AnyToLongLong (row.at ("last_reinforced")).value_or (0);
       const long long source_embedding_id

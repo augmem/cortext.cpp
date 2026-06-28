@@ -104,6 +104,12 @@ Normative note (MUST): total_cost is normalized to [0, 1] to keep gating on the 
 
 Note that total_cost is computed from existing active memories only (k is the current count), so k=0 yields no bootstrap penalty. Capacity pressure activates only when k > C.
 
+When active memory is at capacity, eviction ranks slots by the usual
+dedication/recency eviction score. Exact score ties are deterministic: evict
+the weaker slot first, then the older slot, then the lowest stable slot index.
+This keeps replay and hydration reproducible without changing the
+strength/recency policy.
+
 ### Chunking at Memory Level
 
 Chunking operates on memory embeddings to merge related content from the same source:

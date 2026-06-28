@@ -106,6 +106,12 @@ Make256DEmb (std::initializer_list<std::pair<int, float>> values)
   return Norm (v);
 }
 
+inline std::vector<float>
+ToFloatVec (const Eigen::VectorXf &v)
+{
+  return std::vector<float> (v.data (), v.data () + v.size ());
+}
+
 static Signal
 MakeSignal (const Eigen::VectorXf &emb, uint64_t ts)
 {
@@ -181,6 +187,54 @@ TEST_CASE ("Alg22 boosts predicted-aligned candidates",
         REQUIRE (s2 == Catch::Approx (0.0));
       }
   }
+}
+
+TEST_CASE ("Alg22 structured retrieval boosts shared embedding by memory id",
+           "[operations][predictive]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  const Eigen::VectorXf current = Make256DEmb ({ { 0, 1.0f } });
+  cortext::testing::SeedEmbeddingV2 (*store, 500LL, ToFloatVec (current),
+                                     1);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 500LL, "target",
+                                  "LONG_TERM", 1.0, 1);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 500LL, "sibling",
+                                  "LONG_TERM", 1.0, 1);
+
+  ProcessorContext pctx;
+  pctx.recent_context_embeddings.push_back (current);
+  OperationContext ctx (MakeSignal (current, 123), pctx, cfg, store.get ());
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 500LL, current } });
+  ctx.SetRetrievedMemoryCandidates (
+      std::vector<OperationContext::RetrievedMemoryCandidate>{
+        { 100LL, 500LL, current, 1.0 } });
+
+  auto tx = store->Begin ();
+  ApplyPredictivePreActivation op;
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT memory_id, pre_activation FROM memories "
+      "WHERE memory_id IN (100, 101) ORDER BY memory_id",
+      {});
+  REQUIRE (rows.size () == 2);
+  const double target_pre
+      = std::any_cast<double> (rows[0].at ("pre_activation"));
+  const double sibling_pre
+      = std::any_cast<double> (rows[1].at ("pre_activation"));
+  REQUIRE (target_pre > 0.0);
+  REQUIRE (sibling_pre == Catch::Approx (0.0));
 }
 
 TEST_CASE ("Alg22 respects prediction confidence threshold",

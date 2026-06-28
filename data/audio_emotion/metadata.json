@@ -33,6 +33,13 @@
       "source_count": 192
     }
   },
+  "models_meta": {
+    "bytes": 275931120,
+    "exists": true,
+    "files": 12,
+    "path": "models/AIST-87M-GGUF",
+    "sha256": "ff9493cfd78527c4cb352eb664889c716b139117f25c2264a3bff41d075a7945"
+  },
   "slice": [
     0,
     256
@@ -45,5 +52,5 @@
     "path": "data/ravdess",
     "sha256": "9a33114a3cdc2ae77bfd35d748bf8e793315f4468b784d7d148f85ad8e869a8e"
   },
-  "timestamp": "2026-06-10T06:11:31Z"
+  "timestamp": "2026-06-26T03:45:22Z"
 }

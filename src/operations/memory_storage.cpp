@@ -11,11 +11,18 @@
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace cortext::operations
 {
@@ -127,18 +134,41 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                               : nullptr;
   context.AddOperationTiming ("MemoryStorage.begin_savepoints",
                               ElapsedMillis (savepoint_begin_start));
+  bool savepoint_finished = false;
+  bool object_savepoint_finished = false;
   auto rollback_savepoints = [&] {
-    if (object_savepoint)
+    std::exception_ptr rollback_error;
+    if (object_savepoint && !object_savepoint_finished)
       {
         try
           {
             object_savepoint->Rollback ();
+            object_savepoint_finished = true;
           }
         catch (...)
           {
+            if (!rollback_error)
+              {
+                rollback_error = std::current_exception ();
+              }
           }
       }
-    savepoint->Rollback ();
+    if (!savepoint_finished)
+      {
+        try
+          {
+            savepoint->Rollback ();
+            savepoint_finished = true;
+          }
+        catch (...)
+          {
+            rollback_error = std::current_exception ();
+          }
+      }
+    if (rollback_error)
+      {
+        std::rethrow_exception (rollback_error);
+      }
   };
 
   try
@@ -271,7 +301,6 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                   content_put_ms);
       context.AddOperationTiming ("MemoryStorage.content_blob",
                                   ElapsedMillis (content_start));
-
       // 6. Insert memory embedding (v2: minimal sqlite-vec table)
       const std::string insert_sql = std::string ("INSERT INTO embeddings (")
                                      + store::kEmbeddingsInsertColumns
@@ -367,27 +396,37 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       double signal_id_select_ms = 0.0;
       for (const auto &sig_rec : acc.signals)
         {
-          long long signal_embedding_id = embedding_id;
-          if (sig_rec.embedding.size () > 0)
+          const std::vector<float> signal_embedding
+              = sig_rec.embedding.size () > 0
+                    ? EigenToFloatVec (sig_rec.embedding)
+                    : emb_vec;
+          const auto signal_embedding_start = SteadyClock::now ();
+          savepoint->Execute (insert_sql,
+                              { signal_embedding,
+                                static_cast<long long> (sig_rec.timestamp) });
+          signal_embedding_insert_ms += ElapsedMillis (signal_embedding_start);
+
+          const auto signal_embedding_id_start = SteadyClock::now ();
+          auto signal_embedding_id_rows
+              = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
+          signal_id_select_ms += ElapsedMillis (signal_embedding_id_start);
+          if (signal_embedding_id_rows.empty ()
+              || signal_embedding_id_rows[0].count ("id") == 0)
             {
-              const std::vector<float> sig_vec
-                  = EigenToFloatVec (sig_rec.embedding);
-              const auto signal_embedding_start = SteadyClock::now ();
-              savepoint->Execute (insert_sql,
-                                  { sig_vec,
-                                    static_cast<long long> (sig_rec.timestamp) });
-              signal_embedding_insert_ms
-                  += ElapsedMillis (signal_embedding_start);
-              const auto signal_embedding_id_start = SteadyClock::now ();
-              auto sig_id_rows
-                  = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
-              signal_id_select_ms += ElapsedMillis (signal_embedding_id_start);
-              if (!sig_id_rows.empty () && sig_id_rows[0].count ("id") != 0)
-                {
-                  signal_embedding_id
-                      = AnyToLongLong (sig_id_rows[0].at ("id"))
-                            .value_or (embedding_id);
-                }
+              rollback_savepoints ();
+              telemetry::AddCounter (
+                  "cortext.memory_storage.signal_embedding_error_total", 1);
+              return;
+            }
+          const long long signal_embedding_id
+              = AnyToLongLong (signal_embedding_id_rows[0].at ("id"))
+                    .value_or (0);
+          if (signal_embedding_id <= 0)
+            {
+              rollback_savepoints ();
+              telemetry::AddCounter (
+                  "cortext.memory_storage.signal_embedding_error_total", 1);
+              return;
             }
 
           const auto signal_row_start = SteadyClock::now ();
@@ -442,13 +481,21 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                       ElapsedMillis (reconstruction_start));
         }
 
-      // Commit the savepoint
-      const auto savepoint_commit_start = SteadyClock::now ();
+      // Commit external object content before releasing the DB savepoint. If
+      // DB commit then fails, content-addressed payloads may be orphaned; the
+      // reverse order can leave DB rows pointing at uncommitted object content.
       if (object_savepoint)
         {
+          const auto object_commit_start = SteadyClock::now ();
           object_savepoint->Commit ();
+          object_savepoint_finished = true;
+          object_savepoint.reset ();
+          context.AddOperationTiming ("MemoryStorage.commit_object_savepoint",
+                                      ElapsedMillis (object_commit_start));
         }
+      const auto savepoint_commit_start = SteadyClock::now ();
       savepoint->Commit ();
+      savepoint_finished = true;
       context.AddOperationTiming ("MemoryStorage.commit_savepoints",
                                   ElapsedMillis (savepoint_commit_start));
 
@@ -520,6 +567,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       telemetry::LogError (
           "MemoryStorage failed",
           { telemetry::Attribute::String ("error", e.what ()) });
+      throw;
     }
 }
 

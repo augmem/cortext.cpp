@@ -209,6 +209,36 @@ TEST_CASE ("internal replay ingress preserves media event timestamps",
   REQUIRE (std::any_cast<std::string> (rows[0].at ("modality")) == "audio");
 }
 
+TEST_CASE ("Cortext media overloads validate source media before encoding",
+           "[cortext][media][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_audio_enabled = false;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  std::vector<float> pcm (16000, 0.01f);
+  const std::vector<unsigned char> wav = SampleWavBytes ();
+  const cortext::Cortext::Media missing_mime{ wav.data (), wav.size (), "" };
+
+  REQUIRE_THROWS_AS (
+      ctx->ProcessAudio (pcm.data (), pcm.size (), "stream/source",
+                         missing_mime),
+      std::invalid_argument);
+
+  const std::uint8_t pixel[3] = { 0, 0, 0 };
+  const cortext::Cortext::Media missing_data{ nullptr, wav.size (),
+                                              "image/png" };
+  REQUIRE_THROWS_AS (
+      ctx->ProcessImage (pixel, 1, 1, 3, "stream/source", missing_data),
+      std::invalid_argument);
+}
+
 TEST_CASE ("timestamped replay persists working memory source timestamps",
            "[cortext][replay][working_memory][aist]")
 {
@@ -1082,6 +1112,92 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
     }
 }
 
+TEST_CASE ("Cortext expands maintenance source hydration without used-memory skip",
+           "[cortext][hydration][retrieval]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cortext::testing::ScopedEnvVar disable_query_ordering (
+      "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION", "1");
+
+  constexpr int kEmbeddingDim = 256;
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+
+  constexpr long long kMaintenanceId = 700LL;
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?)",
+      { kMaintenanceId, embedding, 1000LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'cortext/maintenance', 'LONG_TERM', "
+      "'maintenance summary', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000)",
+      { kMaintenanceId, kMaintenanceId });
+
+  cortext::Cortext::Config cfg;
+  const int expected_limit = std::max (
+      1, cortext::core::RetrievalGraphExpandedRagCompactItemLimit (
+             cfg.focus, cfg.stability));
+  REQUIRE (expected_limit >= 2);
+
+  std::vector<long long> linked_ids;
+  for (int i = 0; i < expected_limit + 1; ++i)
+    {
+      const long long memory_id = 800LL + i;
+      const long long ts = 2000LL + i;
+      const std::string source_text
+          = "maintenance linked source " + std::to_string (i);
+      const std::vector<unsigned char> payload (source_text.begin (),
+                                                source_text.end ());
+      auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                       { payload });
+      REQUIRE (blob_rows.size () == 1);
+      const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
+      REQUIRE (!blob_id.empty ());
+
+      store->Execute (
+          "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+          "VALUES (?, ?, ?)",
+          { memory_id, embedding, ts });
+      store->Execute (
+          "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+          "blob_id, start_ts, end_ts, n_signals, modality, s_max, s_avg, "
+          "strength, created_at, used_count) "
+          "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, ?, ?, 1, 'text', "
+          "0.5, 0.5, 1.0, ?, 3)",
+          { memory_id, memory_id, blob_id, ts, ts, ts });
+      store->Execute (
+          "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+          "modality, mime, blob_id, serial_position, created_at) "
+          "VALUES (?, ?, 'stream/main', ?, 'text', 'text/plain', ?, 0, ?)",
+          { memory_id, memory_id, ts, blob_id, ts });
+      store->Execute (
+          "INSERT INTO associations(source_memory_id, target_memory_id, "
+          "edge_type, weight) VALUES (?, ?, 'derived_from', 1.0)",
+          { kMaintenanceId, memory_id });
+      linked_ids.push_back (memory_id);
+    }
+
+  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  REQUIRE (ctx != nullptr);
+
+  auto hydrated
+      = ctx->DebugHydrateForTest ({ kMaintenanceId }, {}, embedding);
+  REQUIRE (static_cast<int> (hydrated.retrieved_memory.size ())
+           == expected_limit);
+  for (const auto &memory : hydrated.retrieved_memory)
+    {
+      REQUIRE (std::find (linked_ids.begin (), linked_ids.end (), memory.id)
+               != linked_ids.end ());
+      REQUIRE (!TextFromMemory (memory).empty ());
+    }
+}
+
 TEST_CASE ("Cortext hides unresolved internal retrieval nodes",
            "[cortext][hydration][retrieval][aist]")
 {
@@ -1239,6 +1355,23 @@ TEST_CASE ("C API handles NULL inputs correctly",
     cortext_free (h);
   }
 
+  SECTION ("cortext_process_audio_with_media rejects invalid media")
+  {
+    ScopedTempDb temp_db;
+    const auto models_dir = RepoModelsDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
+    REQUIRE (h != nullptr);
+    const float pcm[2] = { 0.0f, 0.0f };
+    cortext_media media{};
+    media.size = 4;
+    media.mimetype = "audio/wav";
+    CHECK (cortext_process_audio_with_media (h, pcm, 2, "src", &media) == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "media data must be non-NULL when media size is non-zero");
+    cortext_free (h);
+  }
+
   SECTION ("cortext_process_image returns 1 for NULL data")
   {
     ScopedTempDb temp_db;
@@ -1249,6 +1382,26 @@ TEST_CASE ("C API handles NULL inputs correctly",
     CHECK (cortext_process_image (h, nullptr, 10, 10, 3, "src") == 1);
     REQUIRE (std::string (cortext_last_error ())
              == "handle, data, and source_id must all be non-NULL");
+    cortext_free (h);
+  }
+
+  SECTION ("cortext_process_image_with_media rejects invalid media")
+  {
+    ScopedTempDb temp_db;
+    const auto models_dir = RepoModelsDir ();
+    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
+                                         models_dir.c_str ());
+    REQUIRE (h != nullptr);
+    const std::uint8_t px[3] = { 0, 0, 0 };
+    const std::uint8_t media_bytes[4] = { 'R', 'I', 'F', 'F' };
+    cortext_media media{};
+    media.data = media_bytes;
+    media.size = sizeof (media_bytes);
+    CHECK (
+        cortext_process_image_with_media (h, px, 1, 1, 3, "src", &media)
+        == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "media mimetype must be non-NULL and non-empty when media data is provided");
     cortext_free (h);
   }
 
@@ -1372,6 +1525,24 @@ TEST_CASE ("C API handles NULL inputs correctly",
     REQUIRE (parsed.at ("output").contains ("stored_signal_id"));
     REQUIRE (parsed.at ("output").at ("stored_memory_id").is_number_integer ());
     REQUIRE (parsed.at ("output").at ("stored_signal_id").is_number_integer ());
+    REQUIRE (parsed.contains ("embedding"));
+    REQUIRE (parsed.contains ("embedding_dimension"));
+    REQUIRE (parsed.at ("embedding").is_array ());
+    REQUIRE_FALSE (parsed.at ("embedding").empty ());
+    REQUIRE (parsed.at ("embedding_dimension").get<std::size_t> ()
+             == parsed.at ("embedding").size ());
+    cortext_string_free (json_ptr);
+
+    cortext_process_json_options options{};
+    cortext_process_json_options_init (&options);
+    REQUIRE (options.include_embedding == 1);
+    options.include_embedding = 0;
+    json_ptr = cortext_process_text_json_with_options (
+        h, "json api can omit embedding", "json/source", &options);
+    REQUIRE (json_ptr != nullptr);
+    parsed = nlohmann::json::parse (json_ptr);
+    REQUIRE_FALSE (parsed.contains ("embedding"));
+    REQUIRE_FALSE (parsed.contains ("embedding_dimension"));
     cortext_string_free (json_ptr);
 
     json_ptr = cortext_consolidate_json (h);

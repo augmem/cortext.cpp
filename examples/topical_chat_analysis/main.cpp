@@ -5,6 +5,7 @@
 #include <cortext/core/knobs.hpp>
 #include <cortext/encoder/encoder.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/utils.hpp>
 #include "encoder/text_encoder_factory.hpp"
 
 #include <nlohmann/json.hpp>
@@ -707,22 +708,10 @@ std::optional<MemoryEmotion> GetMemoryEmotion(
   }
   auto get_dbl = [&rows](const char *k, double def) -> double {
     auto itv = rows[0].find(k);
-    if (itv == rows[0].end() || !itv->second.has_value()) {
+    if (itv == rows[0].end()) {
       return def;
     }
-    if (itv->second.type() == typeid(double)) {
-      return std::any_cast<double>(itv->second);
-    }
-    if (itv->second.type() == typeid(float)) {
-      return static_cast<double>(std::any_cast<float>(itv->second));
-    }
-    if (itv->second.type() == typeid(int)) {
-      return static_cast<double>(std::any_cast<int>(itv->second));
-    }
-    if (itv->second.type() == typeid(long long)) {
-      return static_cast<double>(std::any_cast<long long>(itv->second));
-    }
-    return def;
+    return cortext::store::AnyToDouble(itv->second, def);
   };
   MemoryEmotion emotion;
   emotion.intensity = cortext::core::Clamp(get_dbl("emotional_intensity", 0.0), 0.0, 1.0);
@@ -778,22 +767,10 @@ AssociationStats GetAssociationStats(const std::shared_ptr<cortext::Store> &stor
   }
   auto get_dbl = [&rows](const char *k, double def) -> double {
     auto it = rows[0].find(k);
-    if (it == rows[0].end() || !it->second.has_value()) {
+    if (it == rows[0].end()) {
       return def;
     }
-    if (it->second.type() == typeid(double)) {
-      return std::any_cast<double>(it->second);
-    }
-    if (it->second.type() == typeid(float)) {
-      return static_cast<double>(std::any_cast<float>(it->second));
-    }
-    if (it->second.type() == typeid(int)) {
-      return static_cast<double>(std::any_cast<int>(it->second));
-    }
-    if (it->second.type() == typeid(long long)) {
-      return static_cast<double>(std::any_cast<long long>(it->second));
-    }
-    return def;
+    return cortext::store::AnyToDouble(it->second, def);
   };
   auto it = rows[0].find("c");
   if (it != rows[0].end()) {
@@ -834,22 +811,10 @@ MemoryStats GetMemoryStats(const std::shared_ptr<cortext::Store> &store,
   }
   auto get_dbl = [&rows](const char *k, double def) -> double {
     auto it = rows[0].find(k);
-    if (it == rows[0].end() || !it->second.has_value()) {
+    if (it == rows[0].end()) {
       return def;
     }
-    if (it->second.type() == typeid(double)) {
-      return std::any_cast<double>(it->second);
-    }
-    if (it->second.type() == typeid(float)) {
-      return static_cast<double>(std::any_cast<float>(it->second));
-    }
-    if (it->second.type() == typeid(int)) {
-      return static_cast<double>(std::any_cast<int>(it->second));
-    }
-    if (it->second.type() == typeid(long long)) {
-      return static_cast<double>(std::any_cast<long long>(it->second));
-    }
-    return def;
+    return cortext::store::AnyToDouble(it->second, def);
   };
   auto it = rows[0].find("c");
   if (it != rows[0].end()) {

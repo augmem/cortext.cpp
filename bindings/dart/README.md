@@ -7,12 +7,6 @@ The Dart package uses `dart:ffi` over the Cortext C ABI.
 From the repository root:
 
 ```bash
-zig build -Dshared=true -Dllama=false
-```
-
-or:
-
-```bash
 cmake --preset ffi-release
 cmake --build --preset ffi-release --target cortext
 ```
@@ -25,8 +19,8 @@ dart pub get
 dart test
 ```
 
-The package searches `CORTEXT_LIBRARY_PATH`, `zig-out/lib`,
-`build/ffi-release`, `build/ffi-release/lib`, and `install/lib`.
+The package searches `CORTEXT_LIBRARY_PATH`, `build/ffi-release`,
+`build/ffi-release/lib`, `zig-out/lib`, and `install/lib`.
 
 ## Use
 

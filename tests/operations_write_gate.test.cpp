@@ -186,6 +186,35 @@ TEST_CASE ("ComputeWriteGate rejects ephemeral signals even with spike_bypass",
   REQUIRE_FALSE (ctx.GetRepresentativeEmbedding ().has_value ());
 }
 
+TEST_CASE ("ComputeWriteGate treats backward refractory timestamps as zero delta",
+           "[operations][write_gate][robustness]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
+  s.embedding.normalize ();
+  s.timestamp = 100000;
+  s.source_id = "test";
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  SetupAccumulatorState (pctx, s, 0.5, 1.0, 2);
+  pctx.accumulator_states[s.source_id].last_write_ts = s.timestamp + 10000;
+
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFlushRequired (true);
+  ctx.SetThresholdTDynamic (0.45);
+
+  ComputeWriteGate op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (ctx.GetAccumulatorWriteDecision () == false);
+}
+
 TEST_CASE ("ComputeWriteGate rejects when no accumulator state",
            "[operations][write_gate]")
 {

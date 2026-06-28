@@ -91,6 +91,89 @@ const objstore_c_sources = &.{
     "third_party/sqlite-objstore/src/backend_sqlite.c",
 };
 
+const sqlite_c_sources = &.{
+    "third_party/sqlite/src/alter.c",
+    "third_party/sqlite/src/analyze.c",
+    "third_party/sqlite/src/attach.c",
+    "third_party/sqlite/src/auth.c",
+    "third_party/sqlite/src/backup.c",
+    "third_party/sqlite/src/bitvec.c",
+    "third_party/sqlite/src/btmutex.c",
+    "third_party/sqlite/src/btree.c",
+    "third_party/sqlite/src/build.c",
+    "third_party/sqlite/src/callback.c",
+    "third_party/sqlite/src/carray.c",
+    "third_party/sqlite/src/complete.c",
+    "third_party/sqlite/src/date.c",
+    "third_party/sqlite/src/dbpage.c",
+    "third_party/sqlite/src/dbstat.c",
+    "third_party/sqlite/src/delete.c",
+    "third_party/sqlite/src/expr.c",
+    "third_party/sqlite/src/fault.c",
+    "third_party/sqlite/src/fkey.c",
+    "third_party/sqlite/src/func.c",
+    "third_party/sqlite/src/global.c",
+    "third_party/sqlite/src/hash.c",
+    "third_party/sqlite/src/insert.c",
+    "third_party/sqlite/src/json.c",
+    "third_party/sqlite/src/legacy.c",
+    "third_party/sqlite/src/loadext.c",
+    "third_party/sqlite/src/main.c",
+    "third_party/sqlite/src/malloc.c",
+    "third_party/sqlite/src/mem0.c",
+    "third_party/sqlite/src/mem1.c",
+    "third_party/sqlite/src/mem2.c",
+    "third_party/sqlite/src/mem3.c",
+    "third_party/sqlite/src/mem5.c",
+    "third_party/sqlite/src/memdb.c",
+    "third_party/sqlite/src/memjournal.c",
+    "third_party/sqlite/src/mutex.c",
+    "third_party/sqlite/src/mutex_noop.c",
+    "third_party/sqlite/src/mutex_unix.c",
+    "third_party/sqlite/src/mutex_w32.c",
+    "third_party/sqlite/src/notify.c",
+    "third_party/sqlite/src/os.c",
+    "third_party/sqlite/src/os_kv.c",
+    "third_party/sqlite/src/os_unix.c",
+    "third_party/sqlite/src/os_win.c",
+    "third_party/sqlite/src/pager.c",
+    "third_party/sqlite/src/pcache.c",
+    "third_party/sqlite/src/pcache1.c",
+    "third_party/sqlite/src/pragma.c",
+    "third_party/sqlite/src/prepare.c",
+    "third_party/sqlite/src/printf.c",
+    "third_party/sqlite/src/random.c",
+    "third_party/sqlite/src/resolve.c",
+    "third_party/sqlite/src/rowset.c",
+    "third_party/sqlite/src/select.c",
+    "third_party/sqlite/src/status.c",
+    "third_party/sqlite/src/table.c",
+    "third_party/sqlite/src/threads.c",
+    "third_party/sqlite/src/tokenize.c",
+    "third_party/sqlite/src/treeview.c",
+    "third_party/sqlite/src/trigger.c",
+    "third_party/sqlite/src/update.c",
+    "third_party/sqlite/src/upsert.c",
+    "third_party/sqlite/src/utf.c",
+    "third_party/sqlite/src/util.c",
+    "third_party/sqlite/src/vacuum.c",
+    "third_party/sqlite/src/vdbe.c",
+    "third_party/sqlite/src/vdbeapi.c",
+    "third_party/sqlite/src/vdbeaux.c",
+    "third_party/sqlite/src/vdbeblob.c",
+    "third_party/sqlite/src/vdbemem.c",
+    "third_party/sqlite/src/vdbesort.c",
+    "third_party/sqlite/src/vdbetrace.c",
+    "third_party/sqlite/src/vdbevtab.c",
+    "third_party/sqlite/src/vtab.c",
+    "third_party/sqlite/src/wal.c",
+    "third_party/sqlite/src/walker.c",
+    "third_party/sqlite/src/where.c",
+    "third_party/sqlite/src/wherecode.c",
+    "third_party/sqlite/src/whereexpr.c",
+    "third_party/sqlite/src/window.c",
+};
+
 const sqlite_vec_header =
     \\#ifndef SQLITE_VEC_H
     \\#define SQLITE_VEC_H
@@ -138,14 +221,12 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const shared = b.option(bool, "shared", "Build libcortext as a shared library") orelse true;
-    const link_sqlite = b.option(bool, "link-sqlite", "Link against host/target sqlite3") orelse target.query.isNative();
-    const enable_llama = b.option(bool, "llama", "Enable llama.cpp support using prebuilt target-compatible libraries") orelse false;
-    const llama_include = b.option([]const u8, "llama_include", "Directory containing llama.h");
-    const llama_lib = b.option([]const u8, "llama_lib", "Path to libllama");
-    const ggml_include = b.option([]const u8, "ggml_include", "Directory containing ggml-backend.h");
+    const unsupported_text_only = b.option(bool, "unsupported-text-only", "Allow unsupported builds without audio/image GGML kernel support") orelse false;
+    const enable_ggml = b.option(bool, "ggml", "Enable ggml support using prebuilt target-compatible libraries") orelse !unsupported_text_only;
+    const ggml_include = b.option([]const u8, "ggml_include", "Directory containing ggml.h and ggml-backend.h");
     const ggml_lib = b.option([]const u8, "ggml_lib", "Path to libggml");
-    const ggml_base_lib = b.option([]const u8, "ggml_base_lib", "Optional path to libggml-base");
-    const ggml_cpu_lib = b.option([]const u8, "ggml_cpu_lib", "Optional path to libggml-cpu");
+    const ggml_base_lib = b.option([]const u8, "ggml_base_lib", "Path to libggml-base");
+    const ggml_cpu_lib = b.option([]const u8, "ggml_cpu_lib", "Path to libggml-cpu");
     const ggml_blas_lib = b.option([]const u8, "ggml_blas_lib", "Optional path to libggml-blas");
 
     const eigen = b.dependency("eigen", .{});
@@ -179,12 +260,72 @@ pub fn build(b: *std.Build) void {
     mod.addIncludePath(generated.getDirectory());
     mod.addIncludePath(generated.getDirectory().path(b, "third_party/sqlite-vec"));
 
+    const lemon_mod = b.createModule(.{
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    lemon_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/tool/lemon.c"),
+        .flags = &.{"-w"},
+    });
+    const lemon = b.addExecutable(.{
+        .name = "sqlite_lemon",
+        .root_module = lemon_mod,
+    });
+    const keyword_mod = b.createModule(.{
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    keyword_mod.addCSourceFile(.{
+        .file = b.path("third_party/sqlite/tool/mkkeywordhash.c"),
+        .flags = &.{"-w"},
+    });
+    const mkkeywordhash = b.addExecutable(.{
+        .name = "sqlite_mkkeywordhash",
+        .root_module = keyword_mod,
+    });
+    const parse_gen = b.addSystemCommand(&.{
+        "sh",
+        "-c",
+        "out_dir=$1; lemon=$(realpath \"$2\"); parse_y=$3; lempar=$4; parse_c=$5; parse_h=$6; cp \"$parse_y\" \"$out_dir/parse.y\" && cd \"$out_dir\" && \"$lemon\" -T\"$lempar\" parse.y && cp parse.c \"$parse_c\" && cp parse.h \"$parse_h\"",
+        "sqlite-parse-gen",
+    });
+    _ = parse_gen.addOutputDirectoryArg("sqlite-parse");
+    parse_gen.addArtifactArg(lemon);
+    parse_gen.addFileArg(b.path("third_party/sqlite/src/parse.y"));
+    parse_gen.addFileArg(b.path("third_party/sqlite/tool/lempar.c"));
+    const parse_c = parse_gen.addOutputFileArg("parse.c");
+    const parse_h = parse_gen.addOutputFileArg("parse.h");
+    mod.addIncludePath(parse_h.dirname());
+
+    const opcode_gen = b.addSystemCommand(&.{"python3"});
+    opcode_gen.addFileArg(b.path("third_party/sqlite/tool/mkopcodeh.py"));
+    opcode_gen.addFileArg(parse_h);
+    opcode_gen.addFileArg(b.path("third_party/sqlite/src/vdbe.c"));
+    const opcodes_h = opcode_gen.addOutputFileArg("opcodes.h");
+    mod.addIncludePath(opcodes_h.dirname());
+
+    const pragma_gen = b.addSystemCommand(&.{"python3"});
+    pragma_gen.addFileArg(b.path("third_party/sqlite/tool/mkpragmatab.py"));
+    const pragma_h = pragma_gen.addOutputFileArg("pragma.h");
+    pragma_gen.addFileArg(b.path("third_party/sqlite/tool/mkpragmatab.tcl"));
+    mod.addIncludePath(pragma_h.dirname());
+
+    const keyword_gen = b.addSystemCommand(&.{"python3"});
+    keyword_gen.addFileArg(b.path("third_party/sqlite/tool/run_to_file.py"));
+    const keyword_h = keyword_gen.addOutputFileArg("keywordhash.h");
+    keyword_gen.addArtifactArg(mkkeywordhash);
+    mod.addIncludePath(keyword_h.dirname());
+
     mod.addCMacro("SQLITE_CORE", "1");
+    mod.addCMacro("SQLITE_THREADSAFE", "1");
+    mod.addCMacro("SQLITE_ENABLE_JSON1", "1");
     mod.addCMacro("CORTEXT_EMBED_VEC", "1");
     mod.addCMacro("SQLITE_VEC_OMIT_FS", "1");
     mod.addCMacro("CORTEXT_EMBED_OBJSTORE", "1");
     mod.addCMacro("CORTEXT_DISABLE_OPENTELEMETRY", "1");
-    mod.addCMacro("CORTEXT_DISABLE_SHERPA_ONNX", "1");
     mod.addCMacro("BLAKE3_NO_SSE2", "1");
     mod.addCMacro("BLAKE3_NO_SSE41", "1");
     mod.addCMacro("BLAKE3_NO_AVX2", "1");
@@ -193,26 +334,34 @@ pub fn build(b: *std.Build) void {
         mod.addCMacro("CORTEXT_BUILDING_SHARED", "1");
     }
 
-    if (enable_llama) {
-        const include_dir = llama_include orelse fail(b, "-Dllama=true requires -Dllama_include=/path/to/include");
-        const library = llama_lib orelse fail(b, "-Dllama=true requires -Dllama_lib=/path/to/libllama");
-        const ggml_include_dir = ggml_include orelse include_dir;
+    if (!enable_ggml and !unsupported_text_only) {
+        fail(b, "-Dggml=false requires -Dunsupported-text-only=true");
+    }
 
-        mod.addIncludePath(.{ .cwd_relative = include_dir });
+    if (enable_ggml) {
+        const ggml_include_dir = ggml_include orelse fail(b, "-Dggml=true requires -Dggml_include=/path/to/include");
+        const ggml_library = ggml_lib orelse fail(b, "-Dggml=true requires -Dggml_lib=/path/to/libggml");
+        const ggml_base_library = ggml_base_lib orelse fail(b, "-Dggml=true requires -Dggml_base_lib=/path/to/libggml-base");
+        const ggml_cpu_library = ggml_cpu_lib orelse fail(b, "-Dggml=true requires -Dggml_cpu_lib=/path/to/libggml-cpu");
+
         mod.addIncludePath(.{ .cwd_relative = ggml_include_dir });
-        mod.addCMacro("CORTEXT_ENABLE_LLAMA_CPP", "1");
-        mod.addCMacro("CORTEXT_LLAMA_HEADER_PATH", b.fmt("\"{s}/llama.h\"", .{include_dir}));
+        mod.addCMacro("CORTEXT_ENABLE_GGML", "1");
         mod.addCMacro("CORTEXT_GGML_BACKEND_HEADER_PATH", b.fmt("\"{s}/ggml-backend.h\"", .{ggml_include_dir}));
-        mod.addObjectFile(.{ .cwd_relative = library });
-        if (ggml_lib) |path| mod.addObjectFile(.{ .cwd_relative = path });
-        if (ggml_base_lib) |path| mod.addObjectFile(.{ .cwd_relative = path });
-        if (ggml_cpu_lib) |path| mod.addObjectFile(.{ .cwd_relative = path });
+        mod.addObjectFile(.{ .cwd_relative = ggml_library });
+        mod.addObjectFile(.{ .cwd_relative = ggml_base_library });
+        mod.addObjectFile(.{ .cwd_relative = ggml_cpu_library });
         if (ggml_blas_lib) |path| {
             mod.addObjectFile(.{ .cwd_relative = path });
             if (target.result.os.tag == .macos) {
                 mod.linkFramework("Accelerate", .{});
             }
         }
+        mod.addCMacro("CORTEXT_ENABLE_AUDIO", "1");
+        mod.addCMacro("CORTEXT_ENABLE_IMAGE", "1");
+        mod.addCMacro("CORTEXT_REQUIRE_AIST_GGML_KERNELS", "1");
+    } else {
+        mod.addCMacro("CORTEXT_DISABLE_AUDIO", "1");
+        mod.addCMacro("CORTEXT_DISABLE_IMAGE", "1");
     }
 
     const cxx_flags = &.{
@@ -225,15 +374,14 @@ pub fn build(b: *std.Build) void {
     if (pathExists("src/operations/storage_pressure.cpp")) {
         mod.addCSourceFiles(.{ .files = &.{"src/operations/storage_pressure.cpp"}, .flags = cxx_flags });
     }
+    mod.addCSourceFiles(.{ .files = sqlite_c_sources, .flags = &.{"-w"} });
+    mod.addCSourceFile(.{ .file = parse_c, .flags = &.{"-w"} });
     mod.addCSourceFiles(.{ .files = &.{"third_party/sqlite-vec/sqlite-vec.c"}, .flags = &.{"-w"} });
     mod.addCSourceFiles(.{ .files = objstore_c_sources, .flags = &.{"-w"} });
     if (target.result.cpu.arch.isAARCH64()) {
         mod.addCSourceFiles(.{ .files = &.{"third_party/sqlite-objstore/third_party/blake3/blake3_neon.c"}, .flags = &.{"-w"} });
     }
 
-    if (link_sqlite) {
-        mod.linkSystemLibrary("sqlite3", .{});
-    }
     if (target.result.os.tag != .windows) {
         mod.linkSystemLibrary("m", .{});
         mod.linkSystemLibrary("pthread", .{});

@@ -557,12 +557,9 @@ LoadCurrentEmbeddingImpl (Executor &executor, long long memory_id,
         {
           const long long current_embedding_id = AnyToInt64 (
               current_rows[0].at ("embedding_id"));
-          const long long current_created_at = AnyToInt64 (
-              current_rows[0].at ("created_at"));
-          const bool current_surface_fresh =
-              !latest.has_value ()
-              || current_embedding_id == latest->embedding_id
-              || current_created_at > latest->created_at;
+          const bool current_surface_fresh
+              = !latest.has_value ()
+                || current_embedding_id == latest->embedding_id;
           auto it = current_rows[0].find ("embedding");
           if (current_surface_fresh && it != current_rows[0].end ())
             {

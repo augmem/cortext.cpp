@@ -79,6 +79,17 @@ GetString (napi_env env, napi_value value, std::string &out)
 }
 
 bool
+IsNullOrUndefined (napi_env env, napi_value value)
+{
+  napi_valuetype type = napi_undefined;
+  if (napi_typeof (env, value, &type) != napi_ok)
+    {
+      return false;
+    }
+  return type == napi_null || type == napi_undefined;
+}
+
+bool
 GetOptionalStringProperty (napi_env env, napi_value obj, const char *name,
                            std::string &out)
 {
@@ -145,6 +156,38 @@ GetOptionalBoolProperty (napi_env env, napi_value obj, const char *name,
     }
 
   out = flag ? 1 : 0;
+  return true;
+}
+
+bool
+GetProcessJSONOptions (napi_env env, napi_value value,
+                       cortext_process_json_options &out)
+{
+  cortext_process_json_options_init (&out);
+  if (IsNullOrUndefined (env, value))
+    {
+      return true;
+    }
+
+  napi_valuetype type = napi_undefined;
+  if (napi_typeof (env, value, &type) != napi_ok || type != napi_object)
+    {
+      return false;
+    }
+
+  int include_embedding = 1;
+  if (!GetOptionalBoolProperty (env, value, "includeEmbedding",
+                                include_embedding))
+    {
+      return false;
+    }
+  int omit_embedding = 0;
+  if (!GetOptionalBoolProperty (env, value, "omitEmbedding",
+                                omit_embedding))
+    {
+      return false;
+    }
+  out.include_embedding = omit_embedding ? 0 : include_embedding;
   return true;
 }
 
@@ -371,8 +414,8 @@ CortextCtor (napi_env env, napi_callback_info info)
 napi_value
 ProcessTextJSON (napi_env env, napi_callback_info info)
 {
-  size_t argc = 2;
-  napi_value args[2];
+  size_t argc = 3;
+  napi_value args[3];
   napi_value jsthis;
   NAPI_RETURN_IF_FAILED (
       env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
@@ -384,15 +427,24 @@ ProcessTextJSON (napi_env env, napi_callback_info info)
 
   std::string text;
   std::string source_id;
+  cortext_process_json_options options{};
   if (argc < 2 || !GetString (env, args[0], text)
       || !GetString (env, args[1], source_id))
     {
       return ThrowTypeError (env, "processTextJson(text, sourceId) expects strings");
     }
+  if (argc >= 3 && !GetProcessJSONOptions (env, args[2], options))
+    {
+      return ThrowTypeError (env, "process options must be an object");
+    }
+  if (argc < 3)
+    {
+      cortext_process_json_options_init (&options);
+    }
 
   return JSONStringResult (
-      env, cortext_process_text_json (wrapped->handle, text.c_str (),
-                                      source_id.c_str ()),
+      env, cortext_process_text_json_with_options (
+               wrapped->handle, text.c_str (), source_id.c_str (), &options),
       "cortext_process_text_json failed");
 }
 
@@ -424,8 +476,8 @@ EmbedTextJSON (napi_env env, napi_callback_info info)
 napi_value
 ProcessAudioJSON (napi_env env, napi_callback_info info)
 {
-  size_t argc = 2;
-  napi_value args[2];
+  size_t argc = 3;
+  napi_value args[3];
   napi_value jsthis;
   NAPI_RETURN_IF_FAILED (
       env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
@@ -438,17 +490,92 @@ ProcessAudioJSON (napi_env env, napi_callback_info info)
   const float *pcm = nullptr;
   size_t sample_count = 0;
   std::string source_id;
+  cortext_process_json_options options{};
   if (argc < 2 || !GetFloat32Array (env, args[0], &pcm, sample_count)
       || !GetString (env, args[1], source_id))
     {
       return ThrowTypeError (
           env, "processAudioJson(pcm, sourceId) expects Float32Array and string");
     }
+  if (argc >= 3 && !GetProcessJSONOptions (env, args[2], options))
+    {
+      return ThrowTypeError (env, "process options must be an object");
+    }
+  if (argc < 3)
+    {
+      cortext_process_json_options_init (&options);
+    }
 
   return JSONStringResult (
-      env, cortext_process_audio_json (wrapped->handle, pcm, sample_count,
-                                       source_id.c_str ()),
+      env, cortext_process_audio_json_with_options (
+               wrapped->handle, pcm, sample_count, source_id.c_str (),
+               &options),
       "cortext_process_audio_json failed");
+}
+
+napi_value
+ProcessAudioWithMediaJSON (napi_env env, napi_callback_info info)
+{
+  size_t argc = 5;
+  napi_value args[5];
+  napi_value jsthis;
+  NAPI_RETURN_IF_FAILED (
+      env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
+  BindingHandle *wrapped = UnwrapHandle (env, jsthis);
+  if (wrapped == nullptr)
+    {
+      return ThrowCortextError (env, "invalid Cortext handle");
+    }
+
+  const float *pcm = nullptr;
+  size_t sample_count = 0;
+  std::string source_id;
+  const uint8_t *media_data = nullptr;
+  size_t media_size = 0;
+  std::string media_mimetype;
+  cortext_process_json_options options{};
+  if (argc < 2 || !GetFloat32Array (env, args[0], &pcm, sample_count)
+      || !GetString (env, args[1], source_id))
+    {
+      return ThrowTypeError (
+          env,
+          "processAudioWithMediaJson(pcm, sourceId, media, mediaMimeType) expects Float32Array, string, optional bytes, and optional string");
+    }
+
+  cortext_media media{};
+  const cortext_media *media_ptr = nullptr;
+  if (argc >= 3 && !IsNullOrUndefined (env, args[2]))
+    {
+      if (!GetUint8Data (env, args[2], &media_data, media_size))
+        {
+          return ThrowTypeError (env, "media must be bytes, null, or undefined");
+        }
+      if (argc >= 4 && !IsNullOrUndefined (env, args[3])
+          && !GetString (env, args[3], media_mimetype))
+        {
+          return ThrowTypeError (env, "mediaMimeType must be a string");
+        }
+      media = cortext_media{ media_data, media_size,
+                             media_mimetype.empty ()
+                                 ? nullptr
+                                 : media_mimetype.c_str () };
+      media_ptr = &media;
+    }
+  if (argc >= 5 && !GetProcessJSONOptions (env, args[4], options))
+    {
+      return ThrowTypeError (env, "process options must be an object");
+    }
+  if (argc < 5)
+    {
+      cortext_process_json_options_init (&options);
+    }
+
+  return JSONStringResult (
+      env,
+      cortext_process_audio_with_media_json_with_options (
+          wrapped->handle, pcm, sample_count, source_id.c_str (), media_ptr,
+          &options),
+      "cortext_process_audio_with_media_json failed");
 }
 
 napi_value
@@ -481,8 +608,8 @@ EmbedAudioJSON (napi_env env, napi_callback_info info)
 napi_value
 ProcessImageJSON (napi_env env, napi_callback_info info)
 {
-  size_t argc = 5;
-  napi_value args[5];
+  size_t argc = 6;
+  napi_value args[6];
   napi_value jsthis;
   NAPI_RETURN_IF_FAILED (
       env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
@@ -498,6 +625,7 @@ ProcessImageJSON (napi_env env, napi_callback_info info)
   int32_t height = 0;
   int32_t channels = 0;
   std::string source_id;
+  cortext_process_json_options options{};
   if (argc < 5 || !GetUint8Data (env, args[0], &data, byte_count)
       || napi_get_value_int32 (env, args[1], &width) != napi_ok
       || napi_get_value_int32 (env, args[2], &height) != napi_ok
@@ -522,11 +650,105 @@ ProcessImageJSON (napi_env env, napi_callback_info info)
       return ThrowTypeError (
           env, "image buffer is smaller than width * height * channels");
     }
+  if (argc >= 6 && !GetProcessJSONOptions (env, args[5], options))
+    {
+      return ThrowTypeError (env, "process options must be an object");
+    }
+  if (argc < 6)
+    {
+      cortext_process_json_options_init (&options);
+    }
 
   return JSONStringResult (
-      env, cortext_process_image_json (wrapped->handle, data, width, height,
-                                       channels, source_id.c_str ()),
+      env, cortext_process_image_json_with_options (
+               wrapped->handle, data, width, height, channels,
+               source_id.c_str (), &options),
       "cortext_process_image_json failed");
+}
+
+napi_value
+ProcessImageWithMediaJSON (napi_env env, napi_callback_info info)
+{
+  size_t argc = 8;
+  napi_value args[8];
+  napi_value jsthis;
+  NAPI_RETURN_IF_FAILED (
+      env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
+  BindingHandle *wrapped = UnwrapHandle (env, jsthis);
+  if (wrapped == nullptr)
+    {
+      return ThrowCortextError (env, "invalid Cortext handle");
+    }
+
+  const uint8_t *data = nullptr;
+  size_t byte_count = 0;
+  int32_t width = 0;
+  int32_t height = 0;
+  int32_t channels = 0;
+  std::string source_id;
+  const uint8_t *media_data = nullptr;
+  size_t media_size = 0;
+  std::string media_mimetype;
+  cortext_process_json_options options{};
+  if (argc < 5 || !GetUint8Data (env, args[0], &data, byte_count)
+      || napi_get_value_int32 (env, args[1], &width) != napi_ok
+      || napi_get_value_int32 (env, args[2], &height) != napi_ok
+      || napi_get_value_int32 (env, args[3], &channels) != napi_ok
+      || !GetString (env, args[4], source_id))
+    {
+      return ThrowTypeError (
+          env,
+          "processImageWithMediaJson(data, width, height, channels, sourceId, media, mediaMimeType) expects bytes, numbers, string, optional bytes, and optional string");
+    }
+
+  if (width <= 0 || height <= 0 || channels <= 0)
+    {
+      return ThrowTypeError (env, "width, height, and channels must be positive");
+    }
+
+  const size_t expected
+      = static_cast<size_t> (width) * static_cast<size_t> (height)
+        * static_cast<size_t> (channels);
+  if (byte_count < expected)
+    {
+      return ThrowTypeError (
+          env, "image buffer is smaller than width * height * channels");
+    }
+
+  cortext_media media{};
+  const cortext_media *media_ptr = nullptr;
+  if (argc >= 6 && !IsNullOrUndefined (env, args[5]))
+    {
+      if (!GetUint8Data (env, args[5], &media_data, media_size))
+        {
+          return ThrowTypeError (env, "media must be bytes, null, or undefined");
+        }
+      if (argc >= 7 && !IsNullOrUndefined (env, args[6])
+          && !GetString (env, args[6], media_mimetype))
+        {
+          return ThrowTypeError (env, "mediaMimeType must be a string");
+        }
+      media = cortext_media{ media_data, media_size,
+                             media_mimetype.empty ()
+                                 ? nullptr
+                                 : media_mimetype.c_str () };
+      media_ptr = &media;
+    }
+  if (argc >= 8 && !GetProcessJSONOptions (env, args[7], options))
+    {
+      return ThrowTypeError (env, "process options must be an object");
+    }
+  if (argc < 8)
+    {
+      cortext_process_json_options_init (&options);
+    }
+
+  return JSONStringResult (
+      env,
+      cortext_process_image_with_media_json_with_options (
+          wrapped->handle, data, width, height, channels, source_id.c_str (),
+          media_ptr, &options),
+      "cortext_process_image_with_media_json failed");
 }
 
 napi_value
@@ -668,10 +890,14 @@ Init (napi_env env, napi_value exports)
       napi_default, nullptr },
     { "processAudioJson", nullptr, ProcessAudioJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
+    { "processAudioWithMediaJson", nullptr, ProcessAudioWithMediaJSON, nullptr,
+      nullptr, nullptr, napi_default, nullptr },
     { "embedAudioJson", nullptr, EmbedAudioJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
     { "processImageJson", nullptr, ProcessImageJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
+    { "processImageWithMediaJson", nullptr, ProcessImageWithMediaJSON, nullptr,
+      nullptr, nullptr, napi_default, nullptr },
     { "embedImageJson", nullptr, EmbedImageJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
     { "consolidateJson", nullptr, ConsolidateJSON, nullptr, nullptr, nullptr,

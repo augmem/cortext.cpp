@@ -123,6 +123,11 @@ def dir_meta(path: Path) -> dict:
     }
 
 
+def model_meta_path(models: Path) -> Path:
+    gguf_dir = models / "AIST-87M-GGUF"
+    return gguf_dir if gguf_dir.exists() else models
+
+
 def l2_normalize(vec: np.ndarray) -> np.ndarray:
     norm = float(np.linalg.norm(vec))
     if norm <= 1.0e-12 or not math.isfinite(norm):
@@ -257,6 +262,7 @@ def embed_text_groups(
     groups: dict[str, list[str]],
     embedder: Path,
     models: Path,
+    models_meta: dict,
     cache_dir: Path,
     dim: int,
     cache: bool,
@@ -273,6 +279,7 @@ def embed_text_groups(
             "dim": dim,
             "embedder": str(embedder),
             "models": str(models),
+            "models_meta": models_meta,
         }
         use_cache = False
         if cache and output_path.exists() and meta_path.exists():
@@ -300,6 +307,7 @@ def build_text_emotion(
         samples,
         args.text_embedder,
         args.models,
+        args.models_meta,
         args.work_dir / "text_emotion_embeddings",
         args.slice_dim,
         args.cache_embeddings,
@@ -331,6 +339,7 @@ def build_text_emotion(
         "generated_by": "tools/centroid_vectors/build_aist_sliced_centroids.py",
         "timestamp": timestamp_utc(),
         "encoder": "AIST/ES-AIST via cortext_text_embedder",
+        "models_meta": args.models_meta,
         "embedding_dim": args.slice_dim,
         "slice": [0, args.slice_dim],
         "source": str(args.text_emotion_dir),
@@ -365,6 +374,7 @@ def build_affect(
         prompt_groups,
         args.text_embedder,
         args.models,
+        args.models_meta,
         args.work_dir / "affect_prompt_embeddings",
         args.slice_dim,
         args.cache_embeddings,
@@ -410,6 +420,7 @@ def build_affect(
         "generated_by": "tools/centroid_vectors/build_aist_sliced_centroids.py",
         "timestamp": timestamp_utc(),
         "encoder": "AIST/ES-AIST via cortext_text_embedder",
+        "models_meta": args.models_meta,
         "embedding_dim": args.slice_dim,
         "slice": [0, args.slice_dim],
         "text_emotion_source": str(args.text_emotion_dir),
@@ -430,6 +441,7 @@ def parse_ravdess_label(path: Path) -> str | None:
 
 def build_audio_emotion(args: argparse.Namespace, summary: dict) -> None:
     wavs = sorted(args.ravdess_dir.glob("**/*.wav"))
+    source_meta = dir_meta(args.ravdess_dir)
     grouped_paths: dict[str, list[Path]] = {}
     for path in wavs:
         label = parse_ravdess_label(path)
@@ -440,8 +452,26 @@ def build_audio_emotion(args: argparse.Namespace, summary: dict) -> None:
     input_list = args.work_dir / "ravdess_audio_paths.txt"
     write_lines(input_list, [str(path) for path in all_paths])
     output_path = args.work_dir / "ravdess_audio_embeddings.jsonl"
-    if not (args.cache_embeddings and output_path.exists()):
+    meta_path = args.work_dir / "ravdess_audio_embeddings.meta.json"
+    cache_meta = {
+        "embedder": str(args.audio_embedder),
+        "models": str(args.models),
+        "models_meta": args.models_meta,
+        "source_meta": source_meta,
+        "slice_dim": args.slice_dim,
+    }
+    use_cache = False
+    if args.cache_embeddings and output_path.exists() and meta_path.exists():
+        try:
+            use_cache = json.loads(meta_path.read_text(encoding="utf-8")) == cache_meta
+        except json.JSONDecodeError:
+            use_cache = False
+    if not use_cache:
         run_audio_embedder(args.audio_embedder, args.models, input_list, output_path)
+        meta_path.write_text(
+            json.dumps(cache_meta, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     by_path: dict[str, np.ndarray] = {}
     with output_path.open(encoding="utf-8") as f:
@@ -489,7 +519,8 @@ def build_audio_emotion(args: argparse.Namespace, summary: dict) -> None:
         "slice": [0, args.slice_dim],
         "dataset": "RAVDESS",
         "source": str(args.ravdess_dir),
-        "source_meta": dir_meta(args.ravdess_dir),
+        "source_meta": source_meta,
+        "models_meta": args.models_meta,
         "labels": labels_meta,
     }
     (args.out_root / "audio_emotion" / "metadata.json").write_text(
@@ -540,12 +571,14 @@ def main(argv: list[str]) -> int:
         raise FileNotFoundError(f"missing text embedder: {args.text_embedder}")
     if not args.skip_audio and not args.audio_embedder.exists():
         raise FileNotFoundError(f"missing audio embedder: {args.audio_embedder}")
+    args.models_meta = dir_meta(model_meta_path(args.models))
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {
         "generated_by": "tools/centroid_vectors/build_aist_sliced_centroids.py",
         "timestamp": timestamp_utc(),
         "models": str(args.models),
+        "models_meta": args.models_meta,
         "slice": [0, args.slice_dim],
     }
     text_embeddings = build_text_emotion(args, summary)

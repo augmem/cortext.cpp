@@ -450,6 +450,11 @@ k_write_refrac = lerp(0.3, 0.1, T)
 M_write_refrac ← 1.0 + k_write_refrac × exp(−Δt_write / τ_write_refrac(T))
 ```
 
+Implementation note: `Δt_write` is treated as a signed elapsed duration and
+clamped at zero. Backward event timestamps therefore receive the maximum
+refractory multiplier instead of underflowing into an effectively infinite
+elapsed interval.
+
 Final write decision:
 
 ```

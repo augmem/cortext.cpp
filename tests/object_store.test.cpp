@@ -1,8 +1,55 @@
+#include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/store/object_store.hpp>
 #include <cortext/store/schema.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
+#include <string>
+
+namespace
+{
+
+class MissingPutTransaction final : public cortext::Transaction
+{
+public:
+  std::unique_ptr<cortext::Transaction>
+  Begin () override
+  {
+    return std::make_unique<MissingPutTransaction> ();
+  }
+
+  std::vector<std::map<std::string, std::any>>
+  Execute (const std::string &query,
+           const std::vector<std::any> & /*params*/ = {}) override
+  {
+    if (query.find ("objstore_put") != std::string::npos)
+      {
+        ++put_calls;
+        return {};
+      }
+    if (query.find ("objstore_exists") != std::string::npos)
+      {
+        ++exists_calls;
+        return { { { "exists_flag", 0LL } } };
+      }
+    return {};
+  }
+
+  void
+  Commit () override
+  {
+  }
+
+  void
+  Rollback () override
+  {
+  }
+
+  int put_calls = 0;
+  int exists_calls = 0;
+};
+
+} // namespace
 
 TEST_CASE ("ObjectStore computes BLAKE3 content ids", "[object_store]")
 {
@@ -121,4 +168,81 @@ TEST_CASE ("SqlObjectStore duplicate puts are idempotent", "[object_store]")
   REQUIRE (loaded.has_value ());
   REQUIRE (*loaded == payload);
   read_tx->Commit ();
+}
+
+TEST_CASE ("SqlObjectStore rejects operations after transaction finishes",
+           "[object_store]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  cortext::store::ApplyMigrations (*unique_store);
+  std::shared_ptr<cortext::Store> store (std::move (unique_store));
+  cortext::SqlObjectStore object_store (store);
+
+  const std::vector<unsigned char> payload = { 'd', 'o', 'n', 'e' };
+  auto object_tx = object_store.Begin ();
+  const auto object_id = object_tx->Put (payload);
+  object_tx->Commit ();
+
+  REQUIRE_THROWS_AS (object_tx->Begin (),
+                     cortext::TransactionAlreadyFinishedError);
+  REQUIRE_THROWS_AS (object_tx->Put (payload),
+                     cortext::TransactionAlreadyFinishedError);
+  REQUIRE_THROWS_AS (object_tx->Get (object_id),
+                     cortext::TransactionAlreadyFinishedError);
+  REQUIRE_THROWS_AS (object_tx->Exists (object_id),
+                     cortext::TransactionAlreadyFinishedError);
+  REQUIRE_THROWS_AS (object_tx->Delete (object_id),
+                     cortext::TransactionAlreadyFinishedError);
+
+  auto rolled_back_tx = object_store.Begin ();
+  rolled_back_tx->Rollback ();
+  REQUIRE_THROWS_AS (rolled_back_tx->Put (payload),
+                     cortext::TransactionAlreadyFinishedError);
+}
+
+TEST_CASE ("SqlObjectStore attached extension transaction stays bound to DB tx",
+           "[object_store]")
+{
+  cortext::testing::ScopedEnvVar backend ("CORTEXT_OBJSTORE_BACKEND",
+                                          "extension");
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  cortext::store::ApplyMigrations (*unique_store);
+  std::shared_ptr<cortext::Store> store (std::move (unique_store));
+  cortext::SqlObjectStore object_store (store);
+
+  const std::vector<unsigned char> payload = { 'b', 'o', 'u', 'n', 'd' };
+  {
+    auto tx = store->Begin ();
+    auto object_tx = object_store.Attach (*tx);
+    auto competing_savepoint = tx->Begin ();
+    REQUIRE_THROWS_AS (object_tx->Begin (),
+                       cortext::TransactionNotCurrentError);
+    REQUIRE_THROWS_AS (object_tx->Put (payload),
+                       cortext::TransactionNotCurrentError);
+    competing_savepoint->Rollback ();
+    object_tx->Rollback ();
+    tx->Rollback ();
+  }
+
+  {
+    auto tx = store->Begin ();
+    auto object_tx = object_store.Attach (*tx);
+    tx->Commit ();
+    REQUIRE_THROWS_AS (object_tx->Put (payload),
+                       cortext::TransactionAlreadyFinishedError);
+  }
+}
+
+TEST_CASE ("SqlObjectStore extension put fails without persistence confirmation",
+           "[object_store]")
+{
+  cortext::testing::ScopedEnvVar backend ("CORTEXT_OBJSTORE_BACKEND",
+                                          "extension");
+  MissingPutTransaction tx;
+  const std::vector<unsigned char> payload = { 'm', 'i', 's', 's' };
+
+  REQUIRE_THROWS_AS (cortext::PutObject (nullptr, tx, payload),
+                     cortext::StoreError);
+  REQUIRE (tx.put_calls == 1);
+  REQUIRE (tx.exists_calls == 1);
 }

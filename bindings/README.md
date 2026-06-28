@@ -12,6 +12,13 @@ All bindings expose the same v1 concepts:
   toggles.
 - `processText` / `processAudio` / `processImage`: run the memory pipeline and
   return a JSON-compatible context object.
+- `Media` + `processAudioWithMedia` / `processImageWithMedia`: process
+  canonical PCM/pixels while optionally storing caller-provided source media
+  bytes instead of the canonical processing representation.
+- Process JSON payloads include the processed signal `embedding` and
+  `embedding_dimension` by default. Use each binding's process options
+  (`includeEmbedding: false`, `OmitEmbedding`, or `include_embedding=False`) to
+  omit them without a second processing path.
 - `embedText` / `embedAudio` / `embedImage`: embed-only calls that do not store
   signals, retrieve memories, or mutate processor state.
 - `consolidate`: explicit shallow graph consolidation.
@@ -29,13 +36,7 @@ the native SQLite/object-store path.
 
 ## Build Native Library
 
-The default FFI build uses Zig:
-
-```bash
-zig build -Dshared=true -Dllama=false
-```
-
-The CMake FFI preset is also supported:
+The default FFI build uses CMake:
 
 ```bash
 cmake --preset ffi-release
@@ -59,7 +60,7 @@ The WASM wrapper is in `bindings/wasm`, and the generated Emscripten module is
 written to `build-wasm/dist/wasm`.
 
 Set `CORTEXT_LIBRARY_PATH` when a binding should load a specific shared library
-instead of searching `zig-out/lib` and `build/ffi-release`.
+instead of searching `build/ffi-release` and `zig-out/lib`.
 
 ## Packages
 

@@ -82,6 +82,7 @@ public:
     double threshold_T_dynamic = 0.0;  // Alg 8
     double threshold_hysteresis = 0.0; // Alg 8
     double effective_focus = 0.0;      // Alg 10 stabilizer
+    double coherence = 0.0;            // Structural coherence
 
     // Emotion projections (Alg 4)
     double emotion_intensity = 0.0;

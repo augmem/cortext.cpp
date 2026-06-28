@@ -20,6 +20,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -113,7 +114,9 @@ struct DetachedProcessorCaches
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
   ProcessorContext::AssociationFanoutCache association_fanout_cache;
   std::unordered_set<long long> predictive_pre_activation_embedding_ids;
+  std::unordered_set<long long> predictive_pre_activation_memory_ids;
   std::unordered_set<long long> retrieval_suppression_embedding_ids;
+  std::unordered_set<long long> retrieval_suppression_memory_ids;
   std::unordered_map<std::string, std::vector<long long>> index_store;
   std::unordered_map<long long, std::string> index_reverse;
   std::unordered_map<std::string, std::unordered_map<long long, double>>
@@ -132,7 +135,9 @@ ClearRebuildableProcessorCaches (ProcessorContext &ctx)
   ctx.retrieval_surface_source_index_dirty = {};
   ctx.association_fanout_cache = {};
   ctx.predictive_pre_activation_embedding_ids = {};
+  ctx.predictive_pre_activation_memory_ids = {};
   ctx.retrieval_suppression_embedding_ids = {};
+  ctx.retrieval_suppression_memory_ids = {};
   ctx.index_store = {};
   ctx.index_reverse = {};
   ctx.procedural_store = {};
@@ -156,8 +161,12 @@ DetachRebuildableProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.association_fanout_cache);
   caches.predictive_pre_activation_embedding_ids
       = std::move (ctx.predictive_pre_activation_embedding_ids);
+  caches.predictive_pre_activation_memory_ids
+      = std::move (ctx.predictive_pre_activation_memory_ids);
   caches.retrieval_suppression_embedding_ids
       = std::move (ctx.retrieval_suppression_embedding_ids);
+  caches.retrieval_suppression_memory_ids
+      = std::move (ctx.retrieval_suppression_memory_ids);
   caches.index_store = std::move (ctx.index_store);
   caches.index_reverse = std::move (ctx.index_reverse);
   caches.procedural_store = std::move (ctx.procedural_store);
@@ -182,8 +191,12 @@ RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
   ctx.association_fanout_cache = std::move (caches.association_fanout_cache);
   ctx.predictive_pre_activation_embedding_ids
       = std::move (caches.predictive_pre_activation_embedding_ids);
+  ctx.predictive_pre_activation_memory_ids
+      = std::move (caches.predictive_pre_activation_memory_ids);
   ctx.retrieval_suppression_embedding_ids
       = std::move (caches.retrieval_suppression_embedding_ids);
+  ctx.retrieval_suppression_memory_ids
+      = std::move (caches.retrieval_suppression_memory_ids);
   ctx.index_store = std::move (caches.index_store);
   ctx.index_reverse = std::move (caches.index_reverse);
   ctx.procedural_store = std::move (caches.procedural_store);
@@ -322,22 +335,85 @@ DeleteUnreferencedEmbeddings (Transaction &tx)
       {});
 }
 
+long long
+ResolveMemoryIdForRetrievedEmbedding (const OperationContext &op_context,
+                                      long long embedding_id)
+{
+  if (embedding_id <= 0)
+    {
+      return 0;
+    }
+  const auto &p_ctx = op_context.GetProcessorContext ();
+  auto cache_it = p_ctx.retrieval_surface_embedding_index.find (embedding_id);
+  if (cache_it != p_ctx.retrieval_surface_embedding_index.end ())
+    {
+      const long long memory_id
+          = p_ctx.retrieval_surface_cache[cache_it->second].memory_id;
+      if (memory_id > 0)
+        {
+          return memory_id;
+        }
+    }
+
+  Store *store = op_context.GetStore ();
+  if (!store)
+    {
+      return 0;
+    }
+  auto memory_rows = store->Execute (
+      "SELECT memory_id FROM memories WHERE embedding_id = ? LIMIT 1",
+      { embedding_id });
+  if (!memory_rows.empty () && memory_rows[0].count ("memory_id") == 1)
+    {
+      return ExtractInt64 (memory_rows[0], "memory_id", 0);
+    }
+  auto signal_rows = store->Execute (
+      "SELECT memory_id FROM signals WHERE embedding_id = ? LIMIT 1",
+      { embedding_id });
+  if (!signal_rows.empty () && signal_rows[0].count ("memory_id") == 1)
+    {
+      return ExtractInt64 (signal_rows[0], "memory_id", 0);
+    }
+  return 0;
+}
+
 void
 AssembleOutputMemories (const OperationContext &op_context,
                         SignalProcessor::Output &out)
 {
   const auto &cands = op_context.GetRetrievedMemoryEmbeddings ();
-  out.candidate_memory_ids.reserve (cands.size ());
-  for (const auto &kv : cands)
+  const auto &records = op_context.GetRetrievedMemoryCandidates ();
+  out.candidate_memory_ids.reserve (
+      records.empty () ? cands.size () : records.size ());
+  if (!records.empty ())
     {
-      out.candidate_memory_ids.push_back (kv.first);
+      for (const auto &candidate : records)
+        {
+          if (candidate.memory_id > 0)
+            {
+              out.candidate_memory_ids.push_back (candidate.memory_id);
+            }
+        }
+    }
+  else
+    {
+      for (const auto &kv : cands)
+        {
+          const long long memory_id = ResolveMemoryIdForRetrievedEmbedding (
+              op_context, kv.first);
+          if (memory_id > 0)
+            {
+              out.candidate_memory_ids.push_back (memory_id);
+            }
+        }
     }
   for (const auto &e : op_context.GetMemoryUsageEvents ())
     {
       if (e.used)
         {
           out.used_memory_ids.push_back (
-              static_cast<long long> (e.embedding_id));
+              e.memory_id > 0 ? e.memory_id
+                              : static_cast<long long> (e.embedding_id));
         }
     }
 }
@@ -426,6 +502,7 @@ AssembleOutputFields (const OperationContext &op_context,
   out.threshold_T_dynamic = op_context.GetThresholdTDynamic ();
   out.threshold_hysteresis = op_context.GetThresholdHysteresis ();
   out.effective_focus = op_context.GetEffectiveFocus ();
+  out.coherence = op_context.GetCoherence ();
   out.emotion_intensity = op_context.GetEmotionIntensity ();
   out.valence = op_context.GetValence ();
   out.arousal = op_context.GetArousal ();
@@ -1330,17 +1407,17 @@ LoadPredictivePreActivationIds (Store &store, ProcessorContext &ctx)
   try
     {
       ctx.predictive_pre_activation_embedding_ids.clear ();
+      ctx.predictive_pre_activation_memory_ids.clear ();
       auto rows = store.Execute (
-          "SELECT embedding_id FROM memories "
-          "WHERE embedding_id IS NOT NULL "
-          "  AND COALESCE(pre_activation, 0.0) > 1e-6");
-      ctx.predictive_pre_activation_embedding_ids.reserve (rows.size ());
+          "SELECT memory_id FROM memories "
+          "WHERE COALESCE(pre_activation, 0.0) > 1e-6");
+      ctx.predictive_pre_activation_memory_ids.reserve (rows.size ());
       for (const auto &row : rows)
         {
-          const long long embedding_id = ExtractInt64 (row, "embedding_id", 0);
-          if (embedding_id > 0)
+          const long long memory_id = ExtractInt64 (row, "memory_id", 0);
+          if (memory_id > 0)
             {
-              ctx.predictive_pre_activation_embedding_ids.insert (embedding_id);
+              ctx.predictive_pre_activation_memory_ids.insert (memory_id);
             }
         }
     }
@@ -1359,17 +1436,17 @@ LoadRetrievalSuppressionIds (Store &store, ProcessorContext &ctx)
   try
     {
       ctx.retrieval_suppression_embedding_ids.clear ();
+      ctx.retrieval_suppression_memory_ids.clear ();
       auto rows = store.Execute (
-          "SELECT embedding_id FROM memories "
-          "WHERE embedding_id IS NOT NULL "
-          "  AND COALESCE(suppression, 0.0) > 1e-9");
-      ctx.retrieval_suppression_embedding_ids.reserve (rows.size ());
+          "SELECT memory_id FROM memories "
+          "WHERE COALESCE(suppression, 0.0) > 1e-9");
+      ctx.retrieval_suppression_memory_ids.reserve (rows.size ());
       for (const auto &row : rows)
         {
-          const long long embedding_id = ExtractInt64 (row, "embedding_id", 0);
-          if (embedding_id > 0)
+          const long long memory_id = ExtractInt64 (row, "memory_id", 0);
+          if (memory_id > 0)
             {
-              ctx.retrieval_suppression_embedding_ids.insert (embedding_id);
+              ctx.retrieval_suppression_memory_ids.insert (memory_id);
             }
         }
     }
@@ -1392,9 +1469,12 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
       ctx.retrieval_surface_embedding_index.clear ();
       ctx.retrieval_surface_source_index.clear ();
       ctx.retrieval_surface_source_index_dirty.clear ();
+      ctx.association_cache.clear ();
+      ctx.association_cache_index.clear ();
+      ctx.association_fanout_cache = {};
 
-	      auto rows = store.Execute (
-	          "SELECT m.memory_id, m.embedding_id AS base_embedding_id, "
+      auto rows = store.Execute (
+          "SELECT m.memory_id, m.embedding_id AS base_embedding_id, "
 	          "       COALESCE(cme.embedding_id, m.embedding_id) AS embedding_id, "
 	          "       CASE WHEN cme.memory_id IS NOT NULL "
 	          "            THEN cme.embedding ELSE e.embedding END AS embedding, "
@@ -1410,7 +1490,8 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
           "       m.source_contradiction_count, m.emotional_intensity, "
           "       m.s_arousal_avg, m.kind, m.source_id, m.modality, "
           "       COALESCE(m.pre_activation, 0.0) AS pre_activation, "
-          "       CASE WHEN cme.memory_id IS NOT NULL "
+          "       CASE WHEN (cme.memory_id IS NOT NULL "
+          "                  OR m.embedding_id IS NOT NULL) "
           "             AND m.kind != 'WORKING' "
           "             AND m.kind != 'LABEL' "
           "             AND (m.kind != 'ASSOCIATION' OR EXISTS ("
@@ -1422,10 +1503,13 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
 	          "FROM memories m "
 	          "LEFT JOIN current_memory_embeddings cme "
 	          "  ON cme.memory_id = m.memory_id "
-	          "JOIN embeddings e "
-	          "  ON e.embedding_id = COALESCE(cme.embedding_id, m.embedding_id) "
-	          "WHERE cme.memory_id IS NOT NULL "
-	          "   OR m.kind = 'LABEL'");
+          "JOIN embeddings e "
+          "  ON e.embedding_id = COALESCE(cme.embedding_id, m.embedding_id) "
+          "WHERE cme.memory_id IS NOT NULL "
+          "   OR m.kind = 'LABEL' "
+          "   OR (m.kind != 'WORKING' "
+          "       AND m.kind != 'LABEL' "
+          "       AND m.embedding_id IS NOT NULL)");
 
       ctx.retrieval_surface_cache.reserve (rows.size ());
       ctx.retrieval_surface_index.reserve (rows.size ());
@@ -1438,13 +1522,9 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
               continue;
             }
           ProcessorContext::RetrievalSurfaceEntry entry;
-	          entry.memory_id = ExtractInt64 (row, "memory_id", 0);
-	          entry.embedding_id = ExtractInt64 (row, "base_embedding_id", 0);
-	          if (entry.embedding_id <= 0)
-	            {
-	              entry.embedding_id = ExtractInt64 (row, "embedding_id", 0);
-	            }
-	          entry.created_at = ExtractInt64 (row, "created_at", 0);
+          entry.memory_id = ExtractInt64 (row, "memory_id", 0);
+          entry.embedding_id = ExtractInt64 (row, "embedding_id", 0);
+          entry.created_at = ExtractInt64 (row, "created_at", 0);
           entry.start_ts = ExtractInt64 (row, "start_ts", 0);
           entry.last_access = ExtractInt64 (row, "last_access", 0);
           entry.event_ts = ExtractInt64 (row, "event_ts", entry.created_at);
@@ -1463,14 +1543,22 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
           entry.pre_activation = ExtractDouble (row, "pre_activation", 0.0);
           entry.vector_seed_eligible
               = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
-          entry.embedding = BlobToEigen (emb_it->second);
-          auto ctx_it = row.find ("context");
-          if (ctx_it != row.end () && ctx_it->second.has_value ())
-            {
-              entry.context_embedding = BlobToEigen (ctx_it->second);
-            }
+	          entry.embedding = BlobToEigen (emb_it->second);
+	          auto ctx_it = row.find ("context");
+	          if (ctx_it != row.end () && ctx_it->second.has_value ())
+	            {
+	              entry.context_embedding = BlobToEigen (ctx_it->second);
+	            }
+          const long long association_memory_id = entry.memory_id;
+          const long long association_embedding_id = entry.embedding_id;
+          const Eigen::VectorXf association_embedding = entry.embedding;
+          const bool association_is_association = entry.kind == "ASSOCIATION";
           ctx.UpsertRetrievalSurface (std::move (entry));
-        }
+          ctx.UpsertAssociationCache (association_memory_id,
+                                      association_embedding_id,
+                                      association_embedding,
+                                      association_is_association);
+	        }
       ctx.SortRetrievalSurfaceSourceIndexes ();
       telemetry::LogDebug (
           "cortext.retrieval_surface_cache.load",
@@ -1976,12 +2064,7 @@ SignalProcessor::Process (const Signal &signal)
   std::unique_ptr<ObjectTransaction> object_tx;
   if (object_store_ && tx)
     {
-      if (auto *sql_object_store
-          = dynamic_cast<SqlObjectStore *> (object_store_.get ()))
-        {
-          object_tx = sql_object_store->Attach (*tx);
-        }
-      else
+      if (dynamic_cast<SqlObjectStore *> (object_store_.get ()) == nullptr)
         {
           object_tx = object_store_->Begin ();
         }
@@ -1989,9 +2072,12 @@ SignalProcessor::Process (const Signal &signal)
   const auto tx_begin_end = std::chrono::steady_clock::now ();
   const auto snapshot_start = std::chrono::steady_clock::now ();
   ProcessorContext context_snapshot;
+  DetachedProcessorCaches context_cache_snapshot;
   {
-    ScopedProcessorCacheDetach detach (*context_);
+    auto detached_caches = DetachRebuildableProcessorCaches (*context_);
     context_snapshot = *context_;
+    context_cache_snapshot = detached_caches;
+    RestoreRebuildableProcessorCaches (*context_, detached_caches);
   }
   const auto snapshot_end = std::chrono::steady_clock::now ();
 
@@ -2020,6 +2106,7 @@ SignalProcessor::Process (const Signal &signal)
   };
   auto restore_context_snapshot = [&] {
     *context_ = std::move (context_snapshot);
+    RestoreRebuildableProcessorCaches (*context_, context_cache_snapshot);
     if (store_)
       {
         LoadPredictivePreActivationIds (*store_, *context_);
@@ -2088,6 +2175,11 @@ SignalProcessor::Process (const Signal &signal)
             {
               op_context.SetCurrentOperationType ("PersistObjects");
               op_start = std::chrono::steady_clock::now ();
+              // External object stores cannot commit atomically with the DB.
+              // Commit object content before the root DB commit so a later DB
+              // commit failure leaves only content-addressed orphan objects,
+              // not DB rows pointing to missing payloads. SqlObjectStore uses
+              // the DB transaction fallback and does not need object_tx here.
               object_tx->Commit ();
               op_context.AddOperationTiming (
                   "SignalProcessor.persist_objects",
@@ -2194,12 +2286,7 @@ SignalProcessor::Flush ()
   std::unique_ptr<ObjectTransaction> object_tx;
   if (object_store_)
     {
-      if (auto *sql_object_store
-          = dynamic_cast<SqlObjectStore *> (object_store_.get ()))
-        {
-          object_tx = sql_object_store->Attach (*tx);
-        }
-      else
+      if (dynamic_cast<SqlObjectStore *> (object_store_.get ()) == nullptr)
         {
           object_tx = object_store_->Begin ();
         }

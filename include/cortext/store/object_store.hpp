@@ -18,6 +18,11 @@ inline constexpr std::size_t kObjectIdSize = 32;
 ObjectId ComputeObjectId (const std::vector<unsigned char> &data);
 
 /// @brief Transactional content-addressed object storage.
+///
+/// Object transactions are atomic with the metadata database only when the
+/// provider attaches to the same database transaction, as SqlObjectStore does.
+/// External providers may commit independently; callers should treat committed
+/// but unreferenced content-addressed objects as collectible orphans.
 class ObjectTransaction
 {
 public:

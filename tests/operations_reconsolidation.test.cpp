@@ -1,6 +1,7 @@
 // tests/operations_reconsolidation.test.cpp
 #include <Eigen/Dense>
 #include "test_helpers.hpp"
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
@@ -178,6 +179,197 @@ TEST_CASE ("Alg20 drifts embedding and writes lability fields",
     REQUIRE (lab > 0.0);
     REQUIRE (ts == 100LL);
   }
+}
+
+TEST_CASE ("Alg20 structured reconsolidation does not overwrite shared embedding",
+           "[operations][recon]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.0;
+
+  const Eigen::VectorXf cur = MakeUnitVec256 (0);
+  Eigen::VectorXf mem = MakeUnitVec256 (0);
+  mem[1] = 1.0f;
+  mem.normalize ();
+  cortext::testing::SeedEmbeddingV2 (*store, 420LL, mem, 1);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 420LL, "target",
+                                  "LONG_TERM", 1.0, 1);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 420LL, "sibling",
+                                  "LONG_TERM", 1.0, 1);
+  store->Execute (
+      "INSERT INTO signals(memory_id, embedding_id, source_id, timestamp, "
+      "modality, created_at) VALUES (?, ?, ?, ?, 'text', ?)",
+      { 100LL, 420LL, std::string ("target/signal"), 1LL, 1LL });
+
+  ProcessorContext pctx;
+  pctx.recent_context_embeddings.push_back (cur);
+  pctx.UpsertAssociationCache (100LL, 420LL, mem, false);
+  pctx.UpsertAssociationCache (101LL, 420LL, mem, false);
+  ProcessorContext::RetrievalSurfaceEntry surface_entry;
+  surface_entry.memory_id = 100LL;
+  surface_entry.embedding_id = 420LL;
+  surface_entry.embedding = mem;
+  surface_entry.kind = "LONG_TERM";
+  surface_entry.source_id = "target";
+  surface_entry.start_ts = 1;
+  pctx.UpsertRetrievalSurface (std::move (surface_entry));
+  ProcessorContext::RetrievalSurfaceEntry sibling_surface;
+  sibling_surface.memory_id = 101LL;
+  sibling_surface.embedding_id = 420LL;
+  sibling_surface.embedding = mem;
+  sibling_surface.kind = "LONG_TERM";
+  sibling_surface.source_id = "sibling";
+  sibling_surface.start_ts = 1;
+  pctx.UpsertRetrievalSurface (std::move (sibling_surface));
+  OperationContext ctx (MakeSignal (cur, 100), pctx, cfg, store.get ());
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 420LL, mem } });
+  ctx.SetRetrievedMemoryCandidates (
+      std::vector<OperationContext::RetrievedMemoryCandidate>{
+        { 100LL, 420LL, mem, 1.0 } });
+
+  ApplyReconsolidation op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT memory_id, embedding_id FROM memories "
+      "WHERE memory_id IN (100, 101) ORDER BY memory_id",
+      {});
+  REQUIRE (rows.size () == 2);
+  const long long target_embedding
+      = std::any_cast<long long> (rows[0].at ("embedding_id"));
+  const long long sibling_embedding
+      = std::any_cast<long long> (rows[1].at ("embedding_id"));
+  REQUIRE (target_embedding != 420LL);
+  REQUIRE (sibling_embedding == 420LL);
+
+  auto signal_rows = store->Execute (
+      "SELECT embedding_id FROM signals WHERE source_id = ?",
+      { std::string ("target/signal") });
+  REQUIRE (signal_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (signal_rows[0].at ("embedding_id"))
+           == 420LL);
+
+  auto old_embedding_rows = store->Execute (
+      "SELECT embedding FROM embeddings WHERE embedding_id = ?",
+      { 420LL });
+  REQUIRE (old_embedding_rows.size () == 1);
+  Eigen::VectorXf original_still_shared;
+  REQUIRE (cortext::core::DecodeFloatBlob (
+      old_embedding_rows[0].at ("embedding"), kEmbeddingDim,
+      original_still_shared));
+  REQUIRE (original_still_shared[1] == Catch::Approx (mem[1]));
+
+  auto current_rows = store->Execute (
+      "SELECT embedding_id FROM current_memory_embeddings WHERE memory_id = ?",
+      { 100LL });
+  REQUIRE (current_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (current_rows[0].at ("embedding_id"))
+           == target_embedding);
+
+  auto cache_it = pctx.retrieval_surface_index.find (100LL);
+  REQUIRE (cache_it != pctx.retrieval_surface_index.end ());
+  REQUIRE (pctx.retrieval_surface_cache[cache_it->second].embedding_id
+           == target_embedding);
+  auto assoc_it = pctx.association_cache_index.find (100LL);
+  REQUIRE (assoc_it != pctx.association_cache_index.end ());
+  REQUIRE (pctx.association_cache[assoc_it->second].embedding_id
+           == target_embedding);
+  auto sibling_cache_it = pctx.retrieval_surface_embedding_index.find (420LL);
+  REQUIRE (sibling_cache_it != pctx.retrieval_surface_embedding_index.end ());
+  REQUIRE (pctx.retrieval_surface_cache[sibling_cache_it->second].memory_id
+           == 101LL);
+}
+
+TEST_CASE ("Alg20 constructive reconsolidation refreshes processor caches",
+           "[operations][recon]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.0;
+
+  const Eigen::VectorXf cur = MakeUnitVec256 (0);
+  Eigen::VectorXf mem = MakeUnitVec256 (0);
+  mem[1] = 1.0f;
+  mem.normalize ();
+  cortext::testing::SeedEmbeddingV2 (*store, 420LL, mem, 1);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 420LL, "target",
+                                  "LONG_TERM", 1.0, 1);
+
+  ProcessorContext pctx;
+  pctx.recent_context_embeddings.push_back (cur);
+  pctx.UpsertAssociationCache (100LL, 420LL, mem, false);
+  ProcessorContext::RetrievalSurfaceEntry surface_entry;
+  surface_entry.memory_id = 100LL;
+  surface_entry.embedding_id = 420LL;
+  surface_entry.embedding = mem;
+  surface_entry.kind = "LONG_TERM";
+  surface_entry.source_id = "target";
+  surface_entry.start_ts = 1;
+  pctx.UpsertRetrievalSurface (std::move (surface_entry));
+
+  OperationContext ctx (MakeSignal (cur, 2'000'000), pctx, cfg, store.get ());
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 420LL, mem } });
+  ctx.SetRetrievedMemoryCandidates (
+      std::vector<OperationContext::RetrievedMemoryCandidate>{
+        { 100LL, 420LL, mem, 1.0 } });
+
+  ApplyReconsolidation op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto reconstruction_rows = store->Execute (
+      "SELECT embedding_id FROM memory_reconstructions WHERE memory_id = ? "
+      "ORDER BY reconstruction_id DESC LIMIT 1",
+      { 100LL });
+  REQUIRE (reconstruction_rows.size () == 1);
+  const long long reconstruction_embedding_id
+      = std::any_cast<long long> (reconstruction_rows[0].at ("embedding_id"));
+  REQUIRE (reconstruction_embedding_id != 420LL);
+
+  auto current_rows = store->Execute (
+      "SELECT embedding, embedding_id FROM current_memory_embeddings "
+      "WHERE memory_id = ?",
+      { 100LL });
+  REQUIRE (current_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (current_rows[0].at ("embedding_id"))
+           == reconstruction_embedding_id);
+  Eigen::VectorXf current_surface;
+  REQUIRE (cortext::core::DecodeFloatBlob (
+      current_rows[0].at ("embedding"), kEmbeddingDim, current_surface));
+  REQUIRE (current_surface (0) > mem (0));
+  auto cache_it = pctx.retrieval_surface_index.find (100LL);
+  REQUIRE (cache_it != pctx.retrieval_surface_index.end ());
+  REQUIRE (pctx.retrieval_surface_cache[cache_it->second].embedding_id
+           == reconstruction_embedding_id);
+  REQUIRE (pctx.retrieval_surface_cache[cache_it->second].embedding (0)
+           > mem (0));
+  auto assoc_it = pctx.association_cache_index.find (100LL);
+  REQUIRE (assoc_it != pctx.association_cache_index.end ());
+  REQUIRE (pctx.association_cache[assoc_it->second].embedding_id
+           == reconstruction_embedding_id);
+  REQUIRE (pctx.association_cache[assoc_it->second].embedding (0)
+           > mem (0));
 }
 
 TEST_CASE ("Alg20 no drift when S=0: embedding unchanged, lability updated",
@@ -371,6 +563,15 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
 
   ProcessorContext pctx;
   pctx.recent_context_embeddings.push_back (cur);
+  pctx.UpsertAssociationCache (10LL, 10LL, neighbor_vec, false);
+  ProcessorContext::RetrievalSurfaceEntry neighbor_surface;
+  neighbor_surface.memory_id = 10LL;
+  neighbor_surface.embedding_id = 10LL;
+  neighbor_surface.embedding = neighbor_vec;
+  neighbor_surface.kind = "LONG_TERM";
+  neighbor_surface.source_id = "neighbor";
+  neighbor_surface.start_ts = static_cast<long long> (now_ts);
+  pctx.UpsertRetrievalSurface (std::move (neighbor_surface));
 
   // Create OperationContext with the store pointer
   OperationContext ctx (s, pctx, cfg, store.get ());
@@ -419,6 +620,82 @@ TEST_CASE ("Alg20 ripple propagation reaches graph neighbors",
     // Neighbor should have been written via ripple
     REQUIRE (cnt == 1LL);
   }
+  {
+    auto cache_it = pctx.retrieval_surface_index.find (10LL);
+    REQUIRE (cache_it != pctx.retrieval_surface_index.end ());
+    REQUIRE (pctx.retrieval_surface_cache[cache_it->second].embedding (0)
+             > 0.0f);
+    auto assoc_it = pctx.association_cache_index.find (10LL);
+    REQUIRE (assoc_it != pctx.association_cache_index.end ());
+    REQUIRE (pctx.association_cache[assoc_it->second].embedding (0)
+             > 0.0f);
+  }
+}
+
+TEST_CASE ("Alg20 ripple reconstruction forks shared neighbor embedding",
+           "[operations][recon][ripple]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::store::ApplyMigrations (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.0;
+
+  const Eigen::VectorXf cur = MakeUnitVec256 (0);
+  const Eigen::VectorXf primary = MakeUnitVec256 (0);
+  const Eigen::VectorXf neighbor = MakeUnitVec256 (5);
+  const long long now_ts = 1000LL;
+
+  cortext::testing::SeedEmbeddingV2 (*store, 1LL, primary, now_ts);
+  cortext::testing::SeedMemoryV2 (*store, 1LL, 1LL, "primary",
+                                  "LONG_TERM", 1.0, now_ts);
+  cortext::testing::SeedEmbeddingV2 (*store, 900LL, neighbor, now_ts);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 900LL, "neighbor",
+                                  "LONG_TERM", 1.0, now_ts);
+  cortext::testing::SeedMemoryV2 (*store, 201LL, 900LL, "sibling",
+                                  "LONG_TERM", 1.0, now_ts);
+  store->Execute (
+      "INSERT INTO associations (source_memory_id, target_memory_id, "
+      "edge_type, weight) VALUES (?, ?, ?, ?)",
+      { 1LL, 200LL, std::string ("reinforces"), 1.0 });
+
+  ProcessorContext pctx;
+  pctx.recent_context_embeddings.push_back (cur);
+  OperationContext ctx (MakeSignal (cur, 2000), pctx, cfg, store.get ());
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, primary } });
+
+  auto tx = store->Begin ();
+  ApplyReconsolidation recon_op;
+  recon_op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT memory_id, embedding_id FROM memories "
+      "WHERE memory_id IN (200, 201) ORDER BY memory_id",
+      {});
+  REQUIRE (rows.size () == 2);
+  const long long neighbor_embedding
+      = std::any_cast<long long> (rows[0].at ("embedding_id"));
+  const long long sibling_embedding
+      = std::any_cast<long long> (rows[1].at ("embedding_id"));
+  REQUIRE (neighbor_embedding != 900LL);
+  REQUIRE (sibling_embedding == 900LL);
+
+  auto current_rows = store->Execute (
+      "SELECT embedding_id FROM current_memory_embeddings WHERE memory_id = ?",
+      { 200LL });
+  REQUIRE (current_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (current_rows[0].at ("embedding_id"))
+           == neighbor_embedding);
+  REQUIRE (pctx.association_fanout_cache.valid);
 }
 
 TEST_CASE ("Alg20 ripple decay applied correctly per hop",

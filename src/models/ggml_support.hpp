@@ -7,7 +7,7 @@
 #include <mutex>
 #include <string>
 
-#if defined(CORTEXT_ENABLE_LLAMA_CPP)
+#if defined(CORTEXT_ENABLE_GGML)
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgcc-compat"
@@ -16,8 +16,8 @@
 #pragma clang diagnostic ignored "-Wsign-compare"
 #pragma clang diagnostic ignored "-Wc99-extensions"
 #endif
+#include <ggml.h>
 #include CORTEXT_GGML_BACKEND_HEADER_PATH
-#include CORTEXT_LLAMA_HEADER_PATH
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
@@ -26,31 +26,21 @@
 namespace cortext::internal
 {
 
-#if !defined(CORTEXT_ENABLE_LLAMA_CPP)
-using llama_sampler = void;
-struct llama_vocab;
-using llama_token = int32_t;
-#endif
-
-#if defined(CORTEXT_ENABLE_LLAMA_CPP)
+#if defined(CORTEXT_ENABLE_GGML)
 
 inline void
-LoadGgmlBackendsOnce ()
-{
-  static std::once_flag backend_once;
-  std::call_once (backend_once, [] () { ggml_backend_load_all (); });
-}
+InstallGgmlLogFilter ();
 
-struct LlamaCppLogState
+struct GgmlLogState
 {
   ggml_log_level threshold = GGML_LOG_LEVEL_ERROR;
   std::atomic<bool> emit_continuation{ false };
 };
 
 inline ggml_log_level
-ResolveLlamaCppLogLevel ()
+ResolveGgmlLogLevel ()
 {
-  const char *value = std::getenv ("CORTEXT_LLAMA_CPP_LOG_LEVEL");
+  const char *value = std::getenv ("CORTEXT_GGML_LOG_LEVEL");
   if (value == nullptr || *value == '\0')
     {
       return GGML_LOG_LEVEL_ERROR;
@@ -87,10 +77,10 @@ ResolveLlamaCppLogLevel ()
 }
 
 inline void
-CortextLlamaCppLogCallback (ggml_log_level level, const char *text,
-                            void *user_data)
+CortextGgmlLogCallback (ggml_log_level level, const char *text,
+                        void *user_data)
 {
-  auto *state = static_cast<LlamaCppLogState *> (user_data);
+  auto *state = static_cast<GgmlLogState *> (user_data);
   if (state == nullptr || text == nullptr)
     {
       return;
@@ -117,25 +107,34 @@ CortextLlamaCppLogCallback (ggml_log_level level, const char *text,
 }
 
 inline void
-InstallLlamaCppLogFilter ()
+InstallGgmlLogFilter ()
 {
   static std::once_flag once;
-  static LlamaCppLogState state;
+  static GgmlLogState state;
   std::call_once (once, [] () {
-    state.threshold = ResolveLlamaCppLogLevel ();
-    llama_log_set (CortextLlamaCppLogCallback, &state);
+    state.threshold = ResolveGgmlLogLevel ();
+    ggml_log_set (CortextGgmlLogCallback, &state);
+  });
+}
+
+inline void
+LoadGgmlBackendsOnce ()
+{
+  static std::once_flag backend_once;
+  std::call_once (backend_once, [] () {
+    InstallGgmlLogFilter ();
+    ggml_backend_load_all ();
   });
 }
 
 #endif
 
-inline constexpr bool kLlamaCppAvailable
-#if defined(CORTEXT_ENABLE_LLAMA_CPP)
-    = true;
+inline constexpr bool kGgmlAvailable =
+#if defined(CORTEXT_ENABLE_GGML)
+    true;
 #else
-    = false;
+    false;
 #endif
-
 ;
 
 } // namespace cortext::internal

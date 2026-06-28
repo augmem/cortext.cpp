@@ -304,11 +304,10 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
            "[rehearsal, chunk) range",
            "[operations][working_memory][rehearsal][phase4]")
 {
-  // Create signal with slightly different vector to get similarity in range
   Signal s;
   s.embedding = Eigen::VectorXf::Zero (3);
-  s.embedding[0] = 0.9f;
-  s.embedding[1] = 0.4f;
+  s.embedding[0] = 0.6f;
+  s.embedding[1] = 0.8f;
   s.embedding.normalize ();
   s.timestamp = 100000; // 100 seconds in ms
   s.source_id = "test";
@@ -319,8 +318,6 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
   cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
   cfg.stability = 0.5;
 
-
-  // Seed slot with different vector to get ~0.6 similarity (in rehearsal range)
   ProcessorContext::WMSlot slot;
   slot.embedding = Eigen::VectorXf::Zero (3);
   slot.embedding[0] = 1.0f;
@@ -329,14 +326,6 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
   slot.last_ts = 100.0;
   slot.pos_index = 0;
   pctx.wm_slots.push_back (slot);
-
-  // Compute similarity: dot([0.9, 0.4, 0]/norm, [1, 0, 0]) ~= 0.9/sqrt(0.81+0.16)
-  // = 0.9/0.985 ~= 0.91, which exceeds chunk_threshold at F=0 (0.7)
-  // Adjust embedding to get lower similarity
-  s.embedding = Eigen::VectorXf::Zero (3);
-  s.embedding[0] = 0.7f;
-  s.embedding[1] = 0.7f;
-  s.embedding.normalize (); // [0.7, 0.7, 0]/norm = [0.707, 0.707, 0]
 
   const double before_strength = pctx.wm_slots[0].strength;
 
@@ -348,22 +337,10 @@ TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
 
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  // Similarity = dot([0.707, 0.707, 0], [1, 0, 0]) = 0.707
-  // At F=0: chunk_threshold = 0.7, rehearsal_threshold = 0.5
-  // 0.707 >= 0.7 means it will chunk, not rehearse
-  // Need even lower similarity for rehearsal - let me recalculate
-
-  // Actually with F=0, chunk_threshold=0.7. Similarity of 0.707 >= 0.7, so it
-  // chunks. Let's adjust to get similarity in [0.5, 0.7)
-  // Using signal [0.5, 0.866, 0] gives dot([0.5, 0.866, 0], [1, 0, 0]) = 0.5
-  // That's at the boundary. Let's use [0.55, 0.84, 0]
-  // Actually the test setup needs adjustment. For now, verify mechanism works:
-
-  // If chunking happened (similarity >= 0.7), slot count stays same
-  // If rehearsal happened (similarity in [0.5, 0.7)), a new slot is added
-  // Since we want to test rehearsal, verify slot strength increased
-  // In either case (chunk or rehearsal), strength should increase
-  REQUIRE (pctx.wm_slots[0].strength >= before_strength);
+  // Similarity to the existing slot is exactly 0.6, inside the rehearsal band
+  // [0.5, 0.7), so the original slot is boosted but not chunked.
+  REQUIRE_FALSE (pctx.wm_last_chunked);
+  REQUIRE (pctx.wm_slots[0].strength > before_strength);
 }
 
 TEST_CASE ("Alg24 rehearsal strength capped at knob-derived max",
@@ -739,6 +716,77 @@ TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",
         }
     }
   REQUIRE (new_slot_added);
+}
+
+TEST_CASE ("Alg24 eviction tie-breaks by weaker slot before stable index",
+           "[operations][working_memory][eviction][tie]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (4);
+  s.embedding[3] = 1.0f;
+  s.embedding.normalize ();
+  s.timestamp = 200000;
+  s.source_id = "test";
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+
+  ProcessorContext::WMSlot strong_first;
+  strong_first.embedding = Eigen::VectorXf::Zero (4);
+  strong_first.embedding[0] = 1.0f;
+  strong_first.embedding.normalize ();
+  strong_first.strength = 30.0;
+  strong_first.last_ts = 200.0;
+  strong_first.pos_index = 0;
+  pctx.wm_slots.push_back (strong_first);
+
+  ProcessorContext::WMSlot weaker_second;
+  weaker_second.embedding = Eigen::VectorXf::Zero (4);
+  weaker_second.embedding[1] = 1.0f;
+  weaker_second.embedding.normalize ();
+  weaker_second.strength = 20.0;
+  weaker_second.last_ts = 200.0;
+  weaker_second.pos_index = 1;
+  pctx.wm_slots.push_back (weaker_second);
+
+  const int capacity = core::WMBaseCapacity (cfg.sensitivity, cfg.focus);
+  for (int i = static_cast<int> (pctx.wm_slots.size ()); i < capacity; ++i)
+    {
+      ProcessorContext::WMSlot filler;
+      filler.embedding = Eigen::VectorXf::Zero (4);
+      filler.embedding[0] = 1.0f;
+      filler.embedding[1] = 1.0f;
+      filler.embedding.normalize ();
+      filler.strength = 40.0;
+      filler.last_ts = 200.0;
+      filler.pos_index = i;
+      pctx.wm_slots.push_back (filler);
+    }
+
+  WorkingMemory op;
+  OperationContext ctx (s, pctx, cfg);
+  SetupMemoryGatingContext (ctx, pctx, s, 0.9);
+
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  bool strong_first_survived = false;
+  bool weaker_second_survived = false;
+  for (const auto &slot : pctx.wm_slots)
+    {
+      if (slot.embedding.size () == 4 && slot.embedding[0] > 0.9f)
+        {
+          strong_first_survived = true;
+        }
+      if (slot.embedding.size () == 4 && slot.embedding[1] > 0.9f)
+        {
+          weaker_second_survived = true;
+        }
+    }
+  REQUIRE (strong_first_survived);
+  REQUIRE_FALSE (weaker_second_survived);
 }
 
 TEST_CASE ("Alg24 high-T increases slot dedication resistance to eviction",

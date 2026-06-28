@@ -25,6 +25,13 @@ using SteadyClock = std::chrono::steady_clock;
 constexpr std::size_t kPredictiveSqlChunkSize = 400;
 constexpr int kPredictiveDbDecayIntervalSignals = 64;
 
+struct PredictiveCandidate
+{
+  long long memory_id = 0;
+  long long embedding_id = 0;
+  Eigen::VectorXf embedding;
+};
+
 double
 VectorNorm (const Eigen::VectorXf &v)
 {
@@ -90,7 +97,9 @@ DecayActivePreActivation (OperationContext &context, Transaction &tx,
 {
   auto &active_ids = context.GetProcessorContext ()
                          .predictive_pre_activation_embedding_ids;
-  if (active_ids.empty ())
+  auto &active_memory_ids = context.GetProcessorContext ()
+                                .predictive_pre_activation_memory_ids;
+  if (active_ids.empty () && active_memory_ids.empty ())
     {
       return;
     }
@@ -100,6 +109,95 @@ DecayActivePreActivation (OperationContext &context, Transaction &tx,
   const bool flush_db_decay
       = p_ctx.signals_processed <= 1
         || (p_ctx.signals_processed % kPredictiveDbDecayIntervalSignals) == 0;
+
+  std::vector<long long> memory_ids (active_memory_ids.begin (),
+                                     active_memory_ids.end ());
+  std::unordered_set<long long> still_active_memory_ids;
+  still_active_memory_ids.reserve (memory_ids.size ());
+
+  for (std::size_t begin = 0; begin < memory_ids.size ();
+       begin += kPredictiveSqlChunkSize)
+    {
+      const std::size_t end
+          = std::min (memory_ids.size (), begin + kPredictiveSqlChunkSize);
+      const std::string placeholders = Placeholders (end - begin);
+
+      std::vector<std::any> update_params;
+      update_params.reserve ((end - begin) + 2);
+      update_params.push_back (pad);
+      update_params.push_back (pad);
+      for (std::size_t i = begin; i < end; ++i)
+        {
+          update_params.push_back (memory_ids[i]);
+        }
+
+      if (flush_db_decay)
+        {
+          tx.Execute ("UPDATE memories "
+                      "SET pre_activation = CASE "
+                      "  WHEN pre_activation * ? <= 1e-6 "
+                      "    THEN 0.0 "
+                      "  ELSE pre_activation * ? "
+                      "END "
+                      "WHERE memory_id IN (" + placeholders + ") "
+                      "  AND pre_activation > 0.0",
+                      update_params);
+        }
+
+      std::vector<long long> cache_miss_memory_ids;
+      cache_miss_memory_ids.reserve (end - begin);
+      for (std::size_t i = begin; i < end; ++i)
+        {
+          const long long memory_id = memory_ids[i];
+          p_ctx.DecayRetrievalSurfacePreActivationByMemory (memory_id, pad);
+          auto cache_it = p_ctx.retrieval_surface_index.find (memory_id);
+          if (cache_it == p_ctx.retrieval_surface_index.end ())
+            {
+              if (flush_db_decay)
+                {
+                  cache_miss_memory_ids.push_back (memory_id);
+                }
+              else
+                {
+                  still_active_memory_ids.insert (memory_id);
+                }
+              continue;
+            }
+          const auto &entry
+              = p_ctx.retrieval_surface_cache[cache_it->second];
+          if (entry.pre_activation > 1e-6)
+            {
+              still_active_memory_ids.insert (memory_id);
+            }
+        }
+      if (flush_db_decay && !cache_miss_memory_ids.empty ())
+        {
+          const std::string miss_placeholders = Placeholders (
+              cache_miss_memory_ids.size ());
+          auto rows = tx.Execute (
+              "SELECT memory_id FROM memories "
+              "WHERE memory_id IN (" + miss_placeholders + ") "
+              "  AND pre_activation > 0.0 "
+              "  AND pre_activation > 1e-6",
+              ChunkParams (cache_miss_memory_ids, 0,
+                           cache_miss_memory_ids.size ()));
+          for (const auto &row : rows)
+            {
+              auto it = row.find ("memory_id");
+              if (it == row.end ())
+                {
+                  continue;
+                }
+              const auto id = store::AnyToLongLong (it->second);
+              if (id.has_value () && *id > 0)
+                {
+                  still_active_memory_ids.insert (*id);
+                }
+            }
+        }
+    }
+  active_memory_ids.swap (still_active_memory_ids);
+
   std::vector<long long> ids (active_ids.begin (), active_ids.end ());
   std::unordered_set<long long> still_active;
   still_active.reserve (ids.size ());
@@ -240,7 +338,34 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
     }
 
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
-  if (retrieved.empty ())
+  const auto &retrieved_records = context.GetRetrievedMemoryCandidates ();
+  std::vector<PredictiveCandidate> candidates;
+  if (!retrieved_records.empty ())
+    {
+      candidates.reserve (retrieved_records.size ());
+      for (const auto &record : retrieved_records)
+        {
+          if (record.memory_id > 0 && record.embedding_id > 0
+              && record.embedding.size () > 0)
+            {
+              candidates.push_back (
+                  { record.memory_id, record.embedding_id,
+                    record.embedding });
+            }
+        }
+    }
+  else
+    {
+      candidates.reserve (retrieved.size ());
+      for (const auto &kv : retrieved)
+        {
+          if (kv.first > 0 && kv.second.size () > 0)
+            {
+              candidates.push_back ({ 0, kv.first, kv.second });
+            }
+        }
+    }
+  if (candidates.empty ())
     {
       return;
     }
@@ -274,10 +399,9 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
     }
 
   int boost_count = 0;
-  for (const auto &kv : retrieved)
+  for (const auto &candidate : candidates)
     {
-      const long long id = kv.first;
-      const Eigen::VectorXf &vec = kv.second;
+      const Eigen::VectorXf &vec = candidate.embedding;
       if (vec.size () == 0 || vec.size () != pred.size ())
         {
           continue;
@@ -297,13 +421,30 @@ ApplyPredictivePreActivation::Execute (OperationContext &context, Transaction &t
           delta, 0.0,
           core::PredictiveDeltaCap (cfg.focus, cfg.sensitivity, cfg.stability));
 
-      // v2: Update memories pre_activation (row exists from storage)
-      tx.Execute ("UPDATE memories "
-                  "SET pre_activation = MIN(?, COALESCE(pre_activation, 0.0) * ? + ?) "
-                  "WHERE embedding_id = ?;",
-                  { 1.0, pad, delta, id });
-      p_ctx.BoostRetrievalSurfacePreActivationByEmbedding (id, pad, delta);
-      p_ctx.predictive_pre_activation_embedding_ids.insert (id);
+      if (candidate.memory_id > 0)
+        {
+          tx.Execute (
+              "UPDATE memories "
+              "SET pre_activation = MIN(?, COALESCE(pre_activation, 0.0) * ? + ?) "
+              "WHERE memory_id = ?;",
+              { 1.0, pad, delta, candidate.memory_id });
+          p_ctx.BoostRetrievalSurfacePreActivationByMemory (
+              candidate.memory_id, pad, delta);
+          p_ctx.predictive_pre_activation_memory_ids.insert (
+              candidate.memory_id);
+        }
+      else
+        {
+          tx.Execute (
+              "UPDATE memories "
+              "SET pre_activation = MIN(?, COALESCE(pre_activation, 0.0) * ? + ?) "
+              "WHERE embedding_id = ?;",
+              { 1.0, pad, delta, candidate.embedding_id });
+          p_ctx.BoostRetrievalSurfacePreActivationByEmbedding (
+              candidate.embedding_id, pad, delta);
+          p_ctx.predictive_pre_activation_embedding_ids.insert (
+              candidate.embedding_id);
+        }
       ++boost_count;
     }
 

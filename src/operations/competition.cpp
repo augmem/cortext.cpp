@@ -90,12 +90,88 @@ ApplyRIFRecovery (OperationContext &context, Transaction &tx, long long now_ts,
 {
   auto &active_ids
       = context.GetProcessorContext ().retrieval_suppression_embedding_ids;
-  if (active_ids.empty ())
+  auto &active_memory_ids
+      = context.GetProcessorContext ().retrieval_suppression_memory_ids;
+  if (active_ids.empty () && active_memory_ids.empty ())
     {
       return;
     }
 
   const auto start = SteadyClock::now ();
+  std::vector<long long> memory_ids (active_memory_ids.begin (),
+                                     active_memory_ids.end ());
+  std::unordered_set<long long> still_active_memory_ids;
+  still_active_memory_ids.reserve (memory_ids.size ());
+
+  for (std::size_t begin = 0; begin < memory_ids.size ();
+       begin += kCompetitionSqlChunkSize)
+    {
+      const std::size_t end
+          = std::min (memory_ids.size (), begin + kCompetitionSqlChunkSize);
+      const std::string placeholders = Placeholders (end - begin);
+
+      std::vector<std::any> update_params;
+      update_params.reserve ((end - begin) + 12);
+      update_params.push_back (now_ts);
+      update_params.push_back (now_ts);
+      update_params.push_back (recovery_time);
+      update_params.push_back (now_ts);
+      update_params.push_back (recovery_time);
+      update_params.push_back (now_ts);
+      update_params.push_back (now_ts);
+      update_params.push_back (recovery_time);
+      update_params.push_back (now_ts);
+      update_params.push_back (recovery_time);
+      update_params.push_back (now_ts);
+      for (std::size_t i = begin; i < end; ++i)
+        {
+          update_params.push_back (memory_ids[i]);
+        }
+
+      tx.Execute (
+          "UPDATE memories "
+          "SET strength = MAX(0.0, strength + ("
+          "  suppression * ("
+          "    CASE "
+          "      WHEN (? - COALESCE(suppression_ts, 0)) <= 0 THEN 0.0 "
+          "      WHEN (? - COALESCE(suppression_ts, 0)) >= ? THEN 1.0 "
+          "      ELSE ((? - COALESCE(suppression_ts, 0)) * 1.0 / ?) "
+          "    END"
+          "  )"
+          ")), "
+          "suppression = MAX(0.0, suppression - (suppression * ("
+          "    CASE "
+          "      WHEN (? - COALESCE(suppression_ts, 0)) <= 0 THEN 0.0 "
+          "      WHEN (? - COALESCE(suppression_ts, 0)) >= ? THEN 1.0 "
+          "      ELSE ((? - COALESCE(suppression_ts, 0)) * 1.0 / ?) "
+          "    END"
+          "  ))), "
+          "suppression_ts = ? "
+          "WHERE memory_id IN (" + placeholders + ") "
+          "  AND COALESCE(suppression, 0.0) > 0.0",
+          update_params);
+
+      auto rows = tx.Execute (
+          "SELECT memory_id FROM memories "
+          "WHERE memory_id IN (" + placeholders + ") "
+          "  AND COALESCE(suppression, 0.0) > 1e-9",
+          ChunkParams (memory_ids, begin, end));
+      for (const auto &row : rows)
+        {
+          auto it = row.find ("memory_id");
+          if (it == row.end ())
+            {
+              continue;
+            }
+          const auto id = store::AnyToLongLong (it->second);
+          if (id.has_value () && *id > 0)
+            {
+              still_active_memory_ids.insert (*id);
+            }
+        }
+    }
+  active_memory_ids.swap (still_active_memory_ids);
+
   std::vector<long long> ids (active_ids.begin (), active_ids.end ());
   std::unordered_set<long long> still_active;
   still_active.reserve (ids.size ());
@@ -175,28 +251,30 @@ ApplyRIFRecovery (OperationContext &context, Transaction &tx, long long now_ts,
 
 struct Candidate
 {
-  long long id;
+  long long memory_id = 0;
+  long long embedding_id = 0;
   Eigen::VectorXf vec;
-  double activation;
+  double activation = 0.0;
 };
 
 std::vector<Candidate>
-ScoreCandidates (const std::unordered_map<long long, Eigen::VectorXf> &retrieved,
+ScoreCandidates (const std::vector<Candidate> &retrieved,
                  const Eigen::VectorXf &x_ctx)
 {
   std::vector<Candidate> cands;
   cands.reserve (retrieved.size ());
-  for (const auto &kv : retrieved)
+  for (const auto &candidate : retrieved)
     {
-      const long long id = kv.first;
-      const Eigen::VectorXf &v = kv.second;
+      const Eigen::VectorXf &v = candidate.vec;
       if (v.size () == 0 || v.size () != x_ctx.size ())
         {
           continue;
         }
       double act = core::CosineSimilarity (v, x_ctx);
       act = Clamp01 (act);
-      cands.push_back (Candidate{ id, v, act });
+      Candidate scored = candidate;
+      scored.activation = act;
+      cands.push_back (std::move (scored));
     }
   std::sort (cands.begin (), cands.end (),
              [] (const Candidate &a, const Candidate &b) {
@@ -212,6 +290,7 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
                         double competition_scale,
                         long long now_ts, Transaction &tx,
                         std::unordered_set<long long> &active_ids,
+                        std::unordered_set<long long> &active_memory_ids,
                         int &suppressed_count)
 {
   for (const auto &loser : losers)
@@ -239,9 +318,20 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
                   "    suppression_ts = ?, "
                   "    suppression_count = suppression_count + 1, "
                   "    strength = MAX(0.0, strength - ?) "
-                  "WHERE embedding_id = ?;",
-                  { total_supp, now_ts, total_supp, loser.id });
-      active_ids.insert (loser.id);
+                  + std::string (loser.memory_id > 0
+                                     ? "WHERE memory_id = ?;"
+                                     : "WHERE embedding_id = ?;"),
+                  { total_supp, now_ts, total_supp,
+                    loser.memory_id > 0 ? loser.memory_id
+                                        : loser.embedding_id });
+      if (loser.memory_id > 0)
+        {
+          active_memory_ids.insert (loser.memory_id);
+        }
+      else if (loser.embedding_id > 0)
+        {
+          active_ids.insert (loser.embedding_id);
+        }
       ++suppressed_count;
     }
 }
@@ -260,19 +350,46 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
     }
   const Eigen::VectorXf &x_ctx = p_ctx.recent_context_embeddings.back ();
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
-  if (retrieved.empty ())
+  const auto &retrieved_records = context.GetRetrievedMemoryCandidates ();
+  std::vector<Candidate> retrieval_candidates;
+  if (!retrieved_records.empty ())
+    {
+      retrieval_candidates.reserve (retrieved_records.size ());
+      for (const auto &candidate : retrieved_records)
+        {
+          if (candidate.embedding_id > 0 && candidate.embedding.size () > 0)
+            {
+              retrieval_candidates.push_back (
+                  { candidate.memory_id, candidate.embedding_id,
+                    candidate.embedding, 0.0 });
+            }
+        }
+    }
+  else
+    {
+      retrieval_candidates.reserve (retrieved.size ());
+      for (const auto &kv : retrieved)
+        {
+          if (kv.first > 0 && kv.second.size () > 0)
+            {
+              retrieval_candidates.push_back ({ 0, kv.first, kv.second, 0.0 });
+            }
+        }
+    }
+  if (retrieval_candidates.empty ())
     {
       return;
     }
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
   const double recovery_time = core::RetrievalCompetitionRecoverySeconds (
-      cfg.stability);
+                                   cfg.stability)
+                               * 1000.0;
   ApplyRIFRecovery (context, tx, now_ts, recovery_time);
   const double competition_scale
       = neuromodulation::RetrievalCompetitionScale (p_ctx.neuromod_ne);
 
-  std::vector<Candidate> cands = ScoreCandidates (retrieved, x_ctx);
+  std::vector<Candidate> cands = ScoreCandidates (retrieval_candidates, x_ctx);
   if (cands.empty ())
     {
       return;
@@ -288,9 +405,11 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
     }
   int suppressed_count = 0;
   auto &active_suppression_ids = p_ctx.retrieval_suppression_embedding_ids;
+  auto &active_suppression_memory_ids = p_ctx.retrieval_suppression_memory_ids;
   ApplyLateralInhibition (winners, losers, radius, cfg.focus, cfg.sensitivity,
                           cfg.stability, competition_scale, now_ts, tx,
-                          active_suppression_ids, suppressed_count);
+                          active_suppression_ids,
+                          active_suppression_memory_ids, suppressed_count);
 
   // Debug logging
   telemetry::LogDebug ("cortext.competition", {

@@ -64,15 +64,36 @@ ResetAccumulatorOnInterrupt::Execute (OperationContext &context,
     {
       return;
     }
-  const auto &candidates = context.GetRetrievedMemoryEmbeddings ();
-  auto cand_it = candidates.find (*selected_id);
-  if (cand_it == candidates.end () || cand_it->second.size () == 0)
+  Eigen::VectorXf selected_embedding;
+  const auto &records = context.GetRetrievedMemoryCandidates ();
+  if (!records.empty ())
+    {
+      for (const auto &candidate : records)
+        {
+          if (candidate.memory_id == *selected_id
+              && candidate.embedding.size () > 0)
+            {
+              selected_embedding = candidate.embedding;
+              break;
+            }
+        }
+    }
+  else
+    {
+      const auto &candidates = context.GetRetrievedMemoryEmbeddings ();
+      auto cand_it = candidates.find (*selected_id);
+      if (cand_it != candidates.end () && cand_it->second.size () > 0)
+        {
+          selected_embedding = cand_it->second;
+        }
+    }
+  if (selected_embedding.size () == 0)
     {
       return;
     }
 
   it->second.pending_interrupt_abort = true;
-  it->second.pending_interrupt_embedding = cand_it->second;
+  it->second.pending_interrupt_embedding = selected_embedding;
   telemetry::AddCounter ("cortext.accumulator.interrupt_pending_total", 1);
   telemetry::LogDebug ("cortext.accumulator.interrupt_pending", {
     telemetry::Attribute::String ("source_id", signal.source_id),

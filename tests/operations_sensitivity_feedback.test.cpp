@@ -6,6 +6,7 @@
 #include <cortext/operations/sensitivity_feedback.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
+#include <cortext/store/sqlite_store.hpp>
 #include <unordered_map>
 
 using namespace cortext;
@@ -119,4 +120,54 @@ TEST_CASE (
 
   REQUIRE (pc.weight_novelty <= before);
   REQUIRE (pc.weight_novelty >= 0.0);
+}
+
+TEST_CASE ("Alg16 updates redundancy by memory id when embeddings are shared",
+           "[operations][sensitivity_feedback]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const Eigen::VectorXf embedding = unit (0, 256);
+  const Eigen::VectorXf reconstructed = unit (1, 256);
+  cortext::testing::SeedEmbeddingV2 (*store, 420LL, embedding, 1);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 420LL, "used",
+                                  "LONG_TERM", 1.0, 1);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 420LL, "sibling",
+                                  "LONG_TERM", 1.0, 1);
+
+  Signal s;
+  s.embedding = embedding;
+  s.timestamp = 3;
+  ProcessorContext pctx;
+  pctx.recent_context_embeddings.push_back (embedding);
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+
+  OperationContext ctx (s, pctx, cfg, store.get ());
+  OperationContext::MemoryUsageEvent ev{};
+  ev.memory_id = 100LL;
+  ev.embedding_id = 420LL;
+  ev.used = true;
+  ev.contextual_gain = 0.5;
+  ctx.SetMemoryUsageEvents ({ ev });
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 420LL, embedding } });
+  ctx.SetRetrievedMemoryCandidates (
+      std::vector<OperationContext::RetrievedMemoryCandidate>{
+        { 100LL, 420LL, reconstructed, 1.0 } });
+
+  ApplySensitivityFeedback op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT memory_id, redundancy FROM memories "
+      "WHERE memory_id IN (100, 101) ORDER BY memory_id",
+      {});
+  REQUIRE (rows.size () == 2);
+  REQUIRE (std::any_cast<double> (rows[0].at ("redundancy")) < 0.75);
+  REQUIRE (std::any_cast<double> (rows[1].at ("redundancy")) == 0.0);
 }

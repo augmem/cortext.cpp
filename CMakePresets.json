@@ -31,7 +31,7 @@
         {
             "name": "host-debug-examples",
             "displayName": "Host Debug (Examples)",
-            "description": "Debug build including examples (e.g. cortext_chat)",
+            "description": "Debug build including examples",
             "inherits": "host-base",
             "binaryDir": "${sourceDir}/build/debug-examples",
             "cacheVariables": {
@@ -59,8 +59,7 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "BUILD_TESTING": "OFF",
-                "BUILD_SHARED_LIBS": "ON",
-                "CORTEXT_DISABLE_SHERPA_ONNX": "ON"
+                "BUILD_SHARED_LIBS": "ON"
             }
         },
         {
@@ -92,8 +91,7 @@
             "cacheVariables": {
                 "BUILD_WASM": "ON",
                 "CMAKE_BUILD_TYPE": "Release",
-                "BUILD_TESTING": "OFF",
-                "CORTEXT_DISABLE_SHERPA_ONNX": "ON"
+                "BUILD_TESTING": "OFF"
             }
         }
     ],

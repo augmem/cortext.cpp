@@ -7,12 +7,6 @@ This package loads the native Cortext shared library with `ctypes`.
 From the repository root:
 
 ```bash
-zig build -Dshared=true -Dllama=false
-```
-
-or:
-
-```bash
 cmake --preset ffi-release
 cmake --build --preset ffi-release --target cortext
 ```

@@ -1704,6 +1704,11 @@ Write refractory suppresses rapid successive writes:
     Δt_write ← now_s() − to_s(last_write_ts)
     M_write_refrac ← 1.0 + k_write_refrac × exp(−Δt_write / τ_write_refrac(T))
 
+Implementation note: `Δt_write` is treated as a signed elapsed duration
+and clamped at zero. Backward event timestamps therefore receive the
+maximum refractory multiplier instead of underflowing into an
+effectively infinite elapsed interval.
+
 Final write decision:
 
     θ_memory ← θ_dynamic × M_write_refrac
@@ -2148,6 +2153,12 @@ vanishingly rare.
 Note that total_cost is computed from existing active memories only (k
 is the current count), so k=0 yields no bootstrap penalty. Capacity
 pressure activates only when k \> C.
+
+When active memory is at capacity, eviction ranks slots by the usual
+dedication/recency eviction score. Exact score ties are deterministic:
+evict the weaker slot first, then the older slot, then the lowest stable
+slot index. This keeps replay and hydration reproducible without
+changing the strength/recency policy.
 
 ### Chunking at Memory Level
 
@@ -2774,9 +2785,15 @@ association.source_id = association_<timestamp>_<counter>
 association.label = ""
 
 for source in cluster:
-  source.cluster_id = association.memory_id
+  source.cluster_id = cluster.cluster_id
   emit association --derived_from--> source
 ```
+
+Centroids are averaged over embeddings that actually contribute to the
+centroid dimension. Candidates with empty or incompatible embeddings are
+excluded from cluster membership instead of diluting or reshaping the
+accepted centroid vector. Downstream label matching derives its expected
+dimension from the first non-empty centroid in the replay batch.
 
 If durable `LABEL` memories already exist, the association centroid can
 attach to the nearest labels:
@@ -2801,6 +2818,22 @@ and source-span limits. The graph products are useful for later
 retrieval because graph expansion can recover clustered source memories
 through `derived_from`, co-occurrence, similarity, reinforcement, and
 causal edges.
+
+## Reconstruction Surface Discipline
+
+Constructive reconsolidation appends reconstruction records rather than
+rewriting every historical embedding reference. When an append succeeds,
+the bounded `current_memory_embeddings` surface must advance to the
+newest reconstruction embedding. Retrieval reads that current surface
+first, falling back to the latest reconstruction only when the cached
+current row is stale.
+
+This keeps graph retrieval aligned with the live memory surface while
+preserving older signal rows, shared base embeddings, and sibling
+memories that still point at the original embedding. Non-constructive
+fallback updates still fork shared embeddings before writing in place,
+so a reconsolidated memory does not mutate unrelated memories that
+happened to share the same vector row.
 
 ## What Was Removed
 
@@ -3125,8 +3158,8 @@ symbols</td>
 <td>dependency removal</td>
 <td><code>.gitmodules</code> and the worktree no longer contain the
 removed decoder/runtime submodules; the remaining third-party tree is
-limited to SQLite/vector/object storage, optional sherpa-onnx audio,
-opentelemetry, planum, and build/test dependencies</td>
+limited to SQLite/vector/object storage, opt-out OpenTelemetry, planum,
+and build/test dependencies</td>
 </tr>
 <tr>
 <td>API removal</td>
@@ -3163,8 +3196,7 @@ after the cutover:
 
 ``` bash
 cmake -S . -B build/codex-hardcut-check \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCORTEXT_DISABLE_SHERPA_ONNX=ON
+  -DCMAKE_BUILD_TYPE=Debug
 
 cmake --build build/codex-hardcut-check -j
 
@@ -3183,9 +3215,7 @@ test cases** and **16 assertions**. The AIST embedding unit passed **1
 test case** and **2 assertions**.
 
 An examples-enabled build also completed after configuring with
-`CORTEXT_BUILD_EXAMPLES=ON` and `CORTEXT_DISABLE_SHERPA_ONNX=ON`. The
-chat example was skipped by CMake on this machine because `glfw3` was
-absent; this is an environment dependency, not a hard-cutover failure.
+`CORTEXT_BUILD_EXAMPLES=ON`.
 
 ## Retrieval Behavior After Removal
 
@@ -3212,6 +3242,47 @@ disabled-reconstruction path. This is the minimum behavior required for
 the v1 hard-cut engine to stay useful without hidden semantic
 extraction.
 
+### Graph Retrieval Release Probe
+
+A June 2026 regression probe compared a preserved old replay binary
+against the current source tree using the same local AIST GGUF model.
+The model rotation was therefore not sufficient to explain the observed
+A/B drop. The main behavioral regression was a reconsolidation policy
+that appended reconstruction records without advancing
+`current_memory_embeddings`, leaving graph retrieval on stale memory
+surfaces.
+
+The experimental online label-bucket graph was removed from the
+production release path. Runtime storage no longer builds
+embedding-label buckets or writes their synthetic graph edges, retrieval
+no longer reads those buckets or edge types, and hydration no longer
+scans experiment-local label-edge tables. The retained graph behavior is
+the durable source, reconstruction, and association path described
+above.
+
+After restoring current-surface advancement and removing a
+maintenance-node hydration skip that was not present in the preserved
+replay binary, the dense 578-message replay matched the old binary on
+processed text messages, media events, probe events, memory rows, and
+association rows. With the default bundled GGML build, the remaining
+difference was 1 retrieved-list diff and 1 ranked-candidate diff across
+383 probes. The full one-year sparse probe matched the old binary on the
+same structural counts and left 1 retrieved-list diff and 1
+ranked-candidate diff across 31 probes.
+
+The two residual rank flips were traced to query-vector numeric drift
+rather than graph state. For the compared candidate memories, the old
+and current DBs contained identical memory/reconstruction embedding
+hashes, while the probe signal embedding hashes differed for the same
+embedding ids. Forcing the host fallback text path by disabling the full
+GGML graph produced far larger replay drift. Rebuilding the current
+source tree with the same dynamic system GGML libraries used by the
+preserved old binary restored exact replay agreement: the dense replay
+produced `retr_diffs=0` and `rank_diffs=0` across 383 probes, and the
+full sparse replay produced `retr_diffs=0` and `rank_diffs=0` across 31
+probes. The local judge service was unavailable during this pass, so the
+historical 15-win A/B baseline still requires a follow-up judge run.
+
 ## Experimental Interpretation
 
 The hard-cut branch changes the research question. Earlier results asked
@@ -3232,18 +3303,15 @@ the production engine under test.
 
 ## Reproducibility Notes
 
-The local machine used for this verification did not provide a system
-SQLite development package, so the build was configured with a locally
-extracted `libsqlite3-dev` package via `PKG_CONFIG_PATH` and
-`PKG_CONFIG_SYSROOT_DIR`. That workaround affects discovery of headers
-and link flags only; it does not change Cortext source or runtime
-behavior.
+SQLite is built from the vendored `third_party/sqlite` source tree.
+Native verification does not require a system SQLite development package
+or shared `libsqlite3` dependency.
 
-`quarto render docs/paper` parsed the manuscript sources but failed
-while retrieving Git remote metadata because the local environment could
-not authenticate to the GitHub SSH remote. Generated manuscript output
-was restored after the failed render. The source sections remain the
-authoritative paper edits in this branch.
+`QUARTO_DISABLE_GIT=1 QUARTO_DISABLE_GITHUB=1 quarto render docs/paper`
+completed locally and regenerated `docs/paper/_manuscript/index.md`. The
+render reported unresolved cross-reference warnings for
+`@sec-pattern-separation` and `@sec-activity`, which are
+manuscript-source issues outside this regression probe.
 
 # Implementation Considerations
 
@@ -3261,11 +3329,7 @@ The hard-cut runtime no longer contains an internal generative model
 stack. There is no semantic batch stack, adapter registry, mode-selected
 replay, attached static taxonomy, persistent confidence monitor,
 bitemporal fact store, or short-term shadow graph. The remaining model
-dependency in the core loop is the configured embedding path. Text
-encoder resolution still prefers the AAIT/ES-AIST GGUF path when enabled
-and otherwise falls back through the supported embedding encoders. Audio
-speaker embedding in the chat example is part of sherpa-onnx speaker
-attribution and is not a Cortext semantic decoder.
+dependency in the core loop is the configured multimodal embedding path.
 
 Retrieved memories are hydrated only after retrieval has selected a
 compact ranked set. Internal routing nodes such as `LABEL` or
@@ -3543,8 +3607,7 @@ The optimization and cutover work is gated by:
 git diff --check
 
 cmake -S . -B build/codex-hardcut-check \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCORTEXT_DISABLE_SHERPA_ONNX=ON
+  -DCMAKE_BUILD_TYPE=Debug
 
 cmake --build build/codex-hardcut-check -j
 

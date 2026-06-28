@@ -7,12 +7,6 @@ The Go package uses `cgo` over the Cortext C ABI.
 From the repository root:
 
 ```bash
-zig build -Dshared=true -Dllama=false
-```
-
-or:
-
-```bash
 cmake --preset ffi-release
 cmake --build --preset ffi-release --target cortext
 ```
@@ -24,8 +18,8 @@ cd bindings/go
 go test .
 ```
 
-The package links against `zig-out/lib/libcortext.*` or
-`build/ffi-release/libcortext.*`.
+The package links against `build/ffi-release/libcortext.*` or
+`zig-out/lib/libcortext.*`.
 
 ## Use
 

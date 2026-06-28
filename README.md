@@ -39,14 +39,25 @@ and hydration, not for hidden behavior switches.
 
 ## Build And Test
 
-Core native builds require a C++20 compiler, CMake, `pkg-config`, and SQLite
-development headers.
+Core native builds require a C++20 compiler and CMake. SQLite is built from the
+bundled `third_party/sqlite` source tree.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j
 ctest --test-dir build -R cortext_tests --output-on-failure
 ```
+
+Audio and image ingestion/embedding support is enabled by default and is part
+of the supported Cortext build contract. The AIST ggml kernel backend is built
+from bundled source by default; use `CORTEXT_USE_SYSTEM_GGML=ON` only when you
+intentionally want to link against a preinstalled ggml. Unsupported text-only
+builds must opt out explicitly with `CORTEXT_ENABLE_AUDIO=OFF` or
+`CORTEXT_ENABLE_IMAGE=OFF` plus `CORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD=ON`.
+
+OpenTelemetry support is enabled by default. Use
+`CORTEXT_DISABLE_OPENTELEMETRY=ON` only when you want a no-op telemetry build
+without the OpenTelemetry dependency.
 
 The CI release gate runs the model-free suite directly:
 
@@ -61,8 +72,6 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_EXAMPLES=ON
 cmake --build build -j
 ./build/examples/topical_chat_analysis/cortext_topical_chat_analysis --help
 ```
-
-The desktop chat example additionally requires `glfw3`, OpenGL, and `curl`.
 
 ## C++ Quickstart
 
@@ -118,13 +127,7 @@ Bindings live under `bindings/`:
 - `bindings/dart`: `dart:ffi`
 - `bindings/wasm`: browser ES-module wrapper over the WebAssembly C ABI
 
-Build the shared library for FFI consumers with Zig:
-
-```bash
-zig build -Dshared=true -Dllama=false
-```
-
-or with CMake:
+Build the shared library for FFI consumers with CMake:
 
 ```bash
 cmake --preset ffi-release
