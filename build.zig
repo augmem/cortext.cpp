@@ -91,6 +91,38 @@ const objstore_c_sources = &.{
     "third_party/sqlite-objstore/src/backend_sqlite.c",
 };
 
+const ggml_base_sources = &.{
+    "src/ggml.c",
+    "src/ggml.cpp",
+    "src/ggml-alloc.c",
+    "src/ggml-backend.cpp",
+    "src/ggml-backend-reg.cpp",
+    "src/ggml-opt.cpp",
+    "src/ggml-threading.cpp",
+    "src/ggml-quants.c",
+    "src/gguf.cpp",
+};
+
+const ggml_cpu_sources = &.{
+    "src/ggml-cpu/ggml-cpu.c",
+    "src/ggml-cpu/ggml-cpu.cpp",
+    "src/ggml-cpu/repack.cpp",
+    "src/ggml-cpu/hbm.cpp",
+    "src/ggml-cpu/quants.c",
+    "src/ggml-cpu/traits.cpp",
+    "src/ggml-cpu/amx/amx.cpp",
+    "src/ggml-cpu/amx/mmq.cpp",
+    "src/ggml-cpu/binary-ops.cpp",
+    "src/ggml-cpu/unary-ops.cpp",
+    "src/ggml-cpu/vec.cpp",
+    "src/ggml-cpu/ops.cpp",
+};
+
+const ggml_cpu_x86_sources = &.{
+    "src/ggml-cpu/arch/x86/quants.c",
+    "src/ggml-cpu/arch/x86/repack.cpp",
+};
+
 const sqlite_c_sources = &.{
     "third_party/sqlite/src/alter.c",
     "third_party/sqlite/src/analyze.c",
@@ -222,7 +254,10 @@ pub fn build(b: *std.Build) void {
 
     const shared = b.option(bool, "shared", "Build libcortext as a shared library") orelse true;
     const unsupported_text_only = b.option(bool, "unsupported-text-only", "Allow unsupported builds without audio/image GGML kernel support") orelse false;
-    const enable_ggml = b.option(bool, "ggml", "Enable ggml support using prebuilt target-compatible libraries") orelse !unsupported_text_only;
+    const enable_ggml = b.option(bool, "ggml", "Enable GGML audio/image kernel support") orelse !unsupported_text_only;
+    const fetch_aist_model = b.option(bool, "fetch-aist-model", "Download the required AIST GGUF model during the default build") orelse true;
+    const aist_model_quant = b.option([]const u8, "aist-model-quant", "AIST quantization to download: q8_0, q5_1, or all") orelse "q8_0";
+    const models_dir = b.option([]const u8, "models-dir", "Directory where Cortext runtime model assets are stored") orelse "models";
     const ggml_include = b.option([]const u8, "ggml_include", "Directory containing ggml.h and ggml-backend.h");
     const ggml_lib = b.option([]const u8, "ggml_lib", "Path to libggml");
     const ggml_base_lib = b.option([]const u8, "ggml_base_lib", "Path to libggml-base");
@@ -245,6 +280,24 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
         .version = .{ .major = 1, .minor = 0, .patch = 0 },
     });
+
+    if (fetch_aist_model) {
+        if (!std.mem.eql(u8, aist_model_quant, "q8_0") and
+            !std.mem.eql(u8, aist_model_quant, "q5_1") and
+            !std.mem.eql(u8, aist_model_quant, "all"))
+        {
+            fail(b, "-Daist-model-quant must be one of: q8_0, q5_1, all");
+        }
+        const aist_model = b.addSystemCommand(&.{
+            "python3",
+            "scripts/download_aist_model.py",
+            "--models-dir",
+            models_dir,
+            "--quant",
+            aist_model_quant,
+        });
+        lib.step.dependOn(&aist_model.step);
+    }
 
     mod.addIncludePath(b.path("include"));
     mod.addIncludePath(b.path("src"));
@@ -339,21 +392,52 @@ pub fn build(b: *std.Build) void {
     }
 
     if (enable_ggml) {
-        const ggml_include_dir = ggml_include orelse fail(b, "-Dggml=true requires -Dggml_include=/path/to/include");
-        const ggml_library = ggml_lib orelse fail(b, "-Dggml=true requires -Dggml_lib=/path/to/libggml");
-        const ggml_base_library = ggml_base_lib orelse fail(b, "-Dggml=true requires -Dggml_base_lib=/path/to/libggml-base");
-        const ggml_cpu_library = ggml_cpu_lib orelse fail(b, "-Dggml=true requires -Dggml_cpu_lib=/path/to/libggml-cpu");
+        const use_prebuilt_ggml = ggml_include != null or ggml_lib != null or
+            ggml_base_lib != null or ggml_cpu_lib != null or ggml_blas_lib != null;
 
-        mod.addIncludePath(.{ .cwd_relative = ggml_include_dir });
         mod.addCMacro("CORTEXT_ENABLE_GGML", "1");
-        mod.addCMacro("CORTEXT_GGML_BACKEND_HEADER_PATH", b.fmt("\"{s}/ggml-backend.h\"", .{ggml_include_dir}));
-        mod.addObjectFile(.{ .cwd_relative = ggml_library });
-        mod.addObjectFile(.{ .cwd_relative = ggml_base_library });
-        mod.addObjectFile(.{ .cwd_relative = ggml_cpu_library });
-        if (ggml_blas_lib) |path| {
-            mod.addObjectFile(.{ .cwd_relative = path });
-            if (target.result.os.tag == .macos) {
-                mod.linkFramework("Accelerate", .{});
+        if (use_prebuilt_ggml) {
+            const ggml_include_dir = ggml_include orelse fail(b, "prebuilt GGML requires -Dggml_include=/path/to/include");
+            const ggml_library = ggml_lib orelse fail(b, "prebuilt GGML requires -Dggml_lib=/path/to/libggml");
+            const ggml_base_library = ggml_base_lib orelse fail(b, "prebuilt GGML requires -Dggml_base_lib=/path/to/libggml-base");
+            const ggml_cpu_library = ggml_cpu_lib orelse fail(b, "prebuilt GGML requires -Dggml_cpu_lib=/path/to/libggml-cpu");
+
+            mod.addIncludePath(.{ .cwd_relative = ggml_include_dir });
+            mod.addCMacro("CORTEXT_GGML_BACKEND_HEADER_PATH", b.fmt("\"{s}/ggml-backend.h\"", .{ggml_include_dir}));
+            mod.addObjectFile(.{ .cwd_relative = ggml_library });
+            mod.addObjectFile(.{ .cwd_relative = ggml_base_library });
+            mod.addObjectFile(.{ .cwd_relative = ggml_cpu_library });
+            if (ggml_blas_lib) |path| {
+                mod.addObjectFile(.{ .cwd_relative = path });
+                if (target.result.os.tag == .macos) {
+                    mod.linkFramework("Accelerate", .{});
+                }
+            }
+        } else {
+            const ggml = b.dependency("ggml", .{});
+            mod.addIncludePath(ggml.path("include"));
+            mod.addIncludePath(ggml.path("src"));
+            mod.addIncludePath(ggml.path("src/ggml-cpu"));
+            mod.addCMacro("CORTEXT_GGML_BACKEND_HEADER_PATH", "\"ggml-backend.h\"");
+            mod.addCMacro("GGML_VERSION", "\"0.9.5\"");
+            mod.addCMacro("GGML_COMMIT", "\"ebc3a0f4\"");
+            mod.addCMacro("GGML_SCHED_MAX_COPIES", "4");
+            mod.addCMacro("_GNU_SOURCE", "1");
+            mod.addCMacro("_XOPEN_SOURCE", "600");
+            mod.addCMacro("GGML_USE_CPU_REPACK", "1");
+            addGgmlSources(mod, ggml, ggml_base_sources, &.{
+                "-w",
+                "-D_GLIBCXX_ASSERTIONS",
+            });
+            addGgmlSources(mod, ggml, ggml_cpu_sources, &.{
+                "-w",
+                "-D_GLIBCXX_ASSERTIONS",
+            });
+            if (target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .x86) {
+                addGgmlSources(mod, ggml, ggml_cpu_x86_sources, &.{
+                    "-w",
+                    "-D_GLIBCXX_ASSERTIONS",
+                });
             }
         }
         mod.addCMacro("CORTEXT_ENABLE_AUDIO", "1");
@@ -406,6 +490,20 @@ fn fail(b: *std.Build, comptime message: []const u8) noreturn {
     std.log.err(message, .{});
     b.invalid_user_input = true;
     @panic(message);
+}
+
+fn addGgmlSources(
+    mod: *std.Build.Module,
+    dependency: *std.Build.Dependency,
+    files: []const []const u8,
+    common_flags: []const []const u8,
+) void {
+    for (files) |file| {
+        mod.addCSourceFile(.{
+            .file = dependency.path(file),
+            .flags = common_flags,
+        });
+    }
 }
 
 fn sqliteHeader(b: *std.Build) []const u8 {

@@ -276,15 +276,12 @@ cmake --preset ffi-release-node
 cmake --build --preset ffi-release-node --target cortext cortext_node
 ```
 
-Zig can also build the shared library when supplied with target-compatible
-prebuilt GGML artifacts:
+Zig can also build the shared library. The default Zig path downloads/verifies
+AIST and compiles the bundled GGML CPU backend; prebuilt GGML paths are only an
+override for packagers.
 
 ```bash
-zig build check -Dshared=true -Dggml=true \
-  -Dggml_include=/path/to/ggml/include \
-  -Dggml_lib=/path/to/libggml \
-  -Dggml_base_lib=/path/to/libggml-base \
-  -Dggml_cpu_lib=/path/to/libggml-cpu
+zig build check
 ```
 
 ## WebAssembly
