@@ -12,12 +12,18 @@
             .url = "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz",
             .hash = "N-V-__8AABPI6wAbBLaww8cKO-HchZ0ft-BxUOEOyQtTSccD",
         },
+        .ggml = .{
+            .url = "https://github.com/ggml-org/ggml/archive/refs/tags/v0.9.5.tar.gz",
+            .hash = "N-V-__8AAIGx0wBZa9Sz72m_vmGB455owNYDo1MTKim86Nqw",
+        },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "include",
+        "scripts",
         "src",
+        "third_party/sqlite",
         "third_party/sqlite-objstore",
         "third_party/sqlite-vec",
         "README.md",
