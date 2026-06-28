@@ -30,10 +30,11 @@ Requirements:
 
 - C++20 compiler
 - CMake
-- Local AIST GGUF model under `models/AIST-87M-GGUF/` for runtime use and
-  AIST-dependent tests
+- Git and Python 3 for default dependency/model bootstrap
 
-Configure, build, and run tests:
+Configure, build, and run tests. The default build fetches bundled native
+dependencies and downloads the required AIST GGUF model into
+`models/AIST-87M-GGUF/`.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -106,10 +107,11 @@ Primary public entrypoints:
 ## Runtime Model
 
 Cortext's required encoder is `augmem/AIST-87M` in the local GGUF layout under
-`models/AIST-87M-GGUF/`. The engine auto-discovers `AIST-87M_q8_0.gguf` or
-`AIST-87M_q5_1.gguf`, or you can pin the model explicitly with
-`CORTEXT_AIST_MODEL_PATH`. If the model cannot be resolved, engine creation
-fails rather than falling back to a different embedding space.
+`models/AIST-87M-GGUF/`. The default CMake build downloads and verifies the
+preferred `AIST-87M_q8_0.gguf` file automatically. The engine auto-discovers
+`AIST-87M_q8_0.gguf` or `AIST-87M_q5_1.gguf`, or you can pin the model
+explicitly with `CORTEXT_AIST_MODEL_PATH`. If the model cannot be resolved,
+engine creation fails rather than falling back to a different embedding space.
 
 AIST is a multimodal embedding model: text, audio, speech, and image inputs map
 into one retrieval space. Audio inputs use 16 kHz mono float32 PCM. Image inputs
@@ -120,6 +122,17 @@ guard exists because mixing embedding spaces silently corrupts retrieval.
 
 `source_id` is opaque provenance. Cortext uses it for exact same-source grouping
 and hydration, not for hidden behavior switches.
+
+Default builds are opt-out:
+
+- `CORTEXT_FETCH_AIST_MODEL=ON` downloads AIST during `cmake --build`.
+- `CORTEXT_AIST_MODEL_QUANT=q8_0` selects the preferred quantization; use
+  `q5_1` or `all` when needed.
+- `CORTEXT_FETCH_GGML=ON` fetches and builds the bundled GGML backend.
+- `CORTEXT_DISABLE_OPENTELEMETRY=OFF` fetches the OpenTelemetry API dependency;
+  exporter dependencies stay off unless `CORTEXT_OPENTELEMETRY_EXPORTERS=ON`.
+- `CORTEXT_USE_SYSTEM_GGML=ON` and `CORTEXT_FETCH_AIST_MODEL=OFF` are override
+  paths for packagers or offline builds, not the default release path.
 
 ## Storage Model
 
