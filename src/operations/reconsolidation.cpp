@@ -9,9 +9,11 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
+#include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
+#include <any>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -60,6 +62,164 @@ ToFloatVector (const Eigen::VectorXf &v)
   return out;
 }
 
+void
+RefreshProcessorSurfaces (Transaction &tx, ProcessorContext *p_ctx,
+                          long long memory_id, long long old_embedding_id,
+                          long long new_embedding_id,
+                          const Eigen::VectorXf &embedding)
+{
+  if (!p_ctx)
+    {
+      return;
+    }
+
+  auto cache_it = p_ctx->retrieval_surface_index.find (memory_id);
+  if (cache_it != p_ctx->retrieval_surface_index.end ())
+    {
+      auto &entry = p_ctx->retrieval_surface_cache[cache_it->second];
+      if (entry.embedding_id > 0)
+        {
+          p_ctx->retrieval_surface_embedding_index.erase (entry.embedding_id);
+        }
+      entry.embedding_id = new_embedding_id;
+      entry.embedding = embedding;
+      entry.embedding_norm = embedding.norm ();
+      p_ctx->retrieval_surface_embedding_index[new_embedding_id]
+          = cache_it->second;
+    }
+
+  if (old_embedding_id > 0 && old_embedding_id != new_embedding_id)
+    {
+      auto existing = p_ctx->retrieval_surface_embedding_index.find (
+          old_embedding_id);
+      if (existing == p_ctx->retrieval_surface_embedding_index.end ())
+        {
+          auto rows = tx.Execute (
+              "SELECT memory_id FROM memories "
+              "WHERE embedding_id = ? AND memory_id != ? "
+              "ORDER BY memory_id ASC LIMIT 1",
+              { old_embedding_id, memory_id });
+          if (!rows.empty () && rows[0].count ("memory_id") == 1)
+            {
+              const long long sibling_memory_id = store::AnyToLongLong (
+                  rows[0].at ("memory_id")).value_or (0);
+              auto sibling_it = p_ctx->retrieval_surface_index.find (
+                  sibling_memory_id);
+              if (sibling_memory_id > 0
+                  && sibling_it != p_ctx->retrieval_surface_index.end ())
+                {
+                  p_ctx->retrieval_surface_embedding_index[old_embedding_id]
+                      = sibling_it->second;
+                }
+            }
+        }
+    }
+
+  auto assoc_it = p_ctx->association_cache_index.find (memory_id);
+  if (assoc_it != p_ctx->association_cache_index.end ())
+    {
+      auto &entry = p_ctx->association_cache[assoc_it->second];
+      entry.embedding_id = new_embedding_id;
+      entry.embedding = embedding;
+      entry.embedding_norm = embedding.norm ();
+    }
+}
+
+long long
+LoadCurrentSurfaceEmbeddingId (Transaction &tx, long long memory_id,
+                               long long fallback_embedding_id)
+{
+  const auto latest = constructive_recall::LoadLatestReconstruction (
+      tx, memory_id);
+  auto rows = tx.Execute (
+      "SELECT embedding_id, created_at "
+      "FROM current_memory_embeddings WHERE memory_id = ?",
+      { memory_id });
+  if (!rows.empty () && rows[0].count ("embedding_id") == 1)
+    {
+      const long long embedding_id = store::AnyToLongLong (
+          rows[0].at ("embedding_id")).value_or (0);
+      const bool current_surface_fresh
+          = !latest.has_value () || embedding_id == latest->embedding_id;
+      if (embedding_id > 0 && current_surface_fresh)
+        {
+          return embedding_id;
+        }
+    }
+  if (latest.has_value () && latest->embedding_id > 0)
+    {
+      return latest->embedding_id;
+    }
+  return fallback_embedding_id;
+}
+
+long long
+WriteEmbeddingInPlaceOrFork (Transaction &tx, long long memory_id,
+                             long long embedding_id,
+                             const Eigen::VectorXf &embedding,
+                             long long timestamp,
+                             ProcessorContext *p_ctx = nullptr)
+{
+  auto ref_rows = tx.Execute (
+      "SELECT "
+      "  (SELECT COUNT(*) FROM memories WHERE embedding_id = ?) "
+      "+ (SELECT COUNT(*) FROM signals WHERE embedding_id = ?) "
+      "+ (SELECT COUNT(*) FROM memory_reconstructions "
+      "   WHERE embedding_id = ?) AS cnt",
+      { embedding_id, embedding_id, embedding_id });
+  long long ref_count = 0;
+  if (!ref_rows.empty () && ref_rows[0].count ("cnt") == 1)
+    {
+      ref_count = store::AnyToLongLong (ref_rows[0].at ("cnt")).value_or (0);
+    }
+  if (ref_count <= 1)
+    {
+      tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
+                  { embedding_id });
+      tx.Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
+                  "VALUES (?, ?, ?)",
+                  { embedding_id, ToFloatVector (embedding), timestamp });
+      tx.Execute (
+          "DELETE FROM current_memory_embeddings WHERE memory_id = ?",
+          { memory_id });
+      tx.Execute (
+          "INSERT INTO current_memory_embeddings("
+          "memory_id, embedding, embedding_id, created_at"
+          ") VALUES (?, ?, ?, ?)",
+          { memory_id, ToFloatVector (embedding), embedding_id, timestamp });
+      RefreshProcessorSurfaces (tx, p_ctx, memory_id, embedding_id,
+                                embedding_id, embedding);
+      return embedding_id;
+    }
+
+  tx.Execute ("INSERT INTO embeddings (embedding, created_at) VALUES (?, ?)",
+              { ToFloatVector (embedding), timestamp });
+  auto id_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
+  long long replacement_embedding_id = 0;
+  if (!id_rows.empty () && id_rows[0].count ("id") == 1)
+    {
+      replacement_embedding_id
+          = store::AnyToLongLong (id_rows[0].at ("id")).value_or (0);
+    }
+  if (replacement_embedding_id > 0)
+    {
+      tx.Execute ("UPDATE memories SET embedding_id = ? WHERE memory_id = ?",
+                  { replacement_embedding_id, memory_id });
+      tx.Execute (
+          "DELETE FROM current_memory_embeddings WHERE memory_id = ?",
+          { memory_id });
+      tx.Execute (
+          "INSERT INTO current_memory_embeddings("
+          "memory_id, embedding, embedding_id, created_at"
+          ") VALUES (?, ?, ?, ?)",
+          { memory_id, ToFloatVector (embedding), replacement_embedding_id,
+            timestamp });
+      RefreshProcessorSurfaces (tx, p_ctx, memory_id, embedding_id,
+                                replacement_embedding_id, embedding);
+    }
+  return replacement_embedding_id;
+}
+
 /// @brief Neighbor info returned from graph traversal.
 struct NeighborInfo
 {
@@ -72,6 +232,13 @@ struct LabilityUpdate
 {
   long long memory_id = 0;
   double lability = 0.0;
+};
+
+struct RetrievedReconCandidate
+{
+  long long memory_id = 0;
+  long long embedding_id = 0;
+  Eigen::VectorXf embedding;
 };
 
 constexpr long long kReconsolidationNeighborLimit = 128;
@@ -87,7 +254,8 @@ constexpr std::size_t kReconsolidationLabilityOnlyLimit = 16;
 /// up to max_depth hops away.
 inline std::vector<NeighborInfo>
 QueryGraphNeighbors (Store *store, ProcessorContext &p_ctx,
-                     long long embedding_id, int max_depth)
+                     long long seed_memory_id, long long embedding_id,
+                     int max_depth)
 {
   std::vector<NeighborInfo> neighbors;
   if (!store || max_depth < 1)
@@ -95,16 +263,18 @@ QueryGraphNeighbors (Store *store, ProcessorContext &p_ctx,
       return neighbors;
     }
 
-  long long seed_memory_id = 0;
-  auto seed_rows = store->Execute (
-      "SELECT memory_id FROM memories WHERE embedding_id = ? LIMIT 1",
-      { embedding_id });
-  if (!seed_rows.empty ())
+  if (seed_memory_id <= 0)
     {
-      auto it = seed_rows[0].find ("memory_id");
-      if (it != seed_rows[0].end ())
+      auto seed_rows = store->Execute (
+          "SELECT memory_id FROM memories WHERE embedding_id = ? LIMIT 1",
+          { embedding_id });
+      if (!seed_rows.empty ())
         {
-          seed_memory_id = store::AnyToLongLong (it->second).value_or (0);
+          auto it = seed_rows[0].find ("memory_id");
+          if (it != seed_rows[0].end ())
+            {
+              seed_memory_id = store::AnyToLongLong (it->second).value_or (0);
+            }
         }
     }
   if (seed_memory_id <= 0)
@@ -342,7 +512,8 @@ inline void
 WriteNeighborUpdates (Transaction &tx, long long embedding_id,
                       long long memory_id, double lability, long long timestamp,
                       const Eigen::VectorXf &blended,
-                      constructive_recall::ReconstructionUpdatePolicy policy)
+                      constructive_recall::ReconstructionUpdatePolicy policy,
+                      ProcessorContext *p_ctx)
 {
   // Update lability_state and lability_ts in memories table (v2: merged from
   // memory_feedback)
@@ -350,11 +521,8 @@ WriteNeighborUpdates (Transaction &tx, long long embedding_id,
 
   if (constructive_recall::Disabled ())
     {
-      tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
-                  { embedding_id });
-      tx.Execute ("INSERT INTO embeddings (embedding_id, embedding, created_at) "
-                  "VALUES (?, ?, ?)",
-                  { embedding_id, ToFloatVector (blended), timestamp });
+      WriteEmbeddingInPlaceOrFork (tx, memory_id, embedding_id, blended,
+                                   timestamp, p_ctx);
       return;
     }
 
@@ -362,6 +530,14 @@ WriteNeighborUpdates (Transaction &tx, long long embedding_id,
   constructive_recall::AppendReconstructionWithEmbedding (
       tx, memory_id, blended, blob_id, timestamp, std::min (1.0, lability),
       "reconsolidation", 1.0, 1.0, policy);
+  if (auto current = constructive_recall::LoadCurrentEmbedding (
+          tx, memory_id, embedding_id, static_cast<int> (blended.size ())))
+    {
+      const long long current_embedding_id = LoadCurrentSurfaceEmbeddingId (
+          tx, memory_id, embedding_id);
+      RefreshProcessorSurfaces (tx, p_ctx, memory_id, embedding_id,
+                                current_embedding_id, *current);
+    }
 }
 
 } // namespace
@@ -382,7 +558,34 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
   const Eigen::VectorXf u_cur = Unit (x_cur);
 
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
-  if (retrieved.empty ())
+  const auto &retrieved_records = context.GetRetrievedMemoryCandidates ();
+  std::vector<RetrievedReconCandidate> retrieved_candidates;
+  if (!retrieved_records.empty ())
+    {
+      retrieved_candidates.reserve (retrieved_records.size ());
+      for (const auto &candidate : retrieved_records)
+        {
+          if (candidate.memory_id > 0 && candidate.embedding_id > 0
+              && candidate.embedding.size () > 0)
+            {
+              retrieved_candidates.push_back (
+                  { candidate.memory_id, candidate.embedding_id,
+                    candidate.embedding });
+            }
+        }
+    }
+  else
+    {
+      retrieved_candidates.reserve (retrieved.size ());
+      for (const auto &kv : retrieved)
+        {
+          if (kv.first > 0 && kv.second.size () > 0)
+            {
+              retrieved_candidates.push_back ({ 0, kv.first, kv.second });
+            }
+        }
+    }
+  if (retrieved_candidates.empty ())
     {
       return;
     }
@@ -413,22 +616,22 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
         core::ReconstructionHistoryLimit (F, S, T),
         core::ReconstructionPruneBatchLimit (F, S, T),
         core::ReconstructionMinUpdateIntervalMs (F, S, T),
-        false
+        true
       };
 
   double max_drift = 0.0;
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
 
-  // Track which embeddings we've already processed (avoid duplicate ripple)
+  // Track already processed memories/embeddings (avoid duplicate ripple).
   std::unordered_set<long long> processed_ids;
-  int primary_reconstruction_attempts = 0;
+  int primary_reconstruction_considered = 0;
   int ripple_reconstruction_attempts = 0;
 
-  for (const auto &kv : retrieved)
+  for (const auto &retrieved_candidate : retrieved_candidates)
     {
-      const long long embedding_id = kv.first;
-      const Eigen::VectorXf &m = kv.second;
+      const long long embedding_id = retrieved_candidate.embedding_id;
+      const Eigen::VectorXf &m = retrieved_candidate.embedding;
       if (m.size () == 0 || m.size () != u_cur.size ())
         {
           continue;
@@ -438,10 +641,17 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
       double stored_lability = 0.0;
       long long lability_ts = 0;
       const auto metadata_start = SteadyClock::now ();
-      auto mem_rows = tx.Execute (
-          "SELECT memory_id, lability_state, lability_ts "
-          "FROM memories WHERE embedding_id = ?",
-          { embedding_id });
+      auto mem_rows = retrieved_candidate.memory_id > 0
+                          ? tx.Execute (
+                                "SELECT memory_id, lability_state, "
+                                "lability_ts "
+                                "FROM memories WHERE memory_id = ?",
+                                { retrieved_candidate.memory_id })
+                          : tx.Execute (
+                                "SELECT memory_id, lability_state, "
+                                "lability_ts "
+                                "FROM memories WHERE embedding_id = ?",
+                                { embedding_id });
       context.AddOperationTiming ("Reconsolidation.metadata_sql",
                                   ElapsedMillis (metadata_start));
       if (!mem_rows.empty ())
@@ -490,8 +700,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           continue;
         }
 
-      // Mark as processed to avoid duplicate ripple
-      processed_ids.insert (embedding_id);
+      processed_ids.insert (memory_id);
 
       const Eigen::VectorXf u_m = Unit (m);
       // contextual_relevance ∈ [0,1]
@@ -549,20 +758,19 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
                                 + static_cast<float> (drift_mag) * u_cur;
       blended = Unit (blended);
 
-      const bool persist_primary_reconstruction =
-          primary_reconstruction_attempts < primary_reconstruction_limit;
+      const bool persist_primary_reconstruction
+          = primary_reconstruction_considered < primary_reconstruction_limit;
+      if (persist_primary_reconstruction)
+        {
+          ++primary_reconstruction_considered;
+        }
       if (persist_primary_reconstruction && constructive_recall::Disabled ())
         {
           const auto primary_append_start = SteadyClock::now ();
-          tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
-                      { embedding_id });
-          tx.Execute (
-              "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-              "VALUES (?, ?, ?)",
-              { embedding_id, ToFloatVector (blended), now_ts });
+          WriteEmbeddingInPlaceOrFork (tx, memory_id, embedding_id, blended,
+                                       now_ts, &p_ctx);
           context.AddOperationTiming ("Reconsolidation.primary_append",
                                       ElapsedMillis (primary_append_start));
-          ++primary_reconstruction_attempts;
         }
       else if (persist_primary_reconstruction)
         {
@@ -578,9 +786,17 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
               tx, memory_id, blended, blob_id, now_ts, uncertainty,
               "reconsolidation", 1.0, contextual_relevance,
               reconstruction_update_policy);
+          if (auto current = constructive_recall::LoadCurrentEmbedding (
+                  tx, memory_id, embedding_id,
+                  static_cast<int> (blended.size ())))
+            {
+              const long long current_embedding_id = LoadCurrentSurfaceEmbeddingId (
+                  tx, memory_id, embedding_id);
+              RefreshProcessorSurfaces (tx, &p_ctx, memory_id, embedding_id,
+                                        current_embedding_id, *current);
+            }
           context.AddOperationTiming ("Reconsolidation.primary_append",
                                       ElapsedMillis (primary_append_start));
-          ++primary_reconstruction_attempts;
         }
 
       // --- BEGIN RIPPLE PROPAGATION ---
@@ -591,8 +807,8 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
         }
 
       const auto neighbor_query_start = SteadyClock::now ();
-      auto neighbors = QueryGraphNeighbors (store, p_ctx, embedding_id,
-                                            ripple_depth);
+      auto neighbors = QueryGraphNeighbors (store, p_ctx, memory_id,
+                                            embedding_id, ripple_depth);
       context.AddOperationTiming ("Reconsolidation.neighbor_query",
                                   ElapsedMillis (neighbor_query_start));
 
@@ -601,11 +817,11 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
       for (const auto &neighbor : neighbors)
         {
           // Skip if already processed (either as primary or via earlier ripple)
-          if (processed_ids.count (neighbor.embedding_id))
+          if (processed_ids.count (neighbor.memory_id))
             {
               continue;
             }
-          processed_ids.insert (neighbor.embedding_id);
+          processed_ids.insert (neighbor.memory_id);
 
           // Compute decayed lability for this neighbor
           // neighbor_lability = source_lability * pow(ripple_decay, depth)
@@ -667,7 +883,7 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           const auto neighbor_write_start = SteadyClock::now ();
           WriteNeighborUpdates (tx, neighbor.embedding_id, neighbor.memory_id,
                                 neighbor_lability, now_ts, neighbor_blended,
-                                reconstruction_update_policy);
+                                reconstruction_update_policy, &p_ctx);
           ++ripple_reconstruction_attempts;
           context.AddOperationTiming ("Reconsolidation.neighbor_write",
                                       ElapsedMillis (neighbor_write_start));

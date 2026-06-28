@@ -71,9 +71,15 @@ association.source_id = association_<timestamp>_<counter>
 association.label = ""
 
 for source in cluster:
-  source.cluster_id = association.memory_id
+  source.cluster_id = cluster.cluster_id
   emit association --derived_from--> source
 ```
+
+Centroids are averaged over embeddings that actually contribute to the centroid
+dimension. Candidates with empty or incompatible embeddings are excluded from
+cluster membership instead of diluting or reshaping the accepted centroid vector.
+Downstream label matching derives its expected dimension from the first non-empty
+centroid in the replay batch.
 
 If durable `LABEL` memories already exist, the association centroid can attach
 to the nearest labels:
@@ -97,6 +103,20 @@ bounded by knob-derived edge weights, relation fanout, and source-span limits.
 The graph products are useful for later retrieval because graph expansion can
 recover clustered source memories through `derived_from`, co-occurrence,
 similarity, reinforcement, and causal edges.
+
+## Reconstruction Surface Discipline
+
+Constructive reconsolidation appends reconstruction records rather than
+rewriting every historical embedding reference. When an append succeeds, the
+bounded `current_memory_embeddings` surface must advance to the newest
+reconstruction embedding. Retrieval reads that current surface first, falling
+back to the latest reconstruction only when the cached current row is stale.
+
+This keeps graph retrieval aligned with the live memory surface while preserving
+older signal rows, shared base embeddings, and sibling memories that still point
+at the original embedding. Non-constructive fallback updates still fork shared
+embeddings before writing in place, so a reconsolidated memory does not mutate
+unrelated memories that happened to share the same vector row.
 
 ## What Was Removed
 

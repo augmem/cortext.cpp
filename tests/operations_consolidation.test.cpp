@@ -76,7 +76,7 @@ MakeConsolidationSignal (uint64_t ts)
 
 } // namespace
 
-// Helper op to verify consolidation flag and timestamp after execution.
+// Helper op to verify consolidation start flag after execution.
 struct AssertConsolidationStartedOp : IOperation
 {
   AssertConsolidationStartedOp (uint64_t expected_ts)
@@ -88,7 +88,7 @@ struct AssertConsolidationStartedOp : IOperation
   {
     REQUIRE (ctx.GetConsolidationShouldStart () == true);
     auto &p = ctx.GetProcessorContext ();
-    REQUIRE (p.last_consolidation_ts == expected_ts_);
+    REQUIRE (p.last_consolidation_ts != expected_ts_);
   }
   uint64_t expected_ts_;
 };
@@ -330,6 +330,28 @@ TEST_CASE ("Alg28 no trigger does not set start flag",
   processor.Flush ();
 }
 
+TEST_CASE ("Alg28 start does not advance completion frontier before persistence",
+           "[operations][consolidation]")
+{
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  pctx.last_consolidation_ts = 1234ULL;
+  pctx.consolidation_count = 7;
+  pctx.memories_since_consolidation = 3;
+
+  auto signal = MakeConsolidationSignal (5000ULL);
+  OperationContext ctx (signal, pctx, cfg);
+  EvaluateConsolidation eval;
+  eval.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (ctx.GetConsolidationShouldStart ());
+  REQUIRE_FALSE (ctx.GetConsolidationPersisted ());
+  REQUIRE (pctx.last_consolidation_ts == 1234ULL);
+  REQUIRE (pctx.consolidation_count == 7);
+  REQUIRE (pctx.memories_since_consolidation == 3);
+}
+
 TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
            "[operations][consolidation]")
 {
@@ -443,6 +465,65 @@ TEST_CASE ("ScoreConsolidation forced mode broadens partial candidate sets",
   REQUIRE (candidates.size () >= static_cast<size_t> (core::MinClusterSize (cfg.focus)));
   REQUIRE (candidates.size () == 6);
   REQUIRE (candidates[0].embedding_id == 1LL);
+}
+
+TEST_CASE ("ScoreConsolidation uses current memory embedding surface",
+           "[operations][consolidation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  cortext::store::ApplyMigrations (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 1.0;
+
+  Signal dummy;
+  dummy.timestamp = 125'000ULL;
+  dummy.source_id = "test/consolidation";
+  dummy.force_consolidation = true;
+  dummy.embedding = Eigen::VectorXf::Zero (4);
+  ProcessorContext p_ctx;
+  OperationContext ctx (dummy, p_ctx, cfg, store.get ());
+
+  for (long long id = 1; id <= 3; ++id)
+    {
+      std::vector<float> base (256, 0.0f);
+      base[static_cast<size_t> (id)] = 1.0f;
+      store->Execute (
+          "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+          "VALUES(?, ?, ?)",
+          { id, base, 0LL });
+      store->Execute (
+          "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+          "start_ts, n_signals, modality, s_max, s_avg, strength, stability, "
+          "redundancy, created_at) "
+          "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, "
+          "0.05, 0.0, 0.0, 0)",
+          { id, id });
+    }
+
+  std::vector<float> current (256, 0.0f);
+  current[7] = 1.0f;
+  store->Execute (
+      "INSERT INTO current_memory_embeddings("
+      "memory_id, embedding, embedding_id, created_at"
+      ") VALUES (?, ?, ?, ?)",
+      { 1LL, current, 1LL, 1LL });
+
+  ScoreConsolidation op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+
+  const auto &candidates = ctx.GetConsolidationCandidates ();
+  REQUIRE (candidates.size () == 3);
+  REQUIRE (candidates[0].memory_id == 1LL);
+  REQUIRE (candidates[0].embedding.size () == 256);
+  REQUIRE (candidates[0].embedding (7) == Catch::Approx (1.0f));
+  REQUIRE (candidates[0].embedding (1) == Catch::Approx (0.0f));
 }
 
 TEST_CASE ("ScoreConsolidation forced mode includes memories without blobs",

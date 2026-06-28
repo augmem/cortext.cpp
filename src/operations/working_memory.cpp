@@ -458,6 +458,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
           const double dedication_strength
               = core::WMSlotDedicationStrength (cfg.stability);
           double max_eviction_score = -std::numeric_limits<double>::infinity ();
+          constexpr double kTieEpsilon = 1e-12;
 
           for (int i = 0; i < static_cast<int> (p_ctx.wm_slots.size ()); ++i)
             {
@@ -478,7 +479,28 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
               // Eviction score: high = weak + old = evict first
               const double eviction_score = (1.0 - dedication) * (1.0 - recency);
 
-              if (eviction_score > max_eviction_score)
+              bool prefer_slot = false;
+              if (eviction_score > max_eviction_score + kTieEpsilon)
+                {
+                  prefer_slot = true;
+                }
+              else if (std::abs (eviction_score - max_eviction_score)
+                       <= kTieEpsilon)
+                {
+                  const auto &current
+                      = p_ctx.wm_slots[static_cast<size_t> (evict_idx)];
+                  if (slot.strength < current.strength - kTieEpsilon)
+                    {
+                      prefer_slot = true;
+                    }
+                  else if (std::abs (slot.strength - current.strength)
+                           <= kTieEpsilon)
+                    {
+                      prefer_slot = slot.last_ts < current.last_ts - kTieEpsilon;
+                    }
+                }
+
+              if (prefer_slot)
                 {
                   max_eviction_score = eviction_score;
                   evict_idx = i;

@@ -119,6 +119,8 @@ coverage.info
 objects/
 data/
 !data/
+data/emotion/
+data/ravdess/
 models/
 !include/cortext/models/
 !include/cortext/models/**

@@ -44,10 +44,17 @@
       "file": "violation_low_256.npy"
     }
   },
+  "models_meta": {
+    "bytes": 275931120,
+    "exists": true,
+    "files": 12,
+    "path": "models/AIST-87M-GGUF",
+    "sha256": "ff9493cfd78527c4cb352eb664889c716b139117f25c2264a3bff41d075a7945"
+  },
   "slice": [
     0,
     256
   ],
-  "text_emotion_source": "data/emotion/_tmp_text_emotion",
-  "timestamp": "2026-06-10T06:03:42Z"
+  "text_emotion_source": "build/aist_sliced_centroids/text_emotion_embeddings",
+  "timestamp": "2026-06-26T03:37:40Z"
 }

@@ -307,6 +307,135 @@ TEST_CASE ("Algorithm 18 updates by memory_id when usage events provide it",
   REQUIRE (cached.last_access == 100LL);
 }
 
+TEST_CASE ("Algorithm 18 tolerates malformed persisted memory strength row",
+           "[op18][memory_strength][robustness]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> vec (kEmbeddingDim, 0.0f);
+  vec[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 901LL, vec, 1000);
+  store->Execute (
+      "INSERT INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+      "s_max, s_avg, strength, use_frequency, contextual_gain, "
+      "retrieved_count, used_count, last_access, created_at, "
+      "trace_fast, trace_med, trace_slow, trace_ultra) "
+      "VALUES(901, 901, 'test', 'LONG_TERM', 1000, 1, 'text', "
+      "0.5, 0.5, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      { std::string ("bad-strength"), std::string ("bad-use"),
+        std::string ("bad-gain"), std::string ("bad-retrieved"),
+        std::string ("bad-used"), std::string ("bad-access"),
+        std::string ("bad-created"), std::string ("bad-fast"),
+        std::string ("bad-med"), std::string ("bad-slow"),
+        std::string ("bad-ultra") });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::ProcessorContext pctx;
+  OperationContext::MemoryUsageEvent ev{};
+  ev.embedding_id = 901LL;
+  ev.memory_id = 901LL;
+  ev.used = true;
+  ev.contextual_gain = 1.0;
+
+  auto signal = MakeSignal (4, 5000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetMemoryUsageEvents ({ ev });
+
+  cortext::operations::UpdateMemoryStrength update_strength;
+  auto tx = store->Begin ();
+  tx->Execute (
+      "INSERT INTO signals(signal_id, memory_id, source_id, embedding_id, "
+      "timestamp, modality, created_at) "
+      "VALUES(9901, 901, 'test', 901, 5000, 'text', 5000)",
+      {});
+  REQUIRE_NOTHROW (update_strength.Execute (ctx, *tx));
+  tx->Commit ();
+
+  auto signal_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM signals WHERE signal_id = 9901", {});
+  REQUIRE (std::any_cast<long long> (signal_rows[0].at ("cnt")) == 1LL);
+
+  auto memory_rows = store->Execute (
+      "SELECT retrieved_count, used_count, last_access "
+      "FROM memories WHERE memory_id = 901",
+      {});
+  REQUIRE (memory_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (memory_rows[0].at ("retrieved_count"))
+           == 1LL);
+  REQUIRE (std::any_cast<long long> (memory_rows[0].at ("used_count"))
+           == 1LL);
+  REQUIRE (std::any_cast<long long> (memory_rows[0].at ("last_access"))
+           == 5000LL);
+}
+
+TEST_CASE ("Algorithm 18 falls back from malformed last_access to created_at",
+           "[op18][memory_strength][robustness]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> vec (kEmbeddingDim, 0.0f);
+  vec[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 902LL, vec, 4999);
+  store->Execute (
+      "INSERT INTO memories("
+      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
+      "s_max, s_avg, strength, use_frequency, contextual_gain, "
+      "retrieved_count, used_count, last_access, created_at, "
+      "trace_fast, trace_med, trace_slow, trace_ultra) "
+      "VALUES(902, 902, 'test', 'LONG_TERM', 4999, 1, 'text', "
+      "1.0, 1.0, 1.0, 0.0, 0.0, 0, 0, ?, 4999, 1.0, 0.0, 0.0, 0.0)",
+      { std::string ("bad-access") });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+
+  cortext::operations::eviction::EvictionPolicyOverride override;
+  override.trace_count = 1;
+  override.coupling_enabled = false;
+  override.reinforcement
+      = cortext::operations::eviction::ReinforcementStrength::Off;
+  override.half_life = 1.0;
+  cortext::operations::eviction::ScopedEvictionPolicyOverride scoped_override (
+      override);
+
+  OperationContext::MemoryUsageEvent ev{};
+  ev.embedding_id = 902LL;
+  ev.memory_id = 902LL;
+  ev.used = false;
+
+  cortext::ProcessorContext pctx;
+  auto signal = MakeSignal (4, 5000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetMemoryUsageEvents ({ ev });
+
+  cortext::operations::UpdateMemoryStrength update_strength;
+  auto tx = store->Begin ();
+  REQUIRE_NOTHROW (update_strength.Execute (ctx, *tx));
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT strength, trace_fast, last_access FROM memories "
+      "WHERE memory_id = 902",
+      {});
+  REQUIRE (rows.size () == 1);
+  REQUIRE (std::any_cast<double> (rows[0].at ("strength")) > 0.99);
+  REQUIRE (std::any_cast<double> (rows[0].at ("trace_fast")) > 0.99);
+  REQUIRE (std::any_cast<long long> (rows[0].at ("last_access")) == 5000LL);
+}
+
 TEST_CASE ("Algorithm 18 writes an eviction audit row before deleting long-term memory",
            "[op18][memory_strength][eviction_audit]")
 {
@@ -461,6 +590,115 @@ TEST_CASE ("Algorithm 18 evicts once storage budget is below threshold",
       "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
       { 89LL });
   REQUIRE (std::any_cast<long long> (rows[0].at ("cnt")) == 0LL);
+}
+
+TEST_CASE (
+    "Algorithm 18 keeps shared embeddings referenced by surviving memories",
+    "[op18][memory_strength][eviction]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> vec (kEmbeddingDim, 0.0f);
+  vec[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 9900LL, vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 9901LL, 9900LL, "weak",
+                                  "LONG_TERM", 0.1, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 9902LL, 9900LL, "strong",
+                                  "LONG_TERM", 0.9, 1000);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::operations::eviction::EvictionPolicyOverride override;
+  override.consolidation_gate_enabled = false;
+  override.periphery_cutoff = 0.5;
+  cortext::operations::eviction::ScopedEvictionPolicyOverride scoped_override (
+      override);
+
+  cortext::ProcessorContext pctx;
+  auto signal = MakeSignal (4, 2000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+
+  cortext::operations::UpdateMemoryStrength update_strength;
+  auto tx = store->Begin ();
+  update_strength.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto weak_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
+      { 9901LL });
+  REQUIRE (std::any_cast<long long> (weak_rows[0].at ("cnt")) == 0LL);
+
+  auto strong_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
+      { 9902LL });
+  REQUIRE (std::any_cast<long long> (strong_rows[0].at ("cnt")) == 1LL);
+
+  auto embedding_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
+      { 9900LL });
+  REQUIRE (std::any_cast<long long> (embedding_rows[0].at ("cnt")) == 1LL);
+}
+
+TEST_CASE (
+    "Algorithm 18 deletes reconstructions and orphan reconstruction embeddings",
+    "[op18][memory_strength][eviction]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> vec (kEmbeddingDim, 0.0f);
+  vec[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 9900LL, vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 9903LL, vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 9901LL, 9900LL, "weak",
+                                  "LONG_TERM", 0.1, 1000);
+  store->Execute (
+      "INSERT INTO memory_reconstructions("
+      "reconstruction_id, memory_id, embedding_id, created_at, uncertainty, "
+      "trigger, source_confidence, context_similarity) "
+      "VALUES(?, ?, ?, ?, ?, 'retrieval', ?, ?)",
+      { 1LL, 9901LL, 9903LL, 1100LL, 0.1, 0.9, 0.8 });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::operations::eviction::EvictionPolicyOverride override;
+  override.consolidation_gate_enabled = false;
+  override.periphery_cutoff = 0.5;
+  cortext::operations::eviction::ScopedEvictionPolicyOverride scoped_override (
+      override);
+
+  cortext::ProcessorContext pctx;
+  auto signal = MakeSignal (4, 2000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+
+  cortext::operations::UpdateMemoryStrength update_strength;
+  auto tx = store->Begin ();
+  update_strength.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto reconstruction_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memory_reconstructions "
+      "WHERE memory_id = ?",
+      { 9901LL });
+  REQUIRE (
+      std::any_cast<long long> (reconstruction_rows[0].at ("cnt")) == 0LL);
+
+  auto reconstruction_embedding_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
+      { 9903LL });
+  REQUIRE (std::any_cast<long long> (
+               reconstruction_embedding_rows[0].at ("cnt")) == 0LL);
 }
 
 TEST_CASE (

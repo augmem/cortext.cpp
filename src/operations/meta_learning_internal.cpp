@@ -5,6 +5,7 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "cortext/store/utils.hpp"
 
 #include <algorithm>
 #include <any>
@@ -91,23 +92,7 @@ GetDouble (const std::map<std::string, std::any> &row, const char *key,
     {
       return fallback;
     }
-  if (it->second.type () == typeid (double))
-    {
-      return std::any_cast<double> (it->second);
-    }
-  if (it->second.type () == typeid (float))
-    {
-      return static_cast<double> (std::any_cast<float> (it->second));
-    }
-  if (it->second.type () == typeid (int))
-    {
-      return static_cast<double> (std::any_cast<int> (it->second));
-    }
-  if (it->second.type () == typeid (long long))
-    {
-      return static_cast<double> (std::any_cast<long long> (it->second));
-    }
-  return fallback;
+  return store::AnyToDouble (it->second, fallback);
 }
 
 long long

@@ -30,9 +30,13 @@ ApplyStabilityFeedback::Execute (OperationContext &context, Transaction &tx) con
           continue;
         }
       const double cg = *e.contextual_gain; // may be negative
-      auto rows = tx.Execute (
-          "SELECT stability FROM memories WHERE embedding_id = ?",
-          { static_cast<long long> (e.embedding_id) });
+      auto rows = e.memory_id > 0
+                      ? tx.Execute (
+                            "SELECT stability FROM memories WHERE memory_id = ?",
+                            { e.memory_id })
+                      : tx.Execute (
+                            "SELECT stability FROM memories WHERE embedding_id = ?",
+                            { static_cast<long long> (e.embedding_id) });
       if (rows.empty ())
         {
           continue;
@@ -46,9 +50,17 @@ ApplyStabilityFeedback::Execute (OperationContext &context, Transaction &tx) con
       const double stability_clamped
           = core::Clamp (stability_new, 0.0, 2.0);
 
-      tx.Execute ("UPDATE memories SET stability = ? WHERE embedding_id = ?",
-                  { stability_clamped,
-                    static_cast<long long> (e.embedding_id) });
+      if (e.memory_id > 0)
+        {
+          tx.Execute ("UPDATE memories SET stability = ? WHERE memory_id = ?",
+                      { stability_clamped, e.memory_id });
+        }
+      else
+        {
+          tx.Execute ("UPDATE memories SET stability = ? WHERE embedding_id = ?",
+                      { stability_clamped,
+                        static_cast<long long> (e.embedding_id) });
+        }
       stability_factors.push_back (stability_clamped);
     }
 

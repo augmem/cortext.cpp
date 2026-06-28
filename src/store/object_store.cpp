@@ -129,10 +129,23 @@ public:
   {
   }
 
+  SqlObjectTransaction (Store *store, Transaction *tx,
+                        bool direct_sqlite = UseDirectSQLiteObjstore ())
+      : store_ (store), tx_ (tx), direct_sqlite_ (direct_sqlite)
+  {
+  }
+
   explicit SqlObjectTransaction (
       std::unique_ptr<Transaction> owned_tx,
       bool direct_sqlite = UseDirectSQLiteObjstore ())
       : tx_ (owned_tx.get ()), owned_tx_ (std::move (owned_tx)),
+        direct_sqlite_ (direct_sqlite)
+  {
+  }
+
+  SqlObjectTransaction (Store *store, std::unique_ptr<Transaction> owned_tx,
+                        bool direct_sqlite = UseDirectSQLiteObjstore ())
+      : store_ (store), tx_ (owned_tx.get ()), owned_tx_ (std::move (owned_tx)),
         direct_sqlite_ (direct_sqlite)
   {
   }
@@ -153,23 +166,29 @@ public:
 
   std::unique_ptr<ObjectTransaction> Begin () override
   {
+    EnsureActive ();
     if (!tx_)
       {
         throw StoreError ("Cannot begin object transaction without DB tx");
       }
-    return std::make_unique<SqlObjectTransaction> (tx_->Begin (),
-                                                   direct_sqlite_);
+	    if (store_)
+	      {
+	        return std::make_unique<SqlObjectTransaction> (
+	            store_, tx_->Begin (), direct_sqlite_);
+	      }
+	    return std::make_unique<SqlObjectTransaction> (tx_->Begin (), direct_sqlite_);
   }
 
   ObjectId Put (const std::vector<unsigned char> &data) override
   {
+    EnsureActive ();
     if (!tx_)
       {
         throw StoreError ("Cannot put object without DB tx");
       }
     if (direct_sqlite_)
       {
-        return DirectSQLitePut (*tx_, data);
+        return DirectSQLitePut (ActiveTransaction (), data);
       }
     ObjectId id = ComputeObjectId (data);
     const std::string id_key = ObjectIdKey (id);
@@ -177,7 +196,7 @@ public:
       {
         return id;
       }
-    auto rows = tx_->Execute ("SELECT objstore_put(?1) AS id", { data });
+    auto rows = Execute ("SELECT objstore_put(?1) AS id", { data });
     if (!rows.empty () && rows[0].count ("id") != 0)
       {
         auto stored_id = store::BlobFromAny (rows[0].at ("id"));
@@ -192,22 +211,23 @@ public:
         put_ids_.insert (id_key);
         return id;
       }
-    put_ids_.insert (id_key);
-    return id;
+    throw StoreError (
+        "sqlite-objstore put did not confirm object persistence");
   }
 
   std::optional<std::vector<unsigned char>>
   Get (const ObjectId &id) override
   {
+    EnsureActive ();
     if (!tx_)
       {
         throw StoreError ("Cannot get object without DB tx");
       }
     if (direct_sqlite_)
       {
-        return DirectSQLiteGet (*tx_, id);
+        return DirectSQLiteGet (ActiveTransaction (), id);
       }
-    auto rows = tx_->Execute ("SELECT objstore_get(?1) AS data", { id });
+    auto rows = Execute ("SELECT objstore_get(?1) AS data", { id });
     if (rows.empty () || rows[0].count ("data") == 0)
       {
         return std::nullopt;
@@ -217,18 +237,19 @@ public:
 
   bool Exists (const ObjectId &id) override
   {
+    EnsureActive ();
     if (!tx_)
       {
         throw StoreError ("Cannot check object without DB tx");
       }
     if (direct_sqlite_)
       {
-        return DirectSQLiteExists (*tx_, id);
+        return DirectSQLiteExists (ActiveTransaction (), id);
       }
     try
       {
-        auto rows = tx_->Execute ("SELECT objstore_exists(?1) AS exists_flag",
-                                  { id });
+        auto rows = Execute ("SELECT objstore_exists(?1) AS exists_flag",
+                             { id });
         if (rows.empty () || rows[0].count ("exists_flag") == 0)
           {
             return false;
@@ -236,24 +257,36 @@ public:
         return store::AnyToLongLong (rows[0].at ("exists_flag")).value_or (0)
                != 0;
       }
-    catch (const StoreError &)
-      {
-        return false;
-      }
+	    catch (const TransactionAlreadyFinishedError &)
+	      {
+	        throw;
+	      }
+	    catch (const TransactionNotCurrentError &)
+	      {
+	        throw;
+	      }
+	    catch (const NoActiveTransactionError &)
+	      {
+	        throw;
+	      }
+	    catch (const StoreError &)
+	      {
+	        return false;
+	      }
   }
 
   bool Delete (const ObjectId &id) override
   {
+    EnsureActive ();
     if (!tx_)
       {
         throw StoreError ("Cannot delete object without DB tx");
       }
     if (direct_sqlite_)
       {
-        return DirectSQLiteDelete (*tx_, id);
+        return DirectSQLiteDelete (ActiveTransaction (), id);
       }
-    auto rows = tx_->Execute ("SELECT objstore_delete(?1) AS deleted",
-                              { id });
+    auto rows = Execute ("SELECT objstore_delete(?1) AS deleted", { id });
     if (rows.empty () || rows[0].count ("deleted") == 0)
       {
         return false;
@@ -290,6 +323,33 @@ public:
   }
 
 private:
+  void
+  EnsureActive () const
+  {
+    if (finished_)
+      {
+        throw TransactionAlreadyFinishedError (
+            "Object transaction is already finished");
+      }
+  }
+
+  Transaction &
+  ActiveTransaction ()
+  {
+    if (!tx_)
+      {
+        throw StoreError ("Cannot use object transaction without DB tx");
+      }
+    return *tx_;
+  }
+
+  std::vector<std::map<std::string, std::any>>
+  Execute (const std::string &query, const std::vector<std::any> &params)
+  {
+    return ActiveTransaction ().Execute (query, params);
+  }
+
+  Store *store_ = nullptr;
   Transaction *tx_ = nullptr;
   std::unique_ptr<Transaction> owned_tx_;
   std::set<std::string> put_ids_;
@@ -329,7 +389,8 @@ SqlObjectStore::SqlObjectStore (std::shared_ptr<Store> store)
 std::unique_ptr<ObjectTransaction>
 SqlObjectStore::Begin ()
 {
-  return std::make_unique<SqlObjectTransaction> (store_->Begin ());
+  return std::make_unique<SqlObjectTransaction> (store_.get (),
+                                                store_->Begin ());
 }
 
 void
@@ -340,7 +401,7 @@ SqlObjectStore::Close ()
 std::unique_ptr<ObjectTransaction>
 SqlObjectStore::Attach (Transaction &tx)
 {
-  return std::make_unique<SqlObjectTransaction> (&tx);
+  return std::make_unique<SqlObjectTransaction> (store_.get (), &tx);
 }
 
 ObjectId

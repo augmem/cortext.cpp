@@ -46,6 +46,21 @@ final class Config {
   final bool signalFilterTextEnabled;
 }
 
+@immutable
+final class Media {
+  const Media({required this.data, required this.mimetype});
+
+  final Uint8List data;
+  final String mimetype;
+}
+
+@immutable
+final class ProcessOptions {
+  const ProcessOptions({this.includeEmbedding = true});
+
+  final bool includeEmbedding;
+}
+
 final class CortextLibrary {
   CortextLibrary._(this.dynamicLibrary)
     : bindings = CortextBindings(dynamicLibrary);
@@ -79,7 +94,7 @@ final class CortextLibrary {
 
     throw CortextError(
       'Could not locate the Cortext shared library. '
-      'Build it with `zig build -Dshared=true -Dllama=false` or '
+      'Build it with '
       '`cmake --preset ffi-release && cmake --build --preset ffi-release --target cortext`, '
       'or set CORTEXT_LIBRARY_PATH.',
     );
@@ -103,9 +118,9 @@ final class CortextLibrary {
     return <String>[
       for (final root in roots)
         for (final directory in <String>[
-          '$root/zig-out/lib',
           '$root/build/ffi-release',
           '$root/build/ffi-release/lib',
+          '$root/zig-out/lib',
           '$root/install/lib',
         ])
           for (final name in _libraryBasenamesForPlatform()) '$directory/$name',
@@ -224,22 +239,33 @@ final class Cortext {
     _handle = nullptr;
   }
 
-  String processTextJson(String text, String sourceId) {
+  String processTextJson(
+    String text,
+    String sourceId, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
     _ensureOpen();
+    final optionsPointer = _allocateProcessOptions(options);
     return _withTwoStrings(
       text,
       sourceId,
       (textPointer, sourcePointer) =>
-          _library.bindings.cortext_process_text_json(
+          _library.bindings.cortext_process_text_json_with_options(
             _handle,
             textPointer.cast(),
             sourcePointer.cast(),
+            optionsPointer,
           ),
+      after: () => malloc.free(optionsPointer),
     );
   }
 
-  Map<String, dynamic> processText(String text, String sourceId) {
-    return _decodeJsonObject(processTextJson(text, sourceId));
+  Map<String, dynamic> processText(
+    String text,
+    String sourceId, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
+    return _decodeJsonObject(processTextJson(text, sourceId, options));
   }
 
   String embedTextJson(String text) {
@@ -261,32 +287,117 @@ final class Cortext {
     return _decodeEmbedding(embedTextJson(text));
   }
 
-  String processAudioJson(Float32List pcm, String sourceId) {
+  String processAudioJson(
+    Float32List pcm,
+    String sourceId, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
     _ensureOpen();
     final sourcePointer = sourceId.toNativeUtf8();
+    final optionsPointer = _allocateProcessOptions(options);
     Pointer<Float> pcmPointer = nullptr;
     try {
       if (pcm.isNotEmpty) {
         pcmPointer = malloc<Float>(pcm.length);
         pcmPointer.asTypedList(pcm.length).setAll(0, pcm);
       }
-      final raw = _library.bindings.cortext_process_audio_json(
+      final raw = _library.bindings.cortext_process_audio_json_with_options(
         _handle,
         pcmPointer,
         pcm.length,
         sourcePointer.cast(),
+        optionsPointer,
       );
       return _takeJsonString(raw);
     } finally {
       malloc.free(sourcePointer);
+      malloc.free(optionsPointer);
       if (pcmPointer != nullptr) {
         malloc.free(pcmPointer);
       }
     }
   }
 
-  Map<String, dynamic> processAudio(Float32List pcm, String sourceId) {
-    return _decodeJsonObject(processAudioJson(pcm, sourceId));
+  String processAudioWithMediaJson(
+    Float32List pcm,
+    String sourceId,
+    Media? media, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
+    _ensureOpen();
+    final sourcePointer = sourceId.toNativeUtf8();
+    final optionsPointer = _allocateProcessOptions(options);
+    Pointer<Float> pcmPointer = nullptr;
+    Pointer<cortext_media> mediaPointer = nullptr;
+    Pointer<Uint8> mediaDataPointer = nullptr;
+    Pointer<Utf8> mediaMimePointer = nullptr;
+    try {
+      if (pcm.isNotEmpty) {
+        pcmPointer = malloc<Float>(pcm.length);
+        pcmPointer.asTypedList(pcm.length).setAll(0, pcm);
+      }
+      if (media != null && media.data.isNotEmpty) {
+        if (media.mimetype.isEmpty) {
+          throw ArgumentError.value(
+            media.mimetype,
+            'media.mimetype',
+            'must not be empty when media data is provided',
+          );
+        }
+        mediaDataPointer = malloc<Uint8>(media.data.length);
+        mediaDataPointer.asTypedList(media.data.length).setAll(0, media.data);
+        mediaMimePointer = media.mimetype.toNativeUtf8();
+        mediaPointer = malloc<cortext_media>();
+        mediaPointer.ref
+          ..data = mediaDataPointer
+          ..size = media.data.length
+          ..mimetype = mediaMimePointer.cast();
+      }
+      final raw =
+          _library.bindings.cortext_process_audio_with_media_json_with_options(
+        _handle,
+        pcmPointer,
+        pcm.length,
+        sourcePointer.cast(),
+        mediaPointer,
+        optionsPointer,
+      );
+      return _takeJsonString(raw);
+    } finally {
+      malloc.free(sourcePointer);
+      malloc.free(optionsPointer);
+      if (pcmPointer != nullptr) {
+        malloc.free(pcmPointer);
+      }
+      if (mediaPointer != nullptr) {
+        malloc.free(mediaPointer);
+      }
+      if (mediaDataPointer != nullptr) {
+        malloc.free(mediaDataPointer);
+      }
+      if (mediaMimePointer != nullptr) {
+        malloc.free(mediaMimePointer);
+      }
+    }
+  }
+
+  Map<String, dynamic> processAudio(
+    Float32List pcm,
+    String sourceId, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
+    return _decodeJsonObject(processAudioJson(pcm, sourceId, options));
+  }
+
+  Map<String, dynamic> processAudioWithMedia(
+    Float32List pcm,
+    String sourceId,
+    Media? media, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
+    return _decodeJsonObject(
+      processAudioWithMediaJson(pcm, sourceId, media, options),
+    );
   }
 
   String embedAudioJson(Float32List pcm) {
@@ -319,29 +430,101 @@ final class Cortext {
     int width,
     int height,
     int channels,
-    String sourceId,
-  ) {
+    String sourceId, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
     _ensureOpen();
     final sourcePointer = sourceId.toNativeUtf8();
+    final optionsPointer = _allocateProcessOptions(options);
     Pointer<Uint8> dataPointer = nullptr;
     try {
       if (data.isNotEmpty) {
         dataPointer = malloc<Uint8>(data.length);
         dataPointer.asTypedList(data.length).setAll(0, data);
       }
-      final raw = _library.bindings.cortext_process_image_json(
+      final raw = _library.bindings.cortext_process_image_json_with_options(
         _handle,
         dataPointer,
         width,
         height,
         channels,
         sourcePointer.cast(),
+        optionsPointer,
       );
       return _takeJsonString(raw);
     } finally {
       malloc.free(sourcePointer);
+      malloc.free(optionsPointer);
       if (dataPointer != nullptr) {
         malloc.free(dataPointer);
+      }
+    }
+  }
+
+  String processImageWithMediaJson(
+    Uint8List data,
+    int width,
+    int height,
+    int channels,
+    String sourceId,
+    Media? media, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
+    _ensureOpen();
+    final sourcePointer = sourceId.toNativeUtf8();
+    final optionsPointer = _allocateProcessOptions(options);
+    Pointer<Uint8> dataPointer = nullptr;
+    Pointer<cortext_media> mediaPointer = nullptr;
+    Pointer<Uint8> mediaDataPointer = nullptr;
+    Pointer<Utf8> mediaMimePointer = nullptr;
+    try {
+      if (data.isNotEmpty) {
+        dataPointer = malloc<Uint8>(data.length);
+        dataPointer.asTypedList(data.length).setAll(0, data);
+      }
+      if (media != null && media.data.isNotEmpty) {
+        if (media.mimetype.isEmpty) {
+          throw ArgumentError.value(
+            media.mimetype,
+            'media.mimetype',
+            'must not be empty when media data is provided',
+          );
+        }
+        mediaDataPointer = malloc<Uint8>(media.data.length);
+        mediaDataPointer.asTypedList(media.data.length).setAll(0, media.data);
+        mediaMimePointer = media.mimetype.toNativeUtf8();
+        mediaPointer = malloc<cortext_media>();
+        mediaPointer.ref
+          ..data = mediaDataPointer
+          ..size = media.data.length
+          ..mimetype = mediaMimePointer.cast();
+      }
+      final raw =
+          _library.bindings.cortext_process_image_with_media_json_with_options(
+        _handle,
+        dataPointer,
+        width,
+        height,
+        channels,
+        sourcePointer.cast(),
+        mediaPointer,
+        optionsPointer,
+      );
+      return _takeJsonString(raw);
+    } finally {
+      malloc.free(sourcePointer);
+      malloc.free(optionsPointer);
+      if (dataPointer != nullptr) {
+        malloc.free(dataPointer);
+      }
+      if (mediaPointer != nullptr) {
+        malloc.free(mediaPointer);
+      }
+      if (mediaDataPointer != nullptr) {
+        malloc.free(mediaDataPointer);
+      }
+      if (mediaMimePointer != nullptr) {
+        malloc.free(mediaMimePointer);
       }
     }
   }
@@ -351,10 +534,33 @@ final class Cortext {
     int width,
     int height,
     int channels,
-    String sourceId,
-  ) {
+    String sourceId, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
     return _decodeJsonObject(
-      processImageJson(data, width, height, channels, sourceId),
+      processImageJson(data, width, height, channels, sourceId, options),
+    );
+  }
+
+  Map<String, dynamic> processImageWithMedia(
+    Uint8List data,
+    int width,
+    int height,
+    int channels,
+    String sourceId,
+    Media? media, [
+    ProcessOptions options = const ProcessOptions(),
+  ]) {
+    return _decodeJsonObject(
+      processImageWithMediaJson(
+        data,
+        width,
+        height,
+        channels,
+        sourceId,
+        media,
+        options,
+      ),
     );
   }
 
@@ -423,8 +629,9 @@ final class Cortext {
   String _withTwoStrings(
     String first,
     String second,
-    Pointer<Char> Function(Pointer<Utf8> first, Pointer<Utf8> second) call,
-  ) {
+    Pointer<Char> Function(Pointer<Utf8> first, Pointer<Utf8> second) call, {
+    void Function()? after,
+  }) {
     final firstPointer = first.toNativeUtf8();
     final secondPointer = second.toNativeUtf8();
     try {
@@ -432,7 +639,18 @@ final class Cortext {
     } finally {
       malloc.free(firstPointer);
       malloc.free(secondPointer);
+      after?.call();
     }
+  }
+
+  Pointer<cortext_process_json_options> _allocateProcessOptions(
+    ProcessOptions options,
+  ) {
+    final pointer = malloc<cortext_process_json_options>();
+    pointer.ref
+      ..struct_size = sizeOf<cortext_process_json_options>()
+      ..include_embedding = options.includeEmbedding ? 1 : 0;
+    return pointer;
   }
 
   String _takeJsonString(Pointer<Char> raw) {

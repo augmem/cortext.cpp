@@ -14,10 +14,11 @@ This checklist is the minimum evidence for a v1 tag.
 
 ## Native Build Gate
 
-Install a C++20 compiler, CMake, `pkg-config`, and SQLite development headers.
+Install a C++20 compiler and CMake. SQLite is built from the bundled
+`third_party/sqlite` source tree.
 
 ```bash
-cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_SHERPA_ONNX=ON -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_OPENTELEMETRY=ON
 cmake --build build/release -j
 ./build/release/tests/cortext_tests '~[aist]' --reporter compact
 ```
@@ -31,8 +32,6 @@ Run the AIST-tagged tests separately on a host with the model installed.
 ## FFI Gate
 
 ```bash
-zig build --fetch -Dshared=true -Dllama=false
-zig build -Dshared=true -Dllama=false
 cmake --preset ffi-release-node
 cmake --build --preset ffi-release-node --target cortext cortext_node -j
 (cd bindings/go && go test)
@@ -67,8 +66,8 @@ preloaded into `/models` at build time:
 
 ## CI Gate
 
-The GitHub workflow must pass with optional Sherpa and OpenTelemetry integrations
-disabled for deterministic model-free CI:
+The GitHub workflow must pass with optional OpenTelemetry disabled for
+deterministic model-free CI:
 
 - Ubuntu native release build and non-AIST tests.
 - Arch Linux native release build and non-AIST tests.

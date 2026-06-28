@@ -1,11 +1,5 @@
 # Benchmark executable with new source files
 
-# sqlite_store.hpp includes <sqlite3.h>; resolve it the same way the
-# library does (pkg-config on native).
-if(SQLITE3_INCLUDE_DIRS)
-  include_directories(${SQLITE3_INCLUDE_DIRS})
-endif()
-
 add_executable(cortext_text_encoder_bench
   text_encoder_bench.cpp
 )
@@ -183,8 +177,4 @@ target_link_libraries(cortext_audio_video_accumulator_bench PRIVATE
 target_link_libraries(cortext_chat_replay_live_run PRIVATE
   cortext
   nlohmann_json::nlohmann_json
-  ${SQLITE3_LIBRARIES}
 )
-if(SQLITE3_LIBRARY_DIRS)
-  target_link_directories(cortext_chat_replay_live_run PRIVATE ${SQLITE3_LIBRARY_DIRS})
-endif()

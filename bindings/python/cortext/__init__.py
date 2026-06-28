@@ -14,6 +14,7 @@ __all__ = [
     "Cortext",
     "CortextError",
     "DBProvider",
+    "Media",
     "ObjectStoreProvider",
     "last_error",
     "load_library",
@@ -40,6 +41,12 @@ class Config:
     signal_filter_text_enabled: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class Media:
+    data: bytes | bytearray | memoryview
+    mimetype: str
+
+
 class _NativeConfig(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_size_t),
@@ -54,6 +61,21 @@ class _NativeConfig(ctypes.Structure):
         ("signal_filter_audio_enabled", ctypes.c_int),
         ("signal_filter_image_enabled", ctypes.c_int),
         ("signal_filter_text_enabled", ctypes.c_int),
+    ]
+
+
+class _NativeMedia(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.POINTER(ctypes.c_uint8)),
+        ("size", ctypes.c_size_t),
+        ("mimetype", ctypes.c_char_p),
+    ]
+
+
+class _NativeProcessJsonOptions(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_size_t),
+        ("include_embedding", ctypes.c_int),
     ]
 
 
@@ -279,9 +301,9 @@ def _candidate_library_paths() -> list[Path]:
         candidates.append(Path(env_path).expanduser())
 
     for directory in (
-        root / "zig-out" / "lib",
         root / "build" / "ffi-release",
         root / "build" / "ffi-release" / "lib",
+        root / "zig-out" / "lib",
         root / "install" / "lib",
     ):
         for name in names:
@@ -338,6 +360,14 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
     ]
     lib.cortext_process_text_json.restype = ctypes.c_void_p
 
+    lib.cortext_process_text_json_with_options.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(_NativeProcessJsonOptions),
+    ]
+    lib.cortext_process_text_json_with_options.restype = ctypes.c_void_p
+
     lib.cortext_process_audio_json.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_float),
@@ -345,6 +375,34 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.c_char_p,
     ]
     lib.cortext_process_audio_json.restype = ctypes.c_void_p
+
+    lib.cortext_process_audio_json_with_options.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.POINTER(_NativeProcessJsonOptions),
+    ]
+    lib.cortext_process_audio_json_with_options.restype = ctypes.c_void_p
+
+    lib.cortext_process_audio_with_media_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.POINTER(_NativeMedia),
+    ]
+    lib.cortext_process_audio_with_media_json.restype = ctypes.c_void_p
+
+    lib.cortext_process_audio_with_media_json_with_options.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.POINTER(_NativeMedia),
+        ctypes.POINTER(_NativeProcessJsonOptions),
+    ]
+    lib.cortext_process_audio_with_media_json_with_options.restype = ctypes.c_void_p
 
     lib.cortext_process_image_json.argtypes = [
         ctypes.c_void_p,
@@ -355,6 +413,40 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.c_char_p,
     ]
     lib.cortext_process_image_json.restype = ctypes.c_void_p
+
+    lib.cortext_process_image_json_with_options.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.POINTER(_NativeProcessJsonOptions),
+    ]
+    lib.cortext_process_image_json_with_options.restype = ctypes.c_void_p
+
+    lib.cortext_process_image_with_media_json.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.POINTER(_NativeMedia),
+    ]
+    lib.cortext_process_image_with_media_json.restype = ctypes.c_void_p
+
+    lib.cortext_process_image_with_media_json_with_options.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.POINTER(_NativeMedia),
+        ctypes.POINTER(_NativeProcessJsonOptions),
+    ]
+    lib.cortext_process_image_with_media_json_with_options.restype = ctypes.c_void_p
 
     lib.cortext_embed_text_json.argtypes = [
         ctypes.c_void_p,
@@ -413,7 +505,7 @@ def load_library(path: str | os.PathLike[str] | None = None) -> ctypes.CDLL:
     searched = "\n".join(str(candidate) for candidate in _candidate_library_paths())
     raise CortextError(
         "Could not locate the Cortext shared library. "
-        "Build it with `zig build -Dshared=true -Dllama=false` or "
+        "Build it with "
         "`cmake --preset ffi-release && cmake --build --preset ffi-release --target cortext`, "
         "or set CORTEXT_LIBRARY_PATH.\n"
         f"Searched:\n{searched}"
@@ -436,6 +528,32 @@ def version() -> str:
 def _raise_last_error(prefix: str) -> None:
     detail = last_error()
     raise CortextError(f"{prefix}: {detail}" if detail else prefix)
+
+
+def _native_media(
+    media: Media | bytes | bytearray | memoryview | None,
+    mimetype: str | None,
+) -> tuple[_NativeMedia, Any, bytes | None]:
+    if media is None:
+        return _NativeMedia(None, 0, None), None, None
+    if isinstance(media, Media):
+        if mimetype is None:
+            mimetype = media.mimetype
+        media = media.data
+    blob = bytes(media)
+    if not blob:
+        return _NativeMedia(None, 0, None), None, None
+    if not mimetype:
+        raise ValueError("media_mimetype is required when media bytes are provided")
+    raw = (ctypes.c_uint8 * len(blob)).from_buffer_copy(blob)
+    mimetype_bytes = mimetype.encode("utf-8")
+    return _NativeMedia(raw, len(blob), mimetype_bytes), raw, mimetype_bytes
+
+
+def _native_process_json_options(include_embedding: bool) -> _NativeProcessJsonOptions:
+    return _NativeProcessJsonOptions(
+        ctypes.sizeof(_NativeProcessJsonOptions), 1 if include_embedding else 0
+    )
 
 
 def _bool_to_int(value: bool) -> int:
@@ -889,15 +1007,21 @@ class Cortext:
         if status != 0:
             _raise_last_error("cortext_reset failed")
 
-    def process_text_json(self, text: str, source_id: str) -> str:
+    def process_text_json(
+        self, text: str, source_id: str, include_embedding: bool = True
+    ) -> str:
+        options = _native_process_json_options(include_embedding)
         return self._call_json(
-            self._lib.cortext_process_text_json,
+            self._lib.cortext_process_text_json_with_options,
             text.encode("utf-8"),
             source_id.encode("utf-8"),
+            ctypes.byref(options),
         )
 
-    def process_text(self, text: str, source_id: str) -> dict[str, Any]:
-        return json.loads(self.process_text_json(text, source_id))
+    def process_text(
+        self, text: str, source_id: str, include_embedding: bool = True
+    ) -> dict[str, Any]:
+        return json.loads(self.process_text_json(text, source_id, include_embedding))
 
     def embed_text_json(self, text: str) -> str:
         return self._call_json(
@@ -908,18 +1032,68 @@ class Cortext:
     def embed_text(self, text: str) -> list[float]:
         return list(json.loads(self.embed_text_json(text))["embedding"])
 
-    def process_audio_json(self, pcm: Iterable[float], source_id: str) -> str:
+    def process_audio_json(
+        self,
+        pcm: Iterable[float],
+        source_id: str,
+        include_embedding: bool = True,
+    ) -> str:
         samples = array("f", pcm)
         raw = (ctypes.c_float * len(samples)).from_buffer(samples)
+        options = _native_process_json_options(include_embedding)
         return self._call_json(
-            self._lib.cortext_process_audio_json,
+            self._lib.cortext_process_audio_json_with_options,
             raw,
             len(samples),
             source_id.encode("utf-8"),
+            ctypes.byref(options),
         )
 
-    def process_audio(self, pcm: Iterable[float], source_id: str) -> dict[str, Any]:
-        return json.loads(self.process_audio_json(pcm, source_id))
+    def process_audio_with_media_json(
+        self,
+        pcm: Iterable[float],
+        source_id: str,
+        media: Media | bytes | bytearray | memoryview | None = None,
+        media_mimetype: str | None = None,
+        include_embedding: bool = True,
+    ) -> str:
+        samples = array("f", pcm)
+        raw = (ctypes.c_float * len(samples)).from_buffer(samples)
+        native_media, media_buffer, mimetype_buffer = _native_media(
+            media, media_mimetype
+        )
+        options = _native_process_json_options(include_embedding)
+        _ = (media_buffer, mimetype_buffer)
+        return self._call_json(
+            self._lib.cortext_process_audio_with_media_json_with_options,
+            raw,
+            len(samples),
+            source_id.encode("utf-8"),
+            ctypes.byref(native_media),
+            ctypes.byref(options),
+        )
+
+    def process_audio(
+        self,
+        pcm: Iterable[float],
+        source_id: str,
+        include_embedding: bool = True,
+    ) -> dict[str, Any]:
+        return json.loads(self.process_audio_json(pcm, source_id, include_embedding))
+
+    def process_audio_with_media(
+        self,
+        pcm: Iterable[float],
+        source_id: str,
+        media: Media | bytes | bytearray | memoryview | None = None,
+        media_mimetype: str | None = None,
+        include_embedding: bool = True,
+    ) -> dict[str, Any]:
+        return json.loads(
+            self.process_audio_with_media_json(
+                pcm, source_id, media, media_mimetype, include_embedding
+            )
+        )
 
     def embed_audio_json(self, pcm: Iterable[float]) -> str:
         samples = array("f", pcm)
@@ -940,16 +1114,48 @@ class Cortext:
         height: int,
         channels: int,
         source_id: str,
+        include_embedding: bool = True,
     ) -> str:
         blob = bytes(data)
         raw = (ctypes.c_uint8 * len(blob)).from_buffer_copy(blob)
+        options = _native_process_json_options(include_embedding)
         return self._call_json(
-            self._lib.cortext_process_image_json,
+            self._lib.cortext_process_image_json_with_options,
             raw,
             width,
             height,
             channels,
             source_id.encode("utf-8"),
+            ctypes.byref(options),
+        )
+
+    def process_image_with_media_json(
+        self,
+        data: bytes | bytearray | memoryview,
+        width: int,
+        height: int,
+        channels: int,
+        source_id: str,
+        media: Media | bytes | bytearray | memoryview | None = None,
+        media_mimetype: str | None = None,
+        include_embedding: bool = True,
+    ) -> str:
+        blob = bytes(data)
+        raw = (ctypes.c_uint8 * len(blob)).from_buffer_copy(blob)
+        native_media, media_buffer, mimetype_buffer = _native_media(
+            media, media_mimetype
+        )
+        options = _native_process_json_options(include_embedding)
+        _ = (media_buffer, mimetype_buffer)
+        return self._call_json(
+            self._lib.cortext_process_image_with_media_json_with_options,
+            raw,
+            width,
+            height,
+            channels,
+            source_id.encode("utf-8"),
+            ctypes.byref(native_media),
+            ctypes.byref(options),
         )
 
     def process_image(
@@ -959,9 +1165,36 @@ class Cortext:
         height: int,
         channels: int,
         source_id: str,
+        include_embedding: bool = True,
     ) -> dict[str, Any]:
         return json.loads(
-            self.process_image_json(data, width, height, channels, source_id)
+            self.process_image_json(
+                data, width, height, channels, source_id, include_embedding
+            )
+        )
+
+    def process_image_with_media(
+        self,
+        data: bytes | bytearray | memoryview,
+        width: int,
+        height: int,
+        channels: int,
+        source_id: str,
+        media: Media | bytes | bytearray | memoryview | None = None,
+        media_mimetype: str | None = None,
+        include_embedding: bool = True,
+    ) -> dict[str, Any]:
+        return json.loads(
+            self.process_image_with_media_json(
+                data,
+                width,
+                height,
+                channels,
+                source_id,
+                media,
+                media_mimetype,
+                include_embedding,
+            )
         )
 
     def embed_image_json(

@@ -5,9 +5,16 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/schema.hpp>
 #include <cortext/processor/operation_set.hpp>
+#include <cstdint>
 #include <memory>
+#include <set>
 
 using namespace cortext;
+
+namespace cortext::store
+{
+std::set<int64_t> DebugGetAppliedMigrationIdsForTest (Store &store);
+}
 
 TEST_CASE("Migrations apply core tables automatically", "[schema][migration]") {
     auto unique_store = SQLiteStore::Create(":memory:");
@@ -67,6 +74,21 @@ TEST_CASE("Migrations track version history", "[schema][migration]") {
     }
 
     REQUIRE(id == 0);
+}
+
+TEST_CASE("Migrations preserve 64-bit applied migration ids",
+          "[schema][migration]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::ApplyMigrations(*store);
+
+    const int64_t large_id = 3000000000LL;
+    store->Execute(
+        "INSERT INTO cortext_schema_migrations (id, description, applied_at) "
+        "VALUES (?, ?, 0)",
+        {large_id, std::string("synthetic large id")});
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(large_id) == 1);
 }
 
 TEST_CASE("Migrations are idempotent", "[schema][migration]") {

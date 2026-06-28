@@ -131,6 +131,55 @@ TEST_CASE ("Alg27 allows on MU path", "[operations][interrupt_gate]")
   REQUIRE (oc.GetMniOverlapStar () == Catch::Approx (-1.0));
 }
 
+TEST_CASE ("Alg27 structured retrieval selects memory id",
+           "[operations][interrupt_gate]")
+{
+  auto store = CreateTestStore ();
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.7;
+  cfg.sensitivity = 0.6;
+  cfg.stability = 0.5;
+
+  ProcessorContext pc;
+  pc.signals_processed = 100;
+  pc.last_interrupt_tick = 0;
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
+
+  auto cand_emb = MakeUnit256 ({ 0.95f, 0.05f, 0.0f });
+  std::vector<float> emb_data (cand_emb.data (),
+                               cand_emb.data () + cand_emb.size ());
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, ?)",
+      { 700LL, emb_data, 0LL });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, 1.0, ?)",
+      { 70LL, 700LL, 0LL, 0LL });
+
+  auto sig = MakeSignal ();
+  OperationContext oc (sig, pc, cfg, store.get ());
+  oc.SetCoherence (1.0);
+  oc.SetThresholdTDynamic (0.0);
+  oc.SetAtBoundary (true);
+  oc.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 700LL, cand_emb } });
+  oc.SetRetrievedMemoryCandidates (
+      std::vector<OperationContext::RetrievedMemoryCandidate>{
+        { 70LL, 700LL, cand_emb, 1.0 } });
+
+  ComputeMniGateDecision op;
+  auto tx = store->Begin ();
+  op.Execute (oc, *tx);
+
+  REQUIRE (oc.GetInterruptAllowed ());
+  REQUIRE (oc.GetSelectedCandidateId ().has_value ());
+  REQUIRE (*oc.GetSelectedCandidateId () == 70LL);
+}
+
 TEST_CASE ("Alg27 duplicate suppression", "[operations][interrupt_gate]")
 {
   auto store = CreateTestStore ();

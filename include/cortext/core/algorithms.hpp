@@ -18,7 +18,7 @@ Lerp (T a, T b, double t)
 
 /// @brief Clamps a value to the a specified range [lo, hi].
 template <typename T>
-const T &
+T
 Clamp (const T &v, const T &lo, const T &hi)
 {
   if (v < lo)

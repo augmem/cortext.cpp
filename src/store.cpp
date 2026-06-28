@@ -312,14 +312,23 @@ BindParameters (sqlite3_stmt *stmt, const std::vector<std::any> &params)
                   static_cast<int> (vec.size () * sizeof (float)),
                   SQLITE_TRANSIENT);
             }
-          else
+          else if (!param.has_value ()
+                   || param.type () == typeid (std::nullptr_t))
             {
               sqlite3_bind_null (stmt, param_index);
+            }
+          else
+            {
+              throw StoreError (
+                  "Unsupported SQLite bind parameter type at index "
+                  + std::to_string (param_index) + ": " + param.type ().name ());
             }
         }
       catch (const std::bad_any_cast &)
         {
-          sqlite3_bind_null (stmt, param_index);
+          throw StoreError (
+              "SQLite bind parameter type mismatch at index "
+              + std::to_string (param_index));
         }
     }
 }
@@ -517,24 +526,51 @@ SQLiteTransaction::SQLiteTransaction (SQLiteStore *store)
 
 SQLiteTransaction::~SQLiteTransaction ()
 {
-  // If transaction was not finished, rollback to clean up
   if (store_ && !is_committed_ && !is_rolled_back_)
     {
       try
         {
-          // For nested transactions with savepoints, rollback the savepoint
-          if (!savepoint_name_.empty ())
+          auto it = std::find (store_->transaction_stack_.begin (),
+                               store_->transaction_stack_.end (), this);
+          if (savepoint_name_.empty ())
             {
-              store_->ExecuteDirect ("ROLLBACK TO SAVEPOINT " + savepoint_name_);
-            }
-          // For root transactions, rollback the entire transaction
-          else if (store_->in_transaction_)
-            {
-              if (store_->IsDbInTransaction ())
+              if (store_->in_transaction_)
                 {
-                  store_->ExecuteDirect ("ROLLBACK");
+                  if (store_->IsDbInTransaction ())
+                    {
+                      store_->ExecuteDirect ("ROLLBACK");
+                    }
+                  store_->in_transaction_ = false;
                 }
-              store_->in_transaction_ = false;
+              if (it != store_->transaction_stack_.end ())
+                {
+                  for (auto mark_it = it;
+                       mark_it != store_->transaction_stack_.end (); ++mark_it)
+                    {
+                      if (*mark_it)
+                        {
+                          (*mark_it)->is_rolled_back_ = true;
+                        }
+                    }
+                  store_->transaction_stack_.erase (
+                      it, store_->transaction_stack_.end ());
+                }
+            }
+          else if (it != store_->transaction_stack_.end ())
+            {
+              store_->ExecuteDirect ("ROLLBACK TO SAVEPOINT "
+                                     + savepoint_name_);
+              store_->ExecuteDirect ("RELEASE SAVEPOINT " + savepoint_name_);
+              for (auto mark_it = it;
+                   mark_it != store_->transaction_stack_.end (); ++mark_it)
+                {
+                  if (*mark_it)
+                    {
+                      (*mark_it)->is_rolled_back_ = true;
+                    }
+                }
+              store_->transaction_stack_.erase (
+                  it, store_->transaction_stack_.end ());
             }
         }
       catch (...)
@@ -572,7 +608,20 @@ SQLiteTransaction::SQLiteTransaction (SQLiteStore *store,
 std::unique_ptr<Transaction>
 SQLiteTransaction::Begin ()
 {
-  return std::make_unique<SQLiteTransaction> (store_, this);
+  if (is_committed_ || is_rolled_back_)
+    {
+      throw TransactionAlreadyFinishedError (
+          "Transaction is already committed or rolled back");
+    }
+  if (!store_ || store_->transaction_stack_.empty ()
+      || store_->transaction_stack_.back () != this)
+    {
+      throw TransactionNotCurrentError (
+          "Transaction is not the current transaction");
+    }
+  auto transaction = std::make_unique<SQLiteTransaction> (store_, this);
+  store_->transaction_stack_.push_back (transaction.get ());
+  return transaction;
 }
 
 std::vector<std::map<std::string, std::any> >
@@ -583,6 +632,12 @@ SQLiteTransaction::Execute (const std::string &query,
     {
       throw TransactionAlreadyFinishedError (
           "Transaction is already committed or rolled back");
+    }
+  if (!store_ || store_->transaction_stack_.empty ()
+      || store_->transaction_stack_.back () != this)
+    {
+      throw TransactionNotCurrentError (
+          "Transaction is not the current transaction");
     }
   return store_->ExecuteDirect (query, params);
 }
@@ -595,6 +650,12 @@ SQLiteTransaction::Commit ()
       throw TransactionAlreadyFinishedError (
           "Transaction is already committed or rolled back");
     }
+  if (!store_ || store_->transaction_stack_.empty ()
+      || store_->transaction_stack_.back () != this)
+    {
+      throw TransactionNotCurrentError (
+          "Transaction is not the current transaction");
+    }
 
   if (savepoint_name_.empty ())
     {
@@ -606,6 +667,7 @@ SQLiteTransaction::Commit ()
       // This is a nested transaction - release the savepoint
       std::string query = "RELEASE SAVEPOINT " + savepoint_name_;
       store_->ExecuteDirect (query);
+      store_->transaction_stack_.pop_back ();
     }
 
   is_committed_ = true;
@@ -619,6 +681,12 @@ SQLiteTransaction::Rollback ()
       throw TransactionAlreadyFinishedError (
           "Transaction is already committed or rolled back");
     }
+  if (!store_ || store_->transaction_stack_.empty ()
+      || store_->transaction_stack_.back () != this)
+    {
+      throw TransactionNotCurrentError (
+          "Transaction is not the current transaction");
+    }
 
   if (savepoint_name_.empty ())
     {
@@ -627,9 +695,10 @@ SQLiteTransaction::Rollback ()
     }
   else
     {
-      // This is a nested transaction - rollback to savepoint
-      std::string query = "ROLLBACK TO SAVEPOINT " + savepoint_name_;
-      store_->ExecuteDirect (query);
+      // This is a nested transaction - rollback and release the savepoint
+      store_->ExecuteDirect ("ROLLBACK TO SAVEPOINT " + savepoint_name_);
+      store_->ExecuteDirect ("RELEASE SAVEPOINT " + savepoint_name_);
+      store_->transaction_stack_.pop_back ();
     }
 
   is_rolled_back_ = true;
@@ -665,8 +734,17 @@ SQLiteStore::AcquireStatement (const std::string &query)
       = PrepareStatement (connection_->GetConnection (), query, prepare_rc);
   if (statement_cache_.size () >= kStatementCacheCapacity)
     {
-      EvictStatement (statement_cache_fifo_.front ());
-      statement_cache_fifo_.pop_front ();
+      while (statement_cache_.size () >= kStatementCacheCapacity)
+        {
+          if (statement_cache_fifo_.empty ())
+            {
+              EvictStatement (statement_cache_.begin ()->first);
+            }
+          else
+            {
+              EvictStatement (statement_cache_fifo_.front ());
+            }
+        }
     }
   statement_cache_.emplace (query, stmt);
   statement_cache_fifo_.push_back (query);
@@ -682,6 +760,10 @@ SQLiteStore::EvictStatement (const std::string &query)
       sqlite3_finalize (it->second);
       statement_cache_.erase (it);
     }
+  statement_cache_fifo_.erase (
+      std::remove (statement_cache_fifo_.begin (), statement_cache_fifo_.end (),
+                   query),
+      statement_cache_fifo_.end ());
 }
 
 void
@@ -770,7 +852,6 @@ SQLiteStore::Commit ()
 
   auto current_tx = transaction_stack_.back ();
 
-  // Only commit the root transaction to the database
   if (current_tx->parent_transaction_ == nullptr)
     {
       if (in_transaction_)
@@ -782,8 +863,12 @@ SQLiteStore::Commit ()
           in_transaction_ = false;
         }
     }
+  else
+    {
+      ExecuteDirect ("RELEASE SAVEPOINT " + current_tx->savepoint_name_);
+    }
 
-  // Remove this transaction from the stack
+  current_tx->is_committed_ = true;
   transaction_stack_.pop_back ();
 }
 
@@ -797,7 +882,6 @@ SQLiteStore::Rollback ()
 
   auto current_tx = transaction_stack_.back ();
 
-  // Only rollback the root transaction from the database
   if (current_tx->parent_transaction_ == nullptr)
     {
       if (in_transaction_)
@@ -809,14 +893,25 @@ SQLiteStore::Rollback ()
           in_transaction_ = false;
         }
     }
+  else
+    {
+      ExecuteDirect ("ROLLBACK TO SAVEPOINT " + current_tx->savepoint_name_);
+      ExecuteDirect ("RELEASE SAVEPOINT " + current_tx->savepoint_name_);
+    }
 
-  // Remove this transaction from the stack
+  current_tx->is_rolled_back_ = true;
   transaction_stack_.pop_back ();
 }
 
 void
 SQLiteStore::CommitRootTransaction (SQLiteTransaction *transaction)
 {
+  while (!transaction_stack_.empty ()
+         && transaction_stack_.back () != transaction
+         && transaction_stack_.back ()->IsFinished ())
+    {
+      transaction_stack_.pop_back ();
+    }
   if (transaction_stack_.empty () || transaction_stack_.back () != transaction)
     {
       throw TransactionNotCurrentError (
@@ -843,6 +938,12 @@ SQLiteStore::CommitRootTransaction (SQLiteTransaction *transaction)
 void
 SQLiteStore::RollbackRootTransaction (SQLiteTransaction *transaction)
 {
+  while (!transaction_stack_.empty ()
+         && transaction_stack_.back () != transaction
+         && transaction_stack_.back ()->IsFinished ())
+    {
+      transaction_stack_.pop_back ();
+    }
   if (transaction_stack_.empty () || transaction_stack_.back () != transaction)
     {
       throw TransactionNotCurrentError (
@@ -908,7 +1009,16 @@ SQLiteStore::ExecuteDirect (const std::string &query,
                                           errstr ? errstr : "") });
       throw;
     }
-  BindParameters (stmt, params);
+  try
+    {
+      BindParameters (stmt, params);
+    }
+  catch (...)
+    {
+      sqlite3_reset (stmt);
+      sqlite3_clear_bindings (stmt);
+      throw;
+    }
   int rc;
   try
     {

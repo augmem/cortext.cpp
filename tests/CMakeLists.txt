@@ -85,9 +85,6 @@ add_executable(cortext_tests
   formula_validation.test.cpp
   integration_working_memory_manual.test.cpp
   regression_behavior.test.cpp
-  chat_chunk_diagnostics.test.cpp
-  chat_metrics_state.test.cpp
-  chat_stream_usage.test.cpp
   aist_gguf_encoder.test.cpp
 )
 
@@ -102,8 +99,11 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include/planum/contract/per
   )
 endif()
 
-# AIST encoder integration needs the model under models/.
-if(EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
+# AIST encoder integration needs the model under models/ and the default
+# tri-modal build contract.
+if(EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF
+   AND CORTEXT_ENABLE_AUDIO
+   AND CORTEXT_ENABLE_IMAGE)
   target_sources(cortext_tests PRIVATE
     aist_gguf_encoder_integration.test.cpp
   )
@@ -115,11 +115,6 @@ target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
 target_include_directories(cortext_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include
 )
-# sqlite_store.hpp includes <sqlite3.h>; resolve it the same way the library
-# does (pkg-config on native, vendored elsewhere).
-if(SQLITE3_INCLUDE_DIRS)
-  target_include_directories(cortext_tests PRIVATE ${SQLITE3_INCLUDE_DIRS})
-endif()
 
 include(Catch)
 

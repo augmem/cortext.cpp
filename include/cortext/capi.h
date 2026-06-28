@@ -190,6 +190,35 @@ extern "C"
     int signal_filter_text_enabled;
   } cortext_config;
 
+  /// @brief Optional source media payload persisted for audio/image signals.
+  ///
+  /// The canonical process input is still passed through pcm/data arguments.
+  /// When this struct carries bytes, those bytes are stored as the durable
+  /// signal/memory payload using mimetype. Passing NULL, or a struct with
+  /// size == 0, means process without storing an audio/image payload. Media
+  /// bytes are copied during the call.
+  typedef struct cortext_media
+  {
+    const uint8_t *data;
+    size_t size;
+    const char *mimetype;
+  } cortext_media;
+
+  /// @brief Options for JSON process result payloads.
+  ///
+  /// Existing JSON process calls include the processed signal embedding by
+  /// default. Pass include_embedding = 0 through the _with_options variants to
+  /// omit that vector from the returned JSON payload.
+  typedef struct cortext_process_json_options
+  {
+    size_t struct_size;
+    int include_embedding;
+  } cortext_process_json_options;
+
+  /// @brief Initializes process JSON options to current defaults.
+  CORTEXT_EXPORT void cortext_process_json_options_init (
+      cortext_process_json_options *options);
+
   /// @brief Creates a Cortext instance with default models directory.
   /// @param focus Focus knob value in [0.0, 1.0].
   /// @param sensitivity Sensitivity knob value in [0.0, 1.0].
@@ -291,6 +320,15 @@ extern "C"
                                             size_t num_samples,
                                             const char *source_id);
 
+  /// @brief Processes audio while storing caller-provided source media bytes.
+  ///
+  /// PCM remains 16kHz mono float32 and is used for processing. If media is
+  /// non-NULL and media->size > 0, media->data is stored using media->mimetype
+  /// instead of storing the canonical PCM buffer.
+  CORTEXT_EXPORT int cortext_process_audio_with_media (
+      cortext_handle h, const float *pcm, size_t num_samples,
+      const char *source_id, const cortext_media *media);
+
   /// @brief Processes image input through the memory system.
   /// @param h Handle to a Cortext instance.
   /// @param data Raw image data (RGB or RGBA, must be non-NULL).
@@ -308,6 +346,15 @@ extern "C"
                                             const uint8_t *data, int width,
                                             int height, int channels,
                                             const char *source_id);
+
+  /// @brief Processes image pixels while storing caller-provided source media.
+  ///
+  /// Pixel data remains the canonical processing input. If media is non-NULL
+  /// and media->size > 0, media->data is stored using media->mimetype instead
+  /// of storing the canonical raw pixel buffer.
+  CORTEXT_EXPORT int cortext_process_image_with_media (
+      cortext_handle h, const uint8_t *data, int width, int height,
+      int channels, const char *source_id, const cortext_media *media);
 
   /// @brief Encodes text and returns an embedding JSON object.
   ///
@@ -374,11 +421,33 @@ extern "C"
                                                   const char *text,
                                                   const char *source_id);
 
+  /// @brief Processes text input and returns configurable Context JSON.
+  CORTEXT_EXPORT char *cortext_process_text_json_with_options (
+      cortext_handle h, const char *text, const char *source_id,
+      const cortext_process_json_options *options);
+
   /// @brief Processes audio input and returns the resulting Context as JSON.
   CORTEXT_EXPORT char *cortext_process_audio_json (cortext_handle h,
                                                    const float *pcm,
                                                    size_t num_samples,
                                                    const char *source_id);
+
+  /// @brief Processes audio input and returns configurable Context JSON.
+  CORTEXT_EXPORT char *cortext_process_audio_json_with_options (
+      cortext_handle h, const float *pcm, size_t num_samples,
+      const char *source_id, const cortext_process_json_options *options);
+
+  /// @brief Processes audio with source media and returns Context JSON.
+  CORTEXT_EXPORT char *cortext_process_audio_with_media_json (
+      cortext_handle h, const float *pcm, size_t num_samples,
+      const char *source_id, const cortext_media *media);
+
+  /// @brief Processes audio with source media and returns configurable Context
+  /// JSON.
+  CORTEXT_EXPORT char *cortext_process_audio_with_media_json_with_options (
+      cortext_handle h, const float *pcm, size_t num_samples,
+      const char *source_id, const cortext_media *media,
+      const cortext_process_json_options *options);
 
   /// @brief Processes image input and returns the resulting Context as JSON.
   CORTEXT_EXPORT char *cortext_process_image_json (cortext_handle h,
@@ -386,6 +455,24 @@ extern "C"
                                                    int width, int height,
                                                    int channels,
                                                    const char *source_id);
+
+  /// @brief Processes image input and returns configurable Context JSON.
+  CORTEXT_EXPORT char *cortext_process_image_json_with_options (
+      cortext_handle h, const uint8_t *data, int width, int height,
+      int channels, const char *source_id,
+      const cortext_process_json_options *options);
+
+  /// @brief Processes image pixels with source media and returns Context JSON.
+  CORTEXT_EXPORT char *cortext_process_image_with_media_json (
+      cortext_handle h, const uint8_t *data, int width, int height,
+      int channels, const char *source_id, const cortext_media *media);
+
+  /// @brief Processes image pixels with source media and returns configurable
+  /// Context JSON.
+  CORTEXT_EXPORT char *cortext_process_image_with_media_json_with_options (
+      cortext_handle h, const uint8_t *data, int width, int height,
+      int channels, const char *source_id, const cortext_media *media,
+      const cortext_process_json_options *options);
 
   /// @brief Runs shallow consolidation and returns the resulting Context as JSON.
   CORTEXT_EXPORT char *cortext_consolidate_json (cortext_handle h);

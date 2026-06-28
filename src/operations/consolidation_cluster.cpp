@@ -55,6 +55,7 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   // 2. Prepare candidates for clustering.
   struct Candidate
   {
+    long long memory_id;
     long long embedding_id;
     double score;
     Eigen::VectorXf embedding;
@@ -66,11 +67,20 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   for (const auto &ic : input_candidates)
     {
       Candidate c;
+      c.memory_id = ic.memory_id;
       c.embedding_id = ic.embedding_id;
       c.score = ic.score;
       c.embedding = ic.embedding;
       items.push_back (std::move (c));
     }
+  std::sort (items.begin (), items.end (),
+             [] (const Candidate &a, const Candidate &b) {
+               if (a.score != b.score)
+                 {
+                   return a.score < b.score;
+                 }
+               return a.memory_id < b.memory_id;
+             });
 
   if (items.empty ())
     {
@@ -185,33 +195,45 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
       cluster_members[label].push_back (i);
     }
 
+  std::vector<int> cluster_ids;
+  cluster_ids.reserve (cluster_members.size ());
   for (const auto &kv : cluster_members)
     {
-      const auto &members = kv.second;
+      cluster_ids.push_back (kv.first);
+    }
+  std::sort (cluster_ids.begin (), cluster_ids.end ());
+
+  for (const int cluster_id : cluster_ids)
+    {
+      const auto &members = cluster_members[cluster_id];
       if (static_cast<int> (members.size ()) < min_pts)
         {
           continue;
         }
 
       ClusterInfo cluster;
-      cluster.cluster_id = kv.first;
+      cluster.cluster_id = cluster_id;
       cluster.avg_score = 0.0;
       Eigen::VectorXf centroid;
       bool centroid_init = false;
+      int accepted_embedding_count = 0;
 
       for (int idx : members)
         {
           const auto &item = items[static_cast<size_t> (idx)];
+          cluster.memory_ids.push_back (item.memory_id);
           cluster.embedding_ids.push_back (item.embedding_id);
           cluster.avg_score += item.score;
           if (!centroid_init)
             {
               centroid = item.embedding;
               centroid_init = true;
+              ++accepted_embedding_count;
             }
           else if (centroid.size () == item.embedding.size ())
             {
               centroid += item.embedding;
+              ++accepted_embedding_count;
             }
         }
 
@@ -219,11 +241,10 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
         {
           cluster.avg_score /= static_cast<double> (members.size ());
         }
-      if (centroid_init && !members.empty ())
+      if (centroid_init && accepted_embedding_count > 0)
         {
           centroid
-              = centroid
-                / static_cast<float> (members.size ());
+              = centroid / static_cast<float> (accepted_embedding_count);
         }
 
       cluster.centroid.resize (static_cast<size_t> (centroid.size ()));
@@ -242,15 +263,27 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   if (clusters.empty () && force_consolidation && n >= min_pts)
     {
       // Forced fallback: pick a coherent mini-cluster around the lowest-score item.
-      int anchor_idx = 0;
-      double best_score = items[0].score;
-      for (int i = 1; i < n; ++i)
+      int anchor_idx = -1;
+      double best_score = 0.0;
+      for (int i = 0; i < n; ++i)
         {
-          if (items[static_cast<size_t> (i)].score < best_score)
+          if (items[static_cast<size_t> (i)].embedding.size () == 0)
+            {
+              continue;
+            }
+          if (anchor_idx < 0 || items[static_cast<size_t> (i)].score < best_score)
             {
               best_score = items[static_cast<size_t> (i)].score;
               anchor_idx = i;
             }
+        }
+      if (anchor_idx < 0)
+        {
+          context.SetConsolidationClusters (std::move (clusters));
+          telemetry::LogDebug ("cortext.consolidation_cluster",
+                               { telemetry::Attribute::Int64 ("cluster_count",
+                                                              0) });
+          return;
         }
 
       std::vector<std::pair<double, int>> sims;
@@ -267,7 +300,21 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
           sims.emplace_back (sim, i);
         }
       std::sort (sims.begin (), sims.end (),
-                 [] (const auto &a, const auto &b) { return a.first > b.first; });
+                 [] (const auto &a, const auto &b) {
+                   if (a.first == b.first)
+                     {
+                       return a.second < b.second;
+                     }
+                   return a.first > b.first;
+                 });
+      if (static_cast<int> (sims.size ()) < min_pts)
+        {
+          context.SetConsolidationClusters (std::move (clusters));
+          telemetry::LogDebug ("cortext.consolidation_cluster",
+                               { telemetry::Attribute::Int64 ("cluster_count",
+                                                              0) });
+          return;
+        }
 
       const int k = std::min (min_pts, static_cast<int> (sims.size ()));
       ClusterInfo cluster;
@@ -275,20 +322,24 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
       cluster.avg_score = 0.0;
       Eigen::VectorXf centroid;
       bool centroid_init = false;
+      int accepted_embedding_count = 0;
 
       for (int i = 0; i < k; ++i)
         {
           const auto &item = items[static_cast<size_t> (sims[i].second)];
+          cluster.memory_ids.push_back (item.memory_id);
           cluster.embedding_ids.push_back (item.embedding_id);
           cluster.avg_score += item.score;
           if (!centroid_init)
             {
               centroid = item.embedding;
               centroid_init = true;
+              ++accepted_embedding_count;
             }
           else if (centroid.size () == item.embedding.size ())
             {
               centroid += item.embedding;
+              ++accepted_embedding_count;
             }
         }
 
@@ -296,9 +347,9 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
         {
           cluster.avg_score /= static_cast<double> (k);
         }
-      if (centroid_init && k > 0)
+      if (centroid_init && accepted_embedding_count > 0)
         {
-          centroid = centroid / static_cast<float> (k);
+          centroid = centroid / static_cast<float> (accepted_embedding_count);
         }
       cluster.centroid.resize (static_cast<size_t> (centroid.size ()));
       for (int i = 0; i < centroid.size (); ++i)

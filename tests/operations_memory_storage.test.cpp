@@ -6,8 +6,10 @@
 #include <cortext/processor.hpp>
 #include <cortext/processor/accumulator_state.hpp>
 #include <cortext/processor/operation_context.hpp>
+#include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 
@@ -20,6 +22,37 @@ namespace
 {
 
 constexpr int kEmbeddingDim = 256;
+
+class SeedStorageInputsOp : public IOperation
+{
+public:
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    const auto &signal = ctx.GetSignal ();
+    AccumulatorState acc;
+    acc.mu_acc = signal.embedding;
+    acc.c_t = signal.embedding;
+    acc.n_signals = 1;
+    acc.s_sum = 0.6;
+    acc.s_max = 0.6;
+    acc.t_start = signal.timestamp;
+
+    SignalRecord rec;
+    rec.embedding = signal.embedding;
+    rec.timestamp = signal.timestamp;
+    rec.modality = signal.modality;
+    rec.mime = signal.mimetype;
+    rec.score = 0.6;
+    rec.serial_position = 0;
+    acc.signals.push_back (std::move (rec));
+
+    ctx.GetProcessorContext ().accumulator_states[signal.source_id]
+        = std::move (acc);
+    ctx.SetAccumulatorWriteDecision (true);
+    ctx.SetRepresentativeEmbedding (signal.embedding);
+  }
+};
 
 /// @brief RAII wrapper for a temporary database file.
 class ScopedTempDb
@@ -56,6 +89,48 @@ private:
 };
 
 } // namespace
+
+TEST_CASE ("MemoryStorage uses default SqlObjectStore inside processor "
+           "savepoints",
+           "[operations][memory_storage][object_store]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<SeedStorageInputsOp> (),
+      std::make_unique<MemoryStorage> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
+  s.timestamp = 12345;
+  s.source_id = "processor-object-source";
+  const std::string payload = "stored through default object store";
+  s.payload = std::vector<unsigned char> (payload.begin (), payload.end ());
+  s.modality = "text";
+  s.mimetype = "text/plain";
+
+  const auto out = processor.Process (s);
+  REQUIRE (out.stored_memory_id.has_value ());
+  REQUIRE (out.stored_signal_id.has_value ());
+
+  auto memory_rows = store->Execute (
+      "SELECT blob_id FROM memories WHERE memory_id = ?",
+      { *out.stored_memory_id });
+  REQUIRE (memory_rows.size () == 1);
+  const auto blob_id = BlobFromAny (memory_rows[0].at ("blob_id"));
+  REQUIRE_FALSE (blob_id.empty ());
+
+  auto object_rows = store->Execute (
+      "SELECT data FROM objstore_data WHERE id = ?",
+      { blob_id });
+  REQUIRE (object_rows.size () == 1);
+  REQUIRE (BlobFromAny (object_rows[0].at ("data")) == *s.payload);
+}
 
 TEST_CASE ("MemoryStorage stores payload when write_decision is true",
            "[operations][memory_storage]")

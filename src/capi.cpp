@@ -11,6 +11,7 @@
 #include "cortext/store/sqlite_store.hpp"
 #include "cortext/store/store.hpp"
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdlib>
@@ -92,6 +93,54 @@ config_from_c (const cortext_config *cfg)
           = cfg->signal_filter_text_enabled != 0;
     }
   return cpp_cfg;
+}
+
+cortext::Cortext::Media
+media_from_c (const cortext_media *media)
+{
+  if (!media || media->size == 0)
+    {
+      return {};
+    }
+  return cortext::Cortext::Media{
+    media->data, media->size, media->mimetype ? media->mimetype : ""
+  };
+}
+
+bool
+valid_media_or_set_error (const cortext_media *media)
+{
+  if (!media || media->size == 0)
+    {
+      return true;
+    }
+  if (!media->data)
+    {
+      set_last_error ("media data must be non-NULL when media size is non-zero");
+      return false;
+    }
+  if (!media->mimetype || media->mimetype[0] == '\0')
+    {
+      set_last_error ("media mimetype must be non-NULL and non-empty when media data is provided");
+      return false;
+    }
+  return true;
+}
+
+bool
+include_embedding_from_options (const cortext_process_json_options *options)
+{
+  if (!options)
+    {
+      return true;
+    }
+  if (options->struct_size
+      < offsetof (cortext_process_json_options, include_embedding)
+            + sizeof (options->include_embedding))
+    {
+      return true;
+    }
+  return options->include_embedding != 0;
 }
 
 std::any
@@ -251,6 +300,8 @@ public:
   void Rollback () override;
 
 private:
+  void EnsureActive () const;
+
   CallbackStore *store_ = nullptr;
   void *transaction_ = nullptr;
   bool finished_ = false;
@@ -274,12 +325,12 @@ public:
   Execute (const std::string &query,
            const std::vector<std::any> &params = {}) override
   {
-    return ExecuteInTransaction (nullptr, query, params);
+    return ExecuteInTransaction (CurrentTransaction (), query, params);
   }
 
   std::unique_ptr<cortext::Transaction> Begin () override
   {
-    return BeginNested (nullptr);
+    return BeginNested (CurrentTransaction ());
   }
 
   void Commit () override
@@ -298,6 +349,16 @@ public:
 
   std::unique_ptr<cortext::Transaction> BeginNested (void *parent)
   {
+    if (parent)
+      {
+        EnsureCurrent (parent);
+      }
+    else if (!transaction_stack_.empty ())
+      {
+        throw cortext::TransactionNotCurrentError (
+            "External callback store already has an active transaction");
+      }
+
     void *transaction = nullptr;
     const char *error = nullptr;
     const int rc
@@ -306,7 +367,23 @@ public:
       {
         ThrowCallbackError ("begin transaction failed", error);
       }
+    transaction_stack_.push_back (transaction);
     return std::make_unique<CallbackTransaction> (this, transaction);
+  }
+
+  void EnsureCurrent (void *transaction) const
+  {
+    if (!transaction || transaction_stack_.empty ()
+        || transaction_stack_.back () != transaction)
+      {
+        throw cortext::TransactionNotCurrentError (
+            "External callback transaction is not current");
+      }
+  }
+
+  void *CurrentTransaction () const
+  {
+    return transaction_stack_.empty () ? nullptr : transaction_stack_.back ();
   }
 
   std::vector<std::map<std::string, std::any> >
@@ -351,27 +428,58 @@ public:
 
   void CommitTransaction (void *transaction)
   {
+    EnsureCurrent (transaction);
     const char *error = nullptr;
     const int rc = callbacks_.commit (user_data_, transaction, &error);
     if (rc != 0)
       {
         ThrowCallbackError ("commit failed", error);
       }
+    transaction_stack_.pop_back ();
   }
 
   void RollbackTransaction (void *transaction)
   {
+    EnsureCurrent (transaction);
     const char *error = nullptr;
     const int rc = callbacks_.rollback (user_data_, transaction, &error);
     if (rc != 0)
       {
         ThrowCallbackError ("rollback failed", error);
       }
+    transaction_stack_.pop_back ();
   }
 
   void ReleaseTransaction (void *transaction) noexcept
   {
     callbacks_.release_transaction (user_data_, transaction);
+  }
+
+  void RollbackTransactionStackFrom (void *transaction) noexcept
+  {
+    auto it = std::find (transaction_stack_.begin (),
+                         transaction_stack_.end (), transaction);
+    if (it == transaction_stack_.end ())
+      {
+        return;
+      }
+
+    const auto first_index = static_cast<std::size_t> (
+        std::distance (transaction_stack_.begin (), it));
+    for (std::size_t index = transaction_stack_.size (); index > first_index;
+         --index)
+      {
+        try
+          {
+            const char *error = nullptr;
+            (void)callbacks_.rollback (
+                user_data_, transaction_stack_[index - 1], &error);
+          }
+        catch (...)
+          {
+          }
+      }
+    transaction_stack_.erase (it, transaction_stack_.end ());
   }
 
 private:
@@ -389,6 +497,7 @@ private:
 
   cortext_db_callbacks callbacks_{};
   void *user_data_ = nullptr;
+  std::vector<void *> transaction_stack_;
 };
 
 CallbackTransaction::~CallbackTransaction ()
@@ -397,13 +506,7 @@ CallbackTransaction::~CallbackTransaction ()
     {
       if (!finished_)
         {
-          try
-            {
-              store_->RollbackTransaction (transaction_);
-            }
-          catch (...)
-            {
-            }
+          store_->RollbackTransactionStackFrom (transaction_);
         }
       store_->ReleaseTransaction (transaction_);
     }
@@ -412,6 +515,8 @@ CallbackTransaction::~CallbackTransaction ()
 std::unique_ptr<cortext::Transaction>
 CallbackTransaction::Begin ()
 {
+  EnsureActive ();
+  store_->EnsureCurrent (transaction_);
   return store_->BeginNested (transaction_);
 }
 
@@ -419,17 +524,25 @@ std::vector<std::map<std::string, std::any> >
 CallbackTransaction::Execute (const std::string &query,
                               const std::vector<std::any> &params)
 {
+  EnsureActive ();
+  store_->EnsureCurrent (transaction_);
   return store_->ExecuteInTransaction (transaction_, query, params);
 }
 
 void
-CallbackTransaction::Commit ()
+CallbackTransaction::EnsureActive () const
 {
   if (finished_)
     {
       throw cortext::TransactionAlreadyFinishedError (
           "External callback transaction is already finished");
     }
+}
+
+void
+CallbackTransaction::Commit ()
+{
+  EnsureActive ();
   store_->CommitTransaction (transaction_);
   finished_ = true;
 }
@@ -437,11 +550,7 @@ CallbackTransaction::Commit ()
 void
 CallbackTransaction::Rollback ()
 {
-  if (finished_)
-    {
-      throw cortext::TransactionAlreadyFinishedError (
-          "External callback transaction is already finished");
-    }
+  EnsureActive ();
   store_->RollbackTransaction (transaction_);
   finished_ = true;
 }
@@ -468,6 +577,8 @@ public:
   void Rollback () override;
 
 private:
+  void EnsureActive () const;
+
   CallbackObjectStore *store_ = nullptr;
   void *transaction_ = nullptr;
   bool finished_ = false;
@@ -490,13 +601,23 @@ public:
 
   std::unique_ptr<cortext::ObjectTransaction> Begin () override
   {
-    return BeginNested (nullptr);
+    return BeginNested (CurrentTransaction ());
   }
 
   void Close () override {}
 
   std::unique_ptr<cortext::ObjectTransaction> BeginNested (void *parent)
   {
+    if (parent)
+      {
+        EnsureCurrent (parent);
+      }
+    else if (!transaction_stack_.empty ())
+      {
+        throw cortext::TransactionNotCurrentError (
+            "External object store already has an active transaction");
+      }
+
     void *transaction = nullptr;
     const char *error = nullptr;
     const int rc
@@ -505,12 +626,29 @@ public:
       {
         ThrowCallbackError ("object begin failed", error);
       }
+    transaction_stack_.push_back (transaction);
     return std::make_unique<CallbackObjectTransaction> (this, transaction);
+  }
+
+  void EnsureCurrent (void *transaction) const
+  {
+    if (!transaction || transaction_stack_.empty ()
+        || transaction_stack_.back () != transaction)
+      {
+        throw cortext::TransactionNotCurrentError (
+            "External object transaction is not current");
+      }
+  }
+
+  void *CurrentTransaction () const
+  {
+    return transaction_stack_.empty () ? nullptr : transaction_stack_.back ();
   }
 
   void PutObject (void *transaction, const cortext::ObjectId &id,
                   const std::vector<unsigned char> &data)
   {
+    EnsureCurrent (transaction);
     const char *error = nullptr;
     const int rc = callbacks_.put (
         user_data_, transaction, id.empty () ? nullptr : id.data (),
@@ -525,6 +663,7 @@ public:
   std::optional<std::vector<unsigned char>>
   GetObject (void *transaction, const cortext::ObjectId &id)
   {
+    EnsureCurrent (transaction);
     const uint8_t *data = nullptr;
     size_t data_size = 0;
     const char *error = nullptr;
@@ -550,6 +689,7 @@ public:
 
   bool ExistsObject (void *transaction, const cortext::ObjectId &id)
   {
+    EnsureCurrent (transaction);
     int exists = 0;
     const char *error = nullptr;
     const int rc = callbacks_.exists (
@@ -564,6 +704,7 @@ public:
 
   bool DeleteObject (void *transaction, const cortext::ObjectId &id)
   {
+    EnsureCurrent (transaction);
     int deleted = 0;
     const char *error = nullptr;
     const int rc = callbacks_.delete_object (
@@ -578,27 +719,58 @@ public:
 
   void CommitTransaction (void *transaction)
   {
+    EnsureCurrent (transaction);
     const char *error = nullptr;
     const int rc = callbacks_.commit (user_data_, transaction, &error);
     if (rc != 0)
       {
         ThrowCallbackError ("object commit failed", error);
       }
+    transaction_stack_.pop_back ();
   }
 
   void RollbackTransaction (void *transaction)
   {
+    EnsureCurrent (transaction);
     const char *error = nullptr;
     const int rc = callbacks_.rollback (user_data_, transaction, &error);
     if (rc != 0)
       {
         ThrowCallbackError ("object rollback failed", error);
       }
+    transaction_stack_.pop_back ();
   }
 
   void ReleaseTransaction (void *transaction) noexcept
   {
     callbacks_.release_transaction (user_data_, transaction);
+  }
+
+  void RollbackTransactionStackFrom (void *transaction) noexcept
+  {
+    auto it = std::find (transaction_stack_.begin (),
+                         transaction_stack_.end (), transaction);
+    if (it == transaction_stack_.end ())
+      {
+        return;
+      }
+
+    const auto first_index = static_cast<std::size_t> (
+        std::distance (transaction_stack_.begin (), it));
+    for (std::size_t index = transaction_stack_.size (); index > first_index;
+         --index)
+      {
+        try
+          {
+            const char *error = nullptr;
+            (void)callbacks_.rollback (
+                user_data_, transaction_stack_[index - 1], &error);
+          }
+        catch (...)
+          {
+          }
+      }
+    transaction_stack_.erase (it, transaction_stack_.end ());
   }
 
 private:
@@ -616,6 +788,7 @@ private:
 
   cortext_object_callbacks callbacks_{};
   void *user_data_ = nullptr;
+  std::vector<void *> transaction_stack_;
 };
 
 CallbackObjectTransaction::~CallbackObjectTransaction ()
@@ -624,27 +797,33 @@ CallbackObjectTransaction::~CallbackObjectTransaction ()
     {
       if (!finished_)
         {
-          try
-            {
-              store_->RollbackTransaction (transaction_);
-            }
-          catch (...)
-            {
-            }
+          store_->RollbackTransactionStackFrom (transaction_);
         }
       store_->ReleaseTransaction (transaction_);
+    }
+}
+
+void
+CallbackObjectTransaction::EnsureActive () const
+{
+  if (finished_)
+    {
+      throw cortext::TransactionAlreadyFinishedError (
+          "External object transaction is already finished");
     }
 }
 
 std::unique_ptr<cortext::ObjectTransaction>
 CallbackObjectTransaction::Begin ()
 {
+  EnsureActive ();
   return store_->BeginNested (transaction_);
 }
 
 cortext::ObjectId
 CallbackObjectTransaction::Put (const std::vector<unsigned char> &data)
 {
+  EnsureActive ();
   auto id = cortext::ComputeObjectId (data);
   store_->PutObject (transaction_, id, data);
   return id;
@@ -653,29 +832,28 @@ CallbackObjectTransaction::Put (const std::vector<unsigned char> &data)
 std::optional<std::vector<unsigned char>>
 CallbackObjectTransaction::Get (const cortext::ObjectId &id)
 {
+  EnsureActive ();
   return store_->GetObject (transaction_, id);
 }
 
 bool
 CallbackObjectTransaction::Exists (const cortext::ObjectId &id)
 {
+  EnsureActive ();
   return store_->ExistsObject (transaction_, id);
 }
 
 bool
 CallbackObjectTransaction::Delete (const cortext::ObjectId &id)
 {
+  EnsureActive ();
   return store_->DeleteObject (transaction_, id);
 }
 
 void
 CallbackObjectTransaction::Commit ()
 {
-  if (finished_)
-    {
-      throw cortext::TransactionAlreadyFinishedError (
-          "External object transaction is already finished");
-    }
+  EnsureActive ();
   store_->CommitTransaction (transaction_);
   finished_ = true;
 }
@@ -683,11 +861,7 @@ CallbackObjectTransaction::Commit ()
 void
 CallbackObjectTransaction::Rollback ()
 {
-  if (finished_)
-    {
-      throw cortext::TransactionAlreadyFinishedError (
-          "External object transaction is already finished");
-    }
+  EnsureActive ();
   store_->RollbackTransaction (transaction_);
   finished_ = true;
 }
@@ -786,7 +960,8 @@ memory_to_json (const cortext::Cortext::Context::Memory &memory)
 }
 
 nlohmann::json
-context_to_json (const cortext::Cortext::Context &ctx)
+context_to_json (const cortext::Cortext::Context &ctx,
+                 bool include_embedding)
 {
   nlohmann::json working_memory = nlohmann::json::array ();
   for (const auto &memory : ctx.working_memory)
@@ -862,7 +1037,7 @@ context_to_json (const cortext::Cortext::Context &ctx)
       ctx.output.soft_anchor_mean_update_us },
   };
 
-  return {
+  nlohmann::json result = {
     { "working_memory", std::move (working_memory) },
     { "retrieved_memory", std::move (retrieved_memory) },
     { "should_interrupt", ctx.should_interrupt },
@@ -891,15 +1066,24 @@ context_to_json (const cortext::Cortext::Context &ctx)
     { "hydrate_ms", ctx.hydrate_ms },
     { "total_ms", ctx.total_ms },
   };
+
+  if (include_embedding)
+    {
+      result["embedding"] = ctx.embedding;
+      result["embedding_dimension"] = ctx.embedding.size ();
+    }
+
+  return result;
 }
 
 char *
-context_result_to_json (const cortext::Cortext::Context &ctx)
+context_result_to_json (const cortext::Cortext::Context &ctx,
+                        bool include_embedding = true)
 {
   clear_last_error ();
   // Memory text can carry invalid UTF-8 from raw sources; replace with
   // U+FFFD rather than throwing across the C boundary.
-  return copy_string_result (context_to_json (ctx).dump (
+  return copy_string_result (context_to_json (ctx, include_embedding).dump (
       -1, ' ', false, nlohmann::json::error_handler_t::replace));
 }
 
@@ -939,11 +1123,11 @@ invoke_status_only (Fn &&fn)
 
 template <typename Fn>
 char *
-invoke_json (Fn &&fn)
+invoke_json (Fn &&fn, bool include_embedding = true)
 {
   try
     {
-      return context_result_to_json (fn ());
+      return context_result_to_json (fn (), include_embedding);
     }
   catch (const std::exception &ex)
     {
@@ -1049,6 +1233,17 @@ extern "C"
       cfg->signal_filter_text_enabled
           = defaults.signal_filter_text_enabled ? 1 : 0;
     clear_last_error ();
+  }
+
+  void
+  cortext_process_json_options_init (cortext_process_json_options *options)
+  {
+    if (!options)
+      {
+        return;
+      }
+    options->struct_size = sizeof (*options);
+    options->include_embedding = 1;
   }
 
   cortext_handle
@@ -1276,6 +1471,29 @@ extern "C"
   }
 
   int
+  cortext_process_audio_with_media (cortext_handle h, const float *pcm,
+                                    size_t num_samples,
+                                    const char *source_id,
+                                    const cortext_media *media)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !pcm || !source_id)
+      {
+        set_last_error ("handle, pcm, and source_id must all be non-NULL");
+        return 1;
+      }
+    if (!valid_media_or_set_error (media))
+      {
+        return 1;
+      }
+
+    return invoke_status_only ([&] {
+      (void)p->ProcessAudio (pcm, num_samples, std::string (source_id),
+                             media_from_c (media));
+    });
+  }
+
+  int
   cortext_process_image (cortext_handle h, const uint8_t *data, int width,
                          int height, int channels, const char *source_id)
   {
@@ -1289,6 +1507,29 @@ extern "C"
     return invoke_status_only ([&] {
       (void)p->ProcessImage (data, width, height, channels,
                              std::string (source_id));
+    });
+  }
+
+  int
+  cortext_process_image_with_media (cortext_handle h, const uint8_t *data,
+                                    int width, int height, int channels,
+                                    const char *source_id,
+                                    const cortext_media *media)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !data || !source_id)
+      {
+        set_last_error ("handle, data, and source_id must all be non-NULL");
+        return 1;
+      }
+    if (!valid_media_or_set_error (media))
+      {
+        return 1;
+      }
+
+    return invoke_status_only ([&] {
+      (void)p->ProcessImage (data, width, height, channels,
+                             std::string (source_id), media_from_c (media));
     });
   }
 
@@ -1397,6 +1638,15 @@ extern "C"
   cortext_process_text_json (cortext_handle h, const char *text,
                              const char *source_id)
   {
+    return cortext_process_text_json_with_options (h, text, source_id,
+                                                   nullptr);
+  }
+
+  char *
+  cortext_process_text_json_with_options (
+      cortext_handle h, const char *text, const char *source_id,
+      const cortext_process_json_options *options)
+  {
     auto *p = cast_handle (h);
     if (!p || !text || !source_id)
       {
@@ -1405,12 +1655,22 @@ extern "C"
       }
 
     return invoke_json (
-        [&] { return p->ProcessText (std::string (text), std::string (source_id)); });
+        [&] { return p->ProcessText (std::string (text), std::string (source_id)); },
+        include_embedding_from_options (options));
   }
 
   char *
   cortext_process_audio_json (cortext_handle h, const float *pcm,
                               size_t num_samples, const char *source_id)
+  {
+    return cortext_process_audio_json_with_options (h, pcm, num_samples,
+                                                    source_id, nullptr);
+  }
+
+  char *
+  cortext_process_audio_json_with_options (
+      cortext_handle h, const float *pcm, size_t num_samples,
+      const char *source_id, const cortext_process_json_options *options)
   {
     auto *p = cast_handle (h);
     if (!p || !pcm || !source_id)
@@ -1420,13 +1680,58 @@ extern "C"
       }
 
     return invoke_json (
-        [&] { return p->ProcessAudio (pcm, num_samples, std::string (source_id)); });
+        [&] { return p->ProcessAudio (pcm, num_samples, std::string (source_id)); },
+        include_embedding_from_options (options));
+  }
+
+  char *
+  cortext_process_audio_with_media_json (cortext_handle h, const float *pcm,
+                                         size_t num_samples,
+                                         const char *source_id,
+                                         const cortext_media *media)
+  {
+    return cortext_process_audio_with_media_json_with_options (
+        h, pcm, num_samples, source_id, media, nullptr);
+  }
+
+  char *
+  cortext_process_audio_with_media_json_with_options (
+      cortext_handle h, const float *pcm, size_t num_samples,
+      const char *source_id, const cortext_media *media,
+      const cortext_process_json_options *options)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !pcm || !source_id)
+      {
+        set_last_error ("handle, pcm, and source_id must all be non-NULL");
+        return nullptr;
+      }
+    if (!valid_media_or_set_error (media))
+      {
+        return nullptr;
+      }
+
+    return invoke_json ([&] {
+      return p->ProcessAudio (pcm, num_samples, std::string (source_id),
+                              media_from_c (media));
+    },
+                        include_embedding_from_options (options));
   }
 
   char *
   cortext_process_image_json (cortext_handle h, const uint8_t *data, int width,
                               int height, int channels,
                               const char *source_id)
+  {
+    return cortext_process_image_json_with_options (
+        h, data, width, height, channels, source_id, nullptr);
+  }
+
+  char *
+  cortext_process_image_json_with_options (
+      cortext_handle h, const uint8_t *data, int width, int height,
+      int channels, const char *source_id,
+      const cortext_process_json_options *options)
   {
     auto *p = cast_handle (h);
     if (!p || !data || !source_id)
@@ -1438,7 +1743,43 @@ extern "C"
     return invoke_json ([&] {
       return p->ProcessImage (data, width, height, channels,
                               std::string (source_id));
-    });
+    },
+                        include_embedding_from_options (options));
+  }
+
+  char *
+  cortext_process_image_with_media_json (cortext_handle h,
+                                         const uint8_t *data, int width,
+                                         int height, int channels,
+                                         const char *source_id,
+                                         const cortext_media *media)
+  {
+    return cortext_process_image_with_media_json_with_options (
+        h, data, width, height, channels, source_id, media, nullptr);
+  }
+
+  char *
+  cortext_process_image_with_media_json_with_options (
+      cortext_handle h, const uint8_t *data, int width, int height,
+      int channels, const char *source_id, const cortext_media *media,
+      const cortext_process_json_options *options)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !data || !source_id)
+      {
+        set_last_error ("handle, data, and source_id must all be non-NULL");
+        return nullptr;
+      }
+    if (!valid_media_or_set_error (media))
+      {
+        return nullptr;
+      }
+
+    return invoke_json ([&] {
+      return p->ProcessImage (data, width, height, channels,
+                              std::string (source_id), media_from_c (media));
+    },
+                        include_embedding_from_options (options));
   }
 
   char *

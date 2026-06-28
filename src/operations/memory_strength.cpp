@@ -15,6 +15,7 @@
 #include "eviction_policy.hpp"
 #include <cmath>
 #include <functional>
+#include <optional>
 #include <typeinfo>
 #include <unordered_set>
 #include <vector>
@@ -71,6 +72,80 @@ ForEachChunk (std::size_t count, const std::function<void (std::size_t,
           = std::min (count, begin + kEvictionSqlChunkSize);
       fn (begin, end);
     }
+}
+
+const std::any *
+FindValue (const std::map<std::string, std::any> &row, const char *key)
+{
+  auto it = row.find (key);
+  return it == row.end () ? nullptr : &it->second;
+}
+
+bool
+IsNull (const std::any &value)
+{
+  return !value.has_value () || value.type () == typeid (std::nullptr_t);
+}
+
+double
+GetDouble (const std::map<std::string, std::any> &row, const char *key,
+           double fallback)
+{
+  const std::any *value = FindValue (row, key);
+  if (!value || IsNull (*value))
+    {
+      return fallback;
+    }
+  if (value->type () == typeid (double))
+    return std::any_cast<double> (*value);
+  if (value->type () == typeid (float))
+    return static_cast<double> (std::any_cast<float> (*value));
+  if (value->type () == typeid (int))
+    return static_cast<double> (std::any_cast<int> (*value));
+  if (value->type () == typeid (long))
+    return static_cast<double> (std::any_cast<long> (*value));
+  if (value->type () == typeid (long long))
+    return static_cast<double> (std::any_cast<long long> (*value));
+  return fallback;
+}
+
+long long
+GetInt64 (const std::map<std::string, std::any> &row, const char *key,
+          long long fallback)
+{
+  const std::any *value = FindValue (row, key);
+  if (!value || IsNull (*value))
+    {
+      return fallback;
+    }
+  if (value->type () == typeid (long long))
+    return std::any_cast<long long> (*value);
+  if (value->type () == typeid (long))
+    return static_cast<long long> (std::any_cast<long> (*value));
+  if (value->type () == typeid (int))
+    return static_cast<long long> (std::any_cast<int> (*value));
+  if (value->type () == typeid (double))
+    return static_cast<long long> (std::any_cast<double> (*value));
+  return fallback;
+}
+
+std::optional<long long>
+GetInt64Maybe (const std::map<std::string, std::any> &row, const char *key)
+{
+  const std::any *value = FindValue (row, key);
+  if (!value || IsNull (*value))
+    {
+      return std::nullopt;
+    }
+  if (value->type () == typeid (long long))
+    return std::any_cast<long long> (*value);
+  if (value->type () == typeid (long))
+    return static_cast<long long> (std::any_cast<long> (*value));
+  if (value->type () == typeid (int))
+    return static_cast<long long> (std::any_cast<int> (*value));
+  if (value->type () == typeid (double))
+    return static_cast<long long> (std::any_cast<double> (*value));
+  return std::nullopt;
 }
 
 } // namespace
@@ -138,65 +213,42 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
         }
 
       const double strength_prev
-          = std::any_cast<double> (rows[0].at ("strength"));
+          = GetDouble (rows[0], "strength", 1.0);
       const double use_freq_prev
-          = std::any_cast<double> (rows[0].at ("use_frequency"));
+          = GetDouble (rows[0], "use_frequency", 0.0);
       const double contextual_gain_prev
-          = std::any_cast<double> (rows[0].at ("contextual_gain"));
-      auto get_double = [] (const std::any &v, double def) -> double {
-        if (v.type () == typeid (double))
-          return std::any_cast<double> (v);
-        if (v.type () == typeid (float))
-          return static_cast<double> (std::any_cast<float> (v));
-        if (v.type () == typeid (int))
-          return static_cast<double> (std::any_cast<int> (v));
-        if (v.type () == typeid (long long))
-          return static_cast<double> (std::any_cast<long long> (v));
-        return def;
-      };
-      auto get_int = [] (const std::any &v, long long def) -> long long {
-        if (v.type () == typeid (long long))
-          return std::any_cast<long long> (v);
-        if (v.type () == typeid (int))
-          return static_cast<long long> (std::any_cast<int> (v));
-        if (v.type () == typeid (double))
-          return static_cast<long long> (std::any_cast<double> (v));
-        return def;
-      };
+          = GetDouble (rows[0], "contextual_gain", 0.0);
       const long long row_memory_id
-          = get_int (rows[0].at ("memory_id"), memory_id);
+          = GetInt64 (rows[0], "memory_id", memory_id);
       const long long retrieved_prev
-          = std::any_cast<long long> (rows[0].at ("retrieved_count"));
+          = GetInt64 (rows[0], "retrieved_count", 0LL);
       const long long used_prev
-          = std::any_cast<long long> (rows[0].at ("used_count"));
-      const auto &last_access_any = rows[0].at ("last_access");
-      const bool has_last_access
-          = (last_access_any.type () != typeid (std::nullptr_t));
-      const long long last_access_prev
-          = has_last_access ? std::any_cast<long long> (last_access_any) : 0LL;
+          = GetInt64 (rows[0], "used_count", 0LL);
+      const std::optional<long long> last_access_prev
+          = GetInt64Maybe (rows[0], "last_access");
       const long long created_at
-          = std::any_cast<long long> (rows[0].at ("created_at"));
+          = GetInt64 (rows[0], "created_at", ts);
       const int flashbulb
-          = get_int (rows[0].at ("flashbulb"), 0) != 0 ? 1 : 0;
+          = GetInt64 (rows[0], "flashbulb", 0LL) != 0 ? 1 : 0;
       const double half_life_bonus_raw
-          = get_double (rows[0].at ("half_life_bonus"), 0.0);
+          = GetDouble (rows[0], "half_life_bonus", 0.0);
       const auto trace_fallback = core::MemoryStoredTraceFallbackPolicy (
           F_raw, S_raw, T);
       const double trace_fast_prev
-          = get_double (rows[0].at ("trace_fast"),
-                        strength_prev * trace_fallback.fast);
+          = GetDouble (rows[0], "trace_fast",
+                       strength_prev * trace_fallback.fast);
       const double trace_med_prev
-          = get_double (rows[0].at ("trace_med"),
-                        strength_prev * trace_fallback.medium);
+          = GetDouble (rows[0], "trace_med",
+                       strength_prev * trace_fallback.medium);
       const double trace_slow_prev
-          = get_double (rows[0].at ("trace_slow"),
-                        strength_prev * trace_fallback.slow);
+          = GetDouble (rows[0], "trace_slow",
+                       strength_prev * trace_fallback.slow);
       const double trace_ultra_prev
-          = get_double (rows[0].at ("trace_ultra"),
-                        strength_prev * trace_fallback.ultra);
+          = GetDouble (rows[0], "trace_ultra",
+                       strength_prev * trace_fallback.ultra);
 
       const long long access_base
-          = has_last_access ? last_access_prev : created_at;
+          = last_access_prev.value_or (created_at);
       const double delta_seconds = std::max (
           0.0, static_cast<double> (ts - access_base) / 1000.0);
       const bool flashbulb_active
@@ -521,6 +573,43 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       p_ctx.RemoveRetrievalSurface (memory_id);
     }
 
+  const auto reconstruction_embedding_select_start = SteadyClock::now ();
+  ForEachChunk (evictable_memory_ids.size (),
+                [&] (std::size_t begin, std::size_t end) {
+                  const std::string placeholders
+                      = eviction_policy::MakePlaceholders (end - begin);
+                  auto params = MakeParams (evictable_memory_ids, begin, end);
+                  auto rows = tx.Execute (
+                      "SELECT embedding_id FROM memory_reconstructions "
+                      "WHERE memory_id IN (" + placeholders + ") "
+                      "UNION "
+                      "SELECT embedding_id FROM current_memory_embeddings "
+                      "WHERE memory_id IN (" + placeholders + ")",
+                      [&] {
+                        std::vector<std::any> p = params;
+                        AppendParams (p, evictable_memory_ids, begin, end);
+                        return p;
+                      } ());
+                  for (const auto &row : rows)
+                    {
+                      auto it = row.find ("embedding_id");
+                      if (it == row.end ())
+                        {
+                          continue;
+                        }
+                      const auto embedding_id = store::AnyToLongLong (
+                          it->second);
+                      if (embedding_id.has_value ()
+                          && seen_embedding_ids.insert (*embedding_id).second)
+                        {
+                          evictable_embedding_ids.push_back (*embedding_id);
+                        }
+                    }
+                });
+  context.AddOperationTiming (
+      "MemoryStrength.eviction_select_reconstruction_embeddings_sql",
+      ElapsedMillis (reconstruction_embedding_select_start));
+
   const auto eviction_insert_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),
                 [&] (std::size_t begin, std::size_t end) {
@@ -568,6 +657,20 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                               ElapsedMillis (assoc_delete_start));
   p_ctx.association_fanout_cache.valid = false;
 
+  const auto reconstruction_delete_start = SteadyClock::now ();
+  ForEachChunk (evictable_memory_ids.size (),
+                [&] (std::size_t begin, std::size_t end) {
+                  const std::string placeholders
+                      = eviction_policy::MakePlaceholders (end - begin);
+                  tx.Execute (
+                      "DELETE FROM memory_reconstructions "
+                      "WHERE memory_id IN (" + placeholders + ")",
+                      MakeParams (evictable_memory_ids, begin, end));
+                });
+  context.AddOperationTiming (
+      "MemoryStrength.eviction_delete_reconstructions_sql",
+      ElapsedMillis (reconstruction_delete_start));
+
   const auto signal_delete_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),
                 [&] (std::size_t begin, std::size_t end) {
@@ -591,15 +694,6 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       "MemoryStrength.eviction_delete_current_surface_sql",
       ElapsedMillis (current_surface_delete_start));
 
-  const auto embedding_delete_start = SteadyClock::now ();
-  for (const long long embedding_id : evictable_embedding_ids)
-    {
-      tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
-                  { embedding_id });
-    }
-  context.AddOperationTiming ("MemoryStrength.eviction_delete_embeddings_sql",
-                              ElapsedMillis (embedding_delete_start));
-
   const auto memory_delete_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),
                 [&] (std::size_t begin, std::size_t end) {
@@ -612,6 +706,31 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                 });
   context.AddOperationTiming ("MemoryStrength.eviction_delete_memories_sql",
                               ElapsedMillis (memory_delete_start));
+
+  const auto embedding_delete_start = SteadyClock::now ();
+  ForEachChunk (evictable_embedding_ids.size (),
+                [&] (std::size_t begin, std::size_t end) {
+                  const std::string placeholders
+                      = eviction_policy::MakePlaceholders (end - begin);
+                  tx.Execute (
+                      "DELETE FROM embeddings "
+                      "WHERE embedding_id IN (" + placeholders + ") "
+                      "  AND NOT EXISTS ("
+                      "    SELECT 1 FROM memories m "
+                      "    WHERE m.embedding_id = embeddings.embedding_id"
+                      "  ) "
+                      "  AND NOT EXISTS ("
+                      "    SELECT 1 FROM signals s "
+                      "    WHERE s.embedding_id = embeddings.embedding_id"
+                      "  ) "
+                      "  AND NOT EXISTS ("
+                      "    SELECT 1 FROM memory_reconstructions mr "
+                      "    WHERE mr.embedding_id = embeddings.embedding_id"
+                      "  )",
+                      MakeParams (evictable_embedding_ids, begin, end));
+                });
+  context.AddOperationTiming ("MemoryStrength.eviction_delete_embeddings_sql",
+                              ElapsedMillis (embedding_delete_start));
   const int64_t eviction_count
       = static_cast<int64_t> (evictable_memory_ids.size ());
 

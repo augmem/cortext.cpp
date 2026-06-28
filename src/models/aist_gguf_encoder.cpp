@@ -1,5 +1,5 @@
 #include "cortext/models/aist_gguf_encoder.hpp"
-#include "llama_cpp_support.hpp"
+#include "ggml_support.hpp"
 
 #include <algorithm>
 #include <array>
@@ -25,7 +25,7 @@
 #include <Accelerate/Accelerate.h>
 #endif
 
-#if defined(CORTEXT_ENABLE_LLAMA_CPP)
+#if defined(CORTEXT_ENABLE_GGML)
 #include <ggml.h>
 #include CORTEXT_GGML_BACKEND_HEADER_PATH
 #endif
@@ -1543,7 +1543,7 @@ EncodeAistImageFeaturesNative (const RuntimeTensorStore &store,
   return x.data;
 }
 
-#if defined(CORTEXT_ENABLE_LLAMA_CPP)
+#if defined(CORTEXT_ENABLE_GGML)
 enum class GgmlLinearLoadStatus
 {
   Loaded,
@@ -4116,6 +4116,16 @@ AistGgufEncoder::Load (const AistGgufConfig &config)
     {
       runtime_ = std::make_unique<NativeRuntime> ();
       runtime_->Load (config_);
+#if defined(CORTEXT_REQUIRE_AIST_GGML_KERNELS)
+      if (!runtime_->UsesKernelOps ())
+        {
+          throw std::runtime_error (
+              "AIST ggml kernel ops are required because Cortext audio "
+              "support is enabled; provide ggml at build time or "
+              "configure with CORTEXT_ENABLE_AUDIO=OFF and "
+              "CORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD=ON.");
+        }
+#endif
       info_.runtime_available = true;
       const std::string base_status = "triembed_embedding_runtime_loaded";
       info_.runtime_status = runtime_->UsesKernelOps ()
@@ -4239,6 +4249,14 @@ void
 AistGgufEncoder::EncodeAudio (const float *pcm, std::size_t num_samples,
                               std::vector<float> &out_embedding)
 {
+#if defined(CORTEXT_DISABLE_AUDIO)
+  (void)pcm;
+  (void)num_samples;
+  (void)out_embedding;
+  throw std::runtime_error (
+      "AIST audio embedding support was disabled at build time; configure "
+      "with CORTEXT_ENABLE_AUDIO=ON.");
+#else
   if (!loaded_)
     {
       throw std::runtime_error ("AIST GGUF encoder is not loaded");
@@ -4250,6 +4268,7 @@ AistGgufEncoder::EncodeAudio (const float *pcm, std::size_t num_samples,
                                     : info_.runtime_error);
     }
   out_embedding = runtime_->EncodeAudio (pcm, num_samples);
+#endif
 }
 
 void
@@ -4257,6 +4276,16 @@ AistGgufEncoder::EncodeImage (const std::uint8_t *data, int width,
                               int height, int channels,
                               std::vector<float> &out_embedding)
 {
+#if defined(CORTEXT_DISABLE_IMAGE)
+  (void)data;
+  (void)width;
+  (void)height;
+  (void)channels;
+  (void)out_embedding;
+  throw std::runtime_error (
+      "AIST image embedding support was disabled at build time; configure "
+      "with CORTEXT_ENABLE_IMAGE=ON.");
+#else
   if (!loaded_)
     {
       throw std::runtime_error ("AIST GGUF encoder is not loaded");
@@ -4268,6 +4297,7 @@ AistGgufEncoder::EncodeImage (const std::uint8_t *data, int width,
                                     : info_.runtime_error);
     }
   out_embedding = runtime_->EncodeImage (data, width, height, channels);
+#endif
 }
 
 } // namespace cortext

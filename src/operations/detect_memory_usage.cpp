@@ -219,13 +219,14 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
     }
 
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
+  const auto &retrieved_records = context.GetRetrievedMemoryCandidates ();
   const auto &cfg = context.GetConfig ();
   Store *store = context.GetStore ();
   const bool interrupt_allowed = context.GetInterruptAllowed ();
   const auto selected_id = context.GetSelectedCandidateId ();
 
   // Clear events if nothing was retrieved.
-  if (retrieved.empty ())
+  if (retrieved.empty () && retrieved_records.empty ())
     {
       context.SetMemoryUsageEvents ({});
       telemetry::AddCounter ("cortext.detect_memory_usage.no_candidates_total", 1);
@@ -233,35 +234,67 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
     }
 
   std::vector<OperationContext::MemoryUsageEvent> events;
-  events.reserve (retrieved.size ());
+  events.reserve (retrieved_records.empty () ? retrieved.size ()
+                                             : retrieved_records.size ());
 
   int used_count = 0;
   int total_checked = 0;
 
-  for (const auto &kv : retrieved)
+  if (!retrieved_records.empty ())
     {
-      const long long embedding_id = kv.first;
-      const Eigen::VectorXf &emb = kv.second;
-      const long long memory_id
-          = ResolveMemoryIdForEmbedding (p_ctx, store, embedding_id);
-
-      ++total_checked;
-
-      const bool used
-          = interrupt_allowed && selected_id.has_value ()
-                && (embedding_id == *selected_id);
-      std::optional<double> contextual_gain = std::nullopt;
-      if (x_ptr->size () > 0 && emb.size () == x_ptr->size ())
+      for (const auto &candidate : retrieved_records)
         {
-          contextual_gain = core::CosineSimilarity (*x_ptr, emb);
+          const long long embedding_id = candidate.embedding_id;
+          const long long memory_id = candidate.memory_id;
+          const Eigen::VectorXf &emb = candidate.embedding;
+
+          ++total_checked;
+
+          const bool used
+              = interrupt_allowed && selected_id.has_value ()
+                && memory_id > 0 && memory_id == *selected_id;
+          std::optional<double> contextual_gain = std::nullopt;
+          if (x_ptr->size () > 0 && emb.size () == x_ptr->size ())
+            {
+              contextual_gain = core::CosineSimilarity (*x_ptr, emb);
+            }
+
+          events.push_back (
+              { embedding_id, used, contextual_gain, memory_id });
+
+          if (used)
+            {
+              ++used_count;
+            }
         }
-
-      events.push_back (
-          { embedding_id, used, contextual_gain, memory_id });
-
-      if (used)
+    }
+  else
+    {
+      for (const auto &kv : retrieved)
         {
-          ++used_count;
+          const long long embedding_id = kv.first;
+          const Eigen::VectorXf &emb = kv.second;
+          const long long memory_id
+              = ResolveMemoryIdForEmbedding (p_ctx, store, embedding_id);
+
+          ++total_checked;
+
+          const bool used
+              = interrupt_allowed && selected_id.has_value ()
+                    && (embedding_id == *selected_id);
+          std::optional<double> contextual_gain = std::nullopt;
+          if (x_ptr->size () > 0 && emb.size () == x_ptr->size ())
+            {
+              contextual_gain = core::CosineSimilarity (*x_ptr, emb);
+            }
+
+          events.push_back (
+              { embedding_id, used, contextual_gain, memory_id });
+
+          if (used)
+            {
+              ++used_count;
+            }
         }
     }
 
@@ -273,9 +306,9 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
   if (cfg.reinforcement_enabled && store)
     {
       std::vector<ReinforcementCandidate> reinforcement_candidates;
-      reinforcement_candidates.reserve (retrieved.size ());
+      reinforcement_candidates.reserve (context.GetMemoryUsageEvents ().size ());
       std::unordered_set<long long> seen_memory_ids;
-      seen_memory_ids.reserve (retrieved.size ());
+      seen_memory_ids.reserve (context.GetMemoryUsageEvents ().size ());
       for (const auto &event : context.GetMemoryUsageEvents ())
         {
           const long long embedding_id = event.embedding_id;

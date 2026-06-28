@@ -13,10 +13,7 @@ The hard-cut runtime no longer contains an internal generative model stack.
 There is no semantic batch stack, adapter registry, mode-selected replay,
 attached static taxonomy, persistent confidence monitor, bitemporal fact store,
 or short-term shadow graph. The remaining model dependency in the core loop is
-the configured embedding path. Text encoder resolution still
-prefers the AAIT/ES-AIST GGUF path when enabled and otherwise falls back through
-the supported embedding encoders. Audio speaker embedding in the chat example is
-part of sherpa-onnx speaker attribution and is not a Cortext semantic decoder.
+the configured multimodal embedding path.
 
 Retrieved memories are hydrated only after retrieval has selected a compact
 ranked set. Internal routing nodes such as `LABEL` or `ASSOCIATION` rows are not

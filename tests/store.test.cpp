@@ -4,12 +4,21 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/utils.hpp>
+#include <algorithm>
+#include <any>
 #include <ctime>
 #include <filesystem>
 #include <iostream>
+#include <string>
+#include <vector>
 
 namespace
 {
+
+class UnsupportedBindParam
+{
+};
 
 // Helper function to create a temporary database file
 std::string
@@ -54,6 +63,60 @@ private:
 };
 
 } // namespace
+
+namespace cortext::internal
+{
+
+class SQLiteStoreStatementCacheInspector
+{
+public:
+  static std::size_t
+  CacheSize (const SQLiteStore &store)
+  {
+    return store.statement_cache_.size ();
+  }
+
+  static std::size_t
+  FifoSize (const SQLiteStore &store)
+  {
+    return store.statement_cache_fifo_.size ();
+  }
+
+  static std::size_t
+  Capacity ()
+  {
+    return SQLiteStore::kStatementCacheCapacity;
+  }
+
+  static bool
+  CacheContains (const SQLiteStore &store, const std::string &query)
+  {
+    return store.statement_cache_.find (query)
+           != store.statement_cache_.end ();
+  }
+
+  static bool
+  FifoContains (const SQLiteStore &store, const std::string &query)
+  {
+    return std::find (store.statement_cache_fifo_.begin (),
+                      store.statement_cache_fifo_.end (), query)
+           != store.statement_cache_fifo_.end ();
+  }
+};
+
+} // namespace cortext::internal
+
+TEST_CASE ("Store any numeric double conversion", "[store][utils]")
+{
+  REQUIRE (cortext::store::AnyToDouble (std::any (1.5)).value () == 1.5);
+  REQUIRE (cortext::store::AnyToDouble (std::any (1.5f)).value () == 1.5);
+  REQUIRE (cortext::store::AnyToDouble (std::any (7)).value () == 7.0);
+  REQUIRE (cortext::store::AnyToDouble (std::any (7LL)).value () == 7.0);
+
+  REQUIRE_FALSE (
+      cortext::store::AnyToDouble (std::any (std::string ("7"))).has_value ());
+  REQUIRE (cortext::store::AnyToDouble (std::any (), 9.0) == 9.0);
+}
 
 TEST_CASE ("SQLiteStore creation", "[store]")
 {
@@ -273,6 +336,45 @@ TEST_CASE ("Error handling", "[store]")
 
     REQUIRE_THROWS_AS (transaction->Execute ("SELECT 1", {}),
                        cortext::TransactionAlreadyFinishedError);
+
+    REQUIRE_THROWS_AS (transaction->Begin (),
+                       cortext::TransactionAlreadyFinishedError);
+  }
+
+  SECTION ("Store-level commit invalidates transaction handle")
+  {
+    store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY)", {});
+    auto transaction = store->Begin ();
+    transaction->Execute ("INSERT INTO test (id) VALUES (1)", {});
+
+    store->Commit ();
+
+    REQUIRE_THROWS_AS (transaction->Execute ("SELECT 1", {}),
+                       cortext::TransactionAlreadyFinishedError);
+    REQUIRE_THROWS_AS (transaction->Commit (),
+                       cortext::TransactionAlreadyFinishedError);
+    REQUIRE_THROWS_AS (transaction->Rollback (),
+                       cortext::TransactionAlreadyFinishedError);
+    REQUIRE_THROWS_AS (transaction->Begin (),
+                       cortext::TransactionAlreadyFinishedError);
+  }
+
+  SECTION ("Store-level rollback invalidates transaction handle")
+  {
+    store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY)", {});
+    auto transaction = store->Begin ();
+    transaction->Execute ("INSERT INTO test (id) VALUES (1)", {});
+
+    store->Rollback ();
+
+    REQUIRE_THROWS_AS (transaction->Execute ("SELECT 1", {}),
+                       cortext::TransactionAlreadyFinishedError);
+    REQUIRE_THROWS_AS (transaction->Commit (),
+                       cortext::TransactionAlreadyFinishedError);
+    REQUIRE_THROWS_AS (transaction->Rollback (),
+                       cortext::TransactionAlreadyFinishedError);
+    REQUIRE_THROWS_AS (transaction->Begin (),
+                       cortext::TransactionAlreadyFinishedError);
   }
 
   SECTION ("No active transaction error")
@@ -290,6 +392,64 @@ TEST_CASE ("Error handling", "[store]")
     REQUIRE_THROWS_AS (store->Execute ("INSERT INTO test (id) VALUES (1)", {}),
                        cortext::StoreError);
   }
+
+  SECTION ("Nested transaction handles must finish in stack order")
+  {
+    store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)",
+                    {});
+
+    auto outer = store->Begin ();
+    outer->Execute ("INSERT INTO test (value) VALUES (?)", { "outer" });
+    auto inner = outer->Begin ();
+    inner->Execute ("INSERT INTO test (value) VALUES (?)", { "inner" });
+
+    REQUIRE_THROWS_AS (
+        outer->Execute ("INSERT INTO test (value) VALUES (?)",
+                        { "still_inner_scoped" }),
+        cortext::TransactionNotCurrentError);
+    REQUIRE_THROWS_AS (outer->Begin (), cortext::TransactionNotCurrentError);
+    REQUIRE_THROWS_AS (outer->Commit (),
+                       cortext::TransactionNotCurrentError);
+    REQUIRE_THROWS_AS (outer->Rollback (),
+                       cortext::TransactionNotCurrentError);
+
+    inner->Rollback ();
+    outer->Execute ("INSERT INTO test (value) VALUES (?)", { "after_inner" });
+    outer->Commit ();
+
+    auto rows = store->Execute ("SELECT value FROM test ORDER BY id", {});
+    REQUIRE (rows.size () == 2);
+    REQUIRE (std::any_cast<std::string> (rows[0].at ("value")) == "outer");
+    REQUIRE (std::any_cast<std::string> (rows[1].at ("value"))
+             == "after_inner");
+  }
+}
+
+TEST_CASE ("Store-level nested rollback releases savepoint", "[store]")
+{
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY, value TEXT)",
+                  {});
+
+  auto outer = store->Begin ();
+  outer->Execute ("INSERT INTO test (value) VALUES (?)", { "outer" });
+  auto inner = outer->Begin ();
+  inner->Execute ("INSERT INTO test (value) VALUES (?)", { "inner" });
+
+  store->Rollback ();
+
+  REQUIRE_THROWS_AS (inner->Execute ("SELECT 1", {}),
+                     cortext::TransactionAlreadyFinishedError);
+  REQUIRE_THROWS_AS (inner->Begin (),
+                     cortext::TransactionAlreadyFinishedError);
+  outer->Execute ("INSERT INTO test (value) VALUES (?)", { "after_inner" });
+  outer->Commit ();
+
+  auto rows = store->Execute ("SELECT value FROM test ORDER BY rowid", {});
+  REQUIRE (rows.size () == 2);
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("value")) == "outer");
+  REQUIRE (std::any_cast<std::string> (rows[1].at ("value"))
+           == "after_inner");
 }
 
 TEST_CASE ("Store cleanup", "[store]")
@@ -352,6 +512,24 @@ TEST_CASE ("Data type handling", "[store]")
     REQUIRE (result[0].at ("value").type () == typeid (std::nullptr_t));
   }
 
+  SECTION ("Unsupported bind parameter types fail loudly")
+  {
+    store->Execute ("CREATE TABLE strict_params (value INTEGER)", {});
+
+    REQUIRE_THROWS_AS (
+        store->Execute ("INSERT INTO strict_params (value) VALUES (?)",
+                        { UnsupportedBindParam {} }),
+        cortext::StoreError);
+
+    auto count = store->Execute (
+        "SELECT COUNT(*) AS cnt FROM strict_params", {});
+    REQUIRE (std::any_cast<long long> (count[0].at ("cnt")) == 0LL);
+
+    store->Execute ("INSERT INTO strict_params (value) VALUES (?)", { 7LL });
+    auto rows = store->Execute ("SELECT value FROM strict_params", {});
+    REQUIRE (std::any_cast<long long> (rows[0].at ("value")) == 7LL);
+  }
+
   SECTION ("Boolean-like values")
   {
     store->Execute ("CREATE TABLE flags (flag INTEGER)", {});
@@ -365,6 +543,44 @@ TEST_CASE ("Data type handling", "[store]")
     REQUIRE (std::any_cast<long long> (results[0].at ("flag")) == 0LL);
     REQUIRE (std::any_cast<long long> (results[1].at ("flag")) == 1LL);
   }
+}
+
+TEST_CASE ("SQLiteStore statement cache FIFO drops failed statements",
+           "[store][statement_cache]")
+{
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  store->Execute ("CREATE TABLE cache_test (id INTEGER PRIMARY KEY)", {});
+
+  const std::string insert_sql
+      = "INSERT INTO cache_test (id) VALUES (?)";
+  store->Execute (insert_sql, { 1LL });
+  REQUIRE (cortext::internal::SQLiteStoreStatementCacheInspector::CacheContains (
+      *store, insert_sql));
+
+  REQUIRE_THROWS_AS (store->Execute (insert_sql, { 1LL }),
+                     cortext::StoreError);
+  REQUIRE_FALSE (
+      cortext::internal::SQLiteStoreStatementCacheInspector::CacheContains (
+          *store, insert_sql));
+  REQUIRE_FALSE (
+      cortext::internal::SQLiteStoreStatementCacheInspector::FifoContains (
+          *store, insert_sql));
+
+  for (std::size_t i = 0;
+       i < cortext::internal::SQLiteStoreStatementCacheInspector::Capacity ()
+               + 8;
+       ++i)
+    {
+      store->Execute ("SELECT " + std::to_string (i) + " AS value", {});
+    }
+
+  REQUIRE (cortext::internal::SQLiteStoreStatementCacheInspector::CacheSize (
+               *store)
+           <= cortext::internal::SQLiteStoreStatementCacheInspector::Capacity ());
+  REQUIRE (cortext::internal::SQLiteStoreStatementCacheInspector::FifoSize (
+               *store)
+           == cortext::internal::SQLiteStoreStatementCacheInspector::CacheSize (
+               *store));
 }
 
 TEST_CASE ("Concurrent operations", "[store]")
@@ -469,6 +685,30 @@ TEST_CASE ("Transaction lifecycle safety", "[store][safety]")
         = store->Execute ("SELECT value FROM test ORDER BY id", {});
     // Should have outer and after_inner (inner was implicitly rolled back)
     REQUIRE (results.size () == 2);
+  }
+
+  SECTION ("Destroying a non-current nested transaction rolls back descendants")
+  {
+    auto outer = store->Begin ();
+    outer->Execute ("INSERT INTO test (value) VALUES (?)", { "outer" });
+    auto middle = outer->Begin ();
+    middle->Execute ("INSERT INTO test (value) VALUES (?)", { "middle" });
+    auto inner = middle->Begin ();
+    inner->Execute ("INSERT INTO test (value) VALUES (?)", { "inner" });
+
+    middle.reset ();
+
+    REQUIRE_THROWS_AS (inner->Execute ("SELECT 1", {}),
+                       cortext::TransactionAlreadyFinishedError);
+    outer->Execute ("INSERT INTO test (value) VALUES (?)", { "after_middle" });
+    outer->Commit ();
+
+    auto results
+        = store->Execute ("SELECT value FROM test ORDER BY id", {});
+    REQUIRE (results.size () == 2);
+    REQUIRE (std::any_cast<std::string> (results[0].at ("value")) == "outer");
+    REQUIRE (std::any_cast<std::string> (results[1].at ("value"))
+             == "after_middle");
   }
 
   SECTION ("Execute after transaction destruction uses direct execution")

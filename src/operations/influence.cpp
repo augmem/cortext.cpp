@@ -6,24 +6,12 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
-#include <Eigen/Dense>
 #include <cmath>
 #include <numeric>
 #include <vector>
 
 namespace cortext::operations
 {
-
-inline Eigen::VectorXf
-Unit (const Eigen::VectorXf &v)
-{
-  const double n = v.norm ();
-  if (n <= constants::kNormEpsilon)
-    {
-      return v;
-    }
-  return v / static_cast<float> (n);
-}
 
 void
 ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) const
@@ -50,7 +38,6 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
         {
           continue;
         }
-      const Eigen::VectorXf u_m = Unit (it->second);
       const double contextual_gain
           = core::Clamp (e.contextual_gain.value_or (0.0), -1.0, 1.0);
       const double predictive_similarity = 0.0;
@@ -62,10 +49,17 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
             - influence_policy.drift_weight * drift_contrib;
       influences.push_back (influence);
 
-      auto rows = tx.Execute (
-          "SELECT sustained_influence, mean_influence, used_count "
-          "FROM memories WHERE embedding_id = ?",
-          { static_cast<long long> (e.embedding_id) });
+      auto rows = e.memory_id > 0
+                      ? tx.Execute (
+                            "SELECT sustained_influence, mean_influence, "
+                            "used_count "
+                            "FROM memories WHERE memory_id = ?",
+                            { e.memory_id })
+                      : tx.Execute (
+                            "SELECT sustained_influence, mean_influence, "
+                            "used_count "
+                            "FROM memories WHERE embedding_id = ?",
+                            { static_cast<long long> (e.embedding_id) });
       if (rows.empty ())
         {
           continue;
@@ -83,11 +77,23 @@ ApplyInfluenceFeedback::Execute (OperationContext &context, Transaction &tx) con
       const double mean_new = (denom > 0.0)
                                   ? ((mean_prev * used_prev + influence) / denom)
                                   : influence;
-      tx.Execute ("UPDATE memories "
-                  "SET influence = ?, sustained_influence = ?, mean_influence = ? "
-                  "WHERE embedding_id = ?",
-                  { influence, sustained_new, mean_new,
-                    static_cast<long long> (e.embedding_id) });
+      if (e.memory_id > 0)
+        {
+          tx.Execute (
+              "UPDATE memories "
+              "SET influence = ?, sustained_influence = ?, mean_influence = ? "
+              "WHERE memory_id = ?",
+              { influence, sustained_new, mean_new, e.memory_id });
+        }
+      else
+        {
+          tx.Execute (
+              "UPDATE memories "
+              "SET influence = ?, sustained_influence = ?, mean_influence = ? "
+              "WHERE embedding_id = ?",
+              { influence, sustained_new, mean_new,
+                static_cast<long long> (e.embedding_id) });
+        }
     }
 
   if (influences.empty ())

@@ -31,10 +31,54 @@ option(CORTEXT_WASM_EXPORT_ALL "Export all functions in WASM build" OFF)
 option(CORTEXT_EMBED_VEC "Embed sqlite-vec extension" ON)
 option(CORTEXT_EMBED_OBJSTORE "Embed sqlite-objstore extension" ON)
 option(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS "Enable dynamic extension loading fallback" ON)
+option(CORTEXT_ENABLE_AUDIO "Build Cortext audio ingestion and embedding support" ON)
+option(CORTEXT_ENABLE_IMAGE "Build Cortext image ingestion and embedding support" ON)
+option(CORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD
+       "Allow unsupported builds with Cortext audio or image support disabled" OFF)
+option(CORTEXT_FETCH_GGML
+       "Fetch and build bundled ggml when CORTEXT_GGML_SOURCE_DIR is unset" ON)
+option(CORTEXT_USE_SYSTEM_GGML
+       "Use preinstalled ggml headers/libraries instead of bundled ggml" OFF)
 option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
-option(CORTEXT_DISABLE_SHERPA_ONNX "Disable sherpa-onnx ASR/TTS integration" OFF)
+set(CORTEXT_GGML_SOURCE_DIR "" CACHE PATH
+    "Optional local ggml checkout")
+set(CORTEXT_GGML_GIT_REPOSITORY "https://github.com/ggml-org/ggml.git"
+    CACHE STRING "Repository used when CORTEXT_FETCH_GGML=ON")
+set(CORTEXT_GGML_GIT_TAG "v0.9.5"
+    CACHE STRING "Commit/tag used when CORTEXT_FETCH_GGML=ON")
+set(CORTEXT_GGML_OPENMP_DEFAULT ON)
+if(BUILD_SHARED_LIBS)
+  set(CORTEXT_GGML_OPENMP_DEFAULT OFF)
+endif()
+option(CORTEXT_GGML_OPENMP
+       "Enable OpenMP in the bundled ggml backend" ${CORTEXT_GGML_OPENMP_DEFAULT})
 set(CORTEXT_WASM_PRELOAD_MODELS_DIR "" CACHE PATH
     "Optional model directory to embed into the browser WASM bundle at /models")
+
+if(DEFINED CORTEXT_DISABLE_AUDIO AND CORTEXT_DISABLE_AUDIO)
+  set(CORTEXT_ENABLE_AUDIO OFF CACHE BOOL
+      "Build Cortext audio ingestion and embedding support" FORCE)
+endif()
+
+if(DEFINED CORTEXT_DISABLE_IMAGE AND CORTEXT_DISABLE_IMAGE)
+  set(CORTEXT_ENABLE_IMAGE OFF CACHE BOOL
+      "Build Cortext image ingestion and embedding support" FORCE)
+endif()
+
+if((NOT CORTEXT_ENABLE_AUDIO OR NOT CORTEXT_ENABLE_IMAGE)
+   AND NOT CORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD)
+  message(FATAL_ERROR
+    "Cortext builds require audio and image support by default. "
+    "Use -DCORTEXT_ENABLE_AUDIO=OFF or -DCORTEXT_ENABLE_IMAGE=OFF only with "
+    "-DCORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD=ON.")
+endif()
+
+if(CORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD
+   AND (NOT CORTEXT_ENABLE_AUDIO OR NOT CORTEXT_ENABLE_IMAGE))
+  message(WARNING
+    "Configuring an unsupported Cortext build with audio or image support "
+    "disabled. Public audio/image APIs will report build-time disabled errors.")
+endif()
 
 # Sanitizer options for catching memory bugs during development
 option(CORTEXT_ENABLE_ASAN "Enable AddressSanitizer" OFF)
@@ -91,8 +135,9 @@ set(BUILD_TESTING "${_cortext_saved_dependency_build_testing}")
 #
 # OpenTelemetry dependency (native builds only).
 #
-# cortext links against the OpenTelemetry API only. Applications are responsible
-# for installing telemetry SDK exporters as needed.
+# Cortext links against the OpenTelemetry API by default. Applications remain
+# responsible for installing telemetry SDK exporters as needed. Set
+# CORTEXT_DISABLE_OPENTELEMETRY=ON for a dependency-free no-op telemetry build.
 #
 if(NOT EMSCRIPTEN AND NOT CORTEXT_DISABLE_OPENTELEMETRY AND NOT CORTEXT_TARGET_IOS)
   # Temporarily disable BUILD_TESTING while configuring the dependency to avoid
@@ -119,13 +164,7 @@ if(NOT EMSCRIPTEN AND NOT CORTEXT_DISABLE_OPENTELEMETRY AND NOT CORTEXT_TARGET_I
   set(BUILD_TESTING "${_cortext_saved_build_testing}" CACHE BOOL "Build tests" FORCE)
 endif()
 
-
-if(NOT EMSCRIPTEN AND NOT CORTEXT_TARGET_IOS)
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(SQLITE3 REQUIRED sqlite3)
-elseif(CORTEXT_TARGET_IOS)
-  find_library(SQLITE3_IOS_LIB sqlite3 REQUIRED)
-endif()
+add_subdirectory(third_party/sqlite EXCLUDE_FROM_ALL)
 
 add_library(cortext
     src/store.cpp
@@ -201,75 +240,72 @@ add_library(cortext
     src/models/embedding_model_pin.cpp
 )
 
-set(CORTEXT_LLAMA_CPP_AVAILABLE OFF)
-if(NOT EMSCRIPTEN)
-  set(CORTEXT_LLAMA_INCLUDE_DIR "${CORTEXT_LLAMA_INCLUDE_DIR}" CACHE PATH
-      "Path to the directory containing llama.h")
-  set(CORTEXT_GGML_INCLUDE_DIR "${CORTEXT_GGML_INCLUDE_DIR}" CACHE PATH
-      "Path to the directory containing ggml-backend.h")
-  set(CORTEXT_LLAMA_LIBRARY "${CORTEXT_LLAMA_LIBRARY}" CACHE FILEPATH
-      "Path to libllama")
-  set(CORTEXT_GGML_LIBRARY "${CORTEXT_GGML_LIBRARY}" CACHE FILEPATH
-      "Path to libggml")
-  set(CORTEXT_GGML_BASE_LIBRARY "${CORTEXT_GGML_BASE_LIBRARY}" CACHE FILEPATH
-      "Path to libggml-base")
-  set(CORTEXT_GGML_CPU_LIBRARY "${CORTEXT_GGML_CPU_LIBRARY}" CACHE FILEPATH
-      "Path to libggml-cpu")
-  set(CORTEXT_GGML_BLAS_LIBRARY "${CORTEXT_GGML_BLAS_LIBRARY}" CACHE FILEPATH
-      "Path to libggml-blas")
-  find_path(CORTEXT_LLAMA_INCLUDE_DIR
-    NAMES llama.h
-    PATHS /opt/homebrew/include /usr/local/include
-  )
-  find_path(CORTEXT_GGML_INCLUDE_DIR
-    NAMES ggml-backend.h
-    PATHS /opt/homebrew/include /usr/local/include
-  )
-  find_library(CORTEXT_LLAMA_LIBRARY
-    NAMES llama libllama
-    PATHS /opt/homebrew/lib /usr/local/lib
-  )
-  find_library(CORTEXT_GGML_LIBRARY
-    NAMES ggml libggml
-    PATHS /opt/homebrew/lib /usr/local/lib
-  )
-  find_library(CORTEXT_GGML_BASE_LIBRARY
-    NAMES ggml-base libggml-base
-    PATHS /opt/homebrew/lib /usr/local/lib
-  )
-  find_library(CORTEXT_GGML_CPU_LIBRARY
-    NAMES ggml-cpu libggml-cpu
-    PATHS /opt/homebrew/lib /usr/local/lib
-  )
-  find_library(CORTEXT_GGML_BLAS_LIBRARY
-    NAMES ggml-blas libggml-blas
-    PATHS /opt/homebrew/lib /usr/local/lib
-  )
-
-  if(NOT CORTEXT_GGML_INCLUDE_DIR)
-    set(CORTEXT_GGML_INCLUDE_DIR "${CORTEXT_LLAMA_INCLUDE_DIR}")
+function(cortext_resolve_ggml_source_dir input_dir output_dir)
+  if(EXISTS "${input_dir}/include/ggml.h"
+     AND EXISTS "${input_dir}/include/ggml-backend.h"
+     AND EXISTS "${input_dir}/CMakeLists.txt")
+    set(${output_dir} "${input_dir}" PARENT_SCOPE)
+    return()
   endif()
+  message(FATAL_ERROR
+    "CORTEXT_GGML_SOURCE_DIR must point to a ggml source directory: "
+    "${input_dir}")
+endfunction()
 
-  if(CORTEXT_LLAMA_INCLUDE_DIR AND CORTEXT_LLAMA_LIBRARY)
-    set(CORTEXT_LLAMA_CPP_AVAILABLE ON)
-    target_include_directories(cortext PRIVATE
-      "${CORTEXT_LLAMA_INCLUDE_DIR}"
-      "${CORTEXT_GGML_INCLUDE_DIR}"
+set(CORTEXT_GGML_AVAILABLE OFF)
+if(NOT EMSCRIPTEN)
+  set(_cortext_ggml_header_path "")
+  if(CORTEXT_USE_SYSTEM_GGML)
+    set(CORTEXT_GGML_INCLUDE_DIR "${CORTEXT_GGML_INCLUDE_DIR}" CACHE PATH
+        "Path to the directory containing ggml.h and ggml-backend.h")
+    set(CORTEXT_GGML_LIBRARY "${CORTEXT_GGML_LIBRARY}" CACHE FILEPATH
+        "Path to libggml")
+    set(CORTEXT_GGML_BASE_LIBRARY "${CORTEXT_GGML_BASE_LIBRARY}" CACHE FILEPATH
+        "Path to libggml-base")
+    set(CORTEXT_GGML_CPU_LIBRARY "${CORTEXT_GGML_CPU_LIBRARY}" CACHE FILEPATH
+        "Path to libggml-cpu")
+    set(CORTEXT_GGML_BLAS_LIBRARY "${CORTEXT_GGML_BLAS_LIBRARY}" CACHE FILEPATH
+        "Path to libggml-blas")
+    find_path(CORTEXT_GGML_INCLUDE_DIR
+      NAMES ggml.h ggml-backend.h
+      PATHS /opt/homebrew/include /usr/local/include
     )
-    target_compile_definitions(cortext PRIVATE
-      CORTEXT_ENABLE_LLAMA_CPP=1
-      CORTEXT_GGML_BACKEND_HEADER_PATH=\"${CORTEXT_GGML_INCLUDE_DIR}/ggml-backend.h\"
-      CORTEXT_LLAMA_HEADER_PATH=\"${CORTEXT_LLAMA_INCLUDE_DIR}/llama.h\"
+    find_library(CORTEXT_GGML_LIBRARY
+      NAMES ggml libggml
+      PATHS /opt/homebrew/lib /usr/local/lib
     )
-    target_link_libraries(cortext PRIVATE ${CORTEXT_LLAMA_LIBRARY})
-    if(CORTEXT_GGML_LIBRARY)
-      target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_LIBRARY})
+    find_library(CORTEXT_GGML_BASE_LIBRARY
+      NAMES ggml-base libggml-base
+      PATHS /opt/homebrew/lib /usr/local/lib
+    )
+    find_library(CORTEXT_GGML_CPU_LIBRARY
+      NAMES ggml-cpu libggml-cpu
+      PATHS /opt/homebrew/lib /usr/local/lib
+    )
+    find_library(CORTEXT_GGML_BLAS_LIBRARY
+      NAMES ggml-blas libggml-blas
+      PATHS /opt/homebrew/lib /usr/local/lib
+    )
+
+    if(NOT CORTEXT_GGML_INCLUDE_DIR
+       OR NOT CORTEXT_GGML_LIBRARY
+       OR NOT CORTEXT_GGML_CPU_LIBRARY)
+      message(FATAL_ERROR
+        "CORTEXT_USE_SYSTEM_GGML=ON but system ggml was not found. "
+        "Set CORTEXT_GGML_INCLUDE_DIR/CORTEXT_GGML_LIBRARY/"
+        "CORTEXT_GGML_CPU_LIBRARY, or leave CORTEXT_USE_SYSTEM_GGML=OFF "
+        "to build bundled ggml.")
     endif()
+
+    set(CORTEXT_GGML_AVAILABLE ON)
+    set(_cortext_ggml_header_path "${CORTEXT_GGML_INCLUDE_DIR}/ggml-backend.h")
+    target_include_directories(cortext PRIVATE "${CORTEXT_GGML_INCLUDE_DIR}")
+    target_link_libraries(cortext PRIVATE
+      ${CORTEXT_GGML_LIBRARY}
+      ${CORTEXT_GGML_CPU_LIBRARY}
+    )
     if(CORTEXT_GGML_BASE_LIBRARY)
       target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_BASE_LIBRARY})
-    endif()
-    if(CORTEXT_GGML_CPU_LIBRARY)
-      target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_CPU_LIBRARY})
     endif()
     if(CORTEXT_GGML_BLAS_LIBRARY)
       target_link_libraries(cortext PRIVATE ${CORTEXT_GGML_BLAS_LIBRARY})
@@ -278,9 +314,90 @@ if(NOT EMSCRIPTEN)
       find_library(ACCELERATE_FRAMEWORK Accelerate REQUIRED)
       target_link_libraries(cortext PRIVATE ${ACCELERATE_FRAMEWORK})
     endif()
+    message(STATUS "Using system ggml backend from ${CORTEXT_GGML_INCLUDE_DIR}")
+  elseif(CORTEXT_GGML_SOURCE_DIR OR CORTEXT_FETCH_GGML)
+    set(_cortext_saved_build_shared_libs "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
+
+    set(GGML_STATIC ON CACHE BOOL "" FORCE)
+    set(GGML_OPENMP ${CORTEXT_GGML_OPENMP} CACHE BOOL "" FORCE)
+    set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
+    set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+    set(GGML_ALL_WARNINGS_3RD_PARTY OFF CACHE BOOL "" FORCE)
+    set(GGML_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
+    set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+
+    if(CORTEXT_GGML_SOURCE_DIR)
+      cortext_resolve_ggml_source_dir("${CORTEXT_GGML_SOURCE_DIR}"
+                                      _cortext_ggml_source_dir)
+    else()
+      FetchContent_Declare(
+        cortext_ggml_source
+        GIT_REPOSITORY "${CORTEXT_GGML_GIT_REPOSITORY}"
+        GIT_TAG "${CORTEXT_GGML_GIT_TAG}"
+      )
+      FetchContent_GetProperties(cortext_ggml_source)
+      if(NOT cortext_ggml_source_POPULATED)
+        FetchContent_Populate(cortext_ggml_source)
+      endif()
+      cortext_resolve_ggml_source_dir("${cortext_ggml_source_SOURCE_DIR}"
+                                      _cortext_ggml_source_dir)
+    endif()
+
+    add_subdirectory("${_cortext_ggml_source_dir}"
+                     "${CMAKE_BINARY_DIR}/_deps/ggml"
+                     EXCLUDE_FROM_ALL)
+
+    set(BUILD_SHARED_LIBS "${_cortext_saved_build_shared_libs}" CACHE BOOL
+        "Build shared libraries" FORCE)
+
+    if(BUILD_SHARED_LIBS)
+      foreach(_cortext_ggml_target ggml ggml-base ggml-cpu)
+        if(TARGET ${_cortext_ggml_target})
+          set_target_properties(${_cortext_ggml_target}
+            PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        endif()
+      endforeach()
+    endif()
+
+    if(TARGET ggml AND TARGET ggml-cpu)
+      set(CORTEXT_GGML_AVAILABLE ON)
+      set(_cortext_ggml_header_path
+          "${_cortext_ggml_source_dir}/include/ggml-backend.h")
+      target_include_directories(cortext PRIVATE
+        "${_cortext_ggml_source_dir}/include"
+      )
+      target_link_libraries(cortext PRIVATE ggml ggml-cpu)
+      if(TARGET ggml-base)
+        target_link_libraries(cortext PRIVATE ggml-base)
+      endif()
+      message(STATUS "Using bundled ggml backend from ${_cortext_ggml_source_dir}")
+    else()
+      message(FATAL_ERROR
+        "ggml was added but did not define expected ggml/ggml-cpu targets.")
+    endif()
   else()
-    message(STATUS "llama.cpp library not found; GGUF embedding backend disabled")
+    message(STATUS
+      "ggml library not found and CORTEXT_FETCH_GGML=OFF; "
+      "GGUF kernel backend disabled")
   endif()
+
+  if(CORTEXT_GGML_AVAILABLE)
+    target_compile_definitions(cortext PRIVATE
+      CORTEXT_ENABLE_GGML=1
+      CORTEXT_GGML_BACKEND_HEADER_PATH=\"${_cortext_ggml_header_path}\"
+    )
+  endif()
+endif()
+
+if(CORTEXT_ENABLE_AUDIO AND NOT CORTEXT_GGML_AVAILABLE)
+  message(FATAL_ERROR
+    "Cortext audio support requires AIST ggml kernel ops. Keep "
+    "CORTEXT_FETCH_GGML=ON, set CORTEXT_GGML_SOURCE_DIR to a local ggml "
+    "checkout, provide CORTEXT_GGML_* cache entries, or "
+    "opt out explicitly with -DCORTEXT_ENABLE_AUDIO=OFF "
+    "-DCORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD=ON.")
 endif()
 
 if(APPLE)
@@ -294,9 +411,6 @@ endif()
 # runtime always builds.
 target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp)
 
-if(NOT CORTEXT_DISABLE_SHERPA_ONNX AND NOT EMSCRIPTEN)
-  target_sources(cortext PRIVATE src/audio/sherpa_onnx.cpp)
-endif()
 add_library(cortext::cortext ALIAS cortext)
 
 # Public include dirs
@@ -307,6 +421,19 @@ target_include_directories(cortext
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite/src
 )
+
+if(CORTEXT_ENABLE_AUDIO)
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_AUDIO=1)
+  target_compile_definitions(cortext PRIVATE CORTEXT_REQUIRE_AIST_GGML_KERNELS=1)
+else()
+  target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_AUDIO=1)
+endif()
+
+if(CORTEXT_ENABLE_IMAGE)
+  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_IMAGE=1)
+else()
+  target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_IMAGE=1)
+endif()
 
 # Embed sqlite-vec sources when enabled
 set(CORTEXT_EMBED_SOURCES "")
@@ -430,22 +557,15 @@ if(CORTEXT_NLOHMANN_INCLUDE_DIRS)
   target_include_directories(cortext BEFORE PRIVATE ${CORTEXT_NLOHMANN_INCLUDE_DIRS})
 endif()
 if(EMSCRIPTEN)
-  target_compile_options(cortext PRIVATE -sUSE_SQLITE3=1)
   target_compile_definitions(cortext PRIVATE SQLITE_OMIT_LOAD_EXTENSION=1)
   target_sources(cortext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wasm/auto_extensions.cpp)
 elseif(CORTEXT_TARGET_IOS)
-  target_link_libraries(cortext PRIVATE ${SQLITE3_IOS_LIB})
   target_compile_definitions(cortext PRIVATE SQLITE_OMIT_LOAD_EXTENSION=1)
-else()
-  target_include_directories(cortext PUBLIC ${SQLITE3_INCLUDE_DIRS})
-  if(SQLITE3_LIBRARY_DIRS)
-    target_link_directories(cortext PUBLIC ${SQLITE3_LIBRARY_DIRS})
-  endif()
-  target_link_libraries(cortext PUBLIC ${SQLITE3_LIBRARIES})
 endif()
+target_link_libraries(cortext PUBLIC sqlite3)
 
 #
-# OpenTelemetry linkage (native only): API-only.
+# OpenTelemetry linkage (native only): API-only by default, no-op when disabled.
 #
 if(NOT EMSCRIPTEN AND NOT CORTEXT_DISABLE_OPENTELEMETRY AND NOT CORTEXT_TARGET_IOS)
   # opentelemetry-cpp headers can emit some warnings on AppleClang/Clang.
@@ -467,39 +587,6 @@ if(NOT EMSCRIPTEN AND NOT CORTEXT_DISABLE_OPENTELEMETRY AND NOT CORTEXT_TARGET_I
   target_link_libraries(cortext PRIVATE opentelemetry-cpp::api)
 else()
   target_compile_definitions(cortext PRIVATE CORTEXT_DISABLE_OPENTELEMETRY=1)
-endif()
-
-# Optional sherpa-onnx integration for ASR/TTS
-# Enabled by default; set CORTEXT_DISABLE_SHERPA_ONNX=ON to disable
-if(CORTEXT_DISABLE_SHERPA_ONNX)
-  target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_SHERPA_ONNX=1)
-endif()
-
-if(NOT CORTEXT_DISABLE_SHERPA_ONNX AND NOT EMSCRIPTEN)
-  # Configure sherpa-onnx to be a lightweight library build.
-  set(SHERPA_ONNX_ENABLE_PYTHON OFF CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_CHECK OFF CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_WEBSOCKET OFF CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_PORTAUDIO OFF CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_BINARY OFF CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_TTS ON CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION ON CACHE BOOL "" FORCE)
-  set(SHERPA_ONNX_ENABLE_C_API ON CACHE BOOL "" FORCE)
-
-  set(SHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
-
-  # sherpa-onnx transitively builds openfst/simple-sentencepiece code that is
-  # not C++20-clean yet; keep the vendored subproject on C++17 while cortext
-  # itself remains C++20.
-  set(_cortext_saved_cxx_standard "${CMAKE_CXX_STANDARD}")
-  set(CMAKE_CXX_STANDARD 17)
-  add_subdirectory(third_party/sherpa-onnx EXCLUDE_FROM_ALL)
-  set(CMAKE_CXX_STANDARD "${_cortext_saved_cxx_standard}")
-  unset(_cortext_saved_cxx_standard)
-  target_include_directories(cortext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sherpa-onnx)
-  target_link_libraries(cortext PRIVATE sherpa-onnx-cxx-api)
-  target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_SHERPA_ONNX=1)
 endif()
 
 # Use C++20 features
@@ -609,7 +696,6 @@ if(EMSCRIPTEN AND BUILD_WASM)
     -O3
     --no-entry
     -sWASM=1
-    -sUSE_SQLITE3=1
     -sALLOW_MEMORY_GROWTH=1
     -sALLOW_TABLE_GROWTH=1
     -sFORCE_FILESYSTEM=1

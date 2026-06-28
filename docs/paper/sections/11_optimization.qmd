@@ -75,8 +75,7 @@ The optimization and cutover work is gated by:
 git diff --check
 
 cmake -S . -B build/codex-hardcut-check \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCORTEXT_DISABLE_SHERPA_ONNX=ON
+  -DCMAKE_BUILD_TYPE=Debug
 
 cmake --build build/codex-hardcut-check -j
 

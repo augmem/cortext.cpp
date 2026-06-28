@@ -199,6 +199,114 @@ TEST_CASE ("Alg21 inhibits near losers but not distant ones",
   }
 }
 
+TEST_CASE ("Alg21 structured retrieval suppresses shared embedding loser by memory id",
+           "[operations][competition]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.0;
+
+  const Eigen::VectorXf ctx_vec = Make256DEmb ({ { 0, 1.0f } });
+  const Eigen::VectorXf w1 = Make256DEmb ({ { 0, 0.99f }, { 1, 0.05f } });
+  const Eigen::VectorXf w2 = Make256DEmb ({ { 0, 0.98f }, { 1, 0.06f } });
+  const Eigen::VectorXf w3 = Make256DEmb ({ { 0, 0.95f }, { 1, 0.10f } });
+  const Eigen::VectorXf loser = Make256DEmb ({ { 0, 0.88f }, { 1, 0.47f } });
+
+  std::unordered_map<long long, Eigen::VectorXf> base {
+    { 1LL, w1 }, { 2LL, w2 }, { 3LL, w3 }, { 420LL, loser }
+  };
+  SeedEmbeddingsOp seed (base);
+  Signal signal = MakeSignal (ctx_vec, 100);
+  ProcessorContext pctx;
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  seed.Execute (ctx, cortext::testing::GetNullTransaction ());
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 420LL, "loser",
+                                  "LONG_TERM", 1.0, 1);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 420LL, "sibling",
+                                  "LONG_TERM", 1.0, 1);
+
+  pctx.recent_context_embeddings.push_back (ctx_vec);
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, w1 },
+                                                      { 2LL, w2 },
+                                                      { 3LL, w3 },
+                                                      { 420LL, loser } });
+  ctx.SetRetrievedMemoryCandidates (
+      std::vector<OperationContext::RetrievedMemoryCandidate>{
+        { 1LL, 1LL, w1, 1.0 },
+        { 2LL, 2LL, w2, 1.0 },
+        { 3LL, 3LL, w3, 1.0 },
+        { 100LL, 420LL, loser, 0.5 } });
+
+  ApplyRetrievalCompetition op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT memory_id, suppression FROM memories "
+      "WHERE memory_id IN (100, 101) ORDER BY memory_id",
+      {});
+  REQUIRE (rows.size () == 2);
+  REQUIRE (std::any_cast<double> (rows[0].at ("suppression")) > 0.0);
+  REQUIRE (std::any_cast<double> (rows[1].at ("suppression")) == 0.0);
+}
+
+TEST_CASE ("Alg21 memory-scoped RIF recovery survives embedding fork",
+           "[operations][competition][recovery]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.0;
+
+  const Eigen::VectorXf ctx_vec = Make256DEmb ({ { 0, 1.0f } });
+  cortext::testing::SeedEmbeddingV2 (*store, 420LL, ctx_vec, 1);
+  cortext::testing::SeedEmbeddingV2 (*store, 421LL, ctx_vec, 2);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 421LL, "forked",
+                                  "LONG_TERM", 1.0, 1);
+  store->Execute (
+      "UPDATE memories SET suppression = ?, suppression_ts = ?, "
+      "strength = ? WHERE memory_id = ?",
+      { 0.5, 1LL, 0.5, 100LL });
+
+  ProcessorContext pctx;
+  pctx.recent_context_embeddings.push_back (ctx_vec);
+  pctx.retrieval_suppression_memory_ids.insert (100LL);
+  OperationContext ctx (MakeSignal (ctx_vec, 1'000'000), pctx, cfg,
+                        store.get ());
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 421LL, ctx_vec } });
+  ctx.SetRetrievedMemoryCandidates (
+      std::vector<OperationContext::RetrievedMemoryCandidate>{
+        { 100LL, 421LL, ctx_vec, 1.0 } });
+
+  auto tx = store->Begin ();
+  ApplyRetrievalCompetition op;
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT suppression, strength FROM memories WHERE memory_id = ?",
+      { 100LL });
+  REQUIRE (rows.size () == 1);
+  REQUIRE (std::any_cast<double> (rows[0].at ("suppression"))
+           == Catch::Approx (0.0));
+  REQUIRE (std::any_cast<double> (rows[0].at ("strength")) > 0.5);
+  REQUIRE (pctx.retrieval_suppression_memory_ids.empty ());
+}
+
 TEST_CASE ("Alg21 RIF recovery UPDATE does not violate NOT NULL constraint",
            "[operations][competition][rif_state]")
 {
@@ -271,7 +379,7 @@ TEST_CASE ("Alg21 recovery restores strength over time",
   auto unique_store = cortext::SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
-  // Higher stability → longer recovery_time (600s); we'll advance ts by >=600.
+  // Higher stability -> longer recovery_time (600s).
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 1.0;
@@ -312,8 +420,8 @@ TEST_CASE ("Alg21 recovery restores strength over time",
     REQUIRE (strength_after_supp < 1.0);
   }
 
-  // Second pass well after recovery_time (>=600s) should restore some
-  // strength.
+  // One second later should recover only a small fraction.
+  double strength_after_partial_recovery = 0.0;
   {
     cfg.focus = 0.0; // make all candidates winners (k=7) → no new suppression
     auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
@@ -321,20 +429,47 @@ TEST_CASE ("Alg21 recovery restores strength over time",
     auto pipeline = std::make_unique<DynamicOperationSet> (std::move (setup),
                                                     std::move (apply));
     SignalProcessor processor (cfg, store, std::move (pipeline));
-    processor.Process (MakeSignal (ctx, /*ts=*/2000)); // +1000s
+    processor.Process (MakeSignal (ctx, /*ts=*/2000));
     processor.Flush ();
   }
 
-  // v2: Query memories table for strength
   {
     auto rows = store->Execute (
-        "SELECT strength FROM memories WHERE memory_id = ?",
+        "SELECT strength, suppression FROM memories WHERE memory_id = ?",
         { 2LL });
     REQUIRE (rows.size () == 1);
-    const double strength_after_recovery
+    strength_after_partial_recovery
         = std::any_cast<double> (rows[0].at ("strength"));
-    REQUIRE (strength_after_recovery > strength_after_supp);
-    REQUIRE (strength_after_recovery <= 1.0);
+    const double suppression_after_partial
+        = std::any_cast<double> (rows[0].at ("suppression"));
+    REQUIRE (strength_after_partial_recovery > strength_after_supp);
+    REQUIRE (suppression_after_partial > 0.0);
+  }
+
+  // Advance beyond 600 seconds to complete recovery.
+  {
+    auto setup = std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved);
+    auto apply = std::make_unique<ApplyRetrievalCompetition> ();
+    auto pipeline = std::make_unique<DynamicOperationSet> (std::move (setup),
+                                                    std::move (apply));
+    SignalProcessor processor (cfg, store, std::move (pipeline));
+    processor.Process (MakeSignal (ctx, /*ts=*/602000));
+    processor.Flush ();
+  }
+
+  {
+    auto rows = store->Execute (
+        "SELECT strength, suppression FROM memories WHERE memory_id = ?",
+        { 2LL });
+    REQUIRE (rows.size () == 1);
+    const double strength_after_full_recovery
+        = std::any_cast<double> (rows[0].at ("strength"));
+    const double suppression_after_full
+        = std::any_cast<double> (rows[0].at ("suppression"));
+    REQUIRE (strength_after_full_recovery
+             > strength_after_partial_recovery);
+    REQUIRE (strength_after_full_recovery <= 1.0);
+    REQUIRE (suppression_after_full == Catch::Approx (0.0).margin (1e-4));
   }
 }
 

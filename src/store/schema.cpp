@@ -1,6 +1,7 @@
 #include "cortext/store/schema.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -14,7 +15,7 @@ namespace
 /// @brief Represents a single migration step.
 struct Migration
 {
-  int id;                                // Unique integer ID (e.g., 2024010101)
+  int64_t id;                            // Unique integer ID (e.g., 2024010101)
   std::string description;               // Human-readable description
   std::vector<std::string> up_statements; // SQL statements to apply
 };
@@ -23,10 +24,10 @@ struct Migration
 ///
 /// Migration IDs are monotonically increasing integers (e.g., YYYYMMDDnn format)
 /// that must be unique across all registered migrations to prevent collisions.
-std::set<int>
+std::set<int64_t>
 GetAppliedMigrations (Store &store)
 {
-  std::set<int> applied_ids;
+  std::set<int64_t> applied_ids;
   auto rows = store.Execute ("SELECT id FROM cortext_schema_migrations");
   for (const auto &row : rows)
     {
@@ -36,7 +37,7 @@ GetAppliedMigrations (Store &store)
           if (val.type () == typeid (int))
             applied_ids.insert (std::any_cast<int> (val));
           else if (val.type () == typeid (long long))
-            applied_ids.insert (static_cast<int> (std::any_cast<long long> (val)));
+            applied_ids.insert (std::any_cast<long long> (val));
         }
     }
   return applied_ids;
@@ -802,6 +803,14 @@ GetCoreMigrations ()
 
 } // namespace
 
+#if defined(CORTEXT_TESTING)
+std::set<int64_t>
+DebugGetAppliedMigrationIdsForTest (Store &store)
+{
+  return GetAppliedMigrations (store);
+}
+#endif
+
 bool
 TableExists (Store &store, const std::string &table_name)
 {
@@ -856,7 +865,7 @@ ApplyMigrations (Store &store)
       "  applied_at INTEGER"
       ")");
 
-  std::set<int> applied_ids = GetAppliedMigrations (store);
+  std::set<int64_t> applied_ids = GetAppliedMigrations (store);
   auto migrations = GetCoreMigrations ();
 
   // Sort by ID (should already be sorted, but be explicit)

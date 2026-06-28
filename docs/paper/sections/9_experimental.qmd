@@ -33,7 +33,7 @@ only the intended surfaces. The verification pass used the following gates.
 | Gate | Evidence |
 |---|---|
 | runtime code removal | repository scans over `include/`, `src/`, `tests/`, `examples/`, `scripts/`, `tools/`, `bindings/`, `CMakeLists.txt`, and `.gitmodules` find no retained internal decoder, adapter-registry, semantic batch, static taxonomy, fact-layer, STM-shadow, or temporal-neighbor implementation symbols |
-| dependency removal | `.gitmodules` and the worktree no longer contain the removed decoder/runtime submodules; the remaining third-party tree is limited to SQLite/vector/object storage, optional sherpa-onnx audio, opentelemetry, planum, and build/test dependencies |
+| dependency removal | `.gitmodules` and the worktree no longer contain the removed decoder/runtime submodules; the remaining third-party tree is limited to SQLite/vector/object storage, opt-out OpenTelemetry, planum, and build/test dependencies |
 | API removal | public consolidation mode enums and mode-specific C API calls are gone; bindings no longer expose the removed mode fields |
 | current behavior | `Cortext::Consolidate()` and `Signal::force_consolidation` drive the one retained consolidation path; graph retrieval returns source-backed memory context from vector and graph evidence |
 | paper consistency | this section, @sec-consolidation, @sec-implementation, and @sec-optimization describe the current branch rather than deleted adapter-era workflows |
@@ -49,8 +49,7 @@ cutover:
 
 ```bash
 cmake -S . -B build/codex-hardcut-check \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCORTEXT_DISABLE_SHERPA_ONNX=ON
+  -DCMAKE_BUILD_TYPE=Debug
 
 cmake --build build/codex-hardcut-check -j
 
@@ -69,9 +68,7 @@ The targeted graph/reconstruction/state tests passed **5 test cases** and
 **2 assertions**.
 
 An examples-enabled build also completed after configuring with
-`CORTEXT_BUILD_EXAMPLES=ON` and `CORTEXT_DISABLE_SHERPA_ONNX=ON`. The chat
-example was skipped by CMake on this machine because `glfw3` was absent; this
-is an environment dependency, not a hard-cutover failure.
+`CORTEXT_BUILD_EXAMPLES=ON`.
 
 ## Retrieval Behavior After Removal
 
@@ -94,6 +91,43 @@ exclusion, reconstruction-aware ranking, and the disabled-reconstruction path.
 This is the minimum behavior required for the v1 hard-cut engine to stay useful
 without hidden semantic extraction.
 
+### Graph Retrieval Release Probe
+
+A June 2026 regression probe compared a preserved old replay binary against the
+current source tree using the same local AIST GGUF model. The model rotation was
+therefore not sufficient to explain the observed A/B drop. The main behavioral
+regression was a reconsolidation policy that appended reconstruction records
+without advancing `current_memory_embeddings`, leaving graph retrieval on stale
+memory surfaces.
+
+The experimental online label-bucket graph was removed from the production
+release path. Runtime storage no longer builds embedding-label buckets or writes
+their synthetic graph edges, retrieval no longer reads those buckets or edge
+types, and hydration no longer scans experiment-local label-edge tables. The
+retained graph behavior is the durable source, reconstruction, and association
+path described above.
+
+After restoring current-surface advancement and removing a maintenance-node
+hydration skip that was not present in the preserved replay binary, the dense
+578-message replay matched the old binary on processed text messages, media
+events, probe events, memory rows, and association rows. With the default
+bundled GGML build, the remaining difference was 1 retrieved-list diff and 1
+ranked-candidate diff across 383 probes. The full one-year sparse probe matched
+the old binary on the same structural counts and left 1 retrieved-list diff and
+1 ranked-candidate diff across 31 probes.
+
+The two residual rank flips were traced to query-vector numeric drift rather
+than graph state. For the compared candidate memories, the old and current DBs
+contained identical memory/reconstruction embedding hashes, while the probe
+signal embedding hashes differed for the same embedding ids. Forcing the host
+fallback text path by disabling the full GGML graph produced far larger replay
+drift. Rebuilding the current source tree with the same dynamic system GGML
+libraries used by the preserved old binary restored exact replay agreement:
+the dense replay produced `retr_diffs=0` and `rank_diffs=0` across 383 probes,
+and the full sparse replay produced `retr_diffs=0` and `rank_diffs=0` across
+31 probes. The local judge service was unavailable during this pass, so the
+historical 15-win A/B baseline still requires a follow-up judge run.
+
 ## Experimental Interpretation
 
 The hard-cut branch changes the research question. Earlier results asked how
@@ -113,14 +147,12 @@ repository and with the repository treated as the production engine under test.
 
 ## Reproducibility Notes
 
-The local machine used for this verification did not provide a system SQLite
-development package, so the build was configured with a locally extracted
-`libsqlite3-dev` package via `PKG_CONFIG_PATH` and `PKG_CONFIG_SYSROOT_DIR`.
-That workaround affects discovery of headers and link flags only; it does not
-change Cortext source or runtime behavior.
+SQLite is built from the vendored `third_party/sqlite` source tree. Native
+verification does not require a system SQLite development package or shared
+`libsqlite3` dependency.
 
-`quarto render docs/paper` parsed the manuscript sources but failed while
-retrieving Git remote metadata because the local environment could not
-authenticate to the GitHub SSH remote. Generated manuscript output was restored
-after the failed render. The source sections remain the authoritative paper
-edits in this branch.
+`QUARTO_DISABLE_GIT=1 QUARTO_DISABLE_GITHUB=1 quarto render docs/paper`
+completed locally and regenerated `docs/paper/_manuscript/index.md`. The render
+reported unresolved cross-reference warnings for `@sec-pattern-separation` and
+`@sec-activity`, which are manuscript-source issues outside this regression
+probe.

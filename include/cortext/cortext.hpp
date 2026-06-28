@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -115,6 +116,7 @@ public:
 
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
     std::vector<Memory> retrieved_memory;  ///< Long-term retrieval results (injected context)
+    std::vector<float> embedding;          ///< Canonical embedding used for this process call.
     bool should_interrupt = false;
     bool interrupt_aborted = false;
     bool at_boundary = false;
@@ -154,6 +156,19 @@ public:
     bool signal_filter_audio_enabled = true;
     bool signal_filter_image_enabled = true;
     bool signal_filter_text_enabled = false;
+  };
+
+  /// @brief Optional source media payload to persist with an audio/image signal.
+  ///
+  /// Processing still uses the canonical audio/image input passed to
+  /// ProcessAudio/ProcessImage. When Media contains data, those bytes and this
+  /// MIME type become the durable payload instead of the canonical processing
+  /// representation. Media bytes are copied during the call.
+  struct Media
+  {
+    const std::uint8_t *data = nullptr;
+    std::size_t size = 0;
+    std::string mimetype;
   };
 
   /// @brief Factory to create a Cortext instance.
@@ -253,6 +268,15 @@ public:
                         const std::string &source_id,
                         Retention retention = Retention::Durable);
 
+  /// @brief Process audio PCM while storing caller-provided source media.
+  ///
+  /// The PCM buffer remains the canonical processing input. If media contains
+  /// bytes, those bytes are persisted as the signal/memory payload using
+  /// media.mimetype. If media is empty, no audio payload is persisted.
+  Context ProcessAudio (const float *pcm, std::size_t num_samples,
+                        const std::string &source_id, const Media &media,
+                        Retention retention = Retention::Durable);
+
   /// @brief Process image input.
   /// @param data Raw pixel data (RGB/RGBA).
   /// @param width Image width.
@@ -265,6 +289,16 @@ public:
   /// @return Context with retrieved memories and processing output.
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
+                        Retention retention = Retention::Durable);
+
+  /// @brief Process image pixels while storing caller-provided source media.
+  ///
+  /// The pixel buffer remains the canonical processing input. If media contains
+  /// bytes, those bytes are persisted as the signal/memory payload using
+  /// media.mimetype. If media is empty, no image payload is persisted.
+  Context ProcessImage (const std::uint8_t *data, int width, int height,
+                        int channels, const std::string &source_id,
+                        const Media &media,
                         Retention retention = Retention::Durable);
 
   /// @brief Encode text and return the configured encoder's raw embedding.

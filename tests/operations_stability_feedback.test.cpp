@@ -129,3 +129,47 @@ TEST_CASE ("Alg17 non-positive contextual gain decreases half_life",
       pctx.salience_half_life
       == Catch::Approx (cortext::core::ClampHalfLife (0.5 * pctx.half_life)));
 }
+
+TEST_CASE ("Alg17 updates stability by memory id when embeddings are shared",
+           "[operations][stability_feedback]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.stability = 0.5;
+
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  std::vector<float> embedding (256, 0.0f);
+  embedding[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 420LL, embedding, 1);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 420LL, "used",
+                                  "LONG_TERM", 1.0, 1);
+  cortext::testing::SeedMemoryV2 (*store, 101LL, 420LL, "sibling",
+                                  "LONG_TERM", 1.0, 1);
+
+  OperationContext ctx (s, pctx, cfg);
+  OperationContext::MemoryUsageEvent ev{};
+  ev.memory_id = 100LL;
+  ev.embedding_id = 420LL;
+  ev.used = true;
+  ev.contextual_gain = 0.6;
+  ctx.SetMemoryUsageEvents ({ ev });
+
+  ApplyStabilityFeedback op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT memory_id, stability FROM memories "
+      "WHERE memory_id IN (100, 101) ORDER BY memory_id",
+      {});
+  REQUIRE (rows.size () == 2);
+  REQUIRE (std::any_cast<double> (rows[0].at ("stability")) > 1.0);
+  REQUIRE (std::any_cast<double> (rows[1].at ("stability"))
+           == Catch::Approx (1.0));
+}

@@ -15,6 +15,7 @@
 #include <numeric>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace cortext::operations
@@ -163,9 +164,30 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
     }
   auto &acc = acc_it->second;
 
-  // Retrieve candidates (id -> embedding)
+  // Retrieve candidates. Structured records are memory-keyed; the embedding
+  // map is retained as a legacy embedding-keyed fallback.
   const auto &raw_candidates = context.GetRetrievedMemoryEmbeddings ();
-  if (raw_candidates.empty ())
+  const auto &retrieved_records = context.GetRetrievedMemoryCandidates ();
+  const bool use_memory_candidate_ids = !retrieved_records.empty ();
+  std::unordered_map<long long, Eigen::VectorXf> candidate_source;
+  if (use_memory_candidate_ids)
+    {
+      candidate_source.reserve (retrieved_records.size ());
+      for (const auto &candidate : retrieved_records)
+        {
+          if (candidate.memory_id > 0 && candidate.embedding.size () > 0)
+            {
+              candidate_source.emplace (candidate.memory_id,
+                                        candidate.embedding);
+            }
+        }
+    }
+  else
+    {
+      candidate_source = raw_candidates;
+    }
+
+  if (candidate_source.empty ())
     {
       context.SetInterruptGateHasCandidates (false);
       context.SetInterruptAllowed (false);
@@ -212,16 +234,19 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
       write_exclusion_ts = acc.t_start;
     }
 
-  // Query created_at timestamps for all candidate IDs
+  // Query created_at timestamps for all candidate IDs.
   std::unordered_map<long long, Eigen::VectorXf> candidates;
   {
     // Build IN clause for candidate IDs
-    std::string sql = "SELECT embedding_id, created_at FROM memories "
-                      "WHERE embedding_id IN (";
+    std::string sql = use_memory_candidate_ids
+                          ? "SELECT memory_id AS candidate_id, created_at "
+                            "FROM memories WHERE memory_id IN ("
+                          : "SELECT embedding_id AS candidate_id, created_at "
+                            "FROM memories WHERE embedding_id IN (";
     std::vector<std::any> params;
-    params.reserve (raw_candidates.size ());
+    params.reserve (candidate_source.size ());
     bool first = true;
-    for (const auto &kv : raw_candidates)
+    for (const auto &kv : candidate_source)
       {
         if (!first)
           sql += ",";
@@ -243,7 +268,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
         eligible_ids.reserve (rows.size ());
         for (const auto &row : rows)
           {
-            auto it_id = row.find ("embedding_id");
+            auto it_id = row.find ("candidate_id");
             auto it_ts = row.find ("created_at");
             if (it_id == row.end () || it_ts == row.end ())
               continue;
@@ -265,7 +290,7 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
           }
 
         // Build filtered candidates map
-        for (const auto &kv : raw_candidates)
+        for (const auto &kv : candidate_source)
           {
             if (eligible_ids.find (kv.first) != eligible_ids.end ())
               {

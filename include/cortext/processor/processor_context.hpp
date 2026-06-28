@@ -275,9 +275,15 @@ struct ProcessorContext
   /// @brief Embedding ids whose persisted memories currently have non-zero
   /// predictive pre-activation and therefore need per-turn decay.
   std::unordered_set<long long> predictive_pre_activation_embedding_ids;
+  /// @brief Memory ids whose persisted memories currently have non-zero
+  /// predictive pre-activation and therefore need per-turn decay.
+  std::unordered_set<long long> predictive_pre_activation_memory_ids;
   /// @brief Embedding ids whose persisted memories currently carry retrieval
   /// induced forgetting suppression and therefore need recovery updates.
   std::unordered_set<long long> retrieval_suppression_embedding_ids;
+  /// @brief Memory ids whose persisted memories currently carry retrieval
+  /// induced forgetting suppression and therefore need recovery updates.
+  std::unordered_set<long long> retrieval_suppression_memory_ids;
 
   // ======================================================================
   // Sensitivity-Related State (Algorithms 3, 4, 16)
@@ -827,6 +833,18 @@ struct ProcessorContext
   }
 
   void
+  UpdateRetrievalSurfacePreActivationByMemory (long long memory_id,
+                                               double pre_activation)
+  {
+    auto it = retrieval_surface_index.find (memory_id);
+    if (it == retrieval_surface_index.end ())
+      {
+        return;
+      }
+    retrieval_surface_cache[it->second].pre_activation = pre_activation;
+  }
+
+  void
   DecayRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
                                                  double pad)
   {
@@ -844,11 +862,41 @@ struct ProcessorContext
   }
 
   void
+  DecayRetrievalSurfacePreActivationByMemory (long long memory_id, double pad)
+  {
+    auto it = retrieval_surface_index.find (memory_id);
+    if (it == retrieval_surface_index.end ())
+      {
+        return;
+      }
+    auto &entry = retrieval_surface_cache[it->second];
+    entry.pre_activation = std::max (0.0, entry.pre_activation * pad);
+    if (entry.pre_activation <= 1e-6)
+      {
+        entry.pre_activation = 0.0;
+      }
+  }
+
+  void
   BoostRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
                                                  double pad, double delta)
   {
     auto it = retrieval_surface_embedding_index.find (embedding_id);
     if (it == retrieval_surface_embedding_index.end ())
+      {
+        return;
+      }
+    auto &entry = retrieval_surface_cache[it->second];
+    entry.pre_activation = std::min (
+        1.0, std::max (0.0, entry.pre_activation) * pad + delta);
+  }
+
+  void
+  BoostRetrievalSurfacePreActivationByMemory (long long memory_id, double pad,
+                                              double delta)
+  {
+    auto it = retrieval_surface_index.find (memory_id);
+    if (it == retrieval_surface_index.end ())
       {
         return;
       }
@@ -893,6 +941,7 @@ struct ProcessorContext
 
   std::unordered_map<std::string, std::vector<long long>> index_store;
   std::unordered_map<long long, std::string> index_reverse;
+
   std::unordered_map<std::string, std::unordered_map<long long, double>> procedural_store;
   std::vector<AssociationCacheEntry> association_cache;
   std::unordered_map<long long, size_t> association_cache_index;
