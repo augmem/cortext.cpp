@@ -3280,8 +3280,80 @@ source tree with the same dynamic system GGML libraries used by the
 preserved old binary restored exact replay agreement: the dense replay
 produced `retr_diffs=0` and `rank_diffs=0` across 383 probes, and the
 full sparse replay produced `retr_diffs=0` and `rank_diffs=0` across 31
-probes. The local judge service was unavailable during this pass, so the
-historical 15-win A/B baseline still requires a follow-up judge run.
+probes.
+
+A fresh blind-judge run on 2026-06-28 then evaluated the current source
+tree on the same one-year sparse replay. The run processed 2,633 text
+messages after 102,166 skipped transcript messages, emitted 31 probes,
+and judged text-only structurally normalized blind packets with
+Gemma4-12B-AWQ served by vLLM at a 131,072-token context window. The
+protocol used three repetitions per probe, `judge_seed=42`, 2,000
+probe-bootstrap samples, `--max-media-per-system 0`, and
+`--blind-packets`; it completed 93/93 judgments with no missing rows.
+
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>Outcome</th>
+<th style="text-align: right;">Raw wins</th>
+<th style="text-align: right;">Win rate</th>
+<th style="text-align: right;">Probe-bootstrap 95% CI</th>
+<th style="text-align: right;">Mean context tokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cortext native</td>
+<td style="text-align: right;">47/93</td>
+<td style="text-align: right;">0.505</td>
+<td style="text-align: right;">[0.387, 0.624]</td>
+<td style="text-align: right;">467</td>
+</tr>
+<tr>
+<td>Traditional chat RAG</td>
+<td style="text-align: right;">16/93</td>
+<td style="text-align: right;">0.172</td>
+<td style="text-align: right;">[0.108, 0.247]</td>
+<td style="text-align: right;">7,447</td>
+</tr>
+<tr>
+<td>Full-history upper bound</td>
+<td style="text-align: right;">3/93</td>
+<td style="text-align: right;">0.032</td>
+<td style="text-align: right;">[0.000, 0.086]</td>
+<td style="text-align: right;">15,974</td>
+</tr>
+<tr>
+<td>Tie / unclear</td>
+<td style="text-align: right;">27/93</td>
+<td style="text-align: right;">0.290</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+</tbody>
+</table>
+
+Cortext’s single-repetition win counts were 14, 17, and 16 out of 31, so
+the three-repetition average is 15.7 wins per 31-probe pass and recovers
+the historical 15-win A/B level. Probe-majority aggregation gives
+Cortext 14/31, traditional RAG 2/31, full history 1/31, tie-or-unclear
+10/31, and four probes with 1-1-1 splits across repetitions. The token
+evidence remained strongly in Cortext’s favor: mean Cortext context was
+467 tokens versus 7,447 for traditional RAG, a 93.7% reduction. The
+final six probes triggered full-history prompt-fit trimming on all three
+repetitions, dropping 82 to 480 oldest full-history documents while
+preserving `judge_prompt_fits_context_window` and
+`full_history_prompt_fits_judge_context`; this constrains the
+full-history comparator rather than the Cortext packet. The aggregate
+artifact is
+`eval_runs/release_eval_20260628_gemma4_vllm/current_sparse_1y_system_ggml_20260628T0713Z/judge_vllm_gemma4_12b_awq_131k_rep3.json`.
 
 ## Experimental Interpretation
 
@@ -3296,10 +3368,13 @@ judging. The current branch asks a narrower product question:
 
 The answer is not fully settled by unit tests. The current evidence
 proves that the v1 runtime compiles, passes its retained behavioral
-suite, and no longer depends on deleted decoder paths. The next quality
-run should therefore be an external harness against frozen probes, with
-the evaluator outside this repository and with the repository treated as
-the production engine under test.
+suite, no longer depends on deleted decoder paths, structurally matches
+the preserved replay binary, and recovers the historical roughly-15/31
+blind-judge level on frozen one-year sparse probes while using
+substantially fewer context tokens. Broader quality claims still require
+replicated external harnesses against frozen probes, with the evaluator
+outside this repository and with the repository treated as the
+production engine under test.
 
 ## Reproducibility Notes
 
