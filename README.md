@@ -146,9 +146,30 @@ policy that appended reconstruction rows without advancing
 After restoring current-surface advancement and removing the experimental
 label-bucket graph from production, dense and full sparse replay runs matched
 the old binary exactly when built against the same system GGML runtime:
-`retr_diffs=0` and `rank_diffs=0`. The local judge service was unavailable
-during that pass, so historical blind-judge win counts still need a fresh judge
-run before being quoted as current release numbers.
+`retr_diffs=0` and `rank_diffs=0`.
+
+A fresh local blind-judge pass on 2026-06-28 used the same one-year sparse
+replay, with Gemma4-12B-AWQ served by vLLM at a 131,072-token context window.
+The judge saw text-only structurally normalized blind packets
+(`--max-media-per-system 0`, `--blind-packets`) for three repetitions per
+probe (`judge_seed=42`, `bootstrap_samples=2000`) and completed 93/93
+judgments.
+
+| Outcome | Raw wins | Per-31-probe equivalent | Mean context tokens |
+|---|---:|---:|---:|
+| Cortext native | 47/93 | 15.7/31 | 467 |
+| Traditional chat RAG | 16/93 | 5.3/31 | 7,447 |
+| Full-history upper bound | 3/93 | 1.0/31 | 15,974 |
+| Tie / unclear | 27/93 | 9.0/31 | n/a |
+
+Cortext's three single-repetition counts were 14, 17, and 16 wins out of 31,
+which brackets the historical 15-win A/B baseline. Probe-majority aggregation
+gives Cortext 14/31 because four probes split 1-1-1 across repetitions. Mean
+Cortext context was 467 tokens versus 7,447 for traditional RAG, a 93.7%
+context-token reduction. The final six probes required full-history prompt-fit
+trimming to stay inside the 131k judge window; this constrains the
+full-history comparator, not the Cortext packet. Artifact:
+`eval_runs/release_eval_20260628_gemma4_vllm/current_sparse_1y_system_ggml_20260628T0713Z/judge_vllm_gemma4_12b_awq_131k_rep3.json`.
 
 Use the replay executable for end-to-end memory behavior checks:
 
