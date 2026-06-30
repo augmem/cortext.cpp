@@ -116,7 +116,7 @@ QUALITY_COMPOSITE_WEIGHTS = {
 }
 QUALITY_SCORE_MAX = 5.0
 QUALITY_COMPOSITE_DEFINITION = "relevance + sufficiency - 0.25*noise"
-PACKET_ALIASES = ["A", "B", "C", "D"]
+PACKET_ALIASES = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
 USER_SOURCE_ID = "User"
 LEGACY_USER_SOURCE_ID = "Gabe"
 CONTACT_SOURCE_ID = "Contact"
@@ -149,9 +149,31 @@ BLIND_FORBIDDEN_TERMS = {
     "normal_rag",
     "full_history",
     "full history",
+    "vector_only_rag",
+    "semantic_rag",
+    "lexical_rag",
+    "keyword_rag",
+    "hybrid_rag",
+    "rolling_history",
+    "compaction_rollup",
     "upper_bound",
     "upper bound",
 }
+BASE_SYSTEMS_ALLOWED = {
+    "cortext_native",
+    "traditional_chat_rag",
+    "full_history_upper_bound",
+}
+RAG_ABLATION_TYPES = {
+    "vector_rag",
+    "lexical_rag",
+    "rolling_history",
+    "hybrid_history_vector",
+    "compacted_history",
+    "full_history_capped",
+}
+OPENAI_USAGE_TOTALS: Counter = Counter()
+OPENAI_USAGE_BY_MODEL: defaultdict[str, Counter] = defaultdict(Counter)
 SYSTEM_FAILURE_REASONS = {
     "missing_source_link",
     "temporal_drift",
@@ -284,6 +306,84 @@ def estimate_judge_prompt_tokens(content: str | list[dict]) -> int:
 
 def sum_doc_tokens(docs: list[TimelineDoc]) -> int:
     return sum(estimate_tokens(doc.text) for doc in docs)
+
+
+def cap_docs_by_token_budget(
+    docs: list[TimelineDoc], budget_tokens: int | None
+) -> list[TimelineDoc]:
+    if budget_tokens is None or budget_tokens < 0:
+        return docs
+    if budget_tokens <= 0:
+        return []
+    kept: list[TimelineDoc] = []
+    kept_tokens = 0
+    for doc in [d for d in docs if d.index < 0]:
+        doc_tokens = estimate_tokens(doc.text or "")
+        if kept_tokens + doc_tokens <= budget_tokens:
+            kept.append(doc)
+            kept_tokens += doc_tokens
+    real_docs = [d for d in docs if d.index >= 0]
+    for doc in reversed(real_docs):
+        doc_tokens = estimate_tokens(doc.text or "")
+        if kept_tokens + doc_tokens > budget_tokens:
+            continue
+        kept.append(doc)
+        kept_tokens += doc_tokens
+    kept_ids = {id(doc) for doc in kept}
+    return [doc for doc in docs if id(doc) in kept_ids]
+
+
+TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9']+")
+STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+    "had", "has", "have", "he", "her", "his", "i", "if", "in", "is", "it",
+    "its", "me", "my", "of", "on", "or", "our", "she", "so", "that", "the",
+    "their", "them", "then", "there", "they", "this", "to", "us", "was",
+    "we", "were", "what", "when", "where", "which", "who", "with", "you",
+    "your",
+}
+
+
+def lexical_terms(text: str) -> list[str]:
+    return [
+        term
+        for term in TOKEN_RE.findall(text.lower())
+        if len(term) > 2 and term not in STOPWORDS
+    ]
+
+
+def select_lexical_rag_docs(
+    prior_docs: list[TimelineDoc],
+    query_text: str,
+    top_k: int,
+    budget_tokens: int | None,
+) -> list[TimelineDoc]:
+    query_terms = Counter(lexical_terms(query_text))
+    if not query_terms or top_k <= 0:
+        return []
+    query_vocab = set(query_terms)
+    scored: list[tuple[float, int, int, TimelineDoc]] = []
+    for doc in prior_docs:
+        if doc.modality != "text" or doc.index < 0:
+            continue
+        doc_terms = Counter(lexical_terms(doc.text or ""))
+        if not doc_terms:
+            continue
+        overlap = query_vocab & set(doc_terms)
+        if not overlap:
+            continue
+        score = 0.0
+        for term in overlap:
+            # Deterministic BM25-like proxy without corpus-wide precomputation.
+            score += min(query_terms[term], doc_terms[term]) / math.sqrt(
+                1.0 + doc_terms[term]
+            )
+        score += 0.05 * len(overlap)
+        scored.append((score, doc.timestamp, doc.index, doc))
+    scored.sort(key=lambda row: (row[0], row[1], row[2]), reverse=True)
+    docs = [row[3] for row in scored[:top_k]]
+    docs.sort(key=lambda doc: doc.index)
+    return cap_docs_by_token_budget(docs, budget_tokens)
 
 
 def source_for_message(message: dict) -> str:
@@ -1103,6 +1203,74 @@ def load_judge_systems_config(out_path: pathlib.Path) -> dict:
         return {}
 
 
+def configured_base_systems(config: dict) -> list[str]:
+    raw = config.get("base_systems")
+    if raw is None:
+        return list(SYSTEMS)
+    if not isinstance(raw, list):
+        raise RuntimeError("judge_systems.json base_systems must be a list")
+    systems: list[str] = []
+    for item in raw:
+        name = str(item).strip()
+        if name not in BASE_SYSTEMS_ALLOWED:
+            raise RuntimeError(f"Unsupported base system in judge_systems.json: {name!r}")
+        if name not in systems:
+            systems.append(name)
+    if not systems:
+        raise RuntimeError("judge_systems.json base_systems cannot be empty")
+    return systems
+
+
+def configured_rag_ablation_specs(config: dict) -> list[dict]:
+    raw = config.get("rag_ablation_systems") or []
+    if not isinstance(raw, list):
+        raise RuntimeError("judge_systems.json rag_ablation_systems must be a list")
+    specs: list[dict] = []
+    seen: set[str] = set(BASE_SYSTEMS_ALLOWED) | {"compacting_session"}
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RuntimeError("Each rag_ablation_systems entry must be an object")
+        if not bool(item.get("enabled", True)):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise RuntimeError(f"Invalid RAG ablation system name: {name!r}")
+        if name in seen:
+            raise RuntimeError(f"Duplicate or reserved RAG ablation system name: {name!r}")
+        kind = str(item.get("type", "")).strip()
+        if kind not in RAG_ABLATION_TYPES:
+            raise RuntimeError(
+                f"Unsupported RAG ablation type for {name!r}: {kind!r}"
+            )
+        spec = dict(item)
+        spec["name"] = name
+        spec["type"] = kind
+        spec["top_k"] = int(spec.get("top_k", 5))
+        if "budget_tokens" in spec and spec["budget_tokens"] is not None:
+            spec["budget_tokens"] = int(spec["budget_tokens"])
+        else:
+            spec["budget_tokens"] = -1
+        specs.append(spec)
+        seen.add(name)
+    return specs
+
+
+def rag_ablation_description(spec: dict) -> str:
+    kind = str(spec.get("type", ""))
+    top_k = int(spec.get("top_k", 5))
+    budget = int(spec.get("budget_tokens", -1))
+    budget_text = "uncapped" if budget < 0 else f"capped at {budget} estimated tokens"
+    labels = {
+        "vector_rag": f"semantic vector RAG only, top {top_k}, {budget_text}",
+        "lexical_rag": f"deterministic lexical keyword RAG only, top {top_k}, {budget_text}",
+        "rolling_history": f"rolling prior chat context only, {budget_text}",
+        "hybrid_history_vector": f"rolling prior chat plus vector RAG, {budget_text}",
+        "compacted_history": f"deterministic compacted-history baseline only, {budget_text}",
+        "full_history_capped": f"prior text history capped for the judge prompt, {budget_text}",
+    }
+    return labels.get(kind, kind)
+
+
 def summarize_text_chunks(
     text: str,
     provider: str,
@@ -1677,7 +1845,23 @@ def post_json_openai(settings: dict[str, str], payload: dict, timeout_s: int) ->
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
-            return json.loads(response.read().decode("utf-8"))
+            raw = json.loads(response.read().decode("utf-8"))
+            usage = raw.get("usage") if isinstance(raw, dict) else None
+            if isinstance(usage, dict):
+                model = str(raw.get("model") or payload.get("model") or settings["model"])
+                for key in (
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                    "cached_tokens",
+                ):
+                    value = usage.get(key)
+                    if isinstance(value, (int, float)):
+                        OPENAI_USAGE_TOTALS[key] += int(value)
+                        OPENAI_USAGE_BY_MODEL[model][key] += int(value)
+                OPENAI_USAGE_TOTALS["requests"] += 1
+                OPENAI_USAGE_BY_MODEL[model]["requests"] += 1
+            return raw
     except TimeoutError as exc:
         raise JudgeCallTimeout("OpenAI judge request timed out") from exc
     except urllib.error.HTTPError as exc:
@@ -2273,6 +2457,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--dry-run-prompts",
+        action="store_true",
+        help=(
+            "Build and validate judge prompts without calling the judge. Useful "
+            "for context/budget planning before hosted runs."
+        ),
+    )
+    parser.add_argument(
         "--max-media-per-system",
         type=int,
         default=-1,
@@ -2477,6 +2669,8 @@ def main() -> int:
         timeline = build_timeline(input_dir, skip_messages, max_messages, media_limit)
 
     judge_systems_config = load_judge_systems_config(args.out)
+    base_systems = configured_base_systems(judge_systems_config)
+    rag_ablation_specs = configured_rag_ablation_specs(judge_systems_config)
     compacting_config = judge_systems_config.get("compacting_session") or {}
     compacting_enabled = bool(compacting_config.get("enabled"))
     if compacting_enabled and str(compacting_config.get("provider", "")).lower() == "openai":
@@ -2524,9 +2718,14 @@ def main() -> int:
     conn = connect_db(db_path)
     media_memory_map, media_memory_map_audit = build_media_memory_map(conn, timeline)
 
-    systems = list(SYSTEMS) + (
-        ["compacting_session"] if compacting_enabled else []
-    )
+    systems = list(base_systems) + [spec["name"] for spec in rag_ablation_specs]
+    if compacting_enabled and "compacting_session" not in systems:
+        systems.append("compacting_session")
+    if len(systems) > len(PACKET_ALIASES) and args.blind_packets:
+        raise RuntimeError(
+            f"{len(systems)} systems configured but only "
+            f"{len(PACKET_ALIASES)} packet aliases are available"
+        )
     fields = FIELDS
     totals = {system: Counter() for system in systems}
     judged: list[dict] = []
@@ -2545,6 +2744,7 @@ def main() -> int:
         )
     cortext_packet_source = Counter()
     early_stop: dict | None = None
+    dry_run_prompts: list[dict] = []
 
     checkpoint_rows = args.checkpoint_rows or args.out.with_name(args.out.name + ".rows.jsonl")
     checkpoint_rows.parent.mkdir(parents=True, exist_ok=True)
@@ -2693,9 +2893,10 @@ def main() -> int:
                 + [doc for doc in rag_docs if doc.index not in {row.index for row in rolling_docs}]
             )
             rag_packet_docs = prior_context_docs(rag_packet_docs, event_index)
-            full_docs = text_only_docs(
+            all_prior_text_docs = text_only_docs(
                 [doc for doc in timeline if doc.index < event_index]
             )
+            full_docs = list(all_prior_text_docs)
             # A real session that outgrows its context window loses its
             # OLDEST messages; emulate that here so the judge prompt always
             # fits and a blown-out full-history arm degrades by falloff
@@ -2749,14 +2950,67 @@ def main() -> int:
                 "traditional_chat_rag": rag_packet_docs,
                 "full_history_upper_bound": full_docs,
             }
+            for spec in rag_ablation_specs:
+                name = spec["name"]
+                kind = spec["type"]
+                top_k = int(spec.get("top_k", 5))
+                budget_tokens = int(spec.get("budget_tokens", -1))
+                if kind == "vector_rag":
+                    docs = text_only_docs(prior_context_docs(rag_docs[:top_k], event_index))
+                elif kind == "lexical_rag":
+                    docs = select_lexical_rag_docs(
+                        all_prior_text_docs,
+                        query_doc.text,
+                        top_k,
+                        budget_tokens if budget_tokens >= 0 else None,
+                    )
+                elif kind == "rolling_history":
+                    docs = text_only_docs(prior_context_docs(rolling_docs, event_index))
+                elif kind == "hybrid_history_vector":
+                    docs = list(rag_packet_docs)
+                elif kind == "compacted_history":
+                    docs = [compacted] if compacted is not None else []
+                elif kind == "full_history_capped":
+                    docs = list(all_prior_text_docs)
+                else:
+                    raise RuntimeError(f"unsupported RAG ablation type: {kind}")
+                if kind != "lexical_rag":
+                    docs = cap_docs_by_token_budget(
+                        docs,
+                        budget_tokens if budget_tokens >= 0 else None,
+                    )
+                packet_docs_by_system[name] = docs
             if compacting_enabled:
                 packet_docs_by_system["compacting_session"] = (
                     compacting_snapshots.get(event_index, [])
+                )
+                compacting_packet_budget = int(
+                    compacting_config.get(
+                        "packet_budget_tokens",
+                        compacting_config.get("budget_tokens", -1),
+                    )
+                )
+                packet_docs_by_system["compacting_session"] = (
+                    cap_docs_by_token_budget(
+                        packet_docs_by_system["compacting_session"],
+                        compacting_packet_budget
+                        if compacting_packet_budget >= 0
+                        else None,
+                    )
                 )
                 token_totals["compacting_session_tokens"] += sum(
                     estimate_tokens(doc.text or "")
                     for doc in packet_docs_by_system["compacting_session"]
                 )
+            packet_docs_by_system = {
+                system: packet_docs_by_system[system] for system in systems
+            }
+            system_context_tokens = {
+                system: sum_doc_tokens(select_packet_docs(docs, args.context_limit))
+                for system, docs in packet_docs_by_system.items()
+            }
+            for system, tokens in system_context_tokens.items():
+                token_totals[f"{system}_context_tokens"] += tokens
             for row in memory_rows:
                 docs = map_memory_to_docs(row, timeline, media_memory_map)
                 if docs:
@@ -2998,6 +3252,28 @@ def main() -> int:
                     for key, value in media_stats.get(system, {}).items():
                         media_attachment_totals[system][key] += int(value)
 
+                if args.dry_run_prompts:
+                    dry_run_prompts.append(
+                        {
+                            "event_index": event_index,
+                            "probe_event_index": declared_event_index,
+                            "repetition": repetition,
+                            "judge_prompt_tokens_estimate": judge_prompt_tokens_estimate,
+                            "prompt_budget_tokens": prompt_budget_tokens,
+                            "systems": {
+                                system: {
+                                    "docs": len(prompt_packet_docs_by_system[system]),
+                                    "context_tokens": int(
+                                        system_context_tokens.get(system, 0)
+                                    ),
+                                    "media_attachments": media_stats.get(system, {}),
+                                }
+                                for system in systems
+                            },
+                        }
+                    )
+                    continue
+
                 current_key = (event_index, repetition)
                 if current_key in completed_judgment_keys:
                     skipped_checkpoint_judgments += 1
@@ -3140,6 +3416,9 @@ def main() -> int:
                     if winner == system:
                         totals[system]["wins"] += 1
                     row["systems"][system] = {"judge_key": judge_key}
+                    row["systems"][system]["context_tokens"] = int(
+                        system_context_tokens.get(system, 0)
+                    )
                     for field in fields:
                         value = score(scores, judge_key, field)
                         raw_value = value
@@ -3266,6 +3545,14 @@ def main() -> int:
             "bootstrap_unit": "probe",
             "packet_surface": PACKET_SURFACE,
             "systems": systems,
+            "base_systems": base_systems,
+            "rag_ablation_systems": [
+                {
+                    **spec,
+                    "description": rag_ablation_description(spec),
+                }
+                for spec in rag_ablation_specs
+            ],
             "score_fields": fields,
             "quality_composite_definition": QUALITY_COMPOSITE_DEFINITION,
             "quality_composite_weights": QUALITY_COMPOSITE_WEIGHTS,
@@ -3290,6 +3577,18 @@ def main() -> int:
             "compacting_session": (
                 "session that summarizes itself when near its context budget"
             ),
+            "system_descriptions": {
+                **{
+                    "cortext_native": "native Cortext working memory plus STM/LTM graph retrieval",
+                    "traditional_chat_rag": "rolling text history until compaction plus text vector RAG hits",
+                    "full_history_upper_bound": "prior text history only",
+                    "compacting_session": "session that summarizes itself when near its context budget",
+                },
+                **{
+                    spec["name"]: rag_ablation_description(spec)
+                    for spec in rag_ablation_specs
+                },
+            },
             "daily_consolidation_required_for_release": True,
             "default_knobs_required_for_release": [0.5, 0.5, 0.5],
             "judge_media_capabilities": judge_media_capabilities,
@@ -3345,6 +3644,10 @@ def main() -> int:
             ),
             "mean_cortext_context_tokens": mean_cortext_context_tokens,
             "mean_traditional_chat_rag_tokens": mean_traditional_chat_rag_tokens,
+            "mean_context_tokens_by_system": {
+                system: token_totals[f"{system}_context_tokens"] / token_n
+                for system in systems
+            },
             "mean_cortext_token_savings_vs_traditional_chat_rag": (
                 token_savings_vs_traditional_chat_rag
             ),
@@ -3387,6 +3690,8 @@ def main() -> int:
         },
         "db_metrics": summarize_db(conn),
         "judged": len(judged),
+        "dry_run_prompts_only": bool(args.dry_run_prompts),
+        "dry_run_prompts": dry_run_prompts,
         "expected_judgments": expected_judgments,
         "missing_judgments": max(0, expected_judgments - len(judged)),
         "judgment_complete": (
@@ -3477,9 +3782,28 @@ def main() -> int:
             "audio_policy": JUDGE_MEDIA_AUDIO_POLICY,
             "image_policy": JUDGE_MEDIA_IMAGE_POLICY,
             "video_policy": JUDGE_MEDIA_VIDEO_POLICY,
-            "cortext_native": dict(media_attachment_totals["cortext_native"]),
-            "traditional_chat_rag": dict(media_attachment_totals["traditional_chat_rag"]),
-            "full_history_upper_bound": dict(media_attachment_totals["full_history_upper_bound"]),
+            "cortext_native": dict(media_attachment_totals.get("cortext_native", {})),
+            "traditional_chat_rag": dict(
+                media_attachment_totals.get("traditional_chat_rag", {})
+            ),
+            "full_history_upper_bound": dict(
+                media_attachment_totals.get("full_history_upper_bound", {})
+            ),
+            "by_system": {
+                system: dict(media_attachment_totals[system])
+                for system in systems
+            },
+        },
+        "openai_usage": {
+            "this_process": dict(OPENAI_USAGE_TOTALS),
+            "by_model": {
+                model: dict(counter)
+                for model, counter in OPENAI_USAGE_BY_MODEL.items()
+            },
+            "note": (
+                "Usage is captured from OpenAI API responses made by this process; "
+                "checkpoint-resumed rows from previous invocations are not re-billed here."
+            ),
         },
         "judgments": judged,
     }

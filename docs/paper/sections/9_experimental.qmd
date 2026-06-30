@@ -198,6 +198,40 @@ claim: mean sufficiency was lower for Cortext (4.41) than traditional chat+RAG
 is
 `eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
 
+### 128k RAG-Ablation Probe
+
+A follow-up ablation used the same 9 MSC probes, three hosted `gpt-5.5`
+blind repetitions per probe, `judge_seed=42`, and a 128,000-token judge-context
+cap. This run removed the full-history arm and compared Cortext against capped
+RAG-style packet variants:
+
+* semantic vector RAG only, top 5 prior hits;
+* deterministic lexical keyword RAG only, top 5 prior hits;
+* rolling-window chat context capped at 16k estimated packet tokens;
+* hybrid rolling-window plus vector RAG capped at 16k estimated packet tokens;
+* the existing hosted compaction-session rollup, capped to 8k estimated packet
+  tokens for the judge prompt.
+
+The run completed 27/27 judgments. The max estimated judge prompt was 116,425
+tokens under the 128,000-token cap, and the strict prompt/context/fairness gates
+passed. Actual OpenAI API usage captured from responses was 1,871,994 prompt
+tokens and 39,001 completion tokens across 27 judge requests.
+
+| Outcome | Raw wins | Win rate | Probe-bootstrap 95% CI | Mean sufficiency | Mean noise | Mean context tokens |
+|---|---:|---:|---:|---:|---:|---:|
+| Cortext native | 19/27 | 0.704 | [0.407, 0.926] | 4.48 | 1.89 | 816 |
+| Semantic vector RAG | 0/27 | 0.000 | [0.000, 0.000] | 0.67 | 3.46 | 88 |
+| Lexical keyword RAG | 0/27 | 0.000 | [0.000, 0.000] | 0.96 | 3.57 | 224 |
+| Rolling-window chat | 0/27 | 0.000 | [0.000, 0.000] | 4.63 | 4.48 | 15,999 |
+| Hybrid chat+vector RAG | 0/27 | 0.000 | [0.000, 0.000] | 4.78 | 4.43 | 15,999 |
+| Hosted compaction rollup | 8/27 | 0.296 | [0.074, 0.593] | 4.70 | 3.32 | 7,110 |
+
+This ablation supports a narrower claim than the full-history frontier result:
+under a 128k judge-context cap, Cortext retained most wins while substantially
+reducing context and judged noise against retrieval-only, rolling-context,
+hybrid RAG, and compaction-style packet variants. The aggregate artifact is
+`eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
+
 ## Experimental Interpretation
 
 The hard-cut branch changes the research question. Earlier results asked how
