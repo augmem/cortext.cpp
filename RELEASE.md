@@ -1,29 +1,96 @@
-# Cortext 1.0 Release Checklist
+# Cortext v1.0 Release Artifact
 
-This checklist is the minimum evidence for a v1 tag.
+This file is the tracked release artifact for the v1.0 line. The `v1.0` and
+`v1.0.0` tags should point at the commit that contains this artifact.
+
+## Release State
+
+- Version: `1.0.0`
+- Runtime: hard-cut production engine, limited to embedding-backed memory,
+  durable graph associations, bounded retrieval, and shallow consolidation.
+- Removed research stack: decoder, provider registry, semantic extractor,
+  summarizer, static label bank, fact layer, label-bucket graph, and
+  mode-selected deep consolidation.
+- Public API status: C++ facade, C ABI, and binding entry points remain the
+  release surface for this tag.
 
 ## Version Surfaces
 
-- `CMakeLists.txt` project version.
-- `bindings/python/pyproject.toml`.
-- `bindings/javascript/package.json`.
-- `bindings/dart/pubspec.yaml`.
-- `build.zig`.
+The tracked package surfaces now report `1.0.0`:
+
+- `CMakeLists.txt`
+- `bindings/python/pyproject.toml`
+- `bindings/javascript/package.json`
+- `bindings/dart/pubspec.yaml`
+- `build.zig`
+- `build.zig.zon`
 
 `cortext_version()` and every FFI package should report the same version.
 
-## Native Build Gate
+## Current Evidence
 
-Install a C++20 compiler and CMake. SQLite is built from the bundled
-`third_party/sqlite` source tree.
+The current v1.0 public evidence is the hosted Meta Multi-Session Chat eval on
+the public `nayohan/multi_session_chat` mirror, plus the 128k RAG ablation and
+post-optimization full replay verification.
+
+### Hosted Frontier Judge
+
+- Artifact:
+  `eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`
+- Replay: 9,130 text turns from 708 public MSC rows.
+- Protocol: daily source-time consolidation at 02:00 UTC, 5,000-event warmup,
+  500-event probe stride, 9 probes, 3 hosted `gpt-5.5` blind judgments per
+  probe, 27/27 judgments complete.
+- Result: Cortext won 21/27, traditional chat+RAG won 0/27, full-history upper
+  bound won 1/27, hosted compaction rollup won 5/27.
+- Mean context: Cortext 998 tokens versus traditional chat+RAG 49,196 tokens,
+  a 97.97% reduction with probe-bootstrap 95% CI [97.77%, 98.17%].
+- Caveat: this supports token-reduction, noise-reduction, and blind-win claims;
+  it is not a completed sufficiency-match claim.
+
+### 128k RAG Ablation
+
+- Artifact:
+  `eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`
+- Protocol: same 9 MSC probes, 3 hosted `gpt-5.5` blind judgments per probe,
+  128,000-token judge-context cap, 27/27 judgments complete.
+- Systems: Cortext native, semantic vector RAG, lexical keyword RAG,
+  rolling-window chat, 16k hybrid chat+vector RAG, hosted compaction rollup.
+- Result: Cortext won 19/27, hosted compaction rollup won 8/27, and all four
+  RAG-style packet variants won 0/27.
+- Prompt cap: max estimated judge prompt 116,425 tokens under the 128,000-token
+  cap.
+- OpenAI usage: 1,871,994 prompt tokens and 39,001 completion tokens across 27
+  judge requests.
+
+### Full MSC Latency Verification
+
+- Artifact:
+  `build/graph_profile/full_msc_verify_rerun_20260630T142345Z/summary.json`
+- Replay: same 9,130-turn MSC slice, same default knobs, daily consolidation,
+  5,000-event warmup, and 500-event probe stride.
+- Completion: 9 probes, 714 consolidations, 10,099 memories, 9,364 long-term
+  memories, 21 working-memory rows, and 17,719 associations.
+- Behavior: recursive non-timing probe content matched the saved frontier
+  artifact and the prior post-optimization replay.
+- Latency: judged probe total latency was 50.4-80.2 ms, mean 63.5 ms;
+  `GraphRetrieve.total` was 22.2-29.2 ms, mean 25.9 ms.
+
+Full protocol details are recorded in `docs/paper/sections/9_experimental.qmd`,
+`docs/paper/sections/11_optimization.qmd`, and the generated manuscript at
+`docs/paper/_manuscript/index.md`.
+
+## Build Gate
 
 ```bash
-cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+cmake -S . -B build/release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCORTEXT_DISABLE_OPENTELEMETRY=ON
 cmake --build build/release -j
 ./build/release/tests/cortext_tests '~[aist]' --reporter compact
 ```
 
-Run the AIST-tagged tests separately on a host with the model installed.
+Run AIST-tagged tests separately on a host with the model installed:
 
 ```bash
 ./build/release/tests/cortext_tests '[aist]' --reporter compact
@@ -43,25 +110,10 @@ node -e "const c=require('./bindings/javascript'); if (c.version() !== '1.0.0') 
 
 ## Browser WebAssembly Gate
 
-Install or source Emscripten, then build:
-
 ```bash
 ./build-wasm.sh
 test -s build-wasm/dist/wasm/cortext.js
 test -s build-wasm/dist/wasm/cortext.wasm
-```
-
-For a browser demo, serve the repository root and open `examples/web/`.
-
-```bash
-python3 -m http.server 8000
-```
-
-The demo can load `AIST-87M_q8_0.gguf` from a file picker, or the model can be
-preloaded into `/models` at build time:
-
-```bash
-./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODELS_DIR="$PWD/models/AIST-87M-GGUF"
 ```
 
 ## CI Gate
