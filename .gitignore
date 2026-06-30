@@ -119,6 +119,7 @@ coverage.info
 objects/
 data/
 !data/
+data/raw/
 data/emotion/
 data/ravdess/
 models/
