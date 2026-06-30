@@ -3355,6 +3355,105 @@ full-history comparator rather than the Cortext packet. The aggregate
 artifact is
 `eval_runs/release_eval_20260628_gemma4_vllm/current_sparse_1y_system_ggml_20260628T0713Z/judge_vllm_gemma4_12b_awq_131k_rep3.json`.
 
+### Hosted Meta MSC Frontier-Judge Probe
+
+On 2026-06-30, a hosted frontier-judge probe evaluated a public Meta
+Multi-Session Chat validation slice materialized from the Hugging Face
+`nayohan/multi_session_chat` mirror. The materializer produced a
+deterministic chat replay with 708 dataset rows and 9,130 text turns.
+The replay used the default production knobs (`F=S=T=0.5`), daily
+source-time consolidation at 02:00 UTC, a 49,152-token active-history
+budget for the standard chat baseline, a 5,000-event warmup, and
+500-event probe stride, yielding 9 judged probes.
+
+The judge was hosted `gpt-5.5` through OpenAI Chat Completions. The
+protocol used three blind repetitions per probe, `judge_seed=42`, 2,000
+probe-bootstrap samples, `--max-media-per-system 0`, a 1,000,000-token
+judge-context setting, and four text-only systems:
+
+-   Cortext native working memory plus STM/LTM graph retrieval;
+-   traditional chat+RAG, using rolling text history until compaction
+    plus text RAG hits from the same prior event stream;
+-   full-history upper bound over all prior text history; and
+-   a hosted `gpt-5.5` compacting-session rollup baseline.
+
+The run completed 27/27 judgments. The strict gates passed:
+`judge_prompt_fits_context_window`,
+`full_history_prompt_fits_judge_context`,
+`no_future_context_violations`, `no_current_turn_context_inclusions`,
+`blind_prompt_hidden_labels_absent`, `traditional_chat_rag_text_only`,
+and `full_history_text_only`.
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>Outcome</th>
+<th style="text-align: right;">Raw wins</th>
+<th style="text-align: right;">Win rate</th>
+<th style="text-align: right;">Probe-bootstrap 95% CI</th>
+<th style="text-align: right;">Mean sufficiency</th>
+<th style="text-align: right;">Mean noise</th>
+<th style="text-align: right;">Mean context tokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cortext native</td>
+<td style="text-align: right;">21/27</td>
+<td style="text-align: right;">0.778</td>
+<td style="text-align: right;">[0.519, 0.963]</td>
+<td style="text-align: right;">4.41</td>
+<td style="text-align: right;">1.85</td>
+<td style="text-align: right;">998</td>
+</tr>
+<tr>
+<td>Traditional chat RAG</td>
+<td style="text-align: right;">0/27</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">[0.000, 0.000]</td>
+<td style="text-align: right;">4.67</td>
+<td style="text-align: right;">4.70</td>
+<td style="text-align: right;">49,196</td>
+</tr>
+<tr>
+<td>Full-history upper bound</td>
+<td style="text-align: right;">1/27</td>
+<td style="text-align: right;">0.037</td>
+<td style="text-align: right;">[0.000, 0.111]</td>
+<td style="text-align: right;">4.52</td>
+<td style="text-align: right;">5.00</td>
+<td style="text-align: right;">185,439</td>
+</tr>
+<tr>
+<td>Hosted compaction rollup</td>
+<td style="text-align: right;">5/27</td>
+<td style="text-align: right;">0.185</td>
+<td style="text-align: right;">[0.037, 0.444]</td>
+<td style="text-align: right;">4.63</td>
+<td style="text-align: right;">3.63</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+</tbody>
+</table>
+
+Mean Cortext context was 998 tokens versus 49,196 for traditional
+chat+RAG, a 97.97% context-token reduction with probe-bootstrap 95% CI
+\[97.77%, 98.17%\]. This hosted public-benchmark result therefore
+supports a strong token-reduction, noise-reduction, and blind-win claim,
+but not a completed sufficiency-match claim: mean sufficiency was lower
+for Cortext (4.41) than traditional chat+RAG (4.67) and the hosted
+compaction rollup baseline (4.63). The aggregate artifact is
+`eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
+
 ## Experimental Interpretation
 
 The hard-cut branch changes the research question. Earlier results asked

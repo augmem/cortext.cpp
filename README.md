@@ -225,6 +225,35 @@ Cortext's three single-repetition counts were 14, 17, and 16 wins out of 31,
 which brackets the historical 15-win A/B baseline. Mean Cortext context was 467
 tokens versus 7,447 for traditional RAG, a 93.7% context-token reduction.
 
+On 2026-06-30, a hosted frontier-judge pass evaluated a public Meta
+Multi-Session Chat validation slice materialized from the Hugging Face
+`nayohan/multi_session_chat` mirror. The replay processed 9,130 text turns from
+708 rows, used daily source-time consolidation at 02:00 UTC, warmed up for 5,000
+events, and judged 9 probes at 500-event intervals. The judge was `gpt-5.5`
+through hosted OpenAI Chat Completions with a 1,000,000-token context setting,
+three blind repetitions per probe, `judge_seed=42`, and 2,000 bootstrap samples.
+All 27/27 judgments completed with four text-only systems: Cortext native,
+traditional chat+RAG, full-history upper bound, and a hosted `gpt-5.5`
+compacting-session rollup baseline. The strict gates passed:
+`judge_prompt_fits_context_window`, `full_history_prompt_fits_judge_context`,
+no future/current-turn context leakage, hidden labels absent, and text-only RAG
+baselines.
+
+| Outcome | Raw wins | Win rate | Probe-bootstrap 95% CI | Mean sufficiency | Mean noise | Mean context tokens |
+|---|---:|---:|---:|---:|---:|---:|
+| Cortext native | 21/27 | 0.778 | [0.519, 0.963] | 4.41 | 1.85 | 998 |
+| Traditional chat RAG | 0/27 | 0.000 | [0.000, 0.000] | 4.67 | 4.70 | 49,196 |
+| Full-history upper bound | 1/27 | 0.037 | [0.000, 0.111] | 4.52 | 5.00 | 185,439 |
+| Hosted compaction rollup | 5/27 | 0.185 | [0.037, 0.444] | 4.63 | 3.63 | n/a |
+
+Mean Cortext context was 998 tokens versus 49,196 for traditional chat+RAG, a
+97.97% context-token reduction with a probe-bootstrap 95% CI of
+[97.77%, 98.17%]. This result is strong on token reduction, judge wins, and
+noise, but it is not yet a full sufficiency-match claim: traditional chat+RAG
+had higher mean sufficiency (4.67 versus 4.41), and the hosted compaction
+baseline was also higher at 4.63. The aggregate artifact is
+`eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
+
 The full protocol and artifact path are recorded in
 `docs/paper/sections/9_experimental.qmd` and the generated manuscript at
 `docs/paper/_manuscript/index.md`.
@@ -235,6 +264,7 @@ Replay and harness tools:
 cmake --build build -j --target cortext_chat_replay_live_run
 ./build/examples/benchmark/cortext_chat_replay_live_run --help
 python scripts/run_memory_harness.py --max-conversations 2 --max-turns 360 --max-total 720 --no-multi
+scripts/run_msc_frontier_judge.sh
 ```
 
 ## C ABI And FFI
