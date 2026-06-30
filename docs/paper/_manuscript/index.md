@@ -3736,9 +3736,11 @@ path</td>
 <tr>
 <td>retrieval seed surface</td>
 <td>current-memory embedding lookup instead of all reconstruction
-versions</td>
-<td>latest reconstruction remains visible without unbounded scan
-growth</td>
+versions; recent seed and same-source expansion use the live retrieval
+surface cache before SQL fallback</td>
+<td>latest reconstruction remains visible without unbounded scan growth,
+and source-neighbor behavior is preserved without per-seed table
+scans</td>
 </tr>
 <tr>
 <td>graph expansion</td>
@@ -3772,6 +3774,18 @@ needs it</td>
 The important correctness point is that these are implementation changes
 to the retained engine. They do not reintroduce the removed semantic
 batch stack.
+
+On 2026-06-30, a full Meta MSC replay rerun verified the retrieval-cache
+optimization on the same 9,130-turn slice used for the hosted
+frontier-judge artifact. The run preserved native probe behavior
+exactly: all non-timing probe fields, retrieved/working memory IDs,
+retrieval counts, memory counts, and consolidation counts matched the
+saved baseline. At 1,000-event progress checkpoints,
+`GraphRetrieve.total` was 13.7-27.7 ms after optimization versus
+31.4-323.5 ms in the baseline. Across the 9 judged probe turns,
+`GraphRetrieve.total` was 21.8-28.6 ms after optimization versus
+81.6-303.6 ms in the baseline. The verification artifact is
+`build/graph_profile/full_msc_verify_final/summary.json`.
 
 ## Verification Gates
 

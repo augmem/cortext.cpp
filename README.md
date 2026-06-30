@@ -49,6 +49,14 @@ no future or current-turn leakage, hidden labels absent, text-only RAG
 baselines. Artifact:
 `eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
 
+A post-optimization full replay on the same 9,130-turn MSC slice preserved the
+native probe behavior exactly while flattening graph-retrieval latency. The 9
+progress checkpoints reported `GraphRetrieve.total` between 13.7 ms and 27.7
+ms, and the 9 judged probe turns reported 21.8-28.6 ms. Non-timing probe fields,
+retrieved/working memory IDs, retrieval counts, memory counts, and consolidation
+counts matched the saved baseline exactly. Artifact:
+`build/graph_profile/full_msc_verify_final/summary.json`.
+
 An earlier local blind-judge pass (2026-06-28) on a one-year sparse replay,
 judged by Gemma4-12B-AWQ over vLLM at a 131,072-token context, completed 93/93
 judgments.
