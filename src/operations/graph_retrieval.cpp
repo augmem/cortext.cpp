@@ -414,6 +414,74 @@ InsertOrBoost (std::unordered_map<long long, Candidate> &candidates,
     }
 }
 
+bool
+SourceExpansionSurfaceEligible (
+    const ProcessorContext::RetrievalSurfaceEntry &entry,
+    const Candidate &seed, std::uint64_t exclusion_ts, int embedding_dim)
+{
+  if (entry.memory_id <= 0 || entry.memory_id == seed.memory_id
+      || entry.embedding_id <= 0 || entry.start_ts <= 0
+      || entry.source_id != seed.source_id
+      || (entry.kind != "LONG_TERM" && entry.kind != "ASSOCIATION")
+      || entry.embedding.size () != embedding_dim)
+    {
+      return false;
+    }
+  return static_cast<std::uint64_t> (entry.start_ts) < exclusion_ts;
+}
+
+std::vector<const ProcessorContext::RetrievalSurfaceEntry *>
+SourceExpansionRowsFromSurface (const ProcessorContext &p_ctx,
+                                const Candidate &seed,
+                                std::uint64_t exclusion_ts,
+                                int embedding_dim, int limit)
+{
+  std::vector<const ProcessorContext::RetrievalSurfaceEntry *> rows;
+  if (seed.memory_id <= 0 || seed.source_id.empty () || seed.start_ts <= 0
+      || limit <= 0)
+    {
+      return rows;
+    }
+
+  for (const auto &entry : p_ctx.retrieval_surface_cache)
+    {
+      if (SourceExpansionSurfaceEligible (entry, seed, exclusion_ts,
+                                          embedding_dim))
+        {
+          rows.push_back (&entry);
+        }
+    }
+
+  auto by_source_neighbor_order = [&seed] (
+                                      const auto *a,
+                                      const auto *b) {
+    const long long a_gap = std::llabs (a->start_ts - seed.start_ts);
+    const long long b_gap = std::llabs (b->start_ts - seed.start_ts);
+    if (a_gap != b_gap)
+      {
+        return a_gap < b_gap;
+      }
+    if (a->start_ts != b->start_ts)
+      {
+        return a->start_ts < b->start_ts;
+      }
+    return a->memory_id < b->memory_id;
+  };
+
+  if (static_cast<int> (rows.size ()) > limit)
+    {
+      std::partial_sort (
+          rows.begin (), rows.begin () + limit, rows.end (),
+          by_source_neighbor_order);
+      rows.resize (static_cast<std::size_t> (limit));
+    }
+  else
+    {
+      std::sort (rows.begin (), rows.end (), by_source_neighbor_order);
+    }
+  return rows;
+}
+
 } // namespace
 
 void
@@ -457,28 +525,110 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       = !constructive_recall::Disabled ();
   const bool source_seed_expansion_enabled
       = !SourceSeedGraphExpansionDisabled ();
+  const bool profile_graph_retrieval = EnvFlag (
+      "CORTEXT_PROFILE_GRAPH_RETRIEVAL");
+  auto profile_timing =
+      [&context, profile_graph_retrieval] (
+          std::string_view name,
+          std::chrono::steady_clock::time_point section_start) {
+    if (!profile_graph_retrieval)
+      {
+        return;
+      }
+    context.AddOperationTiming (
+        name,
+        std::chrono::duration<double, std::milli> (
+            std::chrono::steady_clock::now () - section_start)
+            .count ());
+  };
   auto &p_ctx = context.GetProcessorContext ();
 
   std::vector<std::map<std::string, std::any>> rows;
   std::unordered_set<long long> seen_seed_memory_ids;
-  auto recent_rows = tx.Execute (
-      "SELECT m.memory_id, m.embedding_id, m.start_ts, e.embedding, "
-      "       m.source_id "
-      "FROM memories m "
-      "JOIN embeddings e ON e.embedding_id = m.embedding_id "
-      "WHERE m.embedding_id IS NOT NULL "
-      "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-      "  AND COALESCE(m.start_ts, 0) < ? "
-      "ORDER BY m.memory_id DESC LIMIT ?",
-      { static_cast<long long> (exclusion_ts),
-        static_cast<long long> (
-            std::max (seed_search_limit, output_limit * 4)) });
-  AppendUniqueRows (rows, std::move (recent_rows), seen_seed_memory_ids);
+  std::vector<Candidate> cached_recent_seeded;
+  std::chrono::steady_clock::time_point section_start;
+  auto start_profile_timing = [&section_start, profile_graph_retrieval] {
+    if (profile_graph_retrieval)
+      {
+        section_start = std::chrono::steady_clock::now ();
+      }
+  };
+  start_profile_timing ();
+  const int recent_seed_limit = std::max (seed_search_limit,
+                                          output_limit * 4);
+  if (constructive_recall_enabled
+      && !p_ctx.retrieval_surface_cache.empty ())
+    {
+      std::vector<const ProcessorContext::RetrievalSurfaceEntry *> recent;
+      recent.reserve (static_cast<std::size_t> (recent_seed_limit));
+      for (const auto &entry : p_ctx.retrieval_surface_cache)
+        {
+          const bool outside_time_window
+              = entry.start_ts >= 0
+                && static_cast<std::uint64_t> (entry.start_ts)
+                       >= exclusion_ts;
+          if (entry.memory_id <= 0 || entry.embedding_id <= 0
+              || entry.embedding.size () != signal.embedding.size ()
+              || (entry.kind != "LONG_TERM" && entry.kind != "ASSOCIATION")
+              || outside_time_window)
+            {
+              continue;
+            }
+          recent.push_back (&entry);
+        }
+      std::sort (recent.begin (), recent.end (),
+                 [] (const auto *a, const auto *b) {
+        return a->memory_id > b->memory_id;
+      });
+      if (static_cast<int> (recent.size ()) > recent_seed_limit)
+        {
+          recent.resize (static_cast<std::size_t> (recent_seed_limit));
+        }
+      cached_recent_seeded.reserve (recent.size ());
+      for (const auto *entry : recent)
+        {
+          if (!seen_seed_memory_ids.insert (entry->memory_id).second)
+            {
+              continue;
+            }
+          Candidate candidate;
+          candidate.memory_id = entry->memory_id;
+          candidate.embedding_id = entry->embedding_id;
+          candidate.source_id = entry->source_id;
+          candidate.start_ts = entry->start_ts;
+          candidate.embedding = entry->embedding;
+          candidate.seed_score = core::Map01 (
+              Cosine (signal.embedding, candidate.embedding));
+          candidate.temporal_score = TemporalScore (
+              signal.timestamp, candidate.start_ts, F, S, T);
+          candidate.score = seed_weight * candidate.seed_score
+                            + temporal_weight * candidate.temporal_score;
+          cached_recent_seeded.push_back (std::move (candidate));
+        }
+    }
+  else
+    {
+      auto recent_rows = tx.Execute (
+          "SELECT m.memory_id, m.embedding_id, m.start_ts, e.embedding, "
+          "       m.source_id "
+          "FROM memories m "
+          "JOIN embeddings e ON e.embedding_id = m.embedding_id "
+          "WHERE m.embedding_id IS NOT NULL "
+          "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+          "  AND COALESCE(m.start_ts, 0) < ? "
+          "ORDER BY m.memory_id DESC LIMIT ?",
+          { static_cast<long long> (exclusion_ts),
+            static_cast<long long> (recent_seed_limit) });
+      AppendUniqueRows (rows, std::move (recent_rows),
+                        seen_seed_memory_ids);
+    }
+  profile_timing ("GraphRetrieve.seed_recent", section_start);
 
     {
       bool historical_knn_loaded = false;
       try
         {
+          start_profile_timing ();
           auto current_knn_rows = tx.Execute (
               "SELECT m.memory_id, cme.embedding_id, m.start_ts, "
               "       cme.embedding, m.source_id "
@@ -499,6 +649,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                                   || !current_knn_rows.empty ();
           AppendUniqueRows (rows, std::move (current_knn_rows),
                             seen_seed_memory_ids);
+          profile_timing ("GraphRetrieve.seed_current_knn_sql",
+                          section_start);
         }
       catch (const std::exception &e)
         {
@@ -508,6 +660,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         }
       try
         {
+          start_profile_timing ();
           auto historical_knn_rows = tx.Execute (
               "SELECT m.memory_id, m.embedding_id, m.start_ts, e.embedding, "
               "       m.source_id "
@@ -526,6 +679,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                                   || !historical_knn_rows.empty ();
           AppendUniqueRows (rows, std::move (historical_knn_rows),
                             seen_seed_memory_ids);
+          profile_timing ("GraphRetrieve.seed_historical_knn_sql",
+                          section_start);
         }
       catch (const std::exception &e)
         {
@@ -534,6 +689,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
               { telemetry::Attribute::String ("error", e.what ()) });
         }
 
+      start_profile_timing ();
       const auto seed_bounds = tx.Execute (
           "SELECT COALESCE(MIN(m.memory_id), 0) AS min_memory_id, "
           "       COALESCE(MAX(m.memory_id), 0) AS max_memory_id "
@@ -593,12 +749,18 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                 }
             }
         }
+      profile_timing ("GraphRetrieve.seed_fallback_sql", section_start);
     }
 
+  start_profile_timing ();
   std::vector<Candidate> seeded;
-  seeded.reserve (rows.size ());
+  seeded.reserve (rows.size () + cached_recent_seeded.size ());
   std::unordered_map<long long, Candidate> candidates;
-  candidates.reserve (rows.size ());
+  candidates.reserve (rows.size () + cached_recent_seeded.size ());
+  for (auto &candidate : cached_recent_seeded)
+    {
+      seeded.push_back (std::move (candidate));
+    }
   for (const auto &row : rows)
     {
       Candidate candidate;
@@ -633,7 +795,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                         + temporal_weight * candidate.temporal_score;
       seeded.push_back (candidate);
     }
+  profile_timing ("GraphRetrieve.seed_materialize", section_start);
 
+  start_profile_timing ();
   std::sort (seeded.begin (), seeded.end (), [] (const Candidate &a,
                                                  const Candidate &b) {
     if (a.score != b.score)
@@ -651,9 +815,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       InsertOrBoost (candidates, std::move (candidate));
     }
   std::vector<Candidate> source_expansion_seeds = seeded;
+  profile_timing ("GraphRetrieve.seed_rank", section_start);
 
   if (fanout > 0 && !seeded.empty ())
     {
+      start_profile_timing ();
       std::vector<std::any> params;
       params.reserve (seeded.size () + 2);
       std::string values;
@@ -738,6 +904,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                             + temporal_weight * candidate.temporal_score;
           InsertOrBoost (candidates, std::move (candidate));
         }
+      profile_timing ("GraphRetrieve.association_expansion", section_start);
     }
 
   const int source_radius = std::max (
@@ -751,351 +918,414 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
 
   if (source_seed_expansion_enabled)
     {
-    for (const auto &seed : source_expansion_seeds)
-      {
-        if (source_expansions >= source_expansion_limit)
-          {
-            break;
-          }
-        auto seed_it = p_ctx.retrieval_surface_index.find (seed.memory_id);
-        if (seed_it == p_ctx.retrieval_surface_index.end ())
-          {
-            continue;
-          }
-        const auto &seed_entry
-            = p_ctx.retrieval_surface_cache[seed_it->second];
-        if (seed_entry.source_id.empty () || seed_entry.start_ts <= 0)
-          {
-            continue;
-          }
-        p_ctx.EnsureRetrievalSurfaceSourceIndexSorted (seed_entry.source_id);
-        auto source_it
-            = p_ctx.retrieval_surface_source_index.find (seed_entry.source_id);
-        if (source_it == p_ctx.retrieval_surface_source_index.end ())
-          {
-            continue;
-          }
-        const auto &source_entries = source_it->second;
-        auto pos = std::find_if (
-            source_entries.begin (), source_entries.end (),
-            [&] (const auto &entry) {
-              return entry.memory_id == seed_entry.memory_id;
-            });
-        if (pos == source_entries.end ())
-          {
-            continue;
-          }
-        const auto center = static_cast<int> (
-            std::distance (source_entries.begin (), pos));
-        const int begin = std::max (0, center - source_radius);
-        const int end = std::min (
-            static_cast<int> (source_entries.size ()),
-            center + source_radius + 1);
-        std::vector<int> neighbor_positions;
-        neighbor_positions.reserve (static_cast<std::size_t> (end - begin));
-        for (int i = begin; i < end; ++i)
-          {
-            if (i != center)
-              {
-                neighbor_positions.push_back (i);
-              }
-          }
-        bool natural_first_is_stale = false;
-        bool has_fresh_signal_neighbor = false;
-        if (!neighbor_positions.empty ())
-          {
-            const auto &natural_first = source_entries[
-                static_cast<std::size_t> (neighbor_positions.front ())];
-            natural_first_is_stale
-                = std::llabs (natural_first.start_ts - seed_entry.start_ts)
-                  > kStaleSourceNeighborGapMs;
-            for (const int position : neighbor_positions)
-              {
-                const auto &entry = source_entries[
-                    static_cast<std::size_t> (position)];
-                if (std::llabs (
-                        static_cast<long long> (signal.timestamp)
-                        - entry.start_ts)
-                    <= kFreshSourceNeighborToSignalGapMs)
+      start_profile_timing ();
+      for (const auto &seed : source_expansion_seeds)
+        {
+          if (source_expansions >= source_expansion_limit)
+            {
+              break;
+            }
+          auto seed_it = p_ctx.retrieval_surface_index.find (seed.memory_id);
+          if (seed_it == p_ctx.retrieval_surface_index.end ())
+            {
+              continue;
+            }
+          const auto &seed_entry
+              = p_ctx.retrieval_surface_cache[seed_it->second];
+          if (seed_entry.source_id.empty () || seed_entry.start_ts <= 0)
+            {
+              continue;
+            }
+          p_ctx.EnsureRetrievalSurfaceSourceIndexSorted (seed_entry.source_id);
+          auto source_it
+              = p_ctx.retrieval_surface_source_index.find (
+                  seed_entry.source_id);
+          if (source_it == p_ctx.retrieval_surface_source_index.end ())
+            {
+              continue;
+            }
+          const auto &source_entries = source_it->second;
+          auto pos = std::find_if (
+              source_entries.begin (), source_entries.end (),
+              [&] (const auto &entry) {
+                return entry.memory_id == seed_entry.memory_id;
+              });
+          if (pos == source_entries.end ())
+            {
+              continue;
+            }
+          const auto center = static_cast<int> (
+              std::distance (source_entries.begin (), pos));
+          const int begin = std::max (0, center - source_radius);
+          const int end = std::min (
+              static_cast<int> (source_entries.size ()),
+              center + source_radius + 1);
+          std::vector<int> neighbor_positions;
+          neighbor_positions.reserve (static_cast<std::size_t> (end - begin));
+          for (int i = begin; i < end; ++i)
+            {
+              if (i != center)
+                {
+                  neighbor_positions.push_back (i);
+                }
+            }
+          bool natural_first_is_stale = false;
+          bool has_fresh_signal_neighbor = false;
+          if (!neighbor_positions.empty ())
+            {
+              const auto &natural_first = source_entries[
+                  static_cast<std::size_t> (neighbor_positions.front ())];
+              natural_first_is_stale
+                  = std::llabs (natural_first.start_ts - seed_entry.start_ts)
+                    > kStaleSourceNeighborGapMs;
+              for (const int position : neighbor_positions)
+                {
+                  const auto &entry = source_entries[
+                      static_cast<std::size_t> (position)];
+                  if (std::llabs (
+                          static_cast<long long> (signal.timestamp)
+                          - entry.start_ts)
+                      <= kFreshSourceNeighborToSignalGapMs)
+                    {
+                      has_fresh_signal_neighbor = true;
+                      break;
+                    }
+                }
+            }
+          if (natural_first_is_stale
+              && has_fresh_signal_neighbor
+              && source_expansion_limit - source_expansions
+                     < static_cast<int> (neighbor_positions.size ()))
+            {
+              std::sort (neighbor_positions.begin (), neighbor_positions.end (),
+                         [&] (int a, int b) {
+                const auto &left
+                    = source_entries[static_cast<std::size_t> (a)];
+                const auto &right
+                    = source_entries[static_cast<std::size_t> (b)];
+                const auto left_gap
+                    = std::llabs (left.start_ts - seed_entry.start_ts);
+                const auto right_gap
+                    = std::llabs (right.start_ts - seed_entry.start_ts);
+                if (left_gap != right_gap)
                   {
-                    has_fresh_signal_neighbor = true;
-                    break;
+                    return left_gap < right_gap;
                   }
-              }
-          }
-        if (natural_first_is_stale
-            && has_fresh_signal_neighbor
-            && source_expansion_limit - source_expansions
-                   < static_cast<int> (neighbor_positions.size ()))
-          {
-            std::sort (neighbor_positions.begin (), neighbor_positions.end (),
-                       [&] (int a, int b) {
-              const auto &left
-                  = source_entries[static_cast<std::size_t> (a)];
-              const auto &right
-                  = source_entries[static_cast<std::size_t> (b)];
-              const auto left_gap
-                  = std::llabs (left.start_ts - seed_entry.start_ts);
-              const auto right_gap
-                  = std::llabs (right.start_ts - seed_entry.start_ts);
-              if (left_gap != right_gap)
+                if (left.start_ts != right.start_ts)
+                  {
+                    return left.start_ts < right.start_ts;
+                  }
+                return left.memory_id < right.memory_id;
+              });
+            }
+          for (int i : neighbor_positions)
+            {
+              if (source_expansions >= source_expansion_limit)
                 {
-                  return left_gap < right_gap;
+                  break;
                 }
-              if (left.start_ts != right.start_ts)
+              const auto &neighbor_index
+                  = source_entries[static_cast<std::size_t> (i)];
+              if (neighbor_index.memory_id == seed_entry.memory_id
+                  || neighbor_index.start_ts <= 0
+                  || static_cast<std::uint64_t> (neighbor_index.start_ts)
+                         >= exclusion_ts)
                 {
-                  return left.start_ts < right.start_ts;
+                  continue;
                 }
-              return left.memory_id < right.memory_id;
-            });
-          }
-        for (int i : neighbor_positions)
-          {
-            if (source_expansions >= source_expansion_limit)
-              {
-                break;
-              }
-            const auto &neighbor_index
-                = source_entries[static_cast<std::size_t> (i)];
-            if (neighbor_index.memory_id == seed_entry.memory_id
-                || neighbor_index.start_ts <= 0
-                || static_cast<std::uint64_t> (neighbor_index.start_ts)
-                       >= exclusion_ts)
-              {
-                continue;
-              }
-            auto neighbor_it = p_ctx.retrieval_surface_index.find (
-                neighbor_index.memory_id);
-            if (neighbor_it == p_ctx.retrieval_surface_index.end ())
-              {
-                continue;
-              }
-            const auto &neighbor
-                = p_ctx.retrieval_surface_cache[neighbor_it->second];
-            if (neighbor.embedding.size () == 0
-                || neighbor.embedding.size () != signal.embedding.size ())
-              {
-                continue;
-              }
+              auto neighbor_it = p_ctx.retrieval_surface_index.find (
+                  neighbor_index.memory_id);
+              if (neighbor_it == p_ctx.retrieval_surface_index.end ())
+                {
+                  continue;
+                }
+              const auto &neighbor
+                  = p_ctx.retrieval_surface_cache[neighbor_it->second];
+              if (neighbor.embedding.size () == 0
+                  || neighbor.embedding.size () != signal.embedding.size ())
+                {
+                  continue;
+                }
 
-            Candidate candidate;
-            candidate.memory_id = neighbor.memory_id;
-            candidate.embedding_id = neighbor.embedding_id;
-            candidate.source_id = neighbor.source_id;
-            candidate.start_ts = neighbor.start_ts;
-            candidate.embedding = neighbor.embedding;
-            const int distance = std::max (1, std::abs (i - center));
-            candidate.graph_score = 1.0 / static_cast<double> (distance);
-            candidate.seed_score = core::Map01 (
-                Cosine (signal.embedding, candidate.embedding));
-            candidate.temporal_score = TemporalScore (
-                signal.timestamp, neighbor.start_ts, F, S, T);
-            candidate.score = seed_weight * candidate.seed_score
-                              + graph_weight * candidate.graph_score
-                              + temporal_weight * candidate.temporal_score;
-            candidate.score = std::max (
-                candidate.score,
-                seed.score
-                    * (0.95 / static_cast<double> (distance)));
-            InsertOrBoost (candidates, std::move (candidate));
-            ++source_expansions;
-          }
-      }
-  }
+              Candidate candidate;
+              candidate.memory_id = neighbor.memory_id;
+              candidate.embedding_id = neighbor.embedding_id;
+              candidate.source_id = neighbor.source_id;
+              candidate.start_ts = neighbor.start_ts;
+              candidate.embedding = neighbor.embedding;
+              const int distance = std::max (1, std::abs (i - center));
+              candidate.graph_score = 1.0 / static_cast<double> (distance);
+              candidate.seed_score = core::Map01 (
+                  Cosine (signal.embedding, candidate.embedding));
+              candidate.temporal_score = TemporalScore (
+                  signal.timestamp, neighbor.start_ts, F, S, T);
+              candidate.score = seed_weight * candidate.seed_score
+                                + graph_weight * candidate.graph_score
+                                + temporal_weight * candidate.temporal_score;
+              candidate.score = std::max (
+                  candidate.score,
+                  seed.score
+                      * (0.95 / static_cast<double> (distance)));
+              InsertOrBoost (candidates, std::move (candidate));
+              ++source_expansions;
+            }
+        }
+      profile_timing ("GraphRetrieve.source_cache_expansion", section_start);
+    }
 
   if (source_seed_expansion_enabled)
     {
-    for (const auto &seed : source_expansion_seeds)
-      {
-        if (source_expansions >= source_expansion_limit
-            || seed.memory_id <= 0)
-          {
-            continue;
-          }
-        const auto source_rows = tx.Execute (
-            "WITH anchor AS ("
-            "  SELECT source_id, COALESCE(start_ts, 0) AS start_ts "
-            "  FROM memories WHERE memory_id = ?"
-            ") "
-            "SELECT m.memory_id, m.embedding_id, m.source_id, m.start_ts, "
-            "       e.embedding "
-            "FROM memories m "
-            "JOIN anchor a ON a.source_id <> '' "
-            "             AND a.source_id = m.source_id "
-            "JOIN embeddings e ON e.embedding_id = m.embedding_id "
-            "WHERE m.memory_id != ? "
-            "  AND m.embedding_id IS NOT NULL "
-            "  AND COALESCE(m.source_id, '') <> '' "
-            "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-            "  AND COALESCE(m.start_ts, 0) < ? "
-            "ORDER BY ABS(COALESCE(m.start_ts, 0) - a.start_ts), "
-            "         m.start_ts ASC, m.memory_id ASC "
-            "LIMIT ?",
-            { seed.memory_id, seed.memory_id,
-              static_cast<long long> (exclusion_ts),
-              static_cast<long long> (source_radius * 2) });
-        int source_rank = 0;
-        for (const auto &row : source_rows)
-          {
-            if (source_expansions >= source_expansion_limit)
-              {
-                break;
-              }
-            Candidate candidate;
-            candidate.memory_id = AnyLongLong (row, "memory_id");
-            candidate.embedding_id = AnyLongLong (row, "embedding_id");
-            candidate.start_ts = AnyLongLong (row, "start_ts");
-            auto it_source = row.find ("source_id");
-            if (it_source != row.end ()
-                && it_source->second.type () == typeid (std::string))
-              {
-                candidate.source_id
-                    = std::any_cast<std::string> (it_source->second);
-              }
-            auto it_embedding = row.find ("embedding");
-            if (candidate.memory_id <= 0 || candidate.embedding_id <= 0
-                || candidate.start_ts <= 0 || it_embedding == row.end ()
-                || !AnyToEmbedding (it_embedding->second, embedding_dim,
-                                    candidate.embedding))
-              {
-                continue;
-              }
-            if (constructive_recall_enabled)
-              {
-                (void)RefreshCandidateToCurrentSurface (tx, candidate,
-                                                        embedding_dim);
-              }
-            const double gap_ms = std::max (
-                1.0, std::abs (static_cast<double> (candidate.start_ts)
+      start_profile_timing ();
+      if (!p_ctx.retrieval_surface_cache.empty ())
+        {
+          for (const auto &seed : source_expansion_seeds)
+            {
+              if (source_expansions >= source_expansion_limit
+                  || seed.memory_id <= 0)
+                {
+                  continue;
+                }
+              const auto source_rows = SourceExpansionRowsFromSurface (
+                  p_ctx, seed, exclusion_ts, embedding_dim,
+                  source_radius * 2);
+              int source_rank = 0;
+              for (const auto *entry : source_rows)
+                {
+                  if (source_expansions >= source_expansion_limit)
+                    {
+                      break;
+                    }
+                  Candidate candidate;
+                  candidate.memory_id = entry->memory_id;
+                  candidate.embedding_id = entry->embedding_id;
+                  candidate.source_id = entry->source_id;
+                  candidate.start_ts = entry->start_ts;
+                  candidate.embedding = entry->embedding;
+                  const double gap_ms = std::max (
+                      1.0, std::abs (
+                               static_cast<double> (candidate.start_ts)
                                - static_cast<double> (seed.start_ts)));
-            candidate.graph_score = 1.0 / (1.0 + gap_ms / 1000.0);
-            candidate.seed_score = core::Map01 (
-                Cosine (signal.embedding, candidate.embedding));
-            candidate.temporal_score = TemporalScore (
-                signal.timestamp, candidate.start_ts, F, S, T);
-            candidate.score = seed_weight * candidate.seed_score
-                              + graph_weight * candidate.graph_score
-                              + temporal_weight * candidate.temporal_score;
-            ++source_rank;
-            candidate.score = std::max (
-                candidate.score,
-                seed.score
-                    * (0.95 / static_cast<double> (
-                                  std::max (1, source_rank))));
-            InsertOrBoost (candidates, std::move (candidate));
-            ++source_expansions;
-          }
-      }
-  }
+                  candidate.graph_score = 1.0 / (1.0 + gap_ms / 1000.0);
+                  candidate.seed_score = core::Map01 (
+                      Cosine (signal.embedding, candidate.embedding));
+                  candidate.temporal_score = TemporalScore (
+                      signal.timestamp, candidate.start_ts, F, S, T);
+                  candidate.score = seed_weight * candidate.seed_score
+                                    + graph_weight * candidate.graph_score
+                                    + temporal_weight
+                                          * candidate.temporal_score;
+                  ++source_rank;
+                  candidate.score = std::max (
+                      candidate.score,
+                      seed.score
+                          * (0.95 / static_cast<double> (
+                                        std::max (1, source_rank))));
+                  InsertOrBoost (candidates, std::move (candidate));
+                  ++source_expansions;
+                }
+            }
+        }
+      else
+        {
+          for (const auto &seed : source_expansion_seeds)
+            {
+              if (source_expansions >= source_expansion_limit
+                  || seed.memory_id <= 0)
+                {
+                  continue;
+                }
+              const auto source_rows = tx.Execute (
+                  "WITH anchor AS ("
+                  "  SELECT source_id, COALESCE(start_ts, 0) AS start_ts "
+                  "  FROM memories WHERE memory_id = ?"
+                  ") "
+                  "SELECT m.memory_id, m.embedding_id, m.source_id, "
+                  "       m.start_ts, e.embedding "
+                  "FROM memories m "
+                  "JOIN anchor a ON a.source_id <> '' "
+                  "             AND a.source_id = m.source_id "
+                  "JOIN embeddings e ON e.embedding_id = m.embedding_id "
+                  "WHERE m.memory_id != ? "
+                  "  AND m.embedding_id IS NOT NULL "
+                  "  AND COALESCE(m.source_id, '') <> '' "
+                  "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+                  "  AND COALESCE(m.start_ts, 0) < ? "
+                  "ORDER BY ABS(COALESCE(m.start_ts, 0) - a.start_ts), "
+                  "         m.start_ts ASC, m.memory_id ASC "
+                  "LIMIT ?",
+                  { seed.memory_id, seed.memory_id,
+                    static_cast<long long> (exclusion_ts),
+                    static_cast<long long> (source_radius * 2) });
+              int source_rank = 0;
+              for (const auto &row : source_rows)
+                {
+                  if (source_expansions >= source_expansion_limit)
+                    {
+                      break;
+                    }
+                  Candidate candidate;
+                  candidate.memory_id = AnyLongLong (row, "memory_id");
+                  candidate.embedding_id = AnyLongLong (row, "embedding_id");
+                  candidate.start_ts = AnyLongLong (row, "start_ts");
+                  auto it_source = row.find ("source_id");
+                  if (it_source != row.end ()
+                      && it_source->second.type () == typeid (std::string))
+                    {
+                      candidate.source_id
+                          = std::any_cast<std::string> (it_source->second);
+                    }
+                  auto it_embedding = row.find ("embedding");
+                  if (candidate.memory_id <= 0 || candidate.embedding_id <= 0
+                      || candidate.start_ts <= 0 || it_embedding == row.end ()
+                      || !AnyToEmbedding (it_embedding->second, embedding_dim,
+                                          candidate.embedding))
+                    {
+                      continue;
+                    }
+                  if (constructive_recall_enabled)
+                    {
+                      (void)RefreshCandidateToCurrentSurface (tx, candidate,
+                                                              embedding_dim);
+                    }
+                  const double gap_ms = std::max (
+                      1.0, std::abs (
+                               static_cast<double> (candidate.start_ts)
+                               - static_cast<double> (seed.start_ts)));
+                  candidate.graph_score = 1.0 / (1.0 + gap_ms / 1000.0);
+                  candidate.seed_score = core::Map01 (
+                      Cosine (signal.embedding, candidate.embedding));
+                  candidate.temporal_score = TemporalScore (
+                      signal.timestamp, candidate.start_ts, F, S, T);
+                  candidate.score = seed_weight * candidate.seed_score
+                                    + graph_weight * candidate.graph_score
+                                    + temporal_weight
+                                          * candidate.temporal_score;
+                  ++source_rank;
+                  candidate.score = std::max (
+                      candidate.score,
+                      seed.score
+                          * (0.95 / static_cast<double> (
+                                        std::max (1, source_rank))));
+                  InsertOrBoost (candidates, std::move (candidate));
+                  ++source_expansions;
+                }
+            }
+        }
+      profile_timing ("GraphRetrieve.source_sql_expansion", section_start);
+    }
 
   if (source_seed_expansion_enabled)
     {
-    for (const auto &seed : source_expansion_seeds)
-      {
-        if (source_expansions >= source_expansion_limit
-            || seed.memory_id <= 0 || seed.source_id.empty ())
-          {
-            continue;
-          }
-        const auto parsed_source = ParseTurnSourceId (seed.source_id);
-        if (!parsed_source)
-          {
-            continue;
-          }
-        for (int delta = -source_radius; delta <= source_radius; ++delta)
-          {
-            if (source_expansions >= source_expansion_limit)
-              {
-                break;
-              }
-            if (delta == 0)
-              {
-                continue;
-              }
-            const std::string turn_pattern = TurnSourceLikePattern (
-                *parsed_source, parsed_source->turn + delta);
-            if (turn_pattern.empty ())
-              {
-                continue;
-              }
-            const auto turn_rows = tx.Execute (
-                "SELECT m.memory_id, m.embedding_id, m.source_id, "
-                "       m.start_ts, e.embedding "
-                "FROM memories m "
-                "JOIN embeddings e ON e.embedding_id = m.embedding_id "
-                "WHERE m.memory_id != ? "
-                "  AND m.embedding_id IS NOT NULL "
-                "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-                "  AND COALESCE(m.start_ts, 0) < ? "
-                "  AND COALESCE(m.source_id, '') LIKE ? ESCAPE '\\' "
-                "ORDER BY ABS(COALESCE(m.start_ts, 0) - ?), "
-                "         m.start_ts ASC, m.memory_id ASC "
-                "LIMIT ?",
-                { seed.memory_id, static_cast<long long> (exclusion_ts),
-                  turn_pattern, seed.start_ts,
-                  static_cast<long long> (source_radius * 2) });
-            int turn_rank = 0;
-            for (const auto &row : turn_rows)
-              {
-                if (source_expansions >= source_expansion_limit)
-                  {
-                    break;
-                  }
-                Candidate candidate;
-                candidate.memory_id = AnyLongLong (row, "memory_id");
-                candidate.embedding_id = AnyLongLong (row, "embedding_id");
-                candidate.start_ts = AnyLongLong (row, "start_ts");
-                auto it_source = row.find ("source_id");
-                if (it_source != row.end ()
-                    && it_source->second.type () == typeid (std::string))
-                  {
-                    candidate.source_id
-                        = std::any_cast<std::string> (it_source->second);
-                  }
-                auto it_embedding = row.find ("embedding");
-                if (candidate.memory_id <= 0 || candidate.embedding_id <= 0
-                    || candidate.start_ts <= 0 || it_embedding == row.end ()
-                    || !AnyToEmbedding (it_embedding->second, embedding_dim,
-                                        candidate.embedding))
-                  {
-                    continue;
-                  }
-                if (constructive_recall_enabled)
-                  {
-                    (void)RefreshCandidateToCurrentSurface (tx, candidate,
-                                                            embedding_dim);
-                  }
-                const int turn_distance = std::max (1, std::abs (delta));
-                const double gap_ms = std::max (
-                    1.0, std::abs (
-                             static_cast<double> (candidate.start_ts)
-                             - static_cast<double> (seed.start_ts)));
-                candidate.graph_score
-                    = 1.0 / (static_cast<double> (turn_distance)
-                             * (1.0 + gap_ms / 1000.0));
-                candidate.seed_score = core::Map01 (
-                    Cosine (signal.embedding, candidate.embedding));
-                candidate.temporal_score = TemporalScore (
-                    signal.timestamp, candidate.start_ts, F, S, T);
-                candidate.score = seed_weight * candidate.seed_score
-                                  + graph_weight * candidate.graph_score
-                                  + temporal_weight
-                                        * candidate.temporal_score;
-                ++turn_rank;
-                candidate.score = std::max (
-                    candidate.score,
-                    seed.score
-                        * (0.90
-                           / static_cast<double> (
-                                 std::max (1,
-                                           turn_distance + turn_rank - 1))));
-                InsertOrBoost (candidates, std::move (candidate));
-                ++source_expansions;
-              }
-          }
-      }
-  }
+      start_profile_timing ();
+      for (const auto &seed : source_expansion_seeds)
+        {
+          if (source_expansions >= source_expansion_limit
+              || seed.memory_id <= 0 || seed.source_id.empty ())
+            {
+              continue;
+            }
+          const auto parsed_source = ParseTurnSourceId (seed.source_id);
+          if (!parsed_source)
+            {
+              continue;
+            }
+          for (int delta = -source_radius; delta <= source_radius; ++delta)
+            {
+              if (source_expansions >= source_expansion_limit)
+                {
+                  break;
+                }
+              if (delta == 0)
+                {
+                  continue;
+                }
+              const std::string turn_pattern = TurnSourceLikePattern (
+                  *parsed_source, parsed_source->turn + delta);
+              if (turn_pattern.empty ())
+                {
+                  continue;
+                }
+              const auto turn_rows = tx.Execute (
+                  "SELECT m.memory_id, m.embedding_id, m.source_id, "
+                  "       m.start_ts, e.embedding "
+                  "FROM memories m "
+                  "JOIN embeddings e ON e.embedding_id = m.embedding_id "
+                  "WHERE m.memory_id != ? "
+                  "  AND m.embedding_id IS NOT NULL "
+                  "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+                  "  AND COALESCE(m.start_ts, 0) < ? "
+                  "  AND COALESCE(m.source_id, '') LIKE ? ESCAPE '\\' "
+                  "ORDER BY ABS(COALESCE(m.start_ts, 0) - ?), "
+                  "         m.start_ts ASC, m.memory_id ASC "
+                  "LIMIT ?",
+                  { seed.memory_id, static_cast<long long> (exclusion_ts),
+                    turn_pattern, seed.start_ts,
+                    static_cast<long long> (source_radius * 2) });
+              int turn_rank = 0;
+              for (const auto &row : turn_rows)
+                {
+                  if (source_expansions >= source_expansion_limit)
+                    {
+                      break;
+                    }
+                  Candidate candidate;
+                  candidate.memory_id = AnyLongLong (row, "memory_id");
+                  candidate.embedding_id = AnyLongLong (row, "embedding_id");
+                  candidate.start_ts = AnyLongLong (row, "start_ts");
+                  auto it_source = row.find ("source_id");
+                  if (it_source != row.end ()
+                      && it_source->second.type () == typeid (std::string))
+                    {
+                      candidate.source_id
+                          = std::any_cast<std::string> (it_source->second);
+                    }
+                  auto it_embedding = row.find ("embedding");
+                  if (candidate.memory_id <= 0 || candidate.embedding_id <= 0
+                      || candidate.start_ts <= 0 || it_embedding == row.end ()
+                      || !AnyToEmbedding (it_embedding->second, embedding_dim,
+                                          candidate.embedding))
+                    {
+                      continue;
+                    }
+                  if (constructive_recall_enabled)
+                    {
+                      (void)RefreshCandidateToCurrentSurface (tx, candidate,
+                                                              embedding_dim);
+                    }
+                  const int turn_distance = std::max (1, std::abs (delta));
+                  const double gap_ms = std::max (
+                      1.0, std::abs (
+                               static_cast<double> (candidate.start_ts)
+                               - static_cast<double> (seed.start_ts)));
+                  candidate.graph_score
+                      = 1.0 / (static_cast<double> (turn_distance)
+                               * (1.0 + gap_ms / 1000.0));
+                  candidate.seed_score = core::Map01 (
+                      Cosine (signal.embedding, candidate.embedding));
+                  candidate.temporal_score = TemporalScore (
+                      signal.timestamp, candidate.start_ts, F, S, T);
+                  candidate.score = seed_weight * candidate.seed_score
+                                    + graph_weight * candidate.graph_score
+                                    + temporal_weight
+                                          * candidate.temporal_score;
+                  ++turn_rank;
+                  candidate.score = std::max (
+                      candidate.score,
+                      seed.score
+                          * (0.90
+                             / static_cast<double> (
+                                   std::max (1,
+                                             turn_distance + turn_rank - 1))));
+                  InsertOrBoost (candidates, std::move (candidate));
+                  ++source_expansions;
+                }
+            }
+        }
+      profile_timing ("GraphRetrieve.turn_source_sql_expansion",
+                      section_start);
+    }
 
+  start_profile_timing ();
   std::vector<Candidate> ranked;
   ranked.reserve (candidates.size ());
   for (auto &[id, candidate] : candidates)
@@ -1146,6 +1376,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
     {
       ranked.resize (static_cast<std::size_t> (output_limit));
     }
+  profile_timing ("GraphRetrieve.final_rank", section_start);
 
   std::unordered_map<long long, Eigen::VectorXf> out;
   out.reserve (ranked.size ());
