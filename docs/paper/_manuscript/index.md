@@ -3454,6 +3454,113 @@ for Cortext (4.41) than traditional chat+RAG (4.67) and the hosted
 compaction rollup baseline (4.63). The aggregate artifact is
 `eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
 
+### 128k RAG-Ablation Probe
+
+A follow-up ablation used the same 9 MSC probes, three hosted `gpt-5.5`
+blind repetitions per probe, `judge_seed=42`, and a 128,000-token
+judge-context cap. This run removed the full-history arm and compared
+Cortext against capped RAG-style packet variants:
+
+-   semantic vector RAG only, top 5 prior hits;
+-   deterministic lexical keyword RAG only, top 5 prior hits;
+-   rolling-window chat context capped at 16k estimated packet tokens;
+-   hybrid rolling-window plus vector RAG capped at 16k estimated packet
+    tokens;
+-   the existing hosted compaction-session rollup, capped to 8k
+    estimated packet tokens for the judge prompt.
+
+The run completed 27/27 judgments. The max estimated judge prompt was
+116,425 tokens under the 128,000-token cap, and the strict
+prompt/context/fairness gates passed. Actual OpenAI API usage captured
+from responses was 1,871,994 prompt tokens and 39,001 completion tokens
+across 27 judge requests.
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+</colgroup>
+<thead>
+<tr>
+<th>Outcome</th>
+<th style="text-align: right;">Raw wins</th>
+<th style="text-align: right;">Win rate</th>
+<th style="text-align: right;">Probe-bootstrap 95% CI</th>
+<th style="text-align: right;">Mean sufficiency</th>
+<th style="text-align: right;">Mean noise</th>
+<th style="text-align: right;">Mean context tokens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cortext native</td>
+<td style="text-align: right;">19/27</td>
+<td style="text-align: right;">0.704</td>
+<td style="text-align: right;">[0.407, 0.926]</td>
+<td style="text-align: right;">4.48</td>
+<td style="text-align: right;">1.89</td>
+<td style="text-align: right;">816</td>
+</tr>
+<tr>
+<td>Semantic vector RAG</td>
+<td style="text-align: right;">0/27</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">[0.000, 0.000]</td>
+<td style="text-align: right;">0.67</td>
+<td style="text-align: right;">3.46</td>
+<td style="text-align: right;">88</td>
+</tr>
+<tr>
+<td>Lexical keyword RAG</td>
+<td style="text-align: right;">0/27</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">[0.000, 0.000]</td>
+<td style="text-align: right;">0.96</td>
+<td style="text-align: right;">3.57</td>
+<td style="text-align: right;">224</td>
+</tr>
+<tr>
+<td>Rolling-window chat</td>
+<td style="text-align: right;">0/27</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">[0.000, 0.000]</td>
+<td style="text-align: right;">4.63</td>
+<td style="text-align: right;">4.48</td>
+<td style="text-align: right;">15,999</td>
+</tr>
+<tr>
+<td>Hybrid chat+vector RAG</td>
+<td style="text-align: right;">0/27</td>
+<td style="text-align: right;">0.000</td>
+<td style="text-align: right;">[0.000, 0.000]</td>
+<td style="text-align: right;">4.78</td>
+<td style="text-align: right;">4.43</td>
+<td style="text-align: right;">15,999</td>
+</tr>
+<tr>
+<td>Hosted compaction rollup</td>
+<td style="text-align: right;">8/27</td>
+<td style="text-align: right;">0.296</td>
+<td style="text-align: right;">[0.074, 0.593]</td>
+<td style="text-align: right;">4.70</td>
+<td style="text-align: right;">3.32</td>
+<td style="text-align: right;">7,110</td>
+</tr>
+</tbody>
+</table>
+
+This ablation supports a narrower claim than the full-history frontier
+result: under a 128k judge-context cap, Cortext retained most wins while
+substantially reducing context and judged noise against retrieval-only,
+rolling-context, hybrid RAG, and compaction-style packet variants. The
+aggregate artifact is
+`eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
+
 ## Experimental Interpretation
 
 The hard-cut branch changes the research question. Earlier results asked

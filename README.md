@@ -57,6 +57,17 @@ retrieved/working memory IDs, retrieval counts, memory counts, and consolidation
 counts matched the saved baseline exactly. Artifact:
 `build/graph_profile/full_msc_verify_final/summary.json`.
 
+A follow-up 128k-capped RAG ablation on the same probes used six blinded
+systems and three hosted `gpt-5.5` judgments per probe. Cortext won 19/27,
+the capped compaction rollup won 8/27, and semantic-vector-only,
+lexical-keyword-only, rolling-window-only, and 16k hybrid chat+vector RAG each
+won 0/27. The max estimated judge prompt was 116,425 tokens under a 128,000
+context cap; actual OpenAI usage was 1,871,994 prompt tokens and 39,001
+completion tokens. Mean context tokens were 816 for Cortext, 88 for semantic
+vector RAG, 224 for lexical RAG, 15,999 for rolling-window chat, 15,999 for
+hybrid RAG, and 7,110 for compaction. Artifact:
+`eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
+
 An earlier local blind-judge pass (2026-06-28) on a one-year sparse replay,
 judged by Gemma4-12B-AWQ over vLLM at a 131,072-token context, completed 93/93
 judgments.
