@@ -2135,6 +2135,8 @@ def expected_judgment_count(
     judge_limit: int,
     judge_start_index: int,
     judge_repetitions: int,
+    judge_index_stride: int = 1,
+    judge_index_offset: int = 0,
 ) -> int:
     return len(
         expected_judgment_keys(
@@ -2143,6 +2145,8 @@ def expected_judgment_count(
             judge_limit,
             judge_start_index,
             judge_repetitions,
+            judge_index_stride,
+            judge_index_offset,
         )
     )
 
@@ -2153,6 +2157,8 @@ def expected_judgment_keys(
     judge_limit: int,
     judge_start_index: int,
     judge_repetitions: int,
+    judge_index_stride: int = 1,
+    judge_index_offset: int = 0,
 ) -> set[tuple[int, int]]:
     query_probe_index = 0
     keys: set[tuple[int, int]] = set()
@@ -2160,12 +2166,14 @@ def expected_judgment_keys(
         query_doc = find_query_doc(timeline, probe)
         if not query_doc:
             continue
-        if judge_limit >= 0 and query_probe_index >= judge_limit:
+        current_query_probe_index = query_probe_index
+        if judge_limit >= 0 and current_query_probe_index >= judge_limit:
             break
-        if query_probe_index < judge_start_index:
-            query_probe_index += 1
-            continue
         query_probe_index += 1
+        if current_query_probe_index < judge_start_index:
+            continue
+        if current_query_probe_index % judge_index_stride != judge_index_offset:
+            continue
         event_index = int(query_doc.index)
         for repetition in range(judge_repetitions):
             keys.add((event_index, repetition))
@@ -2387,6 +2395,21 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--judge-index-stride",
+        type=int,
+        default=1,
+        help=(
+            "Judge only query-bearing probes whose zero-based query probe index "
+            "matches --judge-index-offset modulo this stride."
+        ),
+    )
+    parser.add_argument(
+        "--judge-index-offset",
+        type=int,
+        default=0,
+        help="Modulo offset used with --judge-index-stride.",
+    )
+    parser.add_argument(
         "--judge-repetitions",
         type=int,
         default=1,
@@ -2510,6 +2533,15 @@ def main() -> int:
         raise RuntimeError("--judge-start-index must be >= 0")
     if args.judge_limit >= 0 and args.judge_start_index > args.judge_limit:
         raise RuntimeError("--judge-start-index cannot exceed --judge-limit")
+    if args.judge_index_stride < 1:
+        raise RuntimeError("--judge-index-stride must be >= 1")
+    if (
+        args.judge_index_offset < 0
+        or args.judge_index_offset >= args.judge_index_stride
+    ):
+        raise RuntimeError(
+            "--judge-index-offset must be in [0, --judge-index-stride)"
+        )
     if args.judge_timeout_s < 1:
         raise RuntimeError("--judge-timeout-s must be >= 1")
     if args.judge_context_window_tokens < 1:
@@ -2712,6 +2744,8 @@ def main() -> int:
         args.judge_limit,
         args.judge_start_index,
         args.judge_repetitions,
+        args.judge_index_stride,
+        args.judge_index_offset,
     )
     expected_judgments = len(expected_keys)
     by_index = docs_by_index(timeline)
@@ -2778,14 +2812,22 @@ def main() -> int:
             query_doc = find_query_doc(timeline, probe)
             if not query_doc:
                 continue
+            current_query_probe_index = query_probe_index
             declared_event_index = probe_event_index(probe)
             event_index = int(query_doc.index)
-            if args.judge_limit >= 0 and query_probe_index >= args.judge_limit:
+            if (
+                args.judge_limit >= 0
+                and current_query_probe_index >= args.judge_limit
+            ):
                 break
-            if query_probe_index < args.judge_start_index:
-                query_probe_index += 1
-                continue
             query_probe_index += 1
+            if current_query_probe_index < args.judge_start_index:
+                continue
+            if (
+                current_query_probe_index % args.judge_index_stride
+                != args.judge_index_offset
+            ):
+                continue
             probes_seen += 1
             if declared_event_index is not None and declared_event_index != event_index:
                 fairness_checks["probe_event_index_remapped"] += 1
@@ -3524,6 +3566,8 @@ def main() -> int:
             "judge_seed": args.judge_seed,
             "judge_start_index": args.judge_start_index,
             "judge_limit": args.judge_limit,
+            "judge_index_stride": args.judge_index_stride,
+            "judge_index_offset": args.judge_index_offset,
             "expected_judgments": expected_judgments,
             "judge_timeout_s": args.judge_timeout_s,
             "judge_context_window_tokens": args.judge_context_window_tokens,

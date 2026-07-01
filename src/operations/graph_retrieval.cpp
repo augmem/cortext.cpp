@@ -49,6 +49,7 @@ struct Candidate
 
 constexpr long long kStaleSourceNeighborGapMs = 72LL * 60LL * 60LL * 1000LL;
 constexpr long long kFreshSourceNeighborToSignalGapMs = 10LL * 60LL * 1000LL;
+constexpr double kTemporalRankDaySeconds = 24.0 * 60.0 * 60.0;
 
 struct TurnSourceId
 {
@@ -376,7 +377,17 @@ TemporalScore (std::uint64_t now_ts, long long start_ts, double F, double S,
     }
   const auto age_ms = static_cast<std::uint64_t> (now_ts)
                       - static_cast<std::uint64_t> (start_ts);
-  return core::RetrievalGraphExpandedRagTemporalRankScore (F, S, T, age_ms);
+  const double f = core::RetrievalFocusBias (F);
+  const double s = core::RetrievalSensitivityBias (S);
+  const double t = core::RetrievalStabilityBias (T);
+  const double tau_seconds
+      = core::Clamp (core::Lerp (2.0, 14.0, t)
+                         * core::Lerp (1.25, 0.75, f)
+                         * core::Lerp (1.15, 0.80, s)
+                         * kTemporalRankDaySeconds,
+                     kTemporalRankDaySeconds, 21.0 * kTemporalRankDaySeconds);
+  const double age_seconds = static_cast<double> (age_ms) / 1000.0;
+  return core::Clamp (std::exp (-age_seconds / tau_seconds), 0.0, 1.0);
 }
 
 void

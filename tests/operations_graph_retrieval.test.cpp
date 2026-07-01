@@ -278,6 +278,53 @@ TEST_CASE ("Graph retrieval scores older exact matches beyond old recency cap",
            != out.candidate_memory_ids.end ());
 }
 
+TEST_CASE ("Graph retrieval temporal score decays across multi-month ages",
+           "[operations][graph][retrieval][temporal]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar disable_source_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kDayMs = 24LL * 60LL * 60LL * 1000LL;
+  constexpr std::uint64_t now = 200ULL * static_cast<std::uint64_t> (kDayMs);
+  SeedMemory (*store, 10, 100, UnitVec (0), now - 60ULL * 1000ULL);
+  SeedMemory (*store, 20, 200, UnitVec (0), now - 30ULL * kDayMs);
+  SeedMemory (*store, 30, 300, UnitVec (0), now - 90ULL * kDayMs);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  operations::retrieval_trace::ClearLastRankedCandidates ();
+  const auto out = processor.Process (MakeSignal (UnitVec (0), now));
+  const auto ranked = operations::retrieval_trace::GetLastRankedCandidates ();
+
+  REQUIRE_FALSE (out.candidate_memory_ids.empty ());
+  std::unordered_map<long long, double> temporal_by_memory;
+  for (const auto &candidate : ranked)
+    {
+      temporal_by_memory.emplace (candidate.memory_id,
+                                  candidate.temporal_score);
+    }
+
+  REQUIRE (temporal_by_memory.count (10) == 1);
+  REQUIRE (temporal_by_memory.count (20) == 1);
+  REQUIRE (temporal_by_memory.count (30) == 1);
+  REQUIRE (temporal_by_memory.at (10) <= 1.0);
+  REQUIRE (temporal_by_memory.at (10) > temporal_by_memory.at (20));
+  REQUIRE (temporal_by_memory.at (20) > temporal_by_memory.at (30));
+  REQUIRE (temporal_by_memory.at (30) >= 0.0);
+  REQUIRE (temporal_by_memory.at (30) < 0.05);
+}
+
 TEST_CASE ("Graph retrieval KNN finds older exact matches outside stride buckets",
            "[operations][graph][retrieval]")
 {
