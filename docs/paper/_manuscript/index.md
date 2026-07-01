@@ -3561,6 +3561,80 @@ rolling-context, hybrid RAG, and compaction-style packet variants. The
 aggregate artifact is
 `eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
 
+### Local Temporal-Scoring Fix A/B
+
+On 2026-07-01, after the Fable audit identified the graph-retrieval
+temporal term as effectively dead code, we ran a small local A/B on the
+same 9-probe MSC slice. The baseline artifact was produced from the
+pre-fix binary, and the candidate artifact used a bounded exponential
+age decay that stays in \[0, 1\] over multi-month ages and applies the
+temporal weight once. Both arms used Gemma4-12B-AWQ through vLLM, a
+262,144-token judge context window, one blind repetition per probe,
+`judge_seed=42`, `--max-media-per-system 0`, and three systems only:
+Cortext native, traditional chat+RAG, and full-history upper bound. The
+compacting-session arm was excluded from this local screen.
+
+<table>
+<colgroup>
+<col style="width: 9%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+</colgroup>
+<thead>
+<tr>
+<th>arm</th>
+<th style="text-align: right;">Cortext wins</th>
+<th style="text-align: right;">RAG wins</th>
+<th style="text-align: right;">full-history wins</th>
+<th style="text-align: right;">tie/unclear</th>
+<th style="text-align: right;">Cortext composite</th>
+<th style="text-align: right;">Cortext temporal correctness</th>
+<th style="text-align: right;">mean ingest ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>pre-fix baseline</td>
+<td style="text-align: right;">3/9</td>
+<td style="text-align: right;">1/9</td>
+<td style="text-align: right;">1/9</td>
+<td style="text-align: right;">4/9</td>
+<td style="text-align: right;">4.14</td>
+<td style="text-align: right;">2.89</td>
+<td style="text-align: right;">43.13</td>
+</tr>
+<tr>
+<td>bounded age decay</td>
+<td style="text-align: right;">2/9</td>
+<td style="text-align: right;">2/9</td>
+<td style="text-align: right;">0/9</td>
+<td style="text-align: right;">5/9</td>
+<td style="text-align: right;">2.89</td>
+<td style="text-align: right;">1.67</td>
+<td style="text-align: right;">42.69</td>
+</tr>
+</tbody>
+</table>
+
+The temporal fix therefore passed the mechanical correctness test but
+did not improve this small MSC judge screen: Cortext lost one row win,
+the composite score fell by 1.25 points, and mean temporal-correctness
+fell by 1.22. Replay performance moved slightly in the desired
+direction: mean ingest time fell 1.01 percent, mean processor time fell
+1.34 percent, wall time fell 2.14 percent, peak RSS fell 0.46 percent,
+and retrieved items during ingest fell from 116 to 113. The result is
+too small for a release-quality quality verdict, but it is strong enough
+to prevent claiming the temporal fix as an MSC-quality win without a
+larger frozen-probe rerun. Artifacts:
+`eval_runs/msc_gemma4_temporal_baseline_20260701T200553Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.json`
+and
+`eval_runs/msc_gemma4_temporal_fix_20260701T204155Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.json`.
+
 ## Experimental Interpretation
 
 The hard-cut branch changes the research question. Earlier results asked
