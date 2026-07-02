@@ -38,6 +38,8 @@ cleanup_temp_db (const std::string &db_path)
   try
     {
       std::filesystem::remove (db_path);
+      std::filesystem::remove (db_path + "-wal");
+      std::filesystem::remove (db_path + "-shm");
     }
   catch (const std::filesystem::filesystem_error &)
     {
@@ -759,8 +761,20 @@ TEST_CASE ("WAL mode configuration", "[store][wal]")
              == "wal");
   }
 
-  SECTION ("WAL autocheckpoint is disabled for file databases")
+  SECTION ("WAL autocheckpoint uses SQLite default for file databases")
   {
+    cortext::testing::ScopedEnvVar wal_autocheckpoint (
+        "CORTEXT_SQLITE_WAL_AUTOCHECKPOINT");
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+
+    REQUIRE (store->WalAutoCheckpointPages () == 1000);
+  }
+
+  SECTION ("WAL autocheckpoint supports explicit override")
+  {
+    cortext::testing::ScopedEnvVar wal_autocheckpoint (
+        "CORTEXT_SQLITE_WAL_AUTOCHECKPOINT", "0");
     TempDatabase temp_db;
     auto store = cortext::SQLiteStore::Create (temp_db.path ());
 
@@ -904,15 +918,24 @@ TEST_CASE ("WAL checkpoint operations", "[store][wal]")
     REQUIRE_NOTHROW (store->Checkpoint (false));
   }
 
-  SECTION ("Full checkpoint succeeds")
+  SECTION ("Full checkpoint truncates WAL file")
   {
+    cortext::testing::ScopedEnvVar wal_autocheckpoint (
+        "CORTEXT_SQLITE_WAL_AUTOCHECKPOINT", "0");
     TempDatabase temp_db;
     auto store = cortext::SQLiteStore::Create (temp_db.path ());
 
-    store->Execute ("CREATE TABLE test (id INTEGER)", {});
-    store->Execute ("INSERT INTO test (id) VALUES (1)", {});
+    store->Execute ("CREATE TABLE test (id INTEGER PRIMARY KEY, value BLOB)",
+                    {});
+    const std::vector<unsigned char> payload (4096, 7);
+    for (int i = 0; i < 200; ++i)
+      {
+        store->Execute ("INSERT INTO test (value) VALUES (?)", { payload });
+      }
 
+    REQUIRE (store->WalFileBytes () > 0);
     REQUIRE_NOTHROW (store->Checkpoint (true));
+    REQUIRE (store->WalFileBytes () == 0);
   }
 
   SECTION ("GetWalStatus returns valid info")

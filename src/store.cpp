@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -35,6 +36,8 @@ SQLiteStoreQueryInterrupter::Interrupt (SQLiteStore &store)
 
 namespace
 {
+
+constexpr int kDefaultWalAutoCheckpointPages = 1000;
 
 std::string_view
 ParseDbOperation (const std::string &q)
@@ -108,6 +111,22 @@ ParseLongLongEnv (const char *name)
       return std::nullopt;
     }
   return parsed;
+}
+
+int
+ResolveWalAutoCheckpointPages ()
+{
+  if (auto pages = ParseLongLongEnv ("CORTEXT_SQLITE_WAL_AUTOCHECKPOINT"))
+    {
+      if (*pages >= 0)
+        {
+          return static_cast<int> (
+              std::min (*pages,
+                        static_cast<long long> (
+                            std::numeric_limits<int>::max ())));
+        }
+    }
+  return kDefaultWalAutoCheckpointPages;
 }
 
 std::optional<std::string>
@@ -452,8 +471,11 @@ SQLiteConnection::SQLiteConnection (const std::string &database_path,
       if ((journal_override && *journal_override == "wal")
           || (!journal_override && config.enable_wal))
         {
-          exec_pragma ("PRAGMA wal_autocheckpoint = 0");
-          sqlite3_wal_autocheckpoint (connection_, 0);
+          const int wal_autocheckpoint_pages
+              = ResolveWalAutoCheckpointPages ();
+          exec_pragma ("PRAGMA wal_autocheckpoint = "
+                       + std::to_string (wal_autocheckpoint_pages));
+          sqlite3_wal_autocheckpoint (connection_, wal_autocheckpoint_pages);
         }
     }
 
@@ -1077,7 +1099,7 @@ void
 SQLiteStore::Checkpoint (bool full)
 {
   const int mode
-      = full ? SQLITE_CHECKPOINT_RESTART : SQLITE_CHECKPOINT_PASSIVE;
+      = full ? SQLITE_CHECKPOINT_TRUNCATE : SQLITE_CHECKPOINT_PASSIVE;
   int wal_log = 0;
   int wal_ckpt = 0;
   int rc = sqlite3_wal_checkpoint_v2 (connection_->GetConnection (), nullptr,
