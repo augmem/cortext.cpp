@@ -19,7 +19,7 @@ jobs:
         sudo apt-get install -y cmake build-essential pkg-config libsqlite3-dev
 
     - name: Configure CMake
-      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_SHERPA_ONNX=ON -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_OPENTELEMETRY=ON
 
     - name: Build
       run: cmake --build build -j8
@@ -38,7 +38,7 @@ jobs:
         docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel bash -lc '
           pacman -Syu --noconfirm cmake make gcc pkgconf sqlite git
           git config --global --add safe.directory /workspace
-          cmake -S . -B build-arch -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_SHERPA_ONNX=ON -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+          cmake -S . -B build-arch -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_OPENTELEMETRY=ON
           cmake --build build-arch -j"$(nproc)"
           ./build-arch/tests/cortext_tests "~[aist]" --reporter compact
         '
@@ -77,10 +77,10 @@ jobs:
         sudo apt-get install -y libsqlite3-dev
 
     - name: Fetch Zig dependencies
-      run: zig build --fetch -Dshared=true -Dllama=false
+      run: zig build --fetch -Dshared=true
 
     - name: Build Zig host FFI library
-      run: zig build -Dshared=true -Dllama=false
+      run: zig build -Dshared=true
 
     - name: Cross-build Zig FFI library
-      run: zig build -Dtarget=x86_64-linux-gnu -Dshared=true -Dllama=false
+      run: zig build -Dtarget=x86_64-linux-gnu -Dshared=true
