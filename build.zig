@@ -278,7 +278,7 @@ pub fn build(b: *std.Build) void {
         .name = "cortext",
         .linkage = if (shared) .dynamic else .static,
         .root_module = mod,
-        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+        .version = .{ .major = 1, .minor = 1, .patch = 0 },
     });
 
     if (fetch_aist_model) {

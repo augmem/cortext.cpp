@@ -86,7 +86,8 @@ Cortext's three single-repetition counts were 14, 17, and 16 of 31, bracketing
 the historical 15-win A/B baseline. Mean context was 467 tokens versus 7,447 for
 traditional RAG, a 93.7% reduction.
 
-A separate release probe confirms the v1.0 hard cut is behavior-preserving.
+A separate release probe confirmed the original v1.0 hard cut was
+behavior-preserving.
 Against a preserved replay binary on the same AIST GGUF model and system GGML
 runtime, dense and full sparse replay matched exactly: `retr_diffs=0` and
 `rank_diffs=0`.
@@ -105,11 +106,14 @@ scripts/run_msc_frontier_judge.sh
 
 ## Status
 
-Cortext v1.0 is the hard-cut production runtime: the embedding and graph memory
+Cortext v1.1 is the hard-cut production runtime: the embedding and graph memory
 engine, and nothing else. The older research stack (decoder, provider registry,
 semantic extractor, summarizer, static label bank, fact layer, label-bucket
 graph, mode-selected deep consolidation) is preserved in git but not shipped.
-The release surface is deliberately smaller than the research history.
+The release surface is deliberately smaller than the research history. The v1.1
+line keeps the same product surface while shipping release-hardening fixes for
+storage growth, CI coverage, media validation, environment hook isolation,
+volatile accumulator state, paper artifacts, and store ownership.
 
 ## Build And Test
 
