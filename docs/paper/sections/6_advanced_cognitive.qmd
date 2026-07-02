@@ -582,7 +582,7 @@ middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
 
 ## Emotional Consolidation {#sec-emotional-consolidation}
 
-High-emotion events trigger enhanced consolidation, following @mcgaugh2004amygdala findings. As detailed in @sec-activity, consolidation operates on stored memory metadata:
+High-emotion events trigger enhanced consolidation, following @mcgaugh2004amygdala findings. As detailed in @sec-consolidation, consolidation operates on stored memory metadata:
 
 ```
 θ_intensity = lerp(0.6, 0.8, 1 − S)
@@ -646,6 +646,34 @@ Tagged memories receive a consolidation bonus:
 if m.tagged and now_s() < m.tag_expires_at:
     score_consolidate(m) += lerp(0.10, 0.25, S) × m.tag_strength
 ```
+
+## Pattern Separation Sparse Index {#sec-pattern-separation}
+
+Pattern separation is the lightweight sparse-key side channel used to keep
+nearby dense embeddings addressable without adding a decoder, taxonomy, or
+fact layer. For an accumulator or stored memory embedding `x`, Cortext selects
+the `k` largest-magnitude dimensions, preserves each selected dimension's sign,
+sorts the selected indices, and serializes the result as a stable sparse key:
+
+```
+k_sparse(F,S,T) = RetrievalSparseKeySize(F,S,T)
+top_k(x) = indices of the k_sparse largest |x_i|
+sparse_key(x) = join(sort({ i || sign(x_i) : i in top_k(x) }))
+```
+
+The write path stores each committed memory id under `index_store[sparse_key(e_rep)]`.
+The procedural lane reuses the same keying function but stores values rather
+than membership lists:
+
+```
+index_store[sparse_key(e_rep)] += memory_id
+procedural_store[sparse_key(μ_acc)][memory_id] = Q(proc_key, memory_id)
+```
+
+Thus `index_store` is a sparse content-addressed memory bucket, while
+`procedural_store` is a sparse context-to-memory value table. Empty embeddings
+or non-positive key sizes produce no key and therefore do not update either
+store.
 
 ## Procedural Memory Lane (Habit/Skill Memory)
 
