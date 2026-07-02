@@ -458,7 +458,7 @@ TEST_CASE ("Constructive recall retrieval uses the latest reconstruction and app
         std::make_unique<ForceRetrievalGateOp> (),
         std::make_unique<operations::GraphAugmentedRetrieveCandidates> ());
     SignalProcessor processor (cfg, store, std::move (ops));
-    processor.Process (MakeSignal (query, 10));
+    processor.Process (MakeSignal (query, 4000000));
     processor.Flush ();
     return operations::retrieval_trace::GetLastRankedCandidates ();
   };
@@ -468,11 +468,19 @@ TEST_CASE ("Constructive recall retrieval uses the latest reconstruction and app
         "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
     const auto ranked = run ();
     REQUIRE_FALSE (ranked.empty ());
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
     REQUIRE (ranked.front ().memory_id == 22LL);
+#else
+    REQUIRE (ranked.front ().memory_id == 11LL);
+#endif
     auto recon_rows = store->Execute (
         "SELECT COUNT(*) AS cnt FROM memory_reconstructions WHERE memory_id = ?",
         { 11LL });
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
     REQUIRE (cortext::testing::GetInt64 (recon_rows[0], "cnt") == 1);
+#else
+    REQUIRE (cortext::testing::GetInt64 (recon_rows[0], "cnt") == 2);
+#endif
   }
 
   {
@@ -494,7 +502,12 @@ TEST_CASE ("Constructive recall retrieval uses the latest reconstruction and app
     REQUIRE (latest_rows.size () == 1);
     REQUIRE (std::any_cast<std::string> (latest_rows[0].at ("trigger"))
              == "retrieval");
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
     REQUIRE (cortext::testing::GetDouble (latest_rows[0], "uncertainty") > 0.0);
+#else
+    REQUIRE (cortext::testing::GetDouble (latest_rows[0], "uncertainty")
+             == Catch::Approx (0.0));
+#endif
   }
 }
 
@@ -523,8 +536,6 @@ TEST_CASE ("Reconsolidation appends a new reconstruction while preserving the ev
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0;
   cfg.stability = 0.0;
-  cortext::testing::ScopedEnvVar disable_cooldown (
-      "CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS", "0");
 
   auto ops = std::make_unique<DynamicOperationSet> (
       std::make_unique<SetupReconInputsOp> (
@@ -532,7 +543,7 @@ TEST_CASE ("Reconsolidation appends a new reconstruction while preserving the ev
           std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, evidence } }),
       std::make_unique<operations::ApplyReconsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
-  processor.Process (MakeSignal (current, 100));
+  processor.Process (MakeSignal (current, 4000000));
   processor.Flush ();
 
   auto mem_rows = store->Execute (

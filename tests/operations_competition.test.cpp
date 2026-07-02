@@ -526,5 +526,9 @@ TEST_CASE ("High NE increases retrieval competition suppression",
 
   const double strength_scaled = run_case (false);
   const double strength_unscaled = run_case (true);
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
   REQUIRE (strength_scaled < strength_unscaled);
+#else
+  REQUIRE (strength_scaled == Catch::Approx (strength_unscaled));
+#endif
 }

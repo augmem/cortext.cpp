@@ -1,5 +1,6 @@
 #include "cortext/models/aist_gguf_encoder.hpp"
 #include "ggml_support.hpp"
+#include "../experimental_env.hpp"
 
 #include <algorithm>
 #include <array>
@@ -80,23 +81,6 @@ GetEnvInt (const char *name, int fallback)
     {
       return fallback;
     }
-}
-
-bool
-GetEnvBool (const char *name, bool fallback)
-{
-  const std::string value = GetEnvOrDefault (name);
-  if (value.empty ())
-    {
-      return fallback;
-    }
-  std::string lower (value);
-  std::transform (lower.begin (), lower.end (), lower.begin (),
-                  [] (unsigned char ch) {
-                    return static_cast<char> (std::tolower (ch));
-                  });
-  return lower == "1" || lower == "true" || lower == "yes"
-         || lower == "on";
 }
 
 template <typename T>
@@ -1704,7 +1688,8 @@ public:
         const std::vector<std::string> &prefixes, int threads,
         std::string &error)
   {
-    if (GetEnvBool ("CORTEXT_AIST_DISABLE_GGML_KERNELS", false))
+    if (internal::experimental_env::Flag (
+            "CORTEXT_AIST_DISABLE_GGML_KERNELS"))
       {
         error = "disabled by CORTEXT_AIST_DISABLE_GGML_KERNELS";
         return GgmlLinearLoadStatus::Disabled;
@@ -3342,7 +3327,8 @@ public:
   EncodeImage (const std::uint8_t *data, int width, int height, int channels)
   {
     native_image_used_ = false;
-    if (!GetEnvBool ("CORTEXT_AIST_DISABLE_NATIVE_IMAGE_KERNELS", false))
+    if (!internal::experimental_env::Flag (
+            "CORTEXT_AIST_DISABLE_NATIVE_IMAGE_KERNELS"))
       {
         std::vector<float> input = PreprocessAistImageHWC (
             data, width, height, channels);
@@ -3427,7 +3413,8 @@ public:
       {
         return "native_image_hwc";
       }
-    if (GetEnvBool ("CORTEXT_AIST_DISABLE_FULL_GGML_GRAPH", false))
+    if (internal::experimental_env::Flag (
+            "CORTEXT_AIST_DISABLE_FULL_GGML_GRAPH"))
       {
         return "per_linear_graph_debug";
       }
@@ -3697,7 +3684,8 @@ private:
 
     const std::vector<int> ids = tokenizer_.Encode (text, context_length_);
     if (kernel_ != nullptr && kernel_->IsReady ()
-        && !GetEnvBool ("CORTEXT_AIST_DISABLE_FULL_GGML_GRAPH", false))
+        && !internal::experimental_env::Flag (
+            "CORTEXT_AIST_DISABLE_FULL_GGML_GRAPH"))
       {
         try
           {
@@ -3710,7 +3698,8 @@ private:
           }
         catch (const std::exception &ex)
           {
-            if (GetEnvBool ("CORTEXT_AIST_REQUIRE_FULL_GGML_GRAPH", false))
+            if (internal::experimental_env::Flag (
+                    "CORTEXT_AIST_REQUIRE_FULL_GGML_GRAPH"))
               {
                 throw;
               }
@@ -4078,9 +4067,9 @@ AistGgufEncoder::Load (const AistGgufConfig &config)
                                     config_.n_gpu_layers);
   config_.context_length = GetEnvInt ("CORTEXT_AIST_CONTEXT_LENGTH",
                                       config_.context_length);
-  config_.shadow_only = GetEnvBool ("CORTEXT_AIST_SHADOW_ONLY",
-                                    config_.shadow_only);
-  config_.use_semantic_for_retrieval = GetEnvBool (
+  config_.shadow_only = internal::experimental_env::Bool (
+      "CORTEXT_AIST_SHADOW_ONLY", config_.shadow_only);
+  config_.use_semantic_for_retrieval = internal::experimental_env::Bool (
       "CORTEXT_AIST_USE_SEMANTIC_FOR_RETRIEVAL",
       config_.use_semantic_for_retrieval);
   const std::string tokenizer_override = GetEnvOrDefault (

@@ -243,27 +243,28 @@ def load_shell_env(path: pathlib.Path) -> dict[str, str]:
     return values
 
 
-def discover_env_file(start: pathlib.Path = pathlib.Path("/shared")) -> pathlib.Path | None:
+def discover_env_file(start: pathlib.Path | None = None) -> pathlib.Path | None:
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    search_root = start if start is not None else pathlib.Path.cwd()
     candidates: list[pathlib.Path] = []
-    preferred = [
-        pathlib.Path("/shared/augmem/.env"),
-        pathlib.Path("/shared/orgnet/.env"),
-        pathlib.Path("/shared/personaplex/.env"),
-    ]
-    for path in preferred:
-        if path.exists():
-            candidates.append(path)
-    if start.exists():
-        for name in (".env", ".env.local", ".env.sh"):
-            candidates.extend(sorted(start.glob(f"*/*{name}")))
+    for env_name in ("CORTEXT_EVAL_ENV_FILE", "ENV_FILE"):
+        raw = os.environ.get(env_name, "")
+        if raw:
+            candidates.append(pathlib.Path(raw).expanduser())
+    candidates.extend(
+        [
+            search_root / ".env",
+            repo_root / ".env",
+        ]
+    )
     seen: set[pathlib.Path] = set()
     for path in candidates:
-        if path in seen or not path.is_file():
+        normalized = path if path.is_absolute() else (pathlib.Path.cwd() / path)
+        normalized = normalized.resolve()
+        if normalized in seen or not normalized.is_file():
             continue
-        seen.add(path)
-        values = load_shell_env(path)
-        if values.get("OPENAI_API_KEY"):
-            return path
+        seen.add(normalized)
+        return normalized
     return None
 
 
@@ -2373,7 +2374,8 @@ def main() -> int:
         type=pathlib.Path,
         help=(
             "Optional .env file for OPENAI_API_KEY/OPENAI_BASE_URL. If omitted "
-            "for --judge-provider openai, the runner searches /shared."
+            "for --judge-provider openai, the runner checks CORTEXT_EVAL_ENV_FILE, "
+            "legacy ENV_FILE, and repo-local .env."
         ),
     )
     parser.add_argument(

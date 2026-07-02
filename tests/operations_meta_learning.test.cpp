@@ -179,10 +179,19 @@ TEST_CASE ("ApplyMetaLearning disable flag freezes learned coefficients",
   operations::ApplyMetaLearning meta;
   meta.Execute (ctx, *tx);
 
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
   REQUIRE (pctx.attention_width_prior == Catch::Approx (width_before));
   REQUIRE (pctx.rate_target_prior == Catch::Approx (rate_before));
   REQUIRE (pctx.hysteresis_band_prior == Catch::Approx (hysteresis_before));
 
   auto rows = tx->Execute ("SELECT COUNT(*) AS c FROM meta_learning_coeffs");
   REQUIRE (cortext::testing::GetInt64 (rows[0], "c") == 0);
+#else
+  REQUIRE (pctx.attention_width_prior != Catch::Approx (width_before));
+  REQUIRE (pctx.rate_target_prior != Catch::Approx (rate_before));
+  REQUIRE (pctx.hysteresis_band_prior != Catch::Approx (hysteresis_before));
+
+  auto rows = tx->Execute ("SELECT COUNT(*) AS c FROM meta_learning_coeffs");
+  REQUIRE (cortext::testing::GetInt64 (rows[0], "c") == 3);
+#endif
 }

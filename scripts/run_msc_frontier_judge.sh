@@ -7,7 +7,7 @@ MAX_DIALOGS="${MAX_DIALOGS:-0}"
 MAX_SESSIONS="${MAX_SESSIONS:-0}"
 MODELS_DIR="${MODELS_DIR:-models}"
 BUILD_DIR="${BUILD_DIR:-build}"
-ENV_FILE="${ENV_FILE:-}"
+ENV_FILE="${CORTEXT_EVAL_ENV_FILE:-${ENV_FILE:-}}"
 JUDGE_MODEL="${JUDGE_MODEL:-gpt-5.5}"
 COMPACTION_MODEL="${COMPACTION_MODEL:-${JUDGE_MODEL}}"
 JUDGE_REPETITIONS="${JUDGE_REPETITIONS:-3}"
@@ -26,8 +26,8 @@ COMPACTING_SESSION_MAX_OUTPUT_TOKENS="${COMPACTING_SESSION_MAX_OUTPUT_TOKENS:-70
 mkdir -p "${ROOT}"
 
 if [[ -z "${ENV_FILE}" ]]; then
-  if [[ -f /shared/augmem/.env ]]; then
-    ENV_FILE=/shared/augmem/.env
+  if [[ -f .env ]]; then
+    ENV_FILE=.env
   fi
 fi
 

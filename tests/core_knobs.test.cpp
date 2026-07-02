@@ -1,6 +1,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
+#include "test_helpers.hpp"
 #include <cmath>
 
 using namespace cortext::core;
@@ -149,6 +150,20 @@ TEST_CASE ("WMBaseCapacity defaults to the capacity-21 operating point",
   REQUIRE (WMInitialSlotStrength (0.5, 0.5, 0.5, 1.0)
            > WMInitialSlotStrength (0.5, 0.5, 0.5, 0.0));
   REQUIRE (WMCostSaturator (2.0) == Catch::Approx (2.0 / 3.0));
+}
+
+TEST_CASE ("WM capacity override is ignored without experiment hooks",
+           "[core][knobs][experiment_hooks]")
+{
+  cortext::testing::ScopedEnvVar override ("CORTEXT_WM_CAPACITY_OVERRIDE",
+                                           "42");
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
+  SUCCEED (
+      "CORTEXT_WM_CAPACITY_OVERRIDE is process-cached and covered by "
+      "ablation hook integration tests when experiment hooks are enabled.");
+#else
+  REQUIRE (WMBaseCapacity (0.5, 0.5) == 21);
+#endif
 }
 
 TEST_CASE ("Bootstrap state priors derive from knobs", "[core][knobs]")

@@ -215,6 +215,27 @@ Default build flags are opt-out:
   stay off unless `CORTEXT_OPENTELEMETRY_EXPORTERS=ON`.
 - `CORTEXT_USE_SYSTEM_GGML=ON` with `CORTEXT_FETCH_AIST_MODEL=OFF` are overrides
   for packagers or offline builds, not the default release path.
+- `CORTEXT_EXPERIMENT_HOOKS=OFF` compiles out eval-only ablation env hooks.
+  Set it to `ON` only for controlled mechanism sweeps.
+
+Operational environment variables are intentionally narrow:
+
+- Model/runtime: `CORTEXT_AIST_MODEL_PATH`,
+  `CORTEXT_AIST_TOKENIZER_GGUF_PATH`, `CORTEXT_AIST_RUNTIME`,
+  `CORTEXT_AIST_GGML_BACKEND`, `CORTEXT_AIST_THREADS`,
+  `CORTEXT_AIST_N_GPU_LAYERS`, `CORTEXT_AIST_CONTEXT_LENGTH`, and
+  `CORTEXT_GGML_LOG_LEVEL`.
+- Threading: `CORTEXT_EMBED_THREADS` and `CORTEXT_INFER_THREADS`.
+- SQLite/store tuning: `CORTEXT_SQLITE_SYNCHRONOUS`,
+  `CORTEXT_SQLITE_WAL_AUTOCHECKPOINT`, `CORTEXT_SQLITE_JOURNAL_MODE`,
+  `CORTEXT_SQLITE_LOCKING_MODE`, `CORTEXT_SQLITE_TEMP_STORE`,
+  `CORTEXT_SQLITE_TRANSACTION_MODE`, `CORTEXT_SQLITE_PAGE_SIZE`,
+  `CORTEXT_SQLITE_MMAP_SIZE`, `CORTEXT_SQLITE_CACHE_SIZE_KB`,
+  `CORTEXT_OBJSTORE_BACKEND`, `CORTEXT_OBJSTORE_SYNC`, `SQLITE_VEC_PATH`,
+  `CORTEXT_FOREGROUND_WAL_CHECKPOINT`, `CORTEXT_EVICTION_MIN_DB_BYTES`, and
+  `CORTEXT_EVICTION_MIN_DB_AVAIL_PCT`.
+- Eval wrappers that need OpenAI credentials use `--env-file` or
+  `CORTEXT_EVAL_ENV_FILE`; repo-local `.env` is the only implicit fallback.
 
 ## Storage Model
 

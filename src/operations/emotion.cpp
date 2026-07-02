@@ -4,40 +4,24 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "../experimental_env.hpp"
+
 #include <algorithm>
-#include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <string>
 #include <vector>
 
 namespace cortext::operations
 {
-namespace
-{
-bool
-EnvFlag (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value)
-    {
-      return false;
-    }
-  std::string s (value);
-  std::transform (s.begin (), s.end (), s.begin (),
-                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
-  return s == "1" || s == "true" || s == "yes" || s == "on";
-}
-} // namespace
-
 void
 ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
-  const bool disable_percentile
-      = EnvFlag ("CORTEXT_FLASHBULB_DISABLE_PERCENTILE");
-  const bool disable_rate = EnvFlag ("CORTEXT_FLASHBULB_DISABLE_RATE");
-  const bool disable_arousal
-      = EnvFlag ("CORTEXT_FLASHBULB_DISABLE_AROUSAL");
+  const bool disable_percentile = internal::experimental_env::Flag (
+      "CORTEXT_FLASHBULB_DISABLE_PERCENTILE");
+  const bool disable_rate = internal::experimental_env::Flag (
+      "CORTEXT_FLASHBULB_DISABLE_RATE");
+  const bool disable_arousal = internal::experimental_env::Flag (
+      "CORTEXT_FLASHBULB_DISABLE_AROUSAL");
 
   const auto &cfg = context.GetConfig ();
   const double S = cfg.sensitivity;

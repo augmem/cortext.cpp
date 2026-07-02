@@ -6,13 +6,12 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/utils.hpp"
+#include "../experimental_env.hpp"
 
 #include <algorithm>
 #include <any>
 #include <array>
-#include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <map>
 #include <optional>
 #include <string>
@@ -67,20 +66,6 @@ Exec (Executor &executor, const std::string &query,
       const std::vector<std::any> &params = {})
 {
   return executor.Execute (query, params);
-}
-
-bool
-EnvFlag (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value)
-    {
-      return false;
-    }
-  std::string s (value);
-  std::transform (s.begin (), s.end (), s.begin (),
-                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
-  return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
 double
@@ -405,7 +390,7 @@ LoadOrCreateLearnableRow (Executor &executor, Family family,
 bool
 Disabled ()
 {
-  return EnvFlag ("CORTEXT_DISABLE_META_LEARNING");
+  return internal::experimental_env::Flag ("CORTEXT_DISABLE_META_LEARNING");
 }
 
 double

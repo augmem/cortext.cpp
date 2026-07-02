@@ -6,10 +6,10 @@
 #include "cortext/store/object_store.hpp"
 #include "cortext/signal.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "../experimental_env.hpp"
 
 #include <algorithm>
 #include <chrono>
-#include <cctype>
 #include <string>
 
 namespace cortext::operations
@@ -24,20 +24,6 @@ ElapsedMillis (SteadyClock::time_point start)
 {
   return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
       .count ();
-}
-
-bool
-EnvFlag (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value)
-    {
-      return false;
-    }
-  std::string s (value);
-  std::transform (s.begin (), s.end (), s.begin (),
-                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
-  return s == "1" || s == "true" || s == "yes" || s == "on";
 }
 
 /// @brief Create a SignalRecord from the current signal and context
@@ -158,7 +144,8 @@ UpdateAccumulator::Execute (OperationContext &context,
 
   if (acc.pending_interrupt_abort)
     {
-      const bool disable_accept = EnvFlag ("CORTEXT_DISABLE_INTERRUPT_ACCEPT");
+      const bool disable_accept = internal::experimental_env::Flag (
+          "CORTEXT_DISABLE_INTERRUPT_ACCEPT");
       bool accept = false;
       const bool can_compare
           = (acc.pending_interrupt_embedding.size () > 0

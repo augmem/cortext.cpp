@@ -4,9 +4,9 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
-#include <cctype>
+#include "../experimental_env.hpp"
+
 #include <cmath>
-#include <cstdlib>
 #include <string>
 
 namespace cortext::operations
@@ -15,20 +15,6 @@ namespace cortext::operations
 namespace
 {
 constexpr double kEpsilon = 1e-9;
-
-bool
-EnvFlag (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value)
-    {
-      return false;
-    }
-  std::string s (value);
-  std::transform (s.begin (), s.end (), s.begin (),
-                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
-  return s == "1" || s == "true" || s == "yes" || s == "on";
-}
 
 double
 NormalizeLocal (double raw, double alpha, double min_var, double gain,
@@ -58,12 +44,12 @@ void
 DetectBoundary::Execute (OperationContext &context,
                          Transaction & /*tx*/) const
 {
-  const bool disable_pressure
-      = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_PRESSURE");
-  const bool disable_surprisal
-      = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_SURPRISAL");
-  const bool disable_natural
-      = EnvFlag ("CORTEXT_BOUNDARY_DISABLE_NATURAL");
+  const bool disable_pressure = internal::experimental_env::Flag (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE");
+  const bool disable_surprisal = internal::experimental_env::Flag (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL");
+  const bool disable_natural = internal::experimental_env::Flag (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL");
 
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();

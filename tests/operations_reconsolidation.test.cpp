@@ -253,7 +253,11 @@ TEST_CASE ("Alg20 structured reconsolidation does not overwrite shared embedding
       = std::any_cast<long long> (rows[0].at ("embedding_id"));
   const long long sibling_embedding
       = std::any_cast<long long> (rows[1].at ("embedding_id"));
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
   REQUIRE (target_embedding != 420LL);
+#else
+  REQUIRE (target_embedding == 420LL);
+#endif
   REQUIRE (sibling_embedding == 420LL);
 
   auto signal_rows = store->Execute (
@@ -290,8 +294,13 @@ TEST_CASE ("Alg20 structured reconsolidation does not overwrite shared embedding
            == target_embedding);
   auto sibling_cache_it = pctx.retrieval_surface_embedding_index.find (420LL);
   REQUIRE (sibling_cache_it != pctx.retrieval_surface_embedding_index.end ());
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
   REQUIRE (pctx.retrieval_surface_cache[sibling_cache_it->second].memory_id
            == 101LL);
+#else
+  REQUIRE (pctx.retrieval_surface_cache[sibling_cache_it->second].memory_id
+           == 100LL);
+#endif
 }
 
 TEST_CASE ("Alg20 constructive reconsolidation refreshes processor caches",
@@ -514,7 +523,11 @@ TEST_CASE ("High ACh increases reconsolidation drift",
 
   const double sim_scaled = run_case (false);
   const double sim_unscaled = run_case (true);
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
   REQUIRE (sim_scaled > sim_unscaled);
+#else
+  REQUIRE (sim_scaled == Catch::Approx (sim_unscaled));
+#endif
 }
 
 // --- Ripple Effect Tests ---
@@ -689,15 +702,25 @@ TEST_CASE ("Alg20 ripple reconstruction forks shared neighbor embedding",
       = std::any_cast<long long> (rows[0].at ("embedding_id"));
   const long long sibling_embedding
       = std::any_cast<long long> (rows[1].at ("embedding_id"));
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
   REQUIRE (neighbor_embedding != 900LL);
+#else
+  REQUIRE (neighbor_embedding == 900LL);
+#endif
   REQUIRE (sibling_embedding == 900LL);
 
   auto current_rows = store->Execute (
       "SELECT embedding_id FROM current_memory_embeddings WHERE memory_id = ?",
       { 200LL });
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
   REQUIRE (current_rows.size () == 1);
   REQUIRE (std::any_cast<long long> (current_rows[0].at ("embedding_id"))
            == neighbor_embedding);
+#else
+  REQUIRE (current_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (current_rows[0].at ("embedding_id"))
+           == 900LL);
+#endif
   REQUIRE (pctx.association_fanout_cache.valid);
 }
 

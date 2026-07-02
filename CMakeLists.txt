@@ -44,6 +44,8 @@ option(CORTEXT_FETCH_AIST_MODEL
 option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
 option(CORTEXT_OPENTELEMETRY_EXPORTERS
        "Build optional OpenTelemetry exporter dependencies" OFF)
+option(CORTEXT_EXPERIMENT_HOOKS
+       "Enable experimental environment-variable ablation hooks" OFF)
 set(CORTEXT_GGML_SOURCE_DIR "" CACHE PATH
     "Optional local ggml checkout")
 set(CORTEXT_GGML_GIT_REPOSITORY "https://github.com/ggml-org/ggml.git"
@@ -473,6 +475,10 @@ if(CORTEXT_ENABLE_IMAGE)
   target_compile_definitions(cortext PUBLIC CORTEXT_ENABLE_IMAGE=1)
 else()
   target_compile_definitions(cortext PUBLIC CORTEXT_DISABLE_IMAGE=1)
+endif()
+
+if(CORTEXT_EXPERIMENT_HOOKS)
+  target_compile_definitions(cortext PUBLIC CORTEXT_EXPERIMENT_HOOKS=1)
 endif()
 
 # Embed sqlite-vec sources when enabled
