@@ -6,7 +6,7 @@ author:
     affiliation: "Cortext Research"
   - name: "Cortext Team"
     affiliation: "Deepmind / Google"
-date: "December 2025"
+date: "July 2026"
 bibliography: references.bib
 ---
 
@@ -27,10 +27,10 @@ The core contribution of this work is a formally specified memory architecture i
 1. Most tuneable parameters derive from three primary knobs (Focus, Sensitivity, Stability) through explicit mathematical transformations, while fixed invariants (e.g., controller gains) are labeled and justified.
 2. System priors self-calibrate through uncertainty-weighted Bayesian blending with observed evidence.
 3. Developmental phases emerge from annealed safety bounds and experiential mass accumulation, not explicit mode switching.
-4. A knowledge graph layer enables semantic consolidation and graph-augmented retrieval.
+4. A knowledge graph layer enables shallow embedding consolidation and graph-augmented retrieval.
 5. Ingress-time Soft Anchor state preserves uncertain subject/entity continuity without forcing immediate hard binding.
 
-The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, Soft Anchor formation, metacognition, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 presents the interrupt gate for streaming integration. Section 11 reports experimental results. Section 12 discusses implementation considerations and computational complexity. Section 13 documents the performance profiling and optimization of the reference implementation. Section 14 concludes with limitations and future directions. In the source tree these correspond to `sections/1_...` through `sections/11_...`; the rendered manuscript section numbering includes the introduction and related-work sections before those files.
+The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, Soft Anchor formation, procedural sparse keys, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 presents the interrupt gate for streaming integration. Section 11 reports experimental results. Section 12 discusses implementation considerations and computational complexity. Section 13 documents the performance profiling and optimization of the reference implementation. Section 14 concludes with limitations and future directions. In the source tree these correspond to `sections/1_...` through `sections/11_...`; the rendered manuscript section numbering includes the introduction and related-work sections before those files.
 
 # Related Work
 
@@ -44,7 +44,7 @@ The working memory component of Cortext draws primarily on @cowan2001magical emb
 
 The consolidation mechanisms in Cortext reflect findings from the memory reconsolidation literature [@nader2000fear; @nader2003memory]. Reconsolidation theory posits that retrieved memories enter a labile state during which they can be modified before restabilization. Our architecture implements this through time-bounded lability windows governed by the Stability parameter, with reconsolidation gain modulated by both Sensitivity and contextual relevance.
 
-The distinction between episodic and semantic memory [@tulving1972episodic] motivates our two-tier storage approach: a streaming episodic buffer for immediate experiences and a consolidated semantic graph for abstracted knowledge. The consolidation process transforms high-redundancy episodic clusters into summary nodes linked by typed semantic relations, consistent with complementary learning systems theory [@mcclelland1995why].
+The distinction between episodic and semantic memory [@tulving1972episodic] motivates our two-tier storage approach: a streaming episodic buffer for immediate experiences and a durable graph over consolidated embedding structure. The current consolidation process transforms high-redundancy episodic clusters into association centroid nodes linked to their sources by durable graph edges; it does not synthesize payload summaries or extract free-form semantic relations.
 
 ## Emotional Influences on Memory
 

@@ -1,6 +1,6 @@
 # Cortext: A Three-Knob Adaptive Memory Architecture
 Gabriel Willen, Cortext Team
-2025-12-01
+2026-07-01
 
 # Abstract
 
@@ -66,7 +66,7 @@ architecture in which:
     blending with observed evidence.
 3.  Developmental phases emerge from annealed safety bounds and
     experiential mass accumulation, not explicit mode switching.
-4.  A knowledge graph layer enables semantic consolidation and
+4.  A knowledge graph layer enables shallow embedding consolidation and
     graph-augmented retrieval.
 5.  Ingress-time Soft Anchor state preserves uncertain subject/entity
     continuity without forcing immediate hard binding.
@@ -79,7 +79,7 @@ Stability adaptation. Section 5 describes structural metrics and
 composite scoring. Section 6 covers dynamic thresholding and homeostatic
 control. Section 7 presents the reinforcement and decay dynamics.
 Section 8 describes advanced cognitive processes including working
-memory, Soft Anchor formation, metacognition, and emotional
+memory, Soft Anchor formation, procedural sparse keys, and emotional
 consolidation. Section 9 details the consolidation and graph integration
 system. Section 10 presents the interrupt gate for streaming
 integration. Section 11 reports experimental results. Section 12
@@ -122,11 +122,11 @@ by both Sensitivity and contextual relevance.
 
 The distinction between episodic and semantic memory (Tulving 1972)
 motivates our two-tier storage approach: a streaming episodic buffer for
-immediate experiences and a consolidated semantic graph for abstracted
-knowledge. The consolidation process transforms high-redundancy episodic
-clusters into summary nodes linked by typed semantic relations,
-consistent with complementary learning systems theory (McClelland,
-McNaughton, and O’Reilly 1995).
+immediate experiences and a durable graph over consolidated embedding
+structure. The current consolidation process transforms high-redundancy
+episodic clusters into association centroid nodes linked to their
+sources by durable graph edges; it does not synthesize payload summaries
+or extract free-form semantic relations.
 
 ## Emotional Influences on Memory
 
@@ -1747,7 +1747,8 @@ mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n,
 1), boundary_score}. Store `c_t` as the temporal context for the memory.
 Append e_rep to memory_stream and l2_normalize(μ_acc) to
 recent_memory_centroids. Update `index_store` with the sparse key
-(**?@sec-pattern-separation**). Reset accumulator for next unit.
+(<a href="#sec-pattern-separation" class="quarto-xref">Section 8.14</a>).
+Reset accumulator for next unit.
 
 # Reinforcement and Decay Dynamics
 
@@ -2629,8 +2630,9 @@ Items in the middle region suffer interference:
 ## Emotional Consolidation
 
 High-emotion events trigger enhanced consolidation, following McGaugh
-(2004) findings. As detailed in **?@sec-activity**, consolidation
-operates on stored memory metadata:
+(2004) findings. As detailed in
+<a href="#sec-consolidation" class="quarto-xref">Section 9</a>,
+consolidation operates on stored memory metadata:
 
     θ_intensity = lerp(0.6, 0.8, 1 − S)
     θ_arousal = lerp(0.4, 0.2, S)
@@ -2690,6 +2692,31 @@ Tagged memories receive a consolidation bonus:
 
     if m.tagged and now_s() < m.tag_expires_at:
         score_consolidate(m) += lerp(0.10, 0.25, S) × m.tag_strength
+
+## Pattern Separation Sparse Index
+
+Pattern separation is the lightweight sparse-key side channel used to
+keep nearby dense embeddings addressable without adding a decoder,
+taxonomy, or fact layer. For an accumulator or stored memory embedding
+`x`, Cortext selects the `k` largest-magnitude dimensions, preserves
+each selected dimension’s sign, sorts the selected indices, and
+serializes the result as a stable sparse key:
+
+    k_sparse(F,S,T) = RetrievalSparseKeySize(F,S,T)
+    top_k(x) = indices of the k_sparse largest |x_i|
+    sparse_key(x) = join(sort({ i || sign(x_i) : i in top_k(x) }))
+
+The write path stores each committed memory id under
+`index_store[sparse_key(e_rep)]`. The procedural lane reuses the same
+keying function but stores values rather than membership lists:
+
+    index_store[sparse_key(e_rep)] += memory_id
+    procedural_store[sparse_key(μ_acc)][memory_id] = Q(proc_key, memory_id)
+
+Thus `index_store` is a sparse content-addressed memory bucket, while
+`procedural_store` is a sparse context-to-memory value table. Empty
+embeddings or non-positive key sizes produce no key and therefore do not
+update either store.
 
 ## Procedural Memory Lane (Habit/Skill Memory)
 
@@ -3298,17 +3325,19 @@ probe-bootstrap samples, `--max-media-per-system 0`, and
 
 <table>
 <colgroup>
-<col style="width: 15%" />
-<col style="width: 21%" />
-<col style="width: 21%" />
-<col style="width: 21%" />
-<col style="width: 21%" />
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
 </colgroup>
 <thead>
 <tr>
 <th>Outcome</th>
+<th style="text-align: right;">Probe-majority wins</th>
 <th style="text-align: right;">Raw wins</th>
-<th style="text-align: right;">Win rate</th>
+<th style="text-align: right;">Raw win rate</th>
 <th style="text-align: right;">Probe-bootstrap 95% CI</th>
 <th style="text-align: right;">Mean context tokens</th>
 </tr>
@@ -3316,6 +3345,7 @@ probe-bootstrap samples, `--max-media-per-system 0`, and
 <tbody>
 <tr>
 <td>Cortext native</td>
+<td style="text-align: right;">14/31</td>
 <td style="text-align: right;">47/93</td>
 <td style="text-align: right;">0.505</td>
 <td style="text-align: right;">[0.387, 0.624]</td>
@@ -3323,6 +3353,7 @@ probe-bootstrap samples, `--max-media-per-system 0`, and
 </tr>
 <tr>
 <td>Traditional chat RAG</td>
+<td style="text-align: right;">2/31</td>
 <td style="text-align: right;">16/93</td>
 <td style="text-align: right;">0.172</td>
 <td style="text-align: right;">[0.108, 0.247]</td>
@@ -3330,6 +3361,7 @@ probe-bootstrap samples, `--max-media-per-system 0`, and
 </tr>
 <tr>
 <td>Full-history upper bound</td>
+<td style="text-align: right;">1/31</td>
 <td style="text-align: right;">3/93</td>
 <td style="text-align: right;">0.032</td>
 <td style="text-align: right;">[0.000, 0.086]</td>
@@ -3337,8 +3369,17 @@ probe-bootstrap samples, `--max-media-per-system 0`, and
 </tr>
 <tr>
 <td>Tie / unclear</td>
+<td style="text-align: right;">10/31</td>
 <td style="text-align: right;">27/93</td>
 <td style="text-align: right;">0.290</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>No-majority split</td>
+<td style="text-align: right;">4/31</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">n/a</td>
 <td style="text-align: right;">n/a</td>
 <td style="text-align: right;">n/a</td>
 </tr>
@@ -3347,14 +3388,12 @@ probe-bootstrap samples, `--max-media-per-system 0`, and
 
 Cortext’s single-repetition win counts were 14, 17, and 16 out of 31, so
 the three-repetition average is 15.7 wins per 31-probe pass and recovers
-the historical 15-win A/B level. Probe-majority aggregation gives
-Cortext 14/31, traditional RAG 2/31, full history 1/31, tie-or-unclear
-10/31, and four probes with 1-1-1 splits across repetitions. The token
-evidence remained strongly in Cortext’s favor: mean Cortext context was
-467 tokens versus 7,447 for traditional RAG, a 93.7% reduction. The
-final six probes triggered full-history prompt-fit trimming on all three
-repetitions, dropping 82 to 480 oldest full-history documents while
-preserving `judge_prompt_fits_context_window` and
+the historical 15-win A/B level. The token evidence remained strongly in
+Cortext’s favor: mean Cortext context was 467 tokens versus 7,447 for
+traditional RAG, a 93.7% reduction. The final six probes triggered
+full-history prompt-fit trimming on all three repetitions, dropping 82
+to 480 oldest full-history documents while preserving
+`judge_prompt_fits_context_window` and
 `full_history_prompt_fits_judge_context`; this constrains the
 full-history comparator rather than the Cortext packet. The aggregate
 artifact is
@@ -3391,19 +3430,21 @@ and `full_history_text_only`.
 
 <table>
 <colgroup>
-<col style="width: 11%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
+<col style="width: 9%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
 </colgroup>
 <thead>
 <tr>
 <th>Outcome</th>
+<th style="text-align: right;">Probe-majority wins</th>
 <th style="text-align: right;">Raw wins</th>
-<th style="text-align: right;">Win rate</th>
+<th style="text-align: right;">Raw win rate</th>
 <th style="text-align: right;">Probe-bootstrap 95% CI</th>
 <th style="text-align: right;">Mean sufficiency</th>
 <th style="text-align: right;">Mean noise</th>
@@ -3413,6 +3454,7 @@ and `full_history_text_only`.
 <tbody>
 <tr>
 <td>Cortext native</td>
+<td style="text-align: right;">7/9</td>
 <td style="text-align: right;">21/27</td>
 <td style="text-align: right;">0.778</td>
 <td style="text-align: right;">[0.519, 0.963]</td>
@@ -3422,6 +3464,7 @@ and `full_history_text_only`.
 </tr>
 <tr>
 <td>Traditional chat RAG</td>
+<td style="text-align: right;">0/9</td>
 <td style="text-align: right;">0/27</td>
 <td style="text-align: right;">0.000</td>
 <td style="text-align: right;">[0.000, 0.000]</td>
@@ -3431,6 +3474,7 @@ and `full_history_text_only`.
 </tr>
 <tr>
 <td>Full-history upper bound</td>
+<td style="text-align: right;">0/9</td>
 <td style="text-align: right;">1/27</td>
 <td style="text-align: right;">0.037</td>
 <td style="text-align: right;">[0.000, 0.111]</td>
@@ -3440,11 +3484,22 @@ and `full_history_text_only`.
 </tr>
 <tr>
 <td>Hosted compaction rollup</td>
+<td style="text-align: right;">1/9</td>
 <td style="text-align: right;">5/27</td>
 <td style="text-align: right;">0.185</td>
 <td style="text-align: right;">[0.037, 0.444]</td>
 <td style="text-align: right;">4.63</td>
 <td style="text-align: right;">3.63</td>
+<td style="text-align: right;">n/a</td>
+</tr>
+<tr>
+<td>No-majority split</td>
+<td style="text-align: right;">1/9</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">n/a</td>
+<td style="text-align: right;">n/a</td>
 <td style="text-align: right;">n/a</td>
 </tr>
 </tbody>
@@ -3453,9 +3508,11 @@ and `full_history_text_only`.
 Mean Cortext context was 998 tokens versus 49,196 for traditional
 chat+RAG, a 97.97% context-token reduction with probe-bootstrap 95% CI
 \[97.77%, 98.17%\]. This hosted public-benchmark result therefore
-supports a strong token-reduction, noise-reduction, and blind-win claim,
-but not a completed sufficiency-match claim: mean sufficiency was lower
-for Cortext (4.41) than traditional chat+RAG (4.67) and the hosted
+supports a strong token-reduction, noise-reduction, and blind-win claim:
+Cortext won 7 of 9 probes by majority, with one additional probe split
+across Cortext, full history, and compaction. It does not support a
+completed sufficiency-match claim: mean sufficiency was lower for
+Cortext (4.41) than traditional chat+RAG (4.67) and the hosted
 compaction rollup baseline (4.63). The aggregate artifact is
 `eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
 
@@ -3482,19 +3539,21 @@ across 27 judge requests.
 
 <table>
 <colgroup>
-<col style="width: 11%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
-<col style="width: 14%" />
+<col style="width: 9%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
+<col style="width: 12%" />
 </colgroup>
 <thead>
 <tr>
 <th>Outcome</th>
+<th style="text-align: right;">Probe-majority wins</th>
 <th style="text-align: right;">Raw wins</th>
-<th style="text-align: right;">Win rate</th>
+<th style="text-align: right;">Raw win rate</th>
 <th style="text-align: right;">Probe-bootstrap 95% CI</th>
 <th style="text-align: right;">Mean sufficiency</th>
 <th style="text-align: right;">Mean noise</th>
@@ -3504,6 +3563,7 @@ across 27 judge requests.
 <tbody>
 <tr>
 <td>Cortext native</td>
+<td style="text-align: right;">6/9</td>
 <td style="text-align: right;">19/27</td>
 <td style="text-align: right;">0.704</td>
 <td style="text-align: right;">[0.407, 0.926]</td>
@@ -3513,6 +3573,7 @@ across 27 judge requests.
 </tr>
 <tr>
 <td>Semantic vector RAG</td>
+<td style="text-align: right;">0/9</td>
 <td style="text-align: right;">0/27</td>
 <td style="text-align: right;">0.000</td>
 <td style="text-align: right;">[0.000, 0.000]</td>
@@ -3522,6 +3583,7 @@ across 27 judge requests.
 </tr>
 <tr>
 <td>Lexical keyword RAG</td>
+<td style="text-align: right;">0/9</td>
 <td style="text-align: right;">0/27</td>
 <td style="text-align: right;">0.000</td>
 <td style="text-align: right;">[0.000, 0.000]</td>
@@ -3531,6 +3593,7 @@ across 27 judge requests.
 </tr>
 <tr>
 <td>Rolling-window chat</td>
+<td style="text-align: right;">0/9</td>
 <td style="text-align: right;">0/27</td>
 <td style="text-align: right;">0.000</td>
 <td style="text-align: right;">[0.000, 0.000]</td>
@@ -3540,6 +3603,7 @@ across 27 judge requests.
 </tr>
 <tr>
 <td>Hybrid chat+vector RAG</td>
+<td style="text-align: right;">0/9</td>
 <td style="text-align: right;">0/27</td>
 <td style="text-align: right;">0.000</td>
 <td style="text-align: right;">[0.000, 0.000]</td>
@@ -3549,6 +3613,7 @@ across 27 judge requests.
 </tr>
 <tr>
 <td>Hosted compaction rollup</td>
+<td style="text-align: right;">3/9</td>
 <td style="text-align: right;">8/27</td>
 <td style="text-align: right;">0.296</td>
 <td style="text-align: right;">[0.074, 0.593]</td>
@@ -3560,8 +3625,9 @@ across 27 judge requests.
 </table>
 
 This ablation supports a narrower claim than the full-history frontier
-result: under a 128k judge-context cap, Cortext retained most wins while
-substantially reducing context and judged noise against retrieval-only,
+result: under a 128k judge-context cap, Cortext retained most wins by
+both probe majority (6/9) and row count (19/27) while substantially
+reducing context and judged noise against retrieval-only,
 rolling-context, hybrid RAG, and compaction-style packet variants. The
 aggregate artifact is
 `eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
@@ -3950,6 +4016,20 @@ distinct from the ACT-R-inspired activation ledger that the current
 retrieval trace retains; the ledger is observability, not a scoring
 gate.
 
+### Negative Results Summary
+
+The 18-arm sweep rejects the activation-gating direction for the current
+v1 runtime. All six ACT-R gate-promotion arms failed to beat the default
+stack, and the `all_gates` arm was harmful: sufficiency fell from 3.95
+to 3.72 while noise rose from 0.67 to 0.95. The metacognitive layer was
+cut because its removal was mildly positive at this horizon and it had
+no deferred long-horizon case. Temporal retrieval and predictive
+pre-activation stayed because their removal produced the clearest
+quality or packet-size losses. These verdicts do not remove the
+ACT-R-inspired activation ledger retained in retrieval traces; that
+ledger records ranking evidence for observability and audits, not an
+additional scoring gate.
+
 ### Working-Memory Partition Failure
 
 A June 11 experiment (commit 08902baf) split working memory into a pure
@@ -3997,16 +4077,18 @@ current-turn inclusions under the 131,072-token judge window.
 
 <table>
 <colgroup>
-<col style="width: 13%" />
-<col style="width: 17%" />
-<col style="width: 17%" />
-<col style="width: 17%" />
-<col style="width: 17%" />
-<col style="width: 17%" />
+<col style="width: 11%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
+<col style="width: 14%" />
 </colgroup>
 <thead>
 <tr>
 <th>system</th>
+<th style="text-align: right;">Probe-majority wins</th>
 <th style="text-align: right;">row wins</th>
 <th style="text-align: right;">probe-bootstrap win rate</th>
 <th style="text-align: right;">sufficiency</th>
@@ -4017,6 +4099,7 @@ current-turn inclusions under the 131,072-token judge window.
 <tbody>
 <tr>
 <td>Cortext native</td>
+<td style="text-align: right;">8 / 30</td>
 <td style="text-align: right;">30 / 90</td>
 <td style="text-align: right;">0.33 [0.22, 0.44]</td>
 <td style="text-align: right;">3.14 [2.76, 3.51]</td>
@@ -4025,6 +4108,7 @@ current-turn inclusions under the 131,072-token judge window.
 </tr>
 <tr>
 <td>traditional chat RAG</td>
+<td style="text-align: right;">2 / 30</td>
 <td style="text-align: right;">9 / 90</td>
 <td style="text-align: right;">0.10 [0.03, 0.19]</td>
 <td style="text-align: right;">2.57 [2.22, 2.91]</td>
@@ -4033,6 +4117,7 @@ current-turn inclusions under the 131,072-token judge window.
 </tr>
 <tr>
 <td>full-history upper bound</td>
+<td style="text-align: right;">5 / 30</td>
 <td style="text-align: right;">23 / 90</td>
 <td style="text-align: right;">0.26 [0.17, 0.34]</td>
 <td style="text-align: right;">3.70 [3.36, 4.02]</td>
@@ -4041,6 +4126,7 @@ current-turn inclusions under the 131,072-token judge window.
 </tr>
 <tr>
 <td>compacting session</td>
+<td style="text-align: right;">1 / 30</td>
 <td style="text-align: right;">10 / 90</td>
 <td style="text-align: right;">0.11 [0.06, 0.18]</td>
 <td style="text-align: right;">2.90 [2.58, 3.24]</td>
@@ -4050,21 +4136,22 @@ current-turn inclusions under the 131,072-token judge window.
 </tbody>
 </table>
 
-Full history remains the quality upper bound: best sufficiency and
-lowest noise. It is not a deployable memory strategy, and the judge had
-to drop 123,359 oldest full-history items across probes to keep prompts
-bounded. Cortext is the highest row-win system at this horizon and uses
-432.7 mean context tokens against 42,550.2 for traditional chat RAG, an
-aggregate 98.98 percent reduction (probe-bootstrap savings mean 98.61
-percent, 95% CI \[98.05%, 99.04%\]). The tradeoff is honest: after
-strict prior-only filtering, Cortext carries more noise than the
-windowed baselines, and its sufficiency confidence interval overlaps the
-compacting and RAG arms. This is not a per-mechanism promotion of any
-durable-structure component. It is the full-stack release stress
-verdict: at a horizon where windowed strategies compact or discard old
-context, Cortext stays competitive with the full-history upper bound
-while spending roughly two orders of magnitude less context than chat
-RAG. The artifact is
+Five probes resolved as tie/unclear majorities and nine had no majority
+across the three repetitions. Full history remains the quality upper
+bound: best sufficiency and lowest noise. It is not a deployable memory
+strategy, and the judge had to drop 123,359 oldest full-history items
+across probes to keep prompts bounded. Cortext is the highest row-win
+system at this horizon and uses 432.7 mean context tokens against
+42,550.2 for traditional chat RAG, an aggregate 98.98 percent reduction
+(probe-bootstrap savings mean 98.61 percent, 95% CI \[98.05%, 99.04%\]).
+The tradeoff is honest: after strict prior-only filtering, Cortext
+carries more noise than the windowed baselines, and its sufficiency
+confidence interval overlaps the compacting and RAG arms. This is not a
+per-mechanism promotion of any durable-structure component. It is the
+full-stack release stress verdict: at a horizon where windowed
+strategies compact or discard old context, Cortext stays competitive
+with the full-history upper bound while spending roughly two orders of
+magnitude less context than chat RAG. The artifact is
 `eval_runs/replay_v8_context_blowout/judge_gemma4_12b_local_context128_prioronly.json`.
 
 ## Experimental Interpretation
@@ -4095,10 +4182,7 @@ Native verification does not require a system SQLite development package
 or shared `libsqlite3` dependency.
 
 `QUARTO_DISABLE_GIT=1 QUARTO_DISABLE_GITHUB=1 quarto render docs/paper`
-completed locally and regenerated `docs/paper/_manuscript/index.md`. The
-render reported unresolved cross-reference warnings for
-`@sec-pattern-separation` and `@sec-activity`, which are
-manuscript-source issues outside this regression probe.
+is the manuscript regeneration command used for local verification.
 
 # Implementation Considerations
 

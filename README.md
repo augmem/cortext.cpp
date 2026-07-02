@@ -19,15 +19,17 @@ input.
 ## Results
 
 The strongest result so far is a hosted frontier-judge eval on a public Meta
-Multi-Session Chat slice (2026-06-30). Cortext won 21 of 27 blind judgments and
-used 98% fewer context tokens than traditional chat+RAG.
+Multi-Session Chat slice (2026-06-30). Cortext won 7 of 9 probes by majority
+(21 of 27 blind judgment rows) and used 98% fewer context tokens than
+traditional chat+RAG.
 
-| System | Win rate | Raw wins | 95% CI | Mean context tokens |
+| Outcome | Probe-majority wins | Raw wins | Probe-bootstrap row-win 95% CI | Mean context tokens |
 |---|---:|---:|---:|---:|
-| Cortext native | 0.778 | 21/27 | [0.519, 0.963] | 998 |
-| Traditional chat+RAG | 0.000 | 0/27 | [0.000, 0.000] | 49,196 |
-| Full-history upper bound | 0.037 | 1/27 | [0.000, 0.111] | 185,439 |
-| Hosted compaction rollup | 0.185 | 5/27 | [0.037, 0.444] | n/a |
+| Cortext native | 7/9 | 21/27 | [0.519, 0.963] | 998 |
+| Traditional chat+RAG | 0/9 | 0/27 | [0.000, 0.000] | 49,196 |
+| Full-history upper bound | 0/9 | 1/27 | [0.000, 0.111] | 185,439 |
+| Hosted compaction rollup | 1/9 | 5/27 | [0.037, 0.444] | n/a |
+| No-majority split | 1/9 | n/a | n/a | n/a |
 
 That is a 97.97% context-token reduction versus traditional chat+RAG
 (probe-bootstrap 95% CI [97.77%, 98.17%]). Cortext also had the lowest mean
@@ -58,14 +60,15 @@ counts matched the saved baseline exactly. Artifact:
 `build/graph_profile/full_msc_verify_final/summary.json`.
 
 A follow-up 128k-capped RAG ablation on the same probes used six blinded
-systems and three hosted `gpt-5.5` judgments per probe. Cortext won 19/27,
-the capped compaction rollup won 8/27, and semantic-vector-only,
+systems and three hosted `gpt-5.5` judgments per probe. Cortext won 6/9 probes
+by majority and 19/27 rows, the capped compaction rollup won 3/9 probes and
+8/27 rows, and semantic-vector-only,
 lexical-keyword-only, rolling-window-only, and 16k hybrid chat+vector RAG each
-won 0/27. The max estimated judge prompt was 116,425 tokens under a 128,000
-context cap; actual OpenAI usage was 1,871,994 prompt tokens and 39,001
-completion tokens. Mean context tokens were 816 for Cortext, 88 for semantic
-vector RAG, 224 for lexical RAG, 15,999 for rolling-window chat, 15,999 for
-hybrid RAG, and 7,110 for compaction. Artifact:
+won 0/9 probes and 0/27 rows. The max estimated judge prompt was 116,425
+tokens under a 128,000 context cap; actual OpenAI usage was 1,871,994 prompt
+tokens and 39,001 completion tokens. Mean context tokens were 816 for Cortext,
+88 for semantic vector RAG, 224 for lexical RAG, 15,999 for rolling-window
+chat, 15,999 for hybrid RAG, and 7,110 for compaction. Artifact:
 `eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
 
 An earlier local blind-judge pass (2026-06-28) on a one-year sparse replay,

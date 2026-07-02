@@ -135,18 +135,17 @@ structurally normalized blind packets with Gemma4-12B-AWQ served by vLLM at a
 `judge_seed=42`, 2,000 probe-bootstrap samples, `--max-media-per-system 0`,
 and `--blind-packets`; it completed 93/93 judgments with no missing rows.
 
-| Outcome | Raw wins | Win rate | Probe-bootstrap 95% CI | Mean context tokens |
-|---|---:|---:|---:|---:|
-| Cortext native | 47/93 | 0.505 | [0.387, 0.624] | 467 |
-| Traditional chat RAG | 16/93 | 0.172 | [0.108, 0.247] | 7,447 |
-| Full-history upper bound | 3/93 | 0.032 | [0.000, 0.086] | 15,974 |
-| Tie / unclear | 27/93 | 0.290 | n/a | n/a |
+| Outcome | Probe-majority wins | Raw wins | Raw win rate | Probe-bootstrap 95% CI | Mean context tokens |
+|---|---:|---:|---:|---:|---:|
+| Cortext native | 14/31 | 47/93 | 0.505 | [0.387, 0.624] | 467 |
+| Traditional chat RAG | 2/31 | 16/93 | 0.172 | [0.108, 0.247] | 7,447 |
+| Full-history upper bound | 1/31 | 3/93 | 0.032 | [0.000, 0.086] | 15,974 |
+| Tie / unclear | 10/31 | 27/93 | 0.290 | n/a | n/a |
+| No-majority split | 4/31 | n/a | n/a | n/a | n/a |
 
 Cortext's single-repetition win counts were 14, 17, and 16 out of 31, so the
 three-repetition average is 15.7 wins per 31-probe pass and recovers the
-historical 15-win A/B level. Probe-majority aggregation gives Cortext 14/31,
-traditional RAG 2/31, full history 1/31, tie-or-unclear 10/31, and four probes
-with 1-1-1 splits across repetitions. The token evidence remained strongly in
+historical 15-win A/B level. The token evidence remained strongly in
 Cortext's favor: mean Cortext context was 467 tokens versus 7,447 for
 traditional RAG, a 93.7% reduction. The final six probes triggered full-history
 prompt-fit trimming on all three repetitions, dropping 82 to 480 oldest
@@ -182,17 +181,20 @@ The run completed 27/27 judgments. The strict gates passed:
 `blind_prompt_hidden_labels_absent`, `traditional_chat_rag_text_only`, and
 `full_history_text_only`.
 
-| Outcome | Raw wins | Win rate | Probe-bootstrap 95% CI | Mean sufficiency | Mean noise | Mean context tokens |
-|---|---:|---:|---:|---:|---:|---:|
-| Cortext native | 21/27 | 0.778 | [0.519, 0.963] | 4.41 | 1.85 | 998 |
-| Traditional chat RAG | 0/27 | 0.000 | [0.000, 0.000] | 4.67 | 4.70 | 49,196 |
-| Full-history upper bound | 1/27 | 0.037 | [0.000, 0.111] | 4.52 | 5.00 | 185,439 |
-| Hosted compaction rollup | 5/27 | 0.185 | [0.037, 0.444] | 4.63 | 3.63 | n/a |
+| Outcome | Probe-majority wins | Raw wins | Raw win rate | Probe-bootstrap 95% CI | Mean sufficiency | Mean noise | Mean context tokens |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Cortext native | 7/9 | 21/27 | 0.778 | [0.519, 0.963] | 4.41 | 1.85 | 998 |
+| Traditional chat RAG | 0/9 | 0/27 | 0.000 | [0.000, 0.000] | 4.67 | 4.70 | 49,196 |
+| Full-history upper bound | 0/9 | 1/27 | 0.037 | [0.000, 0.111] | 4.52 | 5.00 | 185,439 |
+| Hosted compaction rollup | 1/9 | 5/27 | 0.185 | [0.037, 0.444] | 4.63 | 3.63 | n/a |
+| No-majority split | 1/9 | n/a | n/a | n/a | n/a | n/a | n/a |
 
 Mean Cortext context was 998 tokens versus 49,196 for traditional chat+RAG, a
 97.97% context-token reduction with probe-bootstrap 95% CI [97.77%, 98.17%].
 This hosted public-benchmark result therefore supports a strong token-reduction,
-noise-reduction, and blind-win claim, but not a completed sufficiency-match
+noise-reduction, and blind-win claim: Cortext won 7 of 9 probes by majority,
+with one additional probe split across Cortext, full history, and compaction.
+It does not support a completed sufficiency-match
 claim: mean sufficiency was lower for Cortext (4.41) than traditional chat+RAG
 (4.67) and the hosted compaction rollup baseline (4.63). The aggregate artifact
 is
@@ -217,17 +219,18 @@ tokens under the 128,000-token cap, and the strict prompt/context/fairness gates
 passed. Actual OpenAI API usage captured from responses was 1,871,994 prompt
 tokens and 39,001 completion tokens across 27 judge requests.
 
-| Outcome | Raw wins | Win rate | Probe-bootstrap 95% CI | Mean sufficiency | Mean noise | Mean context tokens |
-|---|---:|---:|---:|---:|---:|---:|
-| Cortext native | 19/27 | 0.704 | [0.407, 0.926] | 4.48 | 1.89 | 816 |
-| Semantic vector RAG | 0/27 | 0.000 | [0.000, 0.000] | 0.67 | 3.46 | 88 |
-| Lexical keyword RAG | 0/27 | 0.000 | [0.000, 0.000] | 0.96 | 3.57 | 224 |
-| Rolling-window chat | 0/27 | 0.000 | [0.000, 0.000] | 4.63 | 4.48 | 15,999 |
-| Hybrid chat+vector RAG | 0/27 | 0.000 | [0.000, 0.000] | 4.78 | 4.43 | 15,999 |
-| Hosted compaction rollup | 8/27 | 0.296 | [0.074, 0.593] | 4.70 | 3.32 | 7,110 |
+| Outcome | Probe-majority wins | Raw wins | Raw win rate | Probe-bootstrap 95% CI | Mean sufficiency | Mean noise | Mean context tokens |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Cortext native | 6/9 | 19/27 | 0.704 | [0.407, 0.926] | 4.48 | 1.89 | 816 |
+| Semantic vector RAG | 0/9 | 0/27 | 0.000 | [0.000, 0.000] | 0.67 | 3.46 | 88 |
+| Lexical keyword RAG | 0/9 | 0/27 | 0.000 | [0.000, 0.000] | 0.96 | 3.57 | 224 |
+| Rolling-window chat | 0/9 | 0/27 | 0.000 | [0.000, 0.000] | 4.63 | 4.48 | 15,999 |
+| Hybrid chat+vector RAG | 0/9 | 0/27 | 0.000 | [0.000, 0.000] | 4.78 | 4.43 | 15,999 |
+| Hosted compaction rollup | 3/9 | 8/27 | 0.296 | [0.074, 0.593] | 4.70 | 3.32 | 7,110 |
 
 This ablation supports a narrower claim than the full-history frontier result:
-under a 128k judge-context cap, Cortext retained most wins while substantially
+under a 128k judge-context cap, Cortext retained most wins by both probe
+majority (6/9) and row count (19/27) while substantially
 reducing context and judged noise against retrieval-only, rolling-context,
 hybrid RAG, and compaction-style packet variants. The aggregate artifact is
 `eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
@@ -362,6 +365,19 @@ long-horizon re-test. These rejected scoring gates are distinct from the
 ACT-R-inspired activation ledger that the current retrieval trace retains;
 the ledger is observability, not a scoring gate.
 
+### Negative Results Summary
+
+The 18-arm sweep rejects the activation-gating direction for the current v1
+runtime. All six ACT-R gate-promotion arms failed to beat the default stack,
+and the `all_gates` arm was harmful: sufficiency fell from 3.95 to 3.72 while
+noise rose from 0.67 to 0.95. The metacognitive layer was cut because its
+removal was mildly positive at this horizon and it had no deferred long-horizon
+case. Temporal retrieval and predictive pre-activation stayed because their
+removal produced the clearest quality or packet-size losses. These verdicts do
+not remove the ACT-R-inspired activation ledger retained in retrieval traces;
+that ledger records ranking evidence for observability and audits, not an
+additional scoring gate.
+
 ### Working-Memory Partition Failure
 
 A June 11 experiment (commit 08902baf) split working memory into a pure FIFO
@@ -405,15 +421,17 @@ completed 90/90 judgments with zero judge-validation failures, no
 future-context violations, and no current-turn inclusions under the
 131,072-token judge window.
 
-| system | row wins | probe-bootstrap win rate | sufficiency | noise | mean context tokens |
-|---|---:|---:|---:|---:|---:|
-| Cortext native | 30 / 90 | 0.33 [0.22, 0.44] | 3.14 [2.76, 3.51] | 1.64 [1.32, 1.96] | 433 |
-| traditional chat RAG | 9 / 90 | 0.10 [0.03, 0.19] | 2.57 [2.22, 2.91] | 1.09 [0.82, 1.37] | 42,550 |
-| full-history upper bound | 23 / 90 | 0.26 [0.17, 0.34] | 3.70 [3.36, 4.02] | 0.36 [0.21, 0.51] | 88,806 |
-| compacting session | 10 / 90 | 0.11 [0.06, 0.18] | 2.90 [2.58, 3.24] | 0.84 [0.66, 1.04] | n/a |
+| system | Probe-majority wins | row wins | probe-bootstrap win rate | sufficiency | noise | mean context tokens |
+|---|---:|---:|---:|---:|---:|---:|
+| Cortext native | 8 / 30 | 30 / 90 | 0.33 [0.22, 0.44] | 3.14 [2.76, 3.51] | 1.64 [1.32, 1.96] | 433 |
+| traditional chat RAG | 2 / 30 | 9 / 90 | 0.10 [0.03, 0.19] | 2.57 [2.22, 2.91] | 1.09 [0.82, 1.37] | 42,550 |
+| full-history upper bound | 5 / 30 | 23 / 90 | 0.26 [0.17, 0.34] | 3.70 [3.36, 4.02] | 0.36 [0.21, 0.51] | 88,806 |
+| compacting session | 1 / 30 | 10 / 90 | 0.11 [0.06, 0.18] | 2.90 [2.58, 3.24] | 0.84 [0.66, 1.04] | n/a |
 
-Full history remains the quality upper bound: best sufficiency and lowest
-noise. It is not a deployable memory strategy, and the judge had to drop
+Five probes resolved as tie/unclear majorities and nine had no majority across
+the three repetitions. Full history remains the quality upper bound: best
+sufficiency and lowest noise. It is not a deployable memory strategy, and the
+judge had to drop
 123,359 oldest full-history items across probes to keep prompts bounded.
 Cortext is the highest row-win system at this horizon and uses 432.7 mean
 context tokens against 42,550.2 for traditional chat RAG, an aggregate 98.98
@@ -455,7 +473,4 @@ verification does not require a system SQLite development package or shared
 `libsqlite3` dependency.
 
 `QUARTO_DISABLE_GIT=1 QUARTO_DISABLE_GITHUB=1 quarto render docs/paper`
-completed locally and regenerated `docs/paper/_manuscript/index.md`. The render
-reported unresolved cross-reference warnings for `@sec-pattern-separation` and
-`@sec-activity`, which are manuscript-source issues outside this regression
-probe.
+is the manuscript regeneration command used for local verification.
