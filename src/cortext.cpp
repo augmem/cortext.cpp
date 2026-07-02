@@ -10,6 +10,7 @@
 #include "operations/constructive_recall_internal.hpp"
 #include "operations/meta_learning_internal.hpp"
 #include "operations/retrieval_trace_state.hpp"
+#include "experimental_env.hpp"
 #include "signal_filter.hpp"
 #include "streaming_text_probe.hpp"
 
@@ -36,7 +37,6 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -115,25 +115,9 @@ Clamp01 (double value)
 }
 
 bool
-EnvFlag (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value)
-    {
-      return false;
-    }
-  std::string s (value);
-  std::transform (s.begin (), s.end (), s.begin (),
-                  [] (unsigned char c) {
-                    return static_cast<char> (std::tolower (c));
-                  });
-  return s == "1" || s == "true" || s == "yes" || s == "on";
-}
-
-bool
 SourceBlobsDisabled ()
 {
-  return EnvFlag ("CORTEXT_DISABLE_SOURCE_BLOBS");
+  return internal::experimental_env::Flag ("CORTEXT_DISABLE_SOURCE_BLOBS");
 }
 
 #if !defined(CORTEXT_DISABLE_IMAGE)
@@ -838,8 +822,8 @@ ResolveDisplayMemoryIdsForEmptyRetrieval (Store *store, long long memory_id,
     }
 
   const int limit = std::max (1, max_linked_candidates);
-  const bool query_source_ordering_enabled
-      = !EnvFlag ("CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
+  const bool query_source_ordering_enabled = !internal::experimental_env::Flag (
+      "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
   try
     {
       auto rows = store->Execute (

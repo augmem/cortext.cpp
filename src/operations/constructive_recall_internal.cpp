@@ -2,12 +2,11 @@
 
 #include "cortext/core/utils.hpp"
 #include "cortext/store/utils.hpp"
+#include "../experimental_env.hpp"
 
 #include <any>
 #include <algorithm>
-#include <cctype>
 #include <chrono>
-#include <cstdlib>
 #include <map>
 #include <sstream>
 #include <string>
@@ -30,57 +29,10 @@ Exec (Executor &executor, const std::string &query,
 }
 
 bool
-EnvFlag (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value)
-    {
-      return false;
-    }
-  std::string s (value);
-  std::transform (s.begin (), s.end (), s.begin (),
-                  [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
-  return s == "1" || s == "true" || s == "yes" || s == "on";
-}
-
-bool
 CurrentSurfaceWritesDisabled ()
 {
-  return EnvFlag ("CORTEXT_DISABLE_CURRENT_MEMORY_SURFACE_WRITES");
-}
-
-std::optional<int>
-EnvInt (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value || *value == '\0')
-    {
-      return std::nullopt;
-    }
-  char *end = nullptr;
-  const long parsed = std::strtol (value, &end, 10);
-  if (end == value)
-    {
-      return std::nullopt;
-    }
-  return static_cast<int> (parsed);
-}
-
-std::optional<long long>
-EnvInt64 (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value || *value == '\0')
-    {
-      return std::nullopt;
-    }
-  char *end = nullptr;
-  const long long parsed = std::strtoll (value, &end, 10);
-  if (end == value)
-    {
-      return std::nullopt;
-    }
-  return parsed;
+  return internal::experimental_env::Flag (
+      "CORTEXT_DISABLE_CURRENT_MEMORY_SURFACE_WRITES");
 }
 
 long long
@@ -104,7 +56,8 @@ AnyToInt64 (const std::any &value)
 int
 ResolveHistoryLimit (ReconstructionUpdatePolicy policy)
 {
-  if (const auto env = EnvInt ("CORTEXT_RECONSTRUCTION_HISTORY_LIMIT"))
+  if (const auto env
+      = internal::experimental_env::Int ("CORTEXT_RECONSTRUCTION_HISTORY_LIMIT"))
     {
       if (*env > 0)
         {
@@ -118,7 +71,8 @@ int
 ResolvePruneBatchLimit (ReconstructionUpdatePolicy policy,
                         int history_limit)
 {
-  if (const auto env = EnvInt ("CORTEXT_RECONSTRUCTION_PRUNE_BATCH_LIMIT"))
+  if (const auto env = internal::experimental_env::Int (
+          "CORTEXT_RECONSTRUCTION_PRUNE_BATCH_LIMIT"))
     {
       if (*env > 0)
         {
@@ -135,7 +89,8 @@ ResolvePruneBatchLimit (ReconstructionUpdatePolicy policy,
 long long
 ResolveMinUpdateIntervalMs (ReconstructionUpdatePolicy policy)
 {
-  if (const auto env = EnvInt64 ("CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS"))
+  if (const auto env = internal::experimental_env::Int64 (
+          "CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS"))
     {
       return *env;
     }
@@ -429,7 +384,8 @@ UpdateCurrentEmbeddingSurface (Executor &executor, long long memory_id,
 bool
 Disabled ()
 {
-  return EnvFlag ("CORTEXT_DISABLE_CONSTRUCTIVE_RECALL");
+  return internal::experimental_env::Flag (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL");
 }
 
 template <typename Executor>

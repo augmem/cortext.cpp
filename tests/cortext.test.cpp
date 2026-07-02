@@ -521,6 +521,10 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
 TEST_CASE ("Cortext::Create can resolve AIST from env when models dir is missing",
            "[cortext][models][aist]")
 {
+  const auto model_path = std::filesystem::path (RepoModelsDir ())
+                          / "AIST-87M-GGUF" / "AIST-87M_q8_0.gguf";
+  cortext::testing::ScopedEnvVar model_override (
+      "CORTEXT_AIST_MODEL_PATH", model_path.string ());
   cortext::Cortext::Config cfg;
   std::unique_ptr<cortext::Cortext> ctx;
   REQUIRE_NOTHROW (
@@ -680,7 +684,12 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
       {
         REQUIRE (expected_payloads.count (memory.id) == 1);
         REQUIRE (expected_mimes.count (memory.id) == 1);
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
         REQUIRE (memory.content.empty ());
+#else
+        REQUIRE (memory.content.size () == 1);
+        REQUIRE (memory.content[0] == expected_payloads.at (memory.id));
+#endif
         REQUIRE (memory.mimetype == expected_mimes.at (memory.id));
       }
   }
@@ -1099,7 +1108,11 @@ TEST_CASE ("Cortext orders durable label source hydration by query similarity",
     auto recency_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
                                                       query_embedding);
     REQUIRE (recency_hydrated.retrieved_memory.size () >= 2);
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
     REQUIRE (recency_hydrated.retrieved_memory[0].id == 101LL);
+#else
+    REQUIRE (recency_hydrated.retrieved_memory[0].id == 100LL);
+#endif
   }
 }
 

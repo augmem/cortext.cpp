@@ -8,6 +8,7 @@
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "../experimental_env.hpp"
 
 #include <algorithm>
 #include <any>
@@ -15,8 +16,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cctype>
-#include <cstdlib>
 #include <exception>
 #include <limits>
 #include <map>
@@ -346,25 +345,10 @@ TurnSourceLikePattern (const TurnSourceId &source, long long turn)
 }
 
 bool
-EnvFlag (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value)
-    {
-      return false;
-    }
-  std::string flag (value);
-  std::transform (flag.begin (), flag.end (), flag.begin (),
-                  [] (unsigned char c) {
-                    return static_cast<char> (std::tolower (c));
-                  });
-  return flag == "1" || flag == "true" || flag == "yes" || flag == "on";
-}
-
-bool
 SourceSeedGraphExpansionDisabled ()
 {
-  return EnvFlag ("CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION");
+  return internal::experimental_env::Flag (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION");
 }
 
 double
@@ -536,7 +520,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       = !constructive_recall::Disabled ();
   const bool source_seed_expansion_enabled
       = !SourceSeedGraphExpansionDisabled ();
-  const bool profile_graph_retrieval = EnvFlag (
+  const bool profile_graph_retrieval = internal::experimental_env::Flag (
       "CORTEXT_PROFILE_GRAPH_RETRIEVAL");
   auto profile_timing =
       [&context, profile_graph_retrieval] (

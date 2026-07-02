@@ -1,35 +1,16 @@
 #pragma once
 
 #include "cortext/core/algorithms.hpp"
-
-#include <algorithm>
-#include <cctype>
-#include <cstdlib>
-#include <string>
+#include "../experimental_env.hpp"
 
 namespace cortext::operations::neuromodulation
 {
 
-inline bool
-EnvFlag (const char *name)
-{
-  const char *value = std::getenv (name);
-  if (!value)
-    {
-      return false;
-    }
-  std::string s (value);
-  std::transform (s.begin (), s.end (), s.begin (),
-                  [] (unsigned char c) {
-                    return static_cast<char> (std::tolower (c));
-                  });
-  return s == "1" || s == "true" || s == "yes" || s == "on";
-}
-
 inline double
 WriteThresholdScale (double neuromod_ne)
 {
-  if (EnvFlag ("CORTEXT_DISABLE_NEUROMOD_WRITE_SCALE"))
+  if (internal::experimental_env::Flag (
+          "CORTEXT_DISABLE_NEUROMOD_WRITE_SCALE"))
     {
       return 1.0;
     }
@@ -40,7 +21,8 @@ WriteThresholdScale (double neuromod_ne)
 inline double
 ReconsolidationScale (double neuromod_ach)
 {
-  if (EnvFlag ("CORTEXT_DISABLE_NEUROMOD_RECONSOLIDATION_SCALE"))
+  if (internal::experimental_env::Flag (
+          "CORTEXT_DISABLE_NEUROMOD_RECONSOLIDATION_SCALE"))
     {
       return 1.0;
     }
@@ -50,7 +32,8 @@ ReconsolidationScale (double neuromod_ach)
 inline double
 RetrievalCompetitionScale (double neuromod_ne)
 {
-  if (EnvFlag ("CORTEXT_DISABLE_NEUROMOD_COMPETITION_SCALE"))
+  if (internal::experimental_env::Flag (
+          "CORTEXT_DISABLE_NEUROMOD_COMPETITION_SCALE"))
     {
       return 1.0;
     }
@@ -60,7 +43,8 @@ RetrievalCompetitionScale (double neuromod_ne)
 inline double
 ValueUpdateGain (double neuromod_da)
 {
-  if (EnvFlag ("CORTEXT_DISABLE_NEUROMOD_VALUE_GAIN"))
+  if (internal::experimental_env::Flag (
+          "CORTEXT_DISABLE_NEUROMOD_VALUE_GAIN"))
     {
       return 1.0;
     }

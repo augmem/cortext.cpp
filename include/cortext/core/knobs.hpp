@@ -2766,10 +2766,9 @@ LambdaMood (double delta_seconds, double T)
 inline int
 WMBaseCapacity (double S, double F)
 {
-  // Explicit capacity override for controlled release sweeps; cached once per
-  // process. The production default is the capacity-21 operating point from
-  // the live-judge sweep, while preserving the original F/S shape around that
-  // point.
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
+  // Explicit capacity override for controlled sweeps; cached once per process.
+  // Default builds compile this hook out.
   static const int kCapacityOverride = [] {
     const char *value = std::getenv ("CORTEXT_WM_CAPACITY_OVERRIDE");
     const int parsed = value != nullptr ? std::atoi (value) : 0;
@@ -2779,6 +2778,7 @@ WMBaseCapacity (double S, double F)
     {
       return kCapacityOverride;
     }
+#endif
   // base_capacity = 3 * round-ish Miller window:
   //   3 * (lerp(8, 6, S) + lerp(-1, 1, F))
   // Capacity range [15, 27], with 21 at neutral knobs.

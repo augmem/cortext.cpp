@@ -315,6 +315,10 @@ TEST_CASE ("ComputeWriteGate lowers threshold under high NE",
     baseline_ctx.SetFlushRequired (true);
     baseline_ctx.SetThresholdTDynamic (0.6);
     op.Execute (baseline_ctx, cortext::testing::GetNullTransaction ());
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
     REQUIRE (baseline_ctx.GetAccumulatorWriteDecision () == false);
+#else
+    REQUIRE (baseline_ctx.GetAccumulatorWriteDecision () == true);
+#endif
   }
 }

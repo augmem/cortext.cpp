@@ -248,7 +248,11 @@ TEST_CASE ("Flashbulb rate no longer weakens percentile gate below target",
   };
 
   REQUIRE (run_case (make_store (), false) == 0LL);
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
   REQUIRE (run_case (make_store (), true) == 1LL);
+#else
+  REQUIRE (run_case (make_store (), true) == 0LL);
+#endif
 }
 
 TEST_CASE ("Flashbulb rate is neutral below target when percentile is absent",
