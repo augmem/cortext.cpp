@@ -89,7 +89,8 @@ TEST_CASE ("ApplySynapticTagging tags recent memories on high surprisal",
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0;
   cfg.stability = 0.5;
-  OperationContext ctx (MakeSignal ("src", now_ts), pctx, cfg, store.get ());
+  const auto signal = MakeSignal ("src", now_ts);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetMetric (Metric::embedding_surprisal, 1.0);
 
   ApplySynapticTagging op;
@@ -122,7 +123,8 @@ TEST_CASE ("UpdateNeuromodulators derives bounded control state",
   cfg.focus = 0.5;
   cfg.sensitivity = 1.0;
   cfg.stability = 0.5;
-  OperationContext ctx (MakeSignal ("src", 2500), pctx, cfg);
+  const auto signal = MakeSignal ("src", 2500);
+  OperationContext ctx (signal, pctx, cfg);
   ctx.SetMetric (Metric::rarity, 0.8);
   ctx.SetMetric (Metric::embedding_surprisal, 0.7);
   ctx.SetArousal (0.6);
@@ -162,7 +164,8 @@ TEST_CASE ("ConsolidationGate only scores when the gate is open",
 
   ConsolidationGate op;
   {
-    OperationContext ctx (MakeSignal (), pctx, cfg, store.get ());
+    const auto signal = MakeSignal ();
+    OperationContext ctx (signal, pctx, cfg, store.get ());
     auto tx = store->Begin ();
     op.Execute (ctx, *tx);
     tx->Commit ();
@@ -170,7 +173,8 @@ TEST_CASE ("ConsolidationGate only scores when the gate is open",
   }
 
   {
-    OperationContext ctx (MakeSignal (), pctx, cfg, store.get ());
+    const auto signal = MakeSignal ();
+    OperationContext ctx (signal, pctx, cfg, store.get ());
     ctx.SetConsolidationShouldStart (true);
     auto tx = store->Begin ();
     op.Execute (ctx, *tx);

@@ -26,6 +26,14 @@ FILES = {
     },
 }
 
+TOKENIZER_FILE = {
+    "repo": "bert-base-uncased",
+    "filename": "vocab.txt",
+    "target": pathlib.Path("mdbr-leaf-ir") / "vocab.txt",
+    "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+    "size": 231508,
+}
+
 
 def sha256_file(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
@@ -120,6 +128,16 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--revision", default="main", help="Repository revision.")
     parser.add_argument(
+        "--tokenizer-repo",
+        default=TOKENIZER_FILE["repo"],
+        help="Hugging Face repository for the public BERT WordPiece vocab.",
+    )
+    parser.add_argument(
+        "--tokenizer-revision",
+        default="main",
+        help="Tokenizer repository revision.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Re-download even when a valid file already exists.",
@@ -151,6 +169,35 @@ def main(argv: list[str]) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         print(f"[OK] downloaded and verified {dest}")
+
+    tokenizer_dest = args.models_dir / TOKENIZER_FILE["target"]
+    if not args.force and verify(
+        tokenizer_dest, TOKENIZER_FILE["sha256"], TOKENIZER_FILE["size"]
+    ):
+        print(f"[OK] {tokenizer_dest} already present and verified")
+    else:
+        print(f"[download] {tokenizer_dest}")
+        try:
+            download(
+                url_for(
+                    args.tokenizer_repo,
+                    args.tokenizer_revision,
+                    TOKENIZER_FILE["filename"],
+                ),
+                tokenizer_dest,
+                TOKENIZER_FILE["sha256"],
+                TOKENIZER_FILE["size"],
+            )
+        except urllib.error.HTTPError as exc:
+            print(f"error: download failed with HTTP {exc.code}: {exc.url}", file=sys.stderr)
+            return 1
+        except urllib.error.URLError as exc:
+            print(f"error: download failed: {exc.reason}", file=sys.stderr)
+            return 1
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(f"[OK] downloaded and verified {tokenizer_dest}")
 
     return 0
 

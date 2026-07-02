@@ -1208,7 +1208,7 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
 }
 
 TEST_CASE ("Cortext expands maintenance source hydration without used-memory skip",
-           "[cortext][hydration][retrieval]")
+           "[cortext][hydration][retrieval][aist]")
 {
   ScopedTempDb temp_db;
   const auto &db_path = temp_db.path ();

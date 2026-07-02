@@ -57,8 +57,10 @@ jobs:
     - name: Cache AIST q8_0 model
       uses: actions/cache@v4
       with:
-        path: models/AIST-87M-GGUF/AIST-87M_q8_0.gguf
-        key: aist-q8_0-bf4c49954eccc65183f1a97e44606e86c7ee5a4fea500457124b687a3ec97898
+        path: |
+          models/AIST-87M-GGUF/AIST-87M_q8_0.gguf
+          models/mdbr-leaf-ir/vocab.txt
+        key: aist-q8_0-bf4c49954eccc65183f1a97e44606e86c7ee5a4fea500457124b687a3ec97898-bert-vocab-07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3
 
     - name: Ensure AIST q8_0 model
       run: python3 scripts/download_aist_model.py --models-dir models --quant q8_0

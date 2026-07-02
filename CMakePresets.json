@@ -91,7 +91,9 @@
             "cacheVariables": {
                 "BUILD_WASM": "ON",
                 "CMAKE_BUILD_TYPE": "Release",
-                "BUILD_TESTING": "OFF"
+                "BUILD_TESTING": "OFF",
+                "CORTEXT_ENABLE_AUDIO": "OFF",
+                "CORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD": "ON"
             }
         }
     ],
