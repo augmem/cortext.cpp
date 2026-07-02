@@ -1448,6 +1448,11 @@ Each source stream maintains accumulator state:
     coherence_prev ← 0  # previous coherence (initialize to 0)
     acc_signals_window ← []  # ring buffer of recent embeddings for coherence
 
+Accumulator state is live runtime staging state, not durable memory. If
+the process restarts before a write boundary commits a unit, the
+unfinished accumulator window may be lost; committed memories, signal
+rows, and working memory remain the durability boundary.
+
 Reset behavior: reset_accumulator() clears μ_acc, drift_acc, s_sum,
 s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, and
 sets acc_signals_window ← \[\] (and refreshes t_start/last_signal_ts for
