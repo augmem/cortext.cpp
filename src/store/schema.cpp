@@ -44,16 +44,15 @@ GetAppliedMigrations (Store &store)
 }
 
 void
-ApplySingleMigration (Store &store, const Migration &m)
+ApplySingleMigrationInTransaction (Store &store, const Migration &m)
 {
-  auto tx = store.Begin ();
   try
     {
       for (const auto &sql : m.up_statements)
         {
           try
             {
-              tx->Execute (sql);
+              store.Execute (sql);
             }
           catch (const std::exception &e)
             {
@@ -67,15 +66,13 @@ ApplySingleMigration (Store &store, const Migration &m)
               throw;
             }
         }
-      tx->Execute (
+      store.Execute (
           "INSERT INTO cortext_schema_migrations (id, description, applied_at) "
           "VALUES (?, ?, strftime('%s', 'now'))",
           { m.id, m.description });
-      tx->Commit ();
     }
   catch (const std::exception &e)
     {
-      tx->Rollback ();
       telemetry::LogError (
           "Schema migration failed",
           { telemetry::Attribute::String ("component", "store.schema"),
@@ -858,29 +855,55 @@ ColumnExists (Store &store, const std::string &table_name,
 void
 ApplyMigrations (Store &store)
 {
-  store.Execute (
-      "CREATE TABLE IF NOT EXISTS cortext_schema_migrations ("
-      "  id INTEGER PRIMARY KEY,"
-      "  description TEXT,"
-      "  applied_at INTEGER"
-      ")");
+  // Migrations must own the write lock before reading the applied set. Use
+  // direct SQL so this does not depend on the configurable default transaction
+  // mode used by normal processing transactions.
+  store.Execute ("BEGIN IMMEDIATE");
+  bool committed = false;
 
-  std::set<int64_t> applied_ids = GetAppliedMigrations (store);
-  auto migrations = GetCoreMigrations ();
-
-  // Sort by ID (should already be sorted, but be explicit)
-  std::sort (migrations.begin (), migrations.end (),
-             [] (const Migration &a, const Migration &b) {
-               return a.id < b.id;
-             });
-
-  for (const auto &m : migrations)
+  try
     {
-      if (applied_ids.count (m.id))
+      store.Execute (
+          "CREATE TABLE IF NOT EXISTS cortext_schema_migrations ("
+          "  id INTEGER PRIMARY KEY,"
+          "  description TEXT,"
+          "  applied_at INTEGER"
+          ")");
+
+      std::set<int64_t> applied_ids = GetAppliedMigrations (store);
+      auto migrations = GetCoreMigrations ();
+
+      // Sort by ID (should already be sorted, but be explicit)
+      std::sort (migrations.begin (), migrations.end (),
+                 [] (const Migration &a, const Migration &b) {
+                   return a.id < b.id;
+                 });
+
+      for (const auto &m : migrations)
         {
-          continue;
+          if (applied_ids.count (m.id))
+            {
+              continue;
+            }
+          ApplySingleMigrationInTransaction (store, m);
         }
-      ApplySingleMigration (store, m);
+
+      store.Execute ("COMMIT");
+      committed = true;
+    }
+  catch (...)
+    {
+      if (!committed)
+        {
+          try
+            {
+              store.Execute ("ROLLBACK");
+            }
+          catch (...)
+            {
+            }
+        }
+      throw;
     }
 }
 
