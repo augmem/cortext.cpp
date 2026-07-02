@@ -124,7 +124,8 @@ Requirements:
 - Git and Python 3 for default dependency and model bootstrap
 
 The default build fetches bundled native dependencies and downloads the required
-AIST GGUF model into `models/AIST-87M-GGUF/`. Configure, build, and test:
+AIST GGUF model plus its public BERT WordPiece vocab into `models/`. Configure,
+build, and test:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -199,10 +200,10 @@ Public entrypoints:
 
 Cortext's required encoder is `augmem/AIST-87M` in the local GGUF layout under
 `models/AIST-87M-GGUF/`. The default build downloads and verifies
-`AIST-87M_q8_0.gguf` automatically. The engine auto-discovers
-`AIST-87M_q8_0.gguf` or `AIST-87M_q5_1.gguf`, or you can pin a path with
-`CORTEXT_AIST_MODEL_PATH`. If the model cannot be resolved, engine creation
-fails instead of falling back to a different embedding space.
+`AIST-87M_q8_0.gguf` and the BERT WordPiece vocab automatically. The engine
+auto-discovers `AIST-87M_q8_0.gguf` or `AIST-87M_q5_1.gguf`, or you can pin a
+path with `CORTEXT_AIST_MODEL_PATH`. If the model cannot be resolved, engine
+creation fails instead of falling back to a different embedding space.
 
 AIST is multimodal: text, audio, speech, and image inputs map into one retrieval
 space. Audio inputs use 16 kHz mono float32 PCM. Image inputs use row-major
@@ -384,7 +385,7 @@ model file in the browser UI or embed the model directory into the virtual
 filesystem at build time:
 
 ```bash
-./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODELS_DIR="$PWD/models/AIST-87M-GGUF"
+./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODELS_DIR="$PWD/models"
 ```
 
 Serve the repository root after building:

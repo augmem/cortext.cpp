@@ -30,7 +30,7 @@ const handle = runtime.createContext({ dbPath: ":memory:", modelsDir: "/models" 
 or embed a model directory into the bundle at build time:
 
 ```bash
-./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODELS_DIR="$PWD/models/AIST-87M-GGUF"
+./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODELS_DIR="$PWD/models"
 ```
 
 Build-time preloading writes the directory to `/models` inside the virtual
