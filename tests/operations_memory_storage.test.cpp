@@ -60,12 +60,10 @@ class ScopedTempDb
 public:
   ScopedTempDb ()
   {
-	    auto tmp = std::filesystem::temp_directory_path ()
-	               / ("memory_storage_test_"
-	                  + std::to_string (std::rand ()) + ".db");
-	    path_ = tmp.string ();
-	    std::filesystem::remove (path_);
-	    store_ = SQLiteStore::Create (path_.c_str ());
+    path_ = cortext::testing::UniqueTempPath ("memory_storage_test_",
+                                              ".db").string ();
+    std::filesystem::remove (path_);
+    store_ = SQLiteStore::Create (path_.c_str ());
 
     // Initialize core schema
     cortext::testing::InitializeCoreSchema (*store_);

@@ -42,29 +42,30 @@ SeedMemory (Store &store, long long id)
 
 TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
 {
+  ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.9;
   cfg.sensitivity = 0.9;
   cfg.stability = 0.1;
 
-  // Use in-memory SQLite store instead of dummy
-  auto unique_store = SQLiteStore::Create(":memory:");
-  auto store = std::shared_ptr<Store>(std::move(unique_store));
-  
-  // Minimal op set: just UpdateUncertainty
-  auto ops = std::make_unique<DynamicOperationSet> (
-      std::make_unique<UpdateUncertainty> ());
-  SignalProcessor processor (cfg, store, std::move (ops));
-
   Signal s;
   s.timestamp = 1;
   s.source_id = "t";
   s.embedding = Eigen::VectorXf::Ones (4);
-  processor.Process (s);
-  // No direct getter for u_t; rely on absence of crash and that code path
-  // executes.
-  SUCCEED ();
+  s.embedding.normalize ();
+
+  pctx.recent_scores = { 0.0, 1.0, 0.0, 1.0 };
+  pctx.recent_context_embeddings.push_back (-s.embedding);
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetCoherence (0.2);
+  ctx.SetMetric (operations::Metric::embedding_surprisal, 0.8);
+
+  UpdateUncertainty op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (pctx.u_t > 0.0);
+  REQUIRE (pctx.u_t <= 1.0);
 }
 
 
@@ -99,10 +100,13 @@ TEST_CASE ("Alg17 emits adj, Alg6 consumes it", "[stability]")
   REQUIRE (ctx.GetDeltaHalfLifeAdjustment ().has_value ());
 
   // Provide observed retention and run Alg6
+  const double half_life_before = pctx.half_life;
   ctx.SetObservedRetentionSeconds (120.0);
   UpdateStability st;
   st.Execute (ctx, cortext::testing::GetNullTransaction ());
-  SUCCEED ();
+  REQUIRE_FALSE (pctx.observed_retention_history.empty ());
+  REQUIRE (pctx.observed_retention_history.back () == 120.0);
+  REQUIRE (pctx.half_life != half_life_before);
 }
 
 TEST_CASE ("Alg4: ΔT_sensitivity is not clamped (Alg8 clamps later)",
@@ -134,15 +138,28 @@ TEST_CASE ("Alg15/16 use base gains (no knob scaling)", "[feedback]")
   cfg.sensitivity = 0.7;
   Signal sig;
   sig.timestamp = 1;
+  sig.embedding = Eigen::VectorXf::Ones (4);
+  sig.embedding.normalize ();
   OperationContext ctx (sig, pctx, cfg);
+  pctx.weight_relevance = 0.5;
+  pctx.weight_novelty = 0.5;
+  pctx.attention_width = 8.0;
+  pctx.attention_width_prior = 8.0;
+  pctx.recent_context_embeddings.push_back (sig.embedding);
+  ctx.SetRetrievedMemoryEmbeddings ({ { 1LL, sig.embedding } });
   // Provide usage events
   ctx.SetMemoryUsageEvents ({
       { 1, true, +0.2 },
       { 2, true, -0.1 },
   });
+  const double relevance_before = pctx.weight_relevance;
+  const double novelty_before = pctx.weight_novelty;
+  const double width_before = pctx.attention_width;
   ApplyFocusFeedback ffb;
   ffb.Execute (ctx, cortext::testing::GetNullTransaction ());
   ApplySensitivityFeedback sfb;
   sfb.Execute (ctx, cortext::testing::GetNullTransaction ());
-  SUCCEED ();
+  REQUIRE (pctx.weight_relevance > relevance_before);
+  REQUIRE (pctx.attention_width < width_before);
+  REQUIRE (pctx.weight_novelty < novelty_before);
 }

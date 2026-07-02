@@ -20,6 +20,7 @@ endblock()
 list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
 
 add_executable(cortext_tests
+  test_main.cpp
   cortext.test.cpp
   data.test.cpp
   operations_centroids.test.cpp
@@ -28,6 +29,7 @@ add_executable(cortext_tests
   object_store.test.cpp
   core_algorithms.test.cpp
   core_knobs.test.cpp
+  env_scrub.test.cpp
   thread_config.test.cpp
   operation_context.test.cpp
   operation_set.test.cpp
@@ -73,6 +75,7 @@ add_executable(cortext_tests
   operations_detect_memory_usage.test.cpp
   operations_streaming_pacing.test.cpp
   operations_accumulator.test.cpp
+  operations_pipeline_tail.test.cpp
   migration_core.test.cpp
   cortext.test.cpp
   signal_processor.test.cpp
@@ -83,7 +86,6 @@ add_executable(cortext_tests
   implicit_feedback.test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/telemetry_noop_by_default.test.cpp
   formula_validation.test.cpp
-  integration_working_memory_manual.test.cpp
   regression_behavior.test.cpp
   aist_gguf_encoder.test.cpp
 )
@@ -110,7 +112,7 @@ if((CORTEXT_FETCH_AIST_MODEL OR EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
   target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_AIST_MODEL=1)
 endif()
 
-target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
+target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2 nlohmann_json::nlohmann_json)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
 target_include_directories(cortext_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include

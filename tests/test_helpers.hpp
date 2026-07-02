@@ -7,6 +7,7 @@
 #include "cortext/models/aist_gguf_encoder.hpp"
 #include "cortext/models/embedding_model_pin.hpp"
 #include <Eigen/Dense>
+#include <atomic>
 #include <any>
 #include <chrono>
 #include <cstdlib>
@@ -14,7 +15,14 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace cortext::testing
 {
@@ -141,6 +149,24 @@ NowMs ()
   return std::chrono::duration_cast<std::chrono::milliseconds> (
              std::chrono::system_clock::now ().time_since_epoch ())
       .count ();
+}
+
+inline std::filesystem::path
+UniqueTempPath (std::string_view prefix, std::string_view suffix)
+{
+  static std::atomic<unsigned long long> counter{ 0 };
+#if defined(_WIN32)
+  const auto pid = static_cast<unsigned long long> (_getpid ());
+#else
+  const auto pid = static_cast<unsigned long long> (getpid ());
+#endif
+  const auto tick = static_cast<unsigned long long> (
+      std::chrono::high_resolution_clock::now ().time_since_epoch ().count ());
+  const auto seq = counter.fetch_add (1, std::memory_order_relaxed);
+  return std::filesystem::temp_directory_path ()
+         / (std::string (prefix) + std::to_string (pid) + "_"
+            + std::to_string (tick) + "_" + std::to_string (seq)
+            + std::string (suffix));
 }
 
 /// @brief Seed an embedding into the v2 embeddings table (minimal vec0 table).
