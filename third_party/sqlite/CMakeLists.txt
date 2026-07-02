@@ -27,6 +27,9 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/sqlite3.h
 
 add_executable(sqlite_lemon tool/lemon.c)
 add_executable(sqlite_mkkeywordhash tool/mkkeywordhash.c)
+if(EMSCRIPTEN)
+    target_link_options(sqlite_lemon PRIVATE "-sNODERAWFS=1")
+endif()
 add_custom_command(
     OUTPUT
         ${CMAKE_CURRENT_BINARY_DIR}/parse.c
