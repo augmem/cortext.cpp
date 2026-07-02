@@ -95,7 +95,8 @@ TEST_CASE ("ApplyMetaLearning consolidates successful dynamic state into priors"
   cfg.stability = 0.5;
 
   auto tx = store->Begin ();
-  OperationContext init_ctx (MakeSignal (), pctx, cfg, store.get ());
+  auto init_signal = MakeSignal ();
+  OperationContext init_ctx (init_signal, pctx, cfg, store.get ());
   operations::InitializeFocusPriors focus;
   operations::InitializeSensitivityPriors sensitivity;
   operations::InitializeStabilityPriors stability;

@@ -231,7 +231,8 @@ TEST_CASE ("Alg20 structured reconsolidation does not overwrite shared embedding
   sibling_surface.source_id = "sibling";
   sibling_surface.start_ts = 1;
   pctx.UpsertRetrievalSurface (std::move (sibling_surface));
-  OperationContext ctx (MakeSignal (cur, 100), pctx, cfg, store.get ());
+  auto signal = MakeSignal (cur, 100);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetRetrievedMemoryEmbeddings (
       std::unordered_map<long long, Eigen::VectorXf>{ { 420LL, mem } });
   ctx.SetRetrievedMemoryCandidates (
@@ -326,7 +327,8 @@ TEST_CASE ("Alg20 constructive reconsolidation refreshes processor caches",
   surface_entry.start_ts = 1;
   pctx.UpsertRetrievalSurface (std::move (surface_entry));
 
-  OperationContext ctx (MakeSignal (cur, 2'000'000), pctx, cfg, store.get ());
+  auto signal = MakeSignal (cur, 2'000'000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetRetrievedMemoryEmbeddings (
       std::unordered_map<long long, Eigen::VectorXf>{ { 420LL, mem } });
   ctx.SetRetrievedMemoryCandidates (
@@ -668,7 +670,8 @@ TEST_CASE ("Alg20 ripple reconstruction forks shared neighbor embedding",
 
   ProcessorContext pctx;
   pctx.recent_context_embeddings.push_back (cur);
-  OperationContext ctx (MakeSignal (cur, 2000), pctx, cfg, store.get ());
+  auto signal = MakeSignal (cur, 2000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetRetrievedMemoryEmbeddings (
       std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, primary } });
 

@@ -239,20 +239,23 @@ TEST_CASE ("Embedding Prediction Error tracks SSE history for ΔSSE",
 
   Eigen::VectorXf emb1 = Eigen::VectorXf::Zero (8);
   emb1 (0) = 1.0f;
-  OperationContext ctx1 (MakeSignal (emb1, 1), pctx, cfg);
+  auto signal1 = MakeSignal (emb1, 1);
+  OperationContext ctx1 (signal1, pctx, cfg);
   op.Execute (ctx1, cortext::testing::GetNullTransaction ());
   REQUIRE (!pctx.prediction_error_sse.has_value ());
 
   Eigen::VectorXf emb2 = Eigen::VectorXf::Zero (8);
   emb2 (0) = 2.0f;
-  OperationContext ctx2 (MakeSignal (emb2, 2), pctx, cfg);
+  auto signal2 = MakeSignal (emb2, 2);
+  OperationContext ctx2 (signal2, pctx, cfg);
   op.Execute (ctx2, cortext::testing::GetNullTransaction ());
   REQUIRE (pctx.prediction_error_sse.has_value ());
   REQUIRE (!pctx.prediction_error_sse_prev.has_value ());
 
   Eigen::VectorXf emb3 = Eigen::VectorXf::Zero (8);
   emb3 (0) = 3.0f;
-  OperationContext ctx3 (MakeSignal (emb3, 3), pctx, cfg);
+  auto signal3 = MakeSignal (emb3, 3);
+  OperationContext ctx3 (signal3, pctx, cfg);
   op.Execute (ctx3, cortext::testing::GetNullTransaction ());
   REQUIRE (pctx.prediction_error_sse.has_value ());
   REQUIRE (pctx.prediction_error_sse_prev.has_value ());

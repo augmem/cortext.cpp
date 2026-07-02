@@ -212,7 +212,8 @@ TEST_CASE ("Alg22 structured retrieval boosts shared embedding by memory id",
 
   ProcessorContext pctx;
   pctx.recent_context_embeddings.push_back (current);
-  OperationContext ctx (MakeSignal (current, 123), pctx, cfg, store.get ());
+  auto signal = MakeSignal (current, 123);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetRetrievedMemoryEmbeddings (
       std::unordered_map<long long, Eigen::VectorXf>{ { 500LL, current } });
   ctx.SetRetrievedMemoryCandidates (
