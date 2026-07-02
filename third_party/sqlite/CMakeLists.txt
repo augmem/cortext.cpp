@@ -30,6 +30,29 @@ add_executable(sqlite_mkkeywordhash tool/mkkeywordhash.c)
 if(EMSCRIPTEN)
     target_link_options(sqlite_lemon PRIVATE "-sNODERAWFS=1")
 endif()
+set(SQLITE_MKKEYWORDHASH_COMMAND $<TARGET_FILE:sqlite_mkkeywordhash>)
+if(EMSCRIPTEN)
+    if(CMAKE_CROSSCOMPILING_EMULATOR)
+        set(SQLITE_MKKEYWORDHASH_COMMAND
+            ${CMAKE_CROSSCOMPILING_EMULATOR}
+            $<TARGET_FILE:sqlite_mkkeywordhash>
+        )
+    elseif(DEFINED ENV{EMSDK_NODE})
+        set(SQLITE_MKKEYWORDHASH_COMMAND
+            $ENV{EMSDK_NODE}
+            $<TARGET_FILE:sqlite_mkkeywordhash>
+        )
+    else()
+        find_program(SQLITE_NODE_EXECUTABLE NAMES node)
+        if(NOT SQLITE_NODE_EXECUTABLE)
+            message(FATAL_ERROR "Node.js is required to run SQLite generator tools under Emscripten")
+        endif()
+        set(SQLITE_MKKEYWORDHASH_COMMAND
+            ${SQLITE_NODE_EXECUTABLE}
+            $<TARGET_FILE:sqlite_mkkeywordhash>
+        )
+    endif()
+endif()
 add_custom_command(
     OUTPUT
         ${CMAKE_CURRENT_BINARY_DIR}/parse.c
@@ -77,7 +100,7 @@ add_custom_command(
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tool/run_to_file.py
             ${CMAKE_CURRENT_BINARY_DIR}/keywordhash.h
-            $<TARGET_FILE:sqlite_mkkeywordhash>
+            ${SQLITE_MKKEYWORDHASH_COMMAND}
     DEPENDS
         sqlite_mkkeywordhash
         ${CMAKE_CURRENT_SOURCE_DIR}/tool/run_to_file.py
