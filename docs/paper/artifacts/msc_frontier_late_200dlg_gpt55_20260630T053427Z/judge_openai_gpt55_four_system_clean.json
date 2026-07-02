@@ -1,0 +1,5960 @@
+{
+  "schema": "chat_replay_live_run_multimodal_judge_v8",
+  "summary_path": "eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/summary.json",
+  "db_path": "eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/msc.sqlite",
+  "input_dir": "eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/input",
+  "judge_model": "gpt-5.5",
+  "judge_provider": "openai_chat_completions",
+  "judge_base_url": "https://api.openai.com/v1",
+  "judge_env_file": "/shared/augmem/.env",
+  "judge_media_capabilities": {
+    "source": "openai_chat_completions_assumption",
+    "model": "gpt-5.5",
+    "available": true,
+    "capabilities": [
+      "text"
+    ],
+    "text": true,
+    "image": false,
+    "audio": false,
+    "error": ""
+  },
+  "remote_provider_allowed": true,
+  "public_benchmark": true,
+  "native_cortext_only": true,
+  "multimodal_judge": false,
+  "protocol": {
+    "packet_blinding": true,
+    "packet_labels": [
+      "A",
+      "B",
+      "C",
+      "D"
+    ],
+    "judge_repetitions": 3,
+    "judge_seed": 42,
+    "judge_start_index": 0,
+    "judge_limit": -1,
+    "expected_judgments": 27,
+    "judge_timeout_s": 180,
+    "judge_context_window_tokens": 1000000,
+    "openai_temperature_policy": "omitted_for_gpt_5_5_provider_default",
+    "ollama_keep_alive": "",
+    "early_stop_prior_quality_delta_sum": 0.0,
+    "early_stop_prior_judgment_count": 0,
+    "bootstrap_samples": 2000,
+    "bootstrap_unit": "probe",
+    "packet_surface": "structurally_normalized_event_evidence_v1",
+    "systems": [
+      "cortext_native",
+      "traditional_chat_rag",
+      "full_history_upper_bound",
+      "compacting_session"
+    ],
+    "score_fields": [
+      "relevance",
+      "sufficiency",
+      "noise",
+      "temporal_correctness",
+      "source_grounding",
+      "modality_grounding"
+    ],
+    "quality_composite_definition": "relevance + sufficiency - 0.25*noise",
+    "quality_composite_weights": {
+      "relevance": 1.0,
+      "sufficiency": 1.0,
+      "noise": -0.25
+    },
+    "token_estimate_policy": "estimated_text_tokens=max(1, ceil(chars/4)); attached image/audio evidence counted as a small placeholder for prompt-fit checks, not provider-tokenized usage",
+    "cortext_packet_source": {
+      "probe_time_summary_snapshot": 9
+    },
+    "normal_rag_baseline": "rolling text chat history until compaction plus text RAG hits",
+    "normal_rag_vector_search_multiplier": 8,
+    "normal_rag_vector_search_k_policy": "min(prior_text_rows, max(rag_top_k, rag_top_k * normal_rag_vector_search_multiplier)) before dedupe",
+    "normal_rag_vector_candidate_k_policy": "final unique text RAG packet cap after vector-search fanout",
+    "traditional_chat_rag_compaction_summary_policy": "deterministic_extractive_prior_chat",
+    "full_history_upper_bound": "prior text history only",
+    "compacting_session": "session that summarizes itself when near its context budget",
+    "daily_consolidation_required_for_release": true,
+    "default_knobs_required_for_release": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "judge_media_capabilities": {
+      "source": "openai_chat_completions_assumption",
+      "model": "gpt-5.5",
+      "available": true,
+      "capabilities": [
+        "text"
+      ],
+      "text": true,
+      "image": false,
+      "audio": false,
+      "error": ""
+    },
+    "checkpoint_rows": "eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.rows.jsonl",
+    "checkpoint_resume_enabled": true,
+    "checkpoint_unique_rows_loaded": 27,
+    "checkpoint_duplicate_rows_ignored": 0,
+    "checkpoint_malformed_rows_ignored": 0,
+    "checkpoint_out_of_scope_rows_ignored": 0,
+    "checkpoint_rows_skipped_during_resume": 27
+  },
+  "cortext_audio_image_transcript_shortcuts": false,
+  "output_contains_private_text": false,
+  "output_contains_public_benchmark_text": true,
+  "reason_privacy_policy": "Judge reasons are instructed to be structural only, but the artifact is treated as private because local judges may still paraphrase content.",
+  "daily_consolidation": true,
+  "deep_consolidation": false,
+  "source_id_policy": "User and Contact are opaque conversation provenance source IDs; media is not encoded into source_id",
+  "timeline_policy": "transcript messages and media files are processed in timestamp order; text uses internal replay timestamped ingress so non-probe turns can skip context hydration, media uses internal replay timestamped ingress, and benchmark consolidation uses internal replay timestamped consolidation",
+  "processed": {
+    "text": 9130,
+    "audio": 0,
+    "image": 0,
+    "video": 0,
+    "media_failures": 0
+  },
+  "media_memory_map_audit": {
+    "schema": "cortext_judge_media_memory_map_audit_v1",
+    "db_media_occurrence_count": 0,
+    "selected_timeline_media_doc_count": 0,
+    "mapped_media_doc_count": 0,
+    "unmatched_db_media_occurrence_count": 0,
+    "unused_selected_timeline_media_doc_count": 0,
+    "unmatched_db_media_occurrences_sample": [],
+    "policy": "audio/image DB signal rows must map to selected timeline media by shared speaker source_id, modality, and timestamp"
+  },
+  "tokens": {
+    "active_history_token_budget": 49152,
+    "mean_rolling_history_tokens": 49138.88888888889,
+    "mean_full_history_tokens": 185439.44444444444,
+    "context_limit_memories": -1,
+    "mean_cortext_working_tokens": 643.1111111111111,
+    "mean_cortext_retrieved_tokens": 354.77777777777777,
+    "mean_cortext_context_tokens": 997.8888888888889,
+    "mean_traditional_chat_rag_tokens": 49195.77777777778,
+    "mean_cortext_token_savings_vs_traditional_chat_rag": 0.9797159647846925,
+    "judge_context_window_tokens": 1000000,
+    "mean_judge_prompt_tokens_estimate": 667914.3333333334,
+    "max_judge_prompt_tokens_estimate": 828370,
+    "token_count_policy": "estimated_text_tokens=max(1, ceil(chars/4)); attached image/audio evidence counted as a small placeholder for prompt-fit checks, not provider-tokenized usage"
+  },
+  "normal_rag_compaction": {
+    "compacted_items": 46450,
+    "compacted_original_tokens": 1236065,
+    "compacted_summary_tokens": 9360,
+    "compaction_events": 9,
+    "mean_compaction_latency_ms": 1.4056132222222224,
+    "mean_retrieval_latency_ms": 217.81733866666664,
+    "mean_total_latency_ms": 219.22295188888887,
+    "probe_count": 9,
+    "probe_events": 9,
+    "raw_items": 16550,
+    "raw_tokens": 432890
+  },
+  "normal_rag_retrieval": "raw_chat_vector",
+  "normal_rag_baseline_modality": "text_only",
+  "normal_rag_vector_query_encoder": "AIST-87M-GGUF",
+  "normal_rag_vector_candidate_k": 5,
+  "normal_rag_vector_final_k": 5,
+  "normal_rag_vector_search_multiplier": 8,
+  "normal_rag_vector_search_k_policy": "min(prior_text_rows, max(rag_top_k, rag_top_k * normal_rag_vector_search_multiplier)) before dedupe",
+  "normal_rag_vector_candidate_k_policy": "final unique text RAG packet cap after vector-search fanout",
+  "latency": {
+    "mean_cortext_probe_latency_ms": 204.05450655555555,
+    "mean_ingest_total_ms": 120.38764305980307,
+    "wall_ms": 1223246
+  },
+  "db_metrics": {
+    "memories": 10099,
+    "long_term_memories": 9364,
+    "working_memories": 21,
+    "associations": 17719,
+    "facts": 0,
+    "soft_anchor_links": 15,
+    "signals": 9865,
+    "source_backed_memories": 9130
+  },
+  "judged": 27,
+  "expected_judgments": 27,
+  "missing_judgments": 0,
+  "judgment_complete": true,
+  "checkpoint_rows_path": "eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.rows.jsonl",
+  "checkpoint_stats": {
+    "unique_rows_loaded": 27
+  },
+  "checkpoint_rows_skipped_during_resume": 27,
+  "probe_count": 9,
+  "judge_repetitions": 3,
+  "early_stop": null,
+  "quality": {
+    "cortext_native": {
+      "judged": 27,
+      "wins": 21,
+      "mean_relevance": 4.62962962962963,
+      "mean_sufficiency": 4.407407407407407,
+      "mean_noise": 1.8518518518518519,
+      "mean_temporal_correctness": 4.925925925925926,
+      "mean_source_grounding": 4.925925925925926,
+      "mean_modality_grounding": 0.0
+    },
+    "traditional_chat_rag": {
+      "judged": 27,
+      "wins": 0,
+      "mean_relevance": 4.0,
+      "mean_sufficiency": 4.666666666666667,
+      "mean_noise": 4.703703703703703,
+      "mean_temporal_correctness": 4.925925925925926,
+      "mean_source_grounding": 4.074074074074074,
+      "mean_modality_grounding": 0.0
+    },
+    "full_history_upper_bound": {
+      "judged": 27,
+      "wins": 1,
+      "mean_relevance": 3.6666666666666665,
+      "mean_sufficiency": 4.518518518518518,
+      "mean_noise": 5.0,
+      "mean_temporal_correctness": 4.666666666666667,
+      "mean_source_grounding": 4.925925925925926,
+      "mean_modality_grounding": 0.0
+    },
+    "compacting_session": {
+      "judged": 27,
+      "wins": 5,
+      "mean_relevance": 4.222222222222222,
+      "mean_sufficiency": 4.62962962962963,
+      "mean_noise": 3.6296296296296298,
+      "mean_temporal_correctness": 4.962962962962963,
+      "mean_source_grounding": 4.7407407407407405,
+      "mean_modality_grounding": 0.0
+    }
+  },
+  "confidence_intervals": {
+    "unit": "probe",
+    "bootstrap_samples": 2000,
+    "probe_count": 9,
+    "systems": {
+      "cortext_native": {
+        "win_rate": {
+          "n": 9,
+          "mean": 0.7777777777777778,
+          "ci95": [
+            0.5185185185185186,
+            0.9629629629629629
+          ]
+        },
+        "relevance": {
+          "n": 9,
+          "mean": 4.62962962962963,
+          "ci95": [
+            4.222222222222222,
+            5.0
+          ]
+        },
+        "sufficiency": {
+          "n": 9,
+          "mean": 4.407407407407407,
+          "ci95": [
+            3.8518518518518516,
+            4.852777777777773
+          ]
+        },
+        "noise": {
+          "n": 9,
+          "mean": 1.851851851851852,
+          "ci95": [
+            1.5925925925925926,
+            2.037962962962958
+          ]
+        },
+        "temporal_correctness": {
+          "n": 9,
+          "mean": 4.9259259259259265,
+          "ci95": [
+            4.814814814814815,
+            5.0
+          ]
+        },
+        "source_grounding": {
+          "n": 9,
+          "mean": 4.9259259259259265,
+          "ci95": [
+            4.814814814814815,
+            5.0
+          ]
+        },
+        "modality_grounding": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "traditional_chat_rag": {
+        "win_rate": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "relevance": {
+          "n": 9,
+          "mean": 4.0,
+          "ci95": [
+            3.7777777777777777,
+            4.185185185185185
+          ]
+        },
+        "sufficiency": {
+          "n": 9,
+          "mean": 4.666666666666667,
+          "ci95": [
+            4.37037037037037,
+            4.888888888888889
+          ]
+        },
+        "noise": {
+          "n": 9,
+          "mean": 4.703703703703704,
+          "ci95": [
+            4.481481481481482,
+            4.888888888888889
+          ]
+        },
+        "temporal_correctness": {
+          "n": 9,
+          "mean": 4.9259259259259265,
+          "ci95": [
+            4.814814814814815,
+            5.0
+          ]
+        },
+        "source_grounding": {
+          "n": 9,
+          "mean": 4.0740740740740735,
+          "ci95": [
+            3.888888888888889,
+            4.296296296296296
+          ]
+        },
+        "modality_grounding": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "full_history_upper_bound": {
+        "win_rate": {
+          "n": 9,
+          "mean": 0.037037037037037035,
+          "ci95": [
+            0.0,
+            0.1111111111111111
+          ]
+        },
+        "relevance": {
+          "n": 9,
+          "mean": 3.6666666666666665,
+          "ci95": [
+            3.259259259259259,
+            4.037037037037036
+          ]
+        },
+        "sufficiency": {
+          "n": 9,
+          "mean": 4.518518518518519,
+          "ci95": [
+            4.037037037037037,
+            4.888888888888889
+          ]
+        },
+        "noise": {
+          "n": 9,
+          "mean": 5.0,
+          "ci95": [
+            5.0,
+            5.0
+          ]
+        },
+        "temporal_correctness": {
+          "n": 9,
+          "mean": 4.666666666666667,
+          "ci95": [
+            4.185185185185185,
+            5.0
+          ]
+        },
+        "source_grounding": {
+          "n": 9,
+          "mean": 4.9259259259259265,
+          "ci95": [
+            4.814814814814815,
+            5.0
+          ]
+        },
+        "modality_grounding": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "compacting_session": {
+        "win_rate": {
+          "n": 9,
+          "mean": 0.18518518518518517,
+          "ci95": [
+            0.037037037037037035,
+            0.4444444444444444
+          ]
+        },
+        "relevance": {
+          "n": 9,
+          "mean": 4.222222222222222,
+          "ci95": [
+            3.962962962962963,
+            4.518518518518518
+          ]
+        },
+        "sufficiency": {
+          "n": 9,
+          "mean": 4.62962962962963,
+          "ci95": [
+            4.296296296296296,
+            4.888888888888889
+          ]
+        },
+        "noise": {
+          "n": 9,
+          "mean": 3.6296296296296293,
+          "ci95": [
+            2.888888888888889,
+            4.185185185185185
+          ]
+        },
+        "temporal_correctness": {
+          "n": 9,
+          "mean": 4.962962962962963,
+          "ci95": [
+            4.888888888888889,
+            5.0
+          ]
+        },
+        "source_grounding": {
+          "n": 9,
+          "mean": 4.7407407407407405,
+          "ci95": [
+            4.555555555555555,
+            4.888888888888889
+          ]
+        },
+        "modality_grounding": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    "tokens": {
+      "cortext_savings_vs_traditional_chat_rag": {
+        "n": 9,
+        "mean": 0.9797161730921476,
+        "ci95": [
+          0.9777428091722266,
+          0.9816833942672375
+        ]
+      }
+    }
+  },
+  "failure_reasons": {
+    "cortext_wins": 21,
+    "full_history_upper_bound_advantage": 1,
+    "compacting_session_advantage": 5
+  },
+  "judge_validation": {},
+  "fairness_checks": {
+    "cortext_audio_image_transcript_shortcuts": false,
+    "traditional_chat_rag_text_only": true,
+    "full_history_text_only": true,
+    "no_future_context_violations": true,
+    "no_current_turn_context_inclusions": true,
+    "blind_prompt_hidden_labels_absent": true,
+    "traditional_chat_rag_contentful_compaction": true,
+    "judge_prompt_fits_context_window": true,
+    "full_history_prompt_fits_judge_context": true,
+    "judge_supports_attached_audio": false,
+    "judge_supports_attached_images": false,
+    "attached_audio_judged_when_present": true,
+    "attached_images_judged_when_present": true,
+    "media_memory_map_complete": true,
+    "counters": {
+      "cortext_native_non_prior_memory_rows_excluded": 9,
+      "cortext_native_non_prior_working_rows_excluded": 9,
+      "cortext_native_non_prior_retrieved_rows_excluded": 0,
+      "traditional_chat_rag_compaction_events": 9,
+      "traditional_chat_rag_contentful_compaction": 9
+    }
+  },
+  "media_attachments": {
+    "enabled": false,
+    "max_media_per_system": 0,
+    "count_policy": "max_media_per_system=-1 attaches all source blobs present in each packet; conversion policies below may still clip or frame-reduce media for local judge input",
+    "audio_max_seconds": 30,
+    "audio_policy": "audio source blobs converted to mono 16 kHz WAV and clipped to the first 30 seconds for local multimodal judge input",
+    "image_policy": "image source blobs converted to a 768x768 padded JPEG for local judge input",
+    "video_policy": "video source blobs represented by one 768x768 padded JPEG frame for local judge input",
+    "cortext_native": {
+      "image": 0,
+      "audio": 0,
+      "skipped": 0
+    },
+    "traditional_chat_rag": {
+      "image": 0,
+      "audio": 0,
+      "skipped": 0
+    },
+    "full_history_upper_bound": {
+      "image": 0,
+      "audio": 0,
+      "skipped": 0
+    }
+  },
+  "judgments": [
+    {
+      "event_index": 5000,
+      "probe_event_index": 5000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1667647200000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 15
+      },
+      "winner": "cortext_native",
+      "winner_alias": "A",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet A provides the best balance: it has the immediate temporally aligned source-backed text needed for the current turn while avoiding most of the excessive unrelated history present in the other packets.",
+      "judge_raw": {
+        "winner": "A",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet A provides the best balance: it has the immediate temporally aligned source-backed text needed for the current turn while avoiding most of the excessive unrelated history present in the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "cortext_native": "A",
+          "compacting_session": "B",
+          "traditional_chat_rag": "C",
+          "full_history_upper_bound": "D"
+        },
+        "label_to_real": {
+          "A": "cortext_native",
+          "B": "compacting_session",
+          "C": "traditional_chat_rag",
+          "D": "full_history_upper_bound"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the temporally adjacent prior event and a focused recent source-backed window, with some older unrelated snippets adding moderate noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes comprehensive exact recent context and a summary/source-backed older history, but excessive unrelated history creates very high noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history is source-backed and temporally complete through the prior event, but it is overwhelmingly noisy for the current turn."
+        },
+        "compacting_session": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains the exact prior event and a broad recent source-backed window, but the large amount of unrelated earlier context and empty compaction entry make it noisy."
+        }
+      },
+      "cortext_memory_ids": [
+        10478,
+        10480,
+        10482,
+        10484,
+        10486,
+        10488,
+        10490,
+        10493,
+        10495,
+        10497,
+        10499,
+        10501,
+        10503,
+        10505,
+        10507,
+        10509,
+        10511,
+        10513,
+        10515,
+        10518,
+        10520,
+        1719,
+        1740,
+        1744,
+        1723,
+        15,
+        2199,
+        1588,
+        6642,
+        6204,
+        5085,
+        8664,
+        6924,
+        2208
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        10478,
+        10480,
+        10482,
+        10484,
+        10486,
+        10488,
+        10490,
+        10493,
+        10495,
+        10497,
+        10499,
+        10501,
+        10503,
+        10505,
+        10507,
+        10509,
+        10511,
+        10513,
+        10515,
+        10518,
+        1719,
+        1740,
+        1744,
+        1723,
+        15,
+        2199,
+        1588,
+        6642,
+        6204,
+        5085,
+        8664,
+        6924,
+        2208
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        10520
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        10520
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        4077,
+        1,
+        3476,
+        817,
+        2949
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49231,
+      "full_history_tokens": 133986,
+      "cortext_working_tokens": 753,
+      "cortext_retrieved_tokens": 356,
+      "cortext_context_tokens": 1109,
+      "traditional_chat_rag_tokens": 49231,
+      "cortext_latency_ms": 210.5908,
+      "normal_rag_total_latency_ms": 152.579462,
+      "normal_rag_retrieval_latency_ms": 151.423296,
+      "judge_prompt_tokens_estimate": 502802,
+      "media_attachments": {
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 5000,
+      "probe_event_index": 5000,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1667647200000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 15
+      },
+      "winner": "full_history_upper_bound",
+      "winner_alias": "A",
+      "failure_reason": "full_history_upper_bound_advantage",
+      "winner_reason": "Packet A is the only packet with both immediate temporal alignment and older source-backed text history that supports the current turn, despite very high noise.",
+      "judge_raw": {
+        "winner": "A",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet A is the only packet with both immediate temporal alignment and older source-backed text history that supports the current turn, despite very high noise."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "compacting_session": "C",
+          "traditional_chat_rag": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "compacting_session",
+          "D": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 2.0,
+          "sufficiency": 1.0,
+          "noise": 3.0,
+          "temporal_correctness": 4.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate prior turn and recent source-backed context, but lacks the older same-source context needed for the current turn; some unrelated retrieval noise is present."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "D",
+          "relevance": 2.0,
+          "sufficiency": 1.0,
+          "noise": 5.0,
+          "temporal_correctness": 4.0,
+          "source_grounding": 3.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate prior turn, but the compaction-summary/source blob is very noisy and does not surface the needed older aligned context; source grounding is weaker due to summarized material."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate prior turn and source-backed older same-source context that aligns with the current turn; however the packet is extremely noisy due to full-history breadth."
+        },
+        "compacting_session": {
+          "judge_key": "C",
+          "relevance": 2.0,
+          "sufficiency": 1.0,
+          "noise": 3.0,
+          "temporal_correctness": 4.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history is temporally near the current turn and source_id aligned, but it does not provide the specific prior context needed; the source blob includes many unrelated turns."
+        }
+      },
+      "cortext_memory_ids": [
+        10478,
+        10480,
+        10482,
+        10484,
+        10486,
+        10488,
+        10490,
+        10493,
+        10495,
+        10497,
+        10499,
+        10501,
+        10503,
+        10505,
+        10507,
+        10509,
+        10511,
+        10513,
+        10515,
+        10518,
+        10520,
+        1719,
+        1740,
+        1744,
+        1723,
+        15,
+        2199,
+        1588,
+        6642,
+        6204,
+        5085,
+        8664,
+        6924,
+        2208
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        10478,
+        10480,
+        10482,
+        10484,
+        10486,
+        10488,
+        10490,
+        10493,
+        10495,
+        10497,
+        10499,
+        10501,
+        10503,
+        10505,
+        10507,
+        10509,
+        10511,
+        10513,
+        10515,
+        10518,
+        1719,
+        1740,
+        1744,
+        1723,
+        15,
+        2199,
+        1588,
+        6642,
+        6204,
+        5085,
+        8664,
+        6924,
+        2208
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        10520
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        10520
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        4077,
+        1,
+        3476,
+        817,
+        2949
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49231,
+      "full_history_tokens": 133986,
+      "cortext_working_tokens": 753,
+      "cortext_retrieved_tokens": 356,
+      "cortext_context_tokens": 1109,
+      "traditional_chat_rag_tokens": 49231,
+      "cortext_latency_ms": 210.5908,
+      "normal_rag_total_latency_ms": 152.579462,
+      "normal_rag_retrieval_latency_ms": 151.423296,
+      "judge_prompt_tokens_estimate": 502802,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 5000,
+      "probe_event_index": 5000,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1667647200000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 15
+      },
+      "winner": "compacting_session",
+      "winner_alias": "D",
+      "failure_reason": "compacting_session_advantage",
+      "winner_reason": "Packet D provides the best balance of recent temporally aligned source-backed context and manageable noise, including the immediate prior turn and the earlier same-thread evidence needed to interpret the current turn.",
+      "judge_raw": {
+        "winner": "D",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet D provides the best balance of recent temporally aligned source-backed context and manageable noise, including the immediate prior turn and the earlier same-thread evidence needed to interpret the current turn."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "cortext_native": "B",
+          "full_history_upper_bound": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "cortext_native",
+          "C": "full_history_upper_bound",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 3.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate prior turn and very recent source-backed text history with good source_id alignment, but it omits earlier same-thread context that helps ground the current reference; includes some unrelated older snippets and no media."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains temporally aligned text history including the immediate prior turn and same-thread source-backed events, but it is heavily diluted by a large amount of older unrelated text history and summary material; no media attached."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "relevance": 3.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history includes the needed temporally aligned and source-backed context, but the relevant evidence is buried in an extremely large amount of unrelated older text history; no media attached."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate prior turn plus the recent same-thread source-backed text history needed for the current reference, with strong temporal alignment and source_id alignment; some older unrelated text history is present, but noise is moderate and no media is attached."
+        }
+      },
+      "cortext_memory_ids": [
+        10478,
+        10480,
+        10482,
+        10484,
+        10486,
+        10488,
+        10490,
+        10493,
+        10495,
+        10497,
+        10499,
+        10501,
+        10503,
+        10505,
+        10507,
+        10509,
+        10511,
+        10513,
+        10515,
+        10518,
+        10520,
+        1719,
+        1740,
+        1744,
+        1723,
+        15,
+        2199,
+        1588,
+        6642,
+        6204,
+        5085,
+        8664,
+        6924,
+        2208
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        10478,
+        10480,
+        10482,
+        10484,
+        10486,
+        10488,
+        10490,
+        10493,
+        10495,
+        10497,
+        10499,
+        10501,
+        10503,
+        10505,
+        10507,
+        10509,
+        10511,
+        10513,
+        10515,
+        10518,
+        1719,
+        1740,
+        1744,
+        1723,
+        15,
+        2199,
+        1588,
+        6642,
+        6204,
+        5085,
+        8664,
+        6924,
+        2208
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        10520
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        10520
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        4077,
+        1,
+        3476,
+        817,
+        2949
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49231,
+      "full_history_tokens": 133986,
+      "cortext_working_tokens": 753,
+      "cortext_retrieved_tokens": 356,
+      "cortext_context_tokens": 1109,
+      "traditional_chat_rag_tokens": 49231,
+      "cortext_latency_ms": 210.5908,
+      "normal_rag_total_latency_ms": 152.579462,
+      "normal_rag_retrieval_latency_ms": 151.423296,
+      "judge_prompt_tokens_estimate": 502802,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 5500,
+      "probe_event_index": 5500,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1675712400000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 27
+      },
+      "winner": "cortext_native",
+      "winner_alias": "B",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet B provides the most focused source-backed immediate prior text history with the least noise while maintaining strong temporal and source_id alignment.",
+      "judge_raw": {
+        "winner": "B",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet B provides the most focused source-backed immediate prior text history with the least noise while maintaining strong temporal and source_id alignment."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "cortext_native": "B",
+          "full_history_upper_bound": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "cortext_native",
+          "C": "full_history_upper_bound",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate prior text history with strong temporal alignment and source_id alignment; only minor unrelated older text history adds noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains temporally aligned immediate prior text history with source_id alignment, but the source blob is extremely large and noisy with extensive unrelated text history."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the needed immediate prior text history and source-backed event sequence, but it is embedded in a very large, highly noisy source blob."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains temporally aligned prior text history and source_id alignment, but includes a long unrelated source blob before the relevant recent events."
+        }
+      },
+      "cortext_memory_ids": [
+        11529,
+        11531,
+        11533,
+        11535,
+        11537,
+        11541,
+        11543,
+        11545,
+        11547,
+        11549,
+        11551,
+        11553,
+        11555,
+        11557,
+        11559,
+        11561,
+        11563,
+        11566,
+        11568,
+        11570,
+        11572,
+        15,
+        11,
+        19,
+        8536,
+        841,
+        2174,
+        9604,
+        7139,
+        8590,
+        10691,
+        6701
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        11529,
+        11531,
+        11533,
+        11535,
+        11537,
+        11541,
+        11543,
+        11545,
+        11547,
+        11549,
+        11551,
+        11553,
+        11555,
+        11557,
+        11559,
+        11561,
+        11563,
+        11566,
+        11568,
+        11570,
+        15,
+        11,
+        19,
+        8536,
+        841,
+        2174,
+        9604,
+        7139,
+        8590,
+        10691,
+        6701
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        11572
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        11572
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        5016,
+        4563,
+        3459,
+        1628,
+        4566
+      ],
+      "rolling_history_tokens": 49142,
+      "normal_rag_context_tokens": 49184,
+      "full_history_tokens": 147126,
+      "cortext_working_tokens": 495,
+      "cortext_retrieved_tokens": 273,
+      "cortext_context_tokens": 768,
+      "traditional_chat_rag_tokens": 49184,
+      "cortext_latency_ms": 210.82284,
+      "normal_rag_total_latency_ms": 173.06256,
+      "normal_rag_retrieval_latency_ms": 171.916115,
+      "judge_prompt_tokens_estimate": 571060,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 5500,
+      "probe_event_index": 5500,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1675712400000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 27
+      },
+      "winner": "cortext_native",
+      "winner_alias": "D",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "D is the best context because it supplies the temporally aligned immediate source-backed text history needed for the current turn while avoiding the excessive unrelated history present in the other packets.",
+      "judge_raw": {
+        "winner": "D",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "D is the best context because it supplies the temporally aligned immediate source-backed text history needed for the current turn while avoiding the excessive unrelated history present in the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "compacting_session": "B",
+          "full_history_upper_bound": "C",
+          "cortext_native": "D"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "compacting_session",
+          "C": "full_history_upper_bound",
+          "D": "cortext_native"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Provides the immediate preceding text history with strong source_id and temporal alignment, plus only a small amount of unrelated older text history noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains immediate preceding text history with aligned source_id and timestamp, but it is embedded in a very large compacted history with extensive unrelated older text history and extra snippets."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history contains the temporally aligned immediate context and direct source_id evidence, but the overwhelming majority is unrelated retrieval noise."
+        },
+        "compacting_session": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Includes direct source-backed text history leading up to the current turn with good source_id alignment, but also carries a long span of unrelated prior text history that adds substantial noise."
+        }
+      },
+      "cortext_memory_ids": [
+        11529,
+        11531,
+        11533,
+        11535,
+        11537,
+        11541,
+        11543,
+        11545,
+        11547,
+        11549,
+        11551,
+        11553,
+        11555,
+        11557,
+        11559,
+        11561,
+        11563,
+        11566,
+        11568,
+        11570,
+        11572,
+        15,
+        11,
+        19,
+        8536,
+        841,
+        2174,
+        9604,
+        7139,
+        8590,
+        10691,
+        6701
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        11529,
+        11531,
+        11533,
+        11535,
+        11537,
+        11541,
+        11543,
+        11545,
+        11547,
+        11549,
+        11551,
+        11553,
+        11555,
+        11557,
+        11559,
+        11561,
+        11563,
+        11566,
+        11568,
+        11570,
+        15,
+        11,
+        19,
+        8536,
+        841,
+        2174,
+        9604,
+        7139,
+        8590,
+        10691,
+        6701
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        11572
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        11572
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        5016,
+        4563,
+        3459,
+        1628,
+        4566
+      ],
+      "rolling_history_tokens": 49142,
+      "normal_rag_context_tokens": 49184,
+      "full_history_tokens": 147126,
+      "cortext_working_tokens": 495,
+      "cortext_retrieved_tokens": 273,
+      "cortext_context_tokens": 768,
+      "traditional_chat_rag_tokens": 49184,
+      "cortext_latency_ms": 210.82284,
+      "normal_rag_total_latency_ms": 173.06256,
+      "normal_rag_retrieval_latency_ms": 171.916115,
+      "judge_prompt_tokens_estimate": 571060,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 5500,
+      "probe_event_index": 5500,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1675712400000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 27
+      },
+      "winner": "cortext_native",
+      "winner_alias": "C",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet C is the best context because it captures the immediate source-backed, temporally aligned text history needed for the current turn while avoiding most unrelated history noise.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C is the best context because it captures the immediate source-backed, temporally aligned text history needed for the current turn while avoiding most unrelated history noise."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "compacting_session": "A",
+          "traditional_chat_rag": "B",
+          "cortext_native": "C",
+          "full_history_upper_bound": "D"
+        },
+        "label_to_real": {
+          "A": "compacting_session",
+          "B": "traditional_chat_rag",
+          "C": "cortext_native",
+          "D": "full_history_upper_bound"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 4.0,
+          "noise": 1.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Provides the immediate source-backed text history leading into the current turn with strong source_id and temporal alignment, with only a few unrelated source snippets as noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the relevant source-backed recent text history and temporal alignment, plus extensive compacted and older text history with extra unrelated source snippets, making it very noisy."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "D",
+          "relevance": 3.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history includes the needed temporally aligned source-backed context, but it is overwhelmingly noisy with extensive unrelated older history."
+        },
+        "compacting_session": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains source-backed text history with the immediately preceding temporal context and source_id alignment, but it includes a very large amount of unrelated older text history as noise."
+        }
+      },
+      "cortext_memory_ids": [
+        11529,
+        11531,
+        11533,
+        11535,
+        11537,
+        11541,
+        11543,
+        11545,
+        11547,
+        11549,
+        11551,
+        11553,
+        11555,
+        11557,
+        11559,
+        11561,
+        11563,
+        11566,
+        11568,
+        11570,
+        11572,
+        15,
+        11,
+        19,
+        8536,
+        841,
+        2174,
+        9604,
+        7139,
+        8590,
+        10691,
+        6701
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        11529,
+        11531,
+        11533,
+        11535,
+        11537,
+        11541,
+        11543,
+        11545,
+        11547,
+        11549,
+        11551,
+        11553,
+        11555,
+        11557,
+        11559,
+        11561,
+        11563,
+        11566,
+        11568,
+        11570,
+        15,
+        11,
+        19,
+        8536,
+        841,
+        2174,
+        9604,
+        7139,
+        8590,
+        10691,
+        6701
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        11572
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        11572
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        5016,
+        4563,
+        3459,
+        1628,
+        4566
+      ],
+      "rolling_history_tokens": 49142,
+      "normal_rag_context_tokens": 49184,
+      "full_history_tokens": 147126,
+      "cortext_working_tokens": 495,
+      "cortext_retrieved_tokens": 273,
+      "cortext_context_tokens": 768,
+      "traditional_chat_rag_tokens": 49184,
+      "cortext_latency_ms": 210.82284,
+      "normal_rag_total_latency_ms": 173.06256,
+      "normal_rag_retrieval_latency_ms": 171.916115,
+      "judge_prompt_tokens_estimate": 571060,
+      "media_attachments": {
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 6000,
+      "probe_event_index": 6000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1683777600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 7
+      },
+      "winner": "cortext_native",
+      "winner_alias": "C",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet C provides the best context because it contains the temporally aligned immediate source-backed evidence for the Contact's current work while avoiding most of the excessive unrelated history present in the other packets.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C provides the best context because it contains the temporally aligned immediate source-backed evidence for the Contact's current work while avoiding most of the excessive unrelated history present in the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "compacting_session": "A",
+          "traditional_chat_rag": "B",
+          "cortext_native": "C",
+          "full_history_upper_bound": "D"
+        },
+        "label_to_real": {
+          "A": "compacting_session",
+          "B": "traditional_chat_rag",
+          "C": "cortext_native",
+          "D": "full_history_upper_bound"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history is temporally aligned and includes the immediate source-backed Contact evidence needed to answer the current turn, with only limited unrelated older retrieval noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate source-backed Contact evidence needed for the current turn, but the packet is extremely noisy with long unrelated prior history and extra older same-question retrievals."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history contains the immediate source-backed Contact evidence, but it is maximally noisy due to extensive unrelated historical context with many conflicting occupations."
+        },
+        "compacting_session": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes temporally aligned immediate source-backed evidence from the Contact just before the current turn, but it is embedded in a very large noisy history with many unrelated occupations."
+        }
+      },
+      "cortext_memory_ids": [
+        12584,
+        12586,
+        12589,
+        12591,
+        12593,
+        12595,
+        12597,
+        12599,
+        12601,
+        12603,
+        12605,
+        12607,
+        12609,
+        12611,
+        12614,
+        12616,
+        12618,
+        12620,
+        12622,
+        12624,
+        12626,
+        8536,
+        4490,
+        19,
+        15,
+        10014,
+        7087,
+        10018,
+        11,
+        10383,
+        10788,
+        10111,
+        11217,
+        6922
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        12584,
+        12586,
+        12589,
+        12591,
+        12593,
+        12595,
+        12597,
+        12599,
+        12601,
+        12603,
+        12605,
+        12607,
+        12609,
+        12611,
+        12614,
+        12616,
+        12618,
+        12620,
+        12622,
+        12624,
+        8536,
+        4490,
+        19,
+        15,
+        10014,
+        7087,
+        10018,
+        11,
+        10383,
+        10788,
+        10111,
+        11217,
+        6922
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        12626
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        12626
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        4058,
+        3437,
+        4935,
+        5866,
+        4942
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49170,
+      "full_history_tokens": 160840,
+      "cortext_working_tokens": 678,
+      "cortext_retrieved_tokens": 248,
+      "cortext_context_tokens": 926,
+      "traditional_chat_rag_tokens": 49170,
+      "cortext_latency_ms": 242.172775,
+      "normal_rag_total_latency_ms": 185.394701,
+      "normal_rag_retrieval_latency_ms": 184.055367,
+      "judge_prompt_tokens_estimate": 643359,
+      "media_attachments": {
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 6000,
+      "probe_event_index": 6000,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1683777600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 7
+      },
+      "winner": "cortext_native",
+      "winner_alias": "B",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet B provides the best context because it includes the temporally adjacent source-backed evidence needed to answer the current work question while avoiding most of the excessive unrelated history present in the other packets.",
+      "judge_raw": {
+        "winner": "B",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet B provides the best context because it includes the temporally adjacent source-backed evidence needed to answer the current work question while avoiding most of the excessive unrelated history present in the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "cortext_native": "B",
+          "compacting_session": "C",
+          "full_history_upper_bound": "D"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "cortext_native",
+          "C": "compacting_session",
+          "D": "full_history_upper_bound"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the most recent source-backed text history with clear source_id alignment and the immediately preceding Contact work-related self-report, with only limited older unrelated retrieval noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the temporally adjacent source-backed text history with source_id alignment for the current turn, including an immediately preceding Contact work-related self-report, but it is embedded in a very large compacted history with substantial noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains full source-backed text history and the immediately preceding Contact work-related self-report with source_id alignment, but the packet is overwhelmingly noisy due to excessive unrelated history."
+        },
+        "compacting_session": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the temporally adjacent source-backed text history and direct source_id alignment needed for the current turn, but includes a very long span of unrelated prior text history causing high noise."
+        }
+      },
+      "cortext_memory_ids": [
+        12584,
+        12586,
+        12589,
+        12591,
+        12593,
+        12595,
+        12597,
+        12599,
+        12601,
+        12603,
+        12605,
+        12607,
+        12609,
+        12611,
+        12614,
+        12616,
+        12618,
+        12620,
+        12622,
+        12624,
+        12626,
+        8536,
+        4490,
+        19,
+        15,
+        10014,
+        7087,
+        10018,
+        11,
+        10383,
+        10788,
+        10111,
+        11217,
+        6922
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        12584,
+        12586,
+        12589,
+        12591,
+        12593,
+        12595,
+        12597,
+        12599,
+        12601,
+        12603,
+        12605,
+        12607,
+        12609,
+        12611,
+        12614,
+        12616,
+        12618,
+        12620,
+        12622,
+        12624,
+        8536,
+        4490,
+        19,
+        15,
+        10014,
+        7087,
+        10018,
+        11,
+        10383,
+        10788,
+        10111,
+        11217,
+        6922
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        12626
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        12626
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        4058,
+        3437,
+        4935,
+        5866,
+        4942
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49170,
+      "full_history_tokens": 160840,
+      "cortext_working_tokens": 678,
+      "cortext_retrieved_tokens": 248,
+      "cortext_context_tokens": 926,
+      "traditional_chat_rag_tokens": 49170,
+      "cortext_latency_ms": 242.172775,
+      "normal_rag_total_latency_ms": 185.394701,
+      "normal_rag_retrieval_latency_ms": 184.055367,
+      "judge_prompt_tokens_estimate": 643359,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 6000,
+      "probe_event_index": 6000,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1683777600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 7
+      },
+      "winner": "cortext_native",
+      "winner_alias": "B",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet B provides the best context because it contains the immediate source-backed text evidence aligned with the current turn while adding far less unrelated history than the other sufficient packets.",
+      "judge_raw": {
+        "winner": "B",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet B provides the best context because it contains the immediate source-backed text evidence aligned with the current turn while adding far less unrelated history than the other sufficient packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "traditional_chat_rag": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "traditional_chat_rag",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate prior source-backed Contact evidence directly aligned with the current question, with only limited extra older source-backed snippets as noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate source-backed evidence needed for the current question, but it is buried in extensive compacted and unrelated text history, creating high noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains immediate source-backed evidence aligned with the current question, but it is embedded in a very large amount of unrelated older text history and conflicting older source-backed evidence."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains temporally aligned source-backed evidence near the end, but the packet includes a very large amount of unrelated text history and an empty compaction source blob."
+        }
+      },
+      "cortext_memory_ids": [
+        12584,
+        12586,
+        12589,
+        12591,
+        12593,
+        12595,
+        12597,
+        12599,
+        12601,
+        12603,
+        12605,
+        12607,
+        12609,
+        12611,
+        12614,
+        12616,
+        12618,
+        12620,
+        12622,
+        12624,
+        12626,
+        8536,
+        4490,
+        19,
+        15,
+        10014,
+        7087,
+        10018,
+        11,
+        10383,
+        10788,
+        10111,
+        11217,
+        6922
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        12584,
+        12586,
+        12589,
+        12591,
+        12593,
+        12595,
+        12597,
+        12599,
+        12601,
+        12603,
+        12605,
+        12607,
+        12609,
+        12611,
+        12614,
+        12616,
+        12618,
+        12620,
+        12622,
+        12624,
+        8536,
+        4490,
+        19,
+        15,
+        10014,
+        7087,
+        10018,
+        11,
+        10383,
+        10788,
+        10111,
+        11217,
+        6922
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        12626
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        12626
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        4058,
+        3437,
+        4935,
+        5866,
+        4942
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49170,
+      "full_history_tokens": 160840,
+      "cortext_working_tokens": 678,
+      "cortext_retrieved_tokens": 248,
+      "cortext_context_tokens": 926,
+      "traditional_chat_rag_tokens": 49170,
+      "cortext_latency_ms": 242.172775,
+      "normal_rag_total_latency_ms": 185.394701,
+      "normal_rag_retrieval_latency_ms": 184.055367,
+      "judge_prompt_tokens_estimate": 643359,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 6500,
+      "probe_event_index": 6500,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1694348400000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 18
+      },
+      "winner": "cortext_native",
+      "winner_alias": "C",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet C provides the immediate temporally aligned text context needed for the current turn with much less unrelated history than the other sufficient packets.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C provides the immediate temporally aligned text context needed for the current turn with much less unrelated history than the other sufficient packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "compacting_session": "A",
+          "full_history_upper_bound": "B",
+          "cortext_native": "C",
+          "traditional_chat_rag": "D"
+        },
+        "label_to_real": {
+          "A": "compacting_session",
+          "B": "full_history_upper_bound",
+          "C": "cortext_native",
+          "D": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate prior event and nearby recent context with correct source_id and timestamp alignment, plus a few older related snippets; extra retrieval is limited and mostly clean."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate prior event and sufficient recent context, but it is embedded in a very long source blob with many unrelated excerpts, making it noisy despite temporal alignment."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "B",
+          "relevance": 1.0,
+          "sufficiency": 1.0,
+          "noise": 5.0,
+          "temporal_correctness": 1.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history has some older thematically adjacent fragments but lacks the immediate prior source-backed event needed for the current reply; it is temporally distant and very noisy."
+        },
+        "compacting_session": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the temporally adjacent prior event with correct source_id alignment, so it is sufficient for the turn, but it contains a very large amount of unrelated text history and an empty compaction summary, creating heavy noise."
+        }
+      },
+      "cortext_memory_ids": [
+        13632,
+        13634,
+        13636,
+        13638,
+        13640,
+        13642,
+        13645,
+        13647,
+        13649,
+        13651,
+        13653,
+        13655,
+        13657,
+        13659,
+        13661,
+        13663,
+        13665,
+        13667,
+        13670,
+        13672,
+        13674,
+        11859,
+        11851,
+        6849,
+        11855,
+        6853,
+        8758,
+        6308,
+        6839,
+        6835,
+        5177,
+        7618,
+        9630
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        13632,
+        13634,
+        13636,
+        13638,
+        13640,
+        13642,
+        13645,
+        13647,
+        13649,
+        13651,
+        13653,
+        13655,
+        13657,
+        13659,
+        13661,
+        13663,
+        13665,
+        13667,
+        13670,
+        13672,
+        11859,
+        11851,
+        6849,
+        11855,
+        6853,
+        8758,
+        6308,
+        6839,
+        6835,
+        5177,
+        7618,
+        9630
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        13674
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        13674
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        391,
+        2989,
+        2965,
+        3004,
+        4824
+      ],
+      "rolling_history_tokens": 49138,
+      "normal_rag_context_tokens": 49217,
+      "full_history_tokens": 172569,
+      "cortext_working_tokens": 690,
+      "cortext_retrieved_tokens": 548,
+      "cortext_context_tokens": 1238,
+      "traditional_chat_rag_tokens": 49217,
+      "cortext_latency_ms": 114.712443,
+      "normal_rag_total_latency_ms": 200.83951,
+      "normal_rag_retrieval_latency_ms": 199.625205,
+      "judge_prompt_tokens_estimate": 600722,
+      "media_attachments": {
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 6500,
+      "probe_event_index": 6500,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1694348400000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 18
+      },
+      "winner": "cortext_native",
+      "winner_alias": "B",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet B provides the best balance of temporally adjacent text history, source_id alignment, relevant older source-backed evidence, and lower noise than the other packets.",
+      "judge_raw": {
+        "winner": "B",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet B provides the best balance of temporally adjacent text history, source_id alignment, relevant older source-backed evidence, and lower noise than the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "traditional_chat_rag": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "traditional_chat_rag",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the temporally adjacent text history plus source-backed older text history aligned to the current turn; relatively low noise with useful temporal and source_id alignment."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains temporally aligned text history and relevant source-backed excerpts, but the compacted source blob is very noisy and includes extensive unrelated history."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 3.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the temporally adjacent text history with correct source_id alignment, but the source blob is extremely large and noisy with extensive unrelated history."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 3.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the temporally adjacent text history with correct source_id alignment and enough immediate context, but lacks some older aligned context and includes moderate unrelated noise."
+        }
+      },
+      "cortext_memory_ids": [
+        13632,
+        13634,
+        13636,
+        13638,
+        13640,
+        13642,
+        13645,
+        13647,
+        13649,
+        13651,
+        13653,
+        13655,
+        13657,
+        13659,
+        13661,
+        13663,
+        13665,
+        13667,
+        13670,
+        13672,
+        13674,
+        11859,
+        11851,
+        6849,
+        11855,
+        6853,
+        8758,
+        6308,
+        6839,
+        6835,
+        5177,
+        7618,
+        9630
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        13632,
+        13634,
+        13636,
+        13638,
+        13640,
+        13642,
+        13645,
+        13647,
+        13649,
+        13651,
+        13653,
+        13655,
+        13657,
+        13659,
+        13661,
+        13663,
+        13665,
+        13667,
+        13670,
+        13672,
+        11859,
+        11851,
+        6849,
+        11855,
+        6853,
+        8758,
+        6308,
+        6839,
+        6835,
+        5177,
+        7618,
+        9630
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        13674
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        13674
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        391,
+        2989,
+        2965,
+        3004,
+        4824
+      ],
+      "rolling_history_tokens": 49138,
+      "normal_rag_context_tokens": 49217,
+      "full_history_tokens": 172569,
+      "cortext_working_tokens": 690,
+      "cortext_retrieved_tokens": 548,
+      "cortext_context_tokens": 1238,
+      "traditional_chat_rag_tokens": 49217,
+      "cortext_latency_ms": 114.712443,
+      "normal_rag_total_latency_ms": 200.83951,
+      "normal_rag_retrieval_latency_ms": 199.625205,
+      "judge_prompt_tokens_estimate": 600722,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 6500,
+      "probe_event_index": 6500,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1694348400000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 18
+      },
+      "winner": "cortext_native",
+      "winner_alias": "C",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet C provides the best balance of temporally adjacent context and targeted source-backed older evidence with far less noise than the full-history or heavily compacted packets.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C provides the best balance of temporally adjacent context and targeted source-backed older evidence with far less noise than the full-history or heavily compacted packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "compacting_session": "A",
+          "traditional_chat_rag": "B",
+          "cortext_native": "C",
+          "full_history_upper_bound": "D"
+        },
+        "label_to_real": {
+          "A": "compacting_session",
+          "B": "traditional_chat_rag",
+          "C": "cortext_native",
+          "D": "full_history_upper_bound"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history is well targeted: it includes the immediate source-backed prior turn plus older source-backed evidence aligned to swimming/coaching, with only moderate unrelated water/sports context."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate source-backed prior turn and older source-backed evidence aligned to swimming/coaching, but it is extremely noisy due to a very large amount of unrelated text history and summary material."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history contains the immediate source-backed prior turn and extensive older source-backed evidence for swimming/coaching, but the overwhelming amount of unrelated text history makes it very noisy."
+        },
+        "compacting_session": {
+          "judge_key": "A",
+          "relevance": 3.0,
+          "sufficiency": 3.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the temporally adjacent source-backed exchange needed for the current turn, but much of the packet is unrelated prior text history and it lacks targeted older source-backed alignment for the swimming-coaching detail."
+        }
+      },
+      "cortext_memory_ids": [
+        13632,
+        13634,
+        13636,
+        13638,
+        13640,
+        13642,
+        13645,
+        13647,
+        13649,
+        13651,
+        13653,
+        13655,
+        13657,
+        13659,
+        13661,
+        13663,
+        13665,
+        13667,
+        13670,
+        13672,
+        13674,
+        11859,
+        11851,
+        6849,
+        11855,
+        6853,
+        8758,
+        6308,
+        6839,
+        6835,
+        5177,
+        7618,
+        9630
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        13632,
+        13634,
+        13636,
+        13638,
+        13640,
+        13642,
+        13645,
+        13647,
+        13649,
+        13651,
+        13653,
+        13655,
+        13657,
+        13659,
+        13661,
+        13663,
+        13665,
+        13667,
+        13670,
+        13672,
+        11859,
+        11851,
+        6849,
+        11855,
+        6853,
+        8758,
+        6308,
+        6839,
+        6835,
+        5177,
+        7618,
+        9630
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        13674
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        13674
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        391,
+        2989,
+        2965,
+        3004,
+        4824
+      ],
+      "rolling_history_tokens": 49138,
+      "normal_rag_context_tokens": 49217,
+      "full_history_tokens": 172569,
+      "cortext_working_tokens": 690,
+      "cortext_retrieved_tokens": 548,
+      "cortext_context_tokens": 1238,
+      "traditional_chat_rag_tokens": 49217,
+      "cortext_latency_ms": 114.712443,
+      "normal_rag_total_latency_ms": 200.83951,
+      "normal_rag_retrieval_latency_ms": 199.625205,
+      "judge_prompt_tokens_estimate": 600722,
+      "media_attachments": {
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 7000,
+      "probe_event_index": 7000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1701895200000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 19
+      },
+      "winner": "cortext_native",
+      "winner_alias": "A",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet A provides the most directly relevant and sufficient immediate text history for the current turn with the least noise among packets that include the needed source-aligned context.",
+      "judge_raw": {
+        "winner": "A",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet A provides the most directly relevant and sufficient immediate text history for the current turn with the least noise among packets that include the needed source-aligned context."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "cortext_native": "A",
+          "full_history_upper_bound": "B",
+          "traditional_chat_rag": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "cortext_native",
+          "B": "full_history_upper_bound",
+          "C": "traditional_chat_rag",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "A",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediately preceding source_id-aligned exchange needed for the current text turn, with strong temporal alignment; some unrelated older text noise is appended."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains the needed immediate source_id-aligned context near the end and is temporally aligned, but it is buried in a large compacted source blob with substantial unrelated noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "B",
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 5.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history is source_id-labeled but temporally distant and unrelated to the current turn; it lacks the needed immediate prior exchange and is very noisy."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the required immediate prior exchange with source_id alignment and good temporal alignment, but the packet contains a long unrelated text history and an empty compaction summary source blob."
+        }
+      },
+      "cortext_memory_ids": [
+        14686,
+        14688,
+        14690,
+        14692,
+        14694,
+        14696,
+        14698,
+        14700,
+        14702,
+        14704,
+        14706,
+        14708,
+        14712,
+        14714,
+        14716,
+        14718,
+        14720,
+        14722,
+        14724,
+        14726,
+        14728,
+        9143,
+        8607,
+        11817,
+        10766,
+        6348,
+        11,
+        11325,
+        19,
+        8637,
+        8629,
+        2174,
+        11217,
+        12351
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        14686,
+        14688,
+        14690,
+        14692,
+        14694,
+        14696,
+        14698,
+        14700,
+        14702,
+        14704,
+        14706,
+        14708,
+        14712,
+        14714,
+        14716,
+        14718,
+        14720,
+        14722,
+        14724,
+        14726,
+        9143,
+        8607,
+        11817,
+        10766,
+        6348,
+        11,
+        11325,
+        19,
+        8637,
+        8629,
+        2174,
+        11217,
+        12351
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        14728
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        14728
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        6980,
+        1214,
+        1564,
+        3279,
+        6101
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49185,
+      "full_history_tokens": 185885,
+      "cortext_working_tokens": 677,
+      "cortext_retrieved_tokens": 335,
+      "cortext_context_tokens": 1012,
+      "traditional_chat_rag_tokens": 49185,
+      "cortext_latency_ms": 289.534086,
+      "normal_rag_total_latency_ms": 220.21390200000002,
+      "normal_rag_retrieval_latency_ms": 218.670318,
+      "judge_prompt_tokens_estimate": 670273,
+      "media_attachments": {
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 7000,
+      "probe_event_index": 7000,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1701895200000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 19
+      },
+      "winner": "cortext_native",
+      "winner_alias": "D",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "D provides the best context because it includes the immediate source-backed prior turns needed to understand the current recommendation while avoiding most of the unrelated long-history noise present in the other packets.",
+      "judge_raw": {
+        "winner": "D",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "D provides the best context because it includes the immediate source-backed prior turns needed to understand the current recommendation while avoiding most of the unrelated long-history noise present in the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "full_history_upper_bound": "B",
+          "compacting_session": "C",
+          "cortext_native": "D"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "full_history_upper_bound",
+          "C": "compacting_session",
+          "D": "cortext_native"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history is tightly temporally aligned and contains the directly relevant source-backed preceding exchange, with only a small amount of unrelated older source-backed evidence appended."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the temporally aligned recent exchange needed for the current turn, but also contains extensive older source-backed evidence and a compacted summary, creating substantial noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history contains the exact recent source-backed context and strong temporal alignment, but it is extremely noisy with a very large amount of unrelated prior history."
+        },
+        "compacting_session": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Recent text history includes the needed source-backed events immediately before the current turn, but a long unrelated source blob before that adds significant noise."
+        }
+      },
+      "cortext_memory_ids": [
+        14686,
+        14688,
+        14690,
+        14692,
+        14694,
+        14696,
+        14698,
+        14700,
+        14702,
+        14704,
+        14706,
+        14708,
+        14712,
+        14714,
+        14716,
+        14718,
+        14720,
+        14722,
+        14724,
+        14726,
+        14728,
+        9143,
+        8607,
+        11817,
+        10766,
+        6348,
+        11,
+        11325,
+        19,
+        8637,
+        8629,
+        2174,
+        11217,
+        12351
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        14686,
+        14688,
+        14690,
+        14692,
+        14694,
+        14696,
+        14698,
+        14700,
+        14702,
+        14704,
+        14706,
+        14708,
+        14712,
+        14714,
+        14716,
+        14718,
+        14720,
+        14722,
+        14724,
+        14726,
+        9143,
+        8607,
+        11817,
+        10766,
+        6348,
+        11,
+        11325,
+        19,
+        8637,
+        8629,
+        2174,
+        11217,
+        12351
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        14728
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        14728
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        6980,
+        1214,
+        1564,
+        3279,
+        6101
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49185,
+      "full_history_tokens": 185885,
+      "cortext_working_tokens": 677,
+      "cortext_retrieved_tokens": 335,
+      "cortext_context_tokens": 1012,
+      "traditional_chat_rag_tokens": 49185,
+      "cortext_latency_ms": 289.534086,
+      "normal_rag_total_latency_ms": 220.21390200000002,
+      "normal_rag_retrieval_latency_ms": 218.670318,
+      "judge_prompt_tokens_estimate": 670273,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 7000,
+      "probe_event_index": 7000,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1701895200000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 19
+      },
+      "winner": "cortext_native",
+      "winner_alias": "D",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet D is the best context because it supplies the temporally adjacent prior turn needed for the current response with minimal unrelated text history.",
+      "judge_raw": {
+        "winner": "D",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet D is the best context because it supplies the temporally adjacent prior turn needed for the current response with minimal unrelated text history."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "compacting_session": "A",
+          "traditional_chat_rag": "B",
+          "full_history_upper_bound": "C",
+          "cortext_native": "D"
+        },
+        "label_to_real": {
+          "A": "compacting_session",
+          "B": "traditional_chat_rag",
+          "C": "full_history_upper_bound",
+          "D": "cortext_native"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 1.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Provides the immediately preceding text history with strong temporal alignment and source_id alignment; only a few unrelated older snippets add minor noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Includes the needed temporally adjacent text history and source_id alignment, plus a compacted summary and many unrelated older events that add substantial noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history includes the exact prior context with source_id alignment, but the very large amount of unrelated earlier history is extremely noisy."
+        },
+        "compacting_session": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains temporally adjacent text history with source_id alignment through the prior event, sufficient for the current turn, but much unrelated older text history adds noise."
+        }
+      },
+      "cortext_memory_ids": [
+        14686,
+        14688,
+        14690,
+        14692,
+        14694,
+        14696,
+        14698,
+        14700,
+        14702,
+        14704,
+        14706,
+        14708,
+        14712,
+        14714,
+        14716,
+        14718,
+        14720,
+        14722,
+        14724,
+        14726,
+        14728,
+        9143,
+        8607,
+        11817,
+        10766,
+        6348,
+        11,
+        11325,
+        19,
+        8637,
+        8629,
+        2174,
+        11217,
+        12351
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        14686,
+        14688,
+        14690,
+        14692,
+        14694,
+        14696,
+        14698,
+        14700,
+        14702,
+        14704,
+        14706,
+        14708,
+        14712,
+        14714,
+        14716,
+        14718,
+        14720,
+        14722,
+        14724,
+        14726,
+        9143,
+        8607,
+        11817,
+        10766,
+        6348,
+        11,
+        11325,
+        19,
+        8637,
+        8629,
+        2174,
+        11217,
+        12351
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        14728
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        14728
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        6980,
+        1214,
+        1564,
+        3279,
+        6101
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49185,
+      "full_history_tokens": 185885,
+      "cortext_working_tokens": 677,
+      "cortext_retrieved_tokens": 335,
+      "cortext_context_tokens": 1012,
+      "traditional_chat_rag_tokens": 49185,
+      "cortext_latency_ms": 289.534086,
+      "normal_rag_total_latency_ms": 220.21390200000002,
+      "normal_rag_retrieval_latency_ms": 218.670318,
+      "judge_prompt_tokens_estimate": 670273,
+      "media_attachments": {
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 7500,
+      "probe_event_index": 7500,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1711515600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 54
+      },
+      "winner": "cortext_native",
+      "winner_alias": "C",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet C provides the best context because it preserves the immediate source-backed text history for the current turn with strong temporal alignment and far less noise than the other packets.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C provides the best context because it preserves the immediate source-backed text history for the current turn with strong temporal alignment and far less noise than the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "traditional_chat_rag": "B",
+          "cortext_native": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "traditional_chat_rag",
+          "C": "cortext_native",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 1.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Concise text history includes the immediately preceding source-backed events with strong source_id and temporal alignment, with only minor unrelated snippets."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Compacted text history plus source-backed events include the adjacent current-turn context and temporal alignment, but there is heavy unrelated noise and some summary-derived material."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains the temporally adjacent source-backed events needed for the current turn with correct source_id alignment, but the source blob is extremely long and very noisy."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the adjacent source-backed events with correct temporal alignment, but a large amount of unrelated prior text history adds substantial noise."
+        }
+      },
+      "cortext_memory_ids": [
+        15739,
+        15741,
+        15744,
+        15746,
+        15748,
+        15750,
+        15752,
+        15754,
+        15756,
+        15758,
+        15760,
+        15762,
+        15764,
+        15766,
+        15770,
+        15772,
+        15774,
+        15776,
+        15778,
+        15780,
+        15782,
+        11464,
+        10907,
+        2697,
+        2701,
+        9233,
+        8615,
+        2656,
+        581,
+        8523,
+        10788,
+        13157,
+        11325
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        15739,
+        15741,
+        15744,
+        15746,
+        15748,
+        15750,
+        15752,
+        15754,
+        15756,
+        15758,
+        15760,
+        15762,
+        15764,
+        15766,
+        15770,
+        15772,
+        15774,
+        15776,
+        15778,
+        15780,
+        11464,
+        10907,
+        2697,
+        2701,
+        9233,
+        8615,
+        2656,
+        581,
+        8523,
+        10788,
+        13157,
+        11325
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        15782
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        15782
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        2199,
+        1828,
+        7170,
+        6254,
+        246
+      ],
+      "rolling_history_tokens": 49131,
+      "normal_rag_context_tokens": 49196,
+      "full_history_tokens": 198354,
+      "cortext_working_tokens": 629,
+      "cortext_retrieved_tokens": 436,
+      "cortext_context_tokens": 1065,
+      "traditional_chat_rag_tokens": 49196,
+      "cortext_latency_ms": 133.947036,
+      "normal_rag_total_latency_ms": 243.855948,
+      "normal_rag_retrieval_latency_ms": 242.463504,
+      "judge_prompt_tokens_estimate": 738375,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 7500,
+      "probe_event_index": 7500,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1711515600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 54
+      },
+      "winner": "cortext_native",
+      "winner_alias": "C",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet C provides the best context because it includes the immediate source-backed text history needed for the turn with far less noise than the other packets.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C provides the best context because it includes the immediate source-backed text history needed for the turn with far less noise than the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "compacting_session": "B",
+          "cortext_native": "C",
+          "traditional_chat_rag": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "compacting_session",
+          "C": "cortext_native",
+          "D": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 1.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains tightly focused immediate text history with source_id alignment and only limited unrelated retrieved snippets; strong temporal alignment; no media."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains immediate source-backed text history and related earlier text history, but it is embedded in a very large noisy source blob with many unrelated events; no media."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains immediate text history and source_id alignment for the current turn, but the full text history has very high noise from many unrelated events; no media."
+        },
+        "compacting_session": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains source-backed immediate text history with good temporal alignment, plus substantial unrelated text history and a non-informative compaction source blob; no media."
+        }
+      },
+      "cortext_memory_ids": [
+        15739,
+        15741,
+        15744,
+        15746,
+        15748,
+        15750,
+        15752,
+        15754,
+        15756,
+        15758,
+        15760,
+        15762,
+        15764,
+        15766,
+        15770,
+        15772,
+        15774,
+        15776,
+        15778,
+        15780,
+        15782,
+        11464,
+        10907,
+        2697,
+        2701,
+        9233,
+        8615,
+        2656,
+        581,
+        8523,
+        10788,
+        13157,
+        11325
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        15739,
+        15741,
+        15744,
+        15746,
+        15748,
+        15750,
+        15752,
+        15754,
+        15756,
+        15758,
+        15760,
+        15762,
+        15764,
+        15766,
+        15770,
+        15772,
+        15774,
+        15776,
+        15778,
+        15780,
+        11464,
+        10907,
+        2697,
+        2701,
+        9233,
+        8615,
+        2656,
+        581,
+        8523,
+        10788,
+        13157,
+        11325
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        15782
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        15782
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        2199,
+        1828,
+        7170,
+        6254,
+        246
+      ],
+      "rolling_history_tokens": 49131,
+      "normal_rag_context_tokens": 49196,
+      "full_history_tokens": 198354,
+      "cortext_working_tokens": 629,
+      "cortext_retrieved_tokens": 436,
+      "cortext_context_tokens": 1065,
+      "traditional_chat_rag_tokens": 49196,
+      "cortext_latency_ms": 133.947036,
+      "normal_rag_total_latency_ms": 243.855948,
+      "normal_rag_retrieval_latency_ms": 242.463504,
+      "judge_prompt_tokens_estimate": 738375,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 7500,
+      "probe_event_index": 7500,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1711515600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 54
+      },
+      "winner": "cortext_native",
+      "winner_alias": "A",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet A provides the best balance of temporally aligned recent context, relevant source-backed older volunteering evidence, and low noise compared with the much noisier full or compacted histories.",
+      "judge_raw": {
+        "winner": "A",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet A provides the best balance of temporally aligned recent context, relevant source-backed older volunteering evidence, and low noise compared with the much noisier full or compacted histories."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "cortext_native": "A",
+          "traditional_chat_rag": "B",
+          "full_history_upper_bound": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "cortext_native",
+          "B": "traditional_chat_rag",
+          "C": "full_history_upper_bound",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "A",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 1.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history has strong temporal alignment with the immediately preceding question and the recent shelter context, plus a small amount of older source-backed evidence about related volunteering motivations; only modest unrelated text noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate prior turn and recent source-backed shelter context, so it is sufficient, but it is embedded in a very large amount of unrelated text history and compacted excerpts, creating heavy noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history contains the immediate temporal context and older source-backed evidence relevant to volunteering background, but it is extremely noisy with extensive unrelated text history."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the recent temporally aligned exchange and immediate source-backed question, but lacks some older relevant evidence and contains substantial unrelated text history; compaction summary has no useful content."
+        }
+      },
+      "cortext_memory_ids": [
+        15739,
+        15741,
+        15744,
+        15746,
+        15748,
+        15750,
+        15752,
+        15754,
+        15756,
+        15758,
+        15760,
+        15762,
+        15764,
+        15766,
+        15770,
+        15772,
+        15774,
+        15776,
+        15778,
+        15780,
+        15782,
+        11464,
+        10907,
+        2697,
+        2701,
+        9233,
+        8615,
+        2656,
+        581,
+        8523,
+        10788,
+        13157,
+        11325
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        15739,
+        15741,
+        15744,
+        15746,
+        15748,
+        15750,
+        15752,
+        15754,
+        15756,
+        15758,
+        15760,
+        15762,
+        15764,
+        15766,
+        15770,
+        15772,
+        15774,
+        15776,
+        15778,
+        15780,
+        11464,
+        10907,
+        2697,
+        2701,
+        9233,
+        8615,
+        2656,
+        581,
+        8523,
+        10788,
+        13157,
+        11325
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        15782
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        15782
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        2199,
+        1828,
+        7170,
+        6254,
+        246
+      ],
+      "rolling_history_tokens": 49131,
+      "normal_rag_context_tokens": 49196,
+      "full_history_tokens": 198354,
+      "cortext_working_tokens": 629,
+      "cortext_retrieved_tokens": 436,
+      "cortext_context_tokens": 1065,
+      "traditional_chat_rag_tokens": 49196,
+      "cortext_latency_ms": 133.947036,
+      "normal_rag_total_latency_ms": 243.855948,
+      "normal_rag_retrieval_latency_ms": 242.463504,
+      "judge_prompt_tokens_estimate": 738375,
+      "media_attachments": {
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 8000,
+      "probe_event_index": 8000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1721049600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 25
+      },
+      "winner": "compacting_session",
+      "winner_alias": "D",
+      "failure_reason": "compacting_session_advantage",
+      "winner_reason": "Packet D is the best context because it includes the necessary recent source-backed sequence leading to the current turn while avoiding the excessive unrelated history present in the larger packets and the missing earlier context in Packet B.",
+      "judge_raw": {
+        "winner": "D",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet D is the best context because it includes the necessary recent source-backed sequence leading to the current turn while avoiding the excessive unrelated history present in the larger packets and the missing earlier context in Packet B."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "cortext_native": "B",
+          "full_history_upper_bound": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "cortext_native",
+          "C": "full_history_upper_bound",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 3.0,
+          "noise": 2.0,
+          "temporal_correctness": 4.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate prior source-backed text history with good source_id alignment, but it omits some slightly earlier temporally relevant context and includes a small amount of unrelated retrieval noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the temporally aligned relevant recent text history and enough source-backed context, but it is embedded in a very large amount of unrelated text history and summary material."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the relevant source-backed text history with strong temporal and source_id alignment, but the packet is overwhelmingly noisy due to extensive unrelated history."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 1.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Provides a contiguous, temporally aligned recent text history leading into the current turn with strong source_id alignment and minimal unrelated context."
+        }
+      },
+      "cortext_memory_ids": [
+        16790,
+        16792,
+        16794,
+        16796,
+        16798,
+        16800,
+        16802,
+        16804,
+        16806,
+        16808,
+        16810,
+        16812,
+        16816,
+        16818,
+        16820,
+        16822,
+        16824,
+        16826,
+        16828,
+        16830,
+        16832,
+        3271,
+        3266,
+        15086,
+        8203,
+        12648,
+        2044,
+        16429,
+        14459,
+        10810,
+        15927,
+        12182,
+        2701,
+        13087
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        16790,
+        16792,
+        16794,
+        16796,
+        16798,
+        16800,
+        16802,
+        16804,
+        16806,
+        16808,
+        16810,
+        16812,
+        16816,
+        16818,
+        16820,
+        16822,
+        16824,
+        16826,
+        16828,
+        16830,
+        3271,
+        3266,
+        15086,
+        8203,
+        12648,
+        2044,
+        16429,
+        14459,
+        10810,
+        15927,
+        12182,
+        2701,
+        13087
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        16832
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        16832
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        5023,
+        6004,
+        2134,
+        3062,
+        7170
+      ],
+      "rolling_history_tokens": 49122,
+      "normal_rag_context_tokens": 49194,
+      "full_history_tokens": 211227,
+      "cortext_working_tokens": 727,
+      "cortext_retrieved_tokens": 291,
+      "cortext_context_tokens": 1018,
+      "traditional_chat_rag_tokens": 49194,
+      "cortext_latency_ms": 344.477427,
+      "normal_rag_total_latency_ms": 248.67001900000002,
+      "normal_rag_retrieval_latency_ms": 247.404174,
+      "judge_prompt_tokens_estimate": 694996,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 8000,
+      "probe_event_index": 8000,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1721049600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 25
+      },
+      "winner": "compacting_session",
+      "winner_alias": "D",
+      "failure_reason": "compacting_session_advantage",
+      "winner_reason": "Packet D provides the best balance of recent source-backed context, temporal alignment, and low noise for interpreting the current turn.",
+      "judge_raw": {
+        "winner": "D",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet D provides the best balance of recent source-backed context, temporal alignment, and low noise for interpreting the current turn."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "cortext_native": "B",
+          "full_history_upper_bound": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "cortext_native",
+          "C": "full_history_upper_bound",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history has strong source_id alignment and immediate temporal continuity for the current turn, with some unrelated retrieved events and less prior same-thread context than the best packet."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes temporally aligned recent source-backed evidence and sufficient surrounding context, but it is heavily mixed with extensive unrelated older history and a compacted source blob."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "relevance": 3.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history contains the needed temporally aligned source-backed evidence, but the very large amount of unrelated history makes it extremely noisy."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 1.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Recent text history is temporally aligned, source-backed, and includes the immediate and nearby prior context needed for the current turn with minimal unrelated noise."
+        }
+      },
+      "cortext_memory_ids": [
+        16790,
+        16792,
+        16794,
+        16796,
+        16798,
+        16800,
+        16802,
+        16804,
+        16806,
+        16808,
+        16810,
+        16812,
+        16816,
+        16818,
+        16820,
+        16822,
+        16824,
+        16826,
+        16828,
+        16830,
+        16832,
+        3271,
+        3266,
+        15086,
+        8203,
+        12648,
+        2044,
+        16429,
+        14459,
+        10810,
+        15927,
+        12182,
+        2701,
+        13087
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        16790,
+        16792,
+        16794,
+        16796,
+        16798,
+        16800,
+        16802,
+        16804,
+        16806,
+        16808,
+        16810,
+        16812,
+        16816,
+        16818,
+        16820,
+        16822,
+        16824,
+        16826,
+        16828,
+        16830,
+        3271,
+        3266,
+        15086,
+        8203,
+        12648,
+        2044,
+        16429,
+        14459,
+        10810,
+        15927,
+        12182,
+        2701,
+        13087
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        16832
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        16832
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        5023,
+        6004,
+        2134,
+        3062,
+        7170
+      ],
+      "rolling_history_tokens": 49122,
+      "normal_rag_context_tokens": 49194,
+      "full_history_tokens": 211227,
+      "cortext_working_tokens": 727,
+      "cortext_retrieved_tokens": 291,
+      "cortext_context_tokens": 1018,
+      "traditional_chat_rag_tokens": 49194,
+      "cortext_latency_ms": 344.477427,
+      "normal_rag_total_latency_ms": 248.67001900000002,
+      "normal_rag_retrieval_latency_ms": 247.404174,
+      "judge_prompt_tokens_estimate": 694996,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 8000,
+      "probe_event_index": 8000,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1721049600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 25
+      },
+      "winner": "compacting_session",
+      "winner_alias": "C",
+      "failure_reason": "compacting_session_advantage",
+      "winner_reason": "Packet C has the best balance of sufficient, temporally aligned local text history and low noise, while the other packets either omit some local setup or include excessive unrelated context.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C has the best balance of sufficient, temporally aligned local text history and low noise, while the other packets either omit some local setup or include excessive unrelated context."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "compacting_session": "C",
+          "traditional_chat_rag": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "compacting_session",
+          "D": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate preceding source_id-aligned events and is temporally aligned, but it has some unrelated older snippets and misses some slightly earlier setup from the same local thread."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Source-backed text history includes the relevant recent events with temporal alignment, but the packet is extremely large with extensive unrelated text history and a compaction-summary source blob, causing high noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains the temporally aligned recent source_id events needed for the turn, but it is embedded in a very large amount of unrelated text history, creating very high noise."
+        },
+        "compacting_session": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 1.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history provides a clean temporally contiguous run leading into the current turn with strong source_id alignment and enough local setup; only minor unrelated earlier context and an empty compaction summary add noise."
+        }
+      },
+      "cortext_memory_ids": [
+        16790,
+        16792,
+        16794,
+        16796,
+        16798,
+        16800,
+        16802,
+        16804,
+        16806,
+        16808,
+        16810,
+        16812,
+        16816,
+        16818,
+        16820,
+        16822,
+        16824,
+        16826,
+        16828,
+        16830,
+        16832,
+        3271,
+        3266,
+        15086,
+        8203,
+        12648,
+        2044,
+        16429,
+        14459,
+        10810,
+        15927,
+        12182,
+        2701,
+        13087
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        16790,
+        16792,
+        16794,
+        16796,
+        16798,
+        16800,
+        16802,
+        16804,
+        16806,
+        16808,
+        16810,
+        16812,
+        16816,
+        16818,
+        16820,
+        16822,
+        16824,
+        16826,
+        16828,
+        16830,
+        3271,
+        3266,
+        15086,
+        8203,
+        12648,
+        2044,
+        16429,
+        14459,
+        10810,
+        15927,
+        12182,
+        2701,
+        13087
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        16832
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        16832
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        5023,
+        6004,
+        2134,
+        3062,
+        7170
+      ],
+      "rolling_history_tokens": 49122,
+      "normal_rag_context_tokens": 49194,
+      "full_history_tokens": 211227,
+      "cortext_working_tokens": 727,
+      "cortext_retrieved_tokens": 291,
+      "cortext_context_tokens": 1018,
+      "traditional_chat_rag_tokens": 49194,
+      "cortext_latency_ms": 344.477427,
+      "normal_rag_total_latency_ms": 248.67001900000002,
+      "normal_rag_retrieval_latency_ms": 247.404174,
+      "judge_prompt_tokens_estimate": 694996,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 8500,
+      "probe_event_index": 8500,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1730151600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 11
+      },
+      "winner": "cortext_native",
+      "winner_alias": "D",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "D provides the best context because it includes the immediate prior turn needed for the current reply with correct temporal/source alignment while avoiding the much larger unrelated history noise present in the other packets.",
+      "judge_raw": {
+        "winner": "D",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "D provides the best context because it includes the immediate prior turn needed for the current reply with correct temporal/source alignment while avoiding the much larger unrelated history noise present in the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "compacting_session": "B",
+          "full_history_upper_bound": "C",
+          "cortext_native": "D"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "compacting_session",
+          "C": "full_history_upper_bound",
+          "D": "cortext_native"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate prior text history with strong source_id and temporal alignment, plus only a small amount of extra source-backed evidence, making it sufficient and comparatively clean."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate prior text history with correct temporal alignment and source_id alignment, but it is embedded in a very large compacted history plus unrelated source-backed evidence, creating heavy noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate prior text history and full source-backed event stream, so it is sufficient and temporally aligned, but the overwhelming full-history context is very noisy for this turn."
+        },
+        "compacting_session": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains a continuous source-backed text window ending at the immediate prior turn with correct source_id and temporal alignment, sufficient for the current response, but includes substantial unrelated prior text history."
+        }
+      },
+      "cortext_memory_ids": [
+        17845,
+        17847,
+        17849,
+        17851,
+        17853,
+        17855,
+        17857,
+        17859,
+        17861,
+        17863,
+        17866,
+        17868,
+        17870,
+        17872,
+        17874,
+        17876,
+        17878,
+        17880,
+        17882,
+        17884,
+        17886,
+        13399,
+        13611,
+        12023,
+        3843,
+        11726,
+        5821,
+        14488,
+        10315,
+        16031,
+        2928,
+        2304,
+        764,
+        13148
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        17845,
+        17847,
+        17849,
+        17851,
+        17853,
+        17855,
+        17857,
+        17859,
+        17861,
+        17863,
+        17866,
+        17868,
+        17870,
+        17872,
+        17874,
+        17876,
+        17878,
+        17880,
+        17882,
+        17884,
+        13399,
+        13611,
+        12023,
+        3843,
+        11726,
+        5821,
+        14488,
+        10315,
+        16031,
+        2928,
+        2304,
+        764,
+        13148
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        17886
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        17886
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        1861,
+        6248,
+        5651,
+        6838,
+        1149
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49220,
+      "full_history_tokens": 223397,
+      "cortext_working_tokens": 478,
+      "cortext_retrieved_tokens": 276,
+      "cortext_context_tokens": 754,
+      "traditional_chat_rag_tokens": 49220,
+      "cortext_latency_ms": 139.662193,
+      "normal_rag_total_latency_ms": 265.251173,
+      "normal_rag_retrieval_latency_ms": 263.838059,
+      "judge_prompt_tokens_estimate": 761272,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 8500,
+      "probe_event_index": 8500,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1730151600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 11
+      },
+      "winner": "cortext_native",
+      "winner_alias": "C",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet C provides the best context because it includes the immediately preceding text history needed for the current turn with strong source_id and temporal alignment while avoiding most of the unrelated older text history present in the other packets.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C provides the best context because it includes the immediately preceding text history needed for the current turn with strong source_id and temporal alignment while avoiding most of the unrelated older text history present in the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "compacting_session": "B",
+          "cortext_native": "C",
+          "traditional_chat_rag": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "compacting_session",
+          "C": "cortext_native",
+          "D": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history is tightly focused on the immediate preceding source_id-aligned turns with correct temporal alignment; only minor unrelated snippets add noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate preceding context with temporal alignment, but it is embedded in a very noisy source blob and includes compacted summary material mixed with event evidence."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate preceding source_id-aligned turns with correct temporal alignment, but it is extremely noisy due to a very large amount of unrelated older text history."
+        },
+        "compacting_session": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains the immediate preceding source_id-aligned context and correct temporal alignment, but includes substantial unrelated text history and an uninformative compaction entry."
+        }
+      },
+      "cortext_memory_ids": [
+        17845,
+        17847,
+        17849,
+        17851,
+        17853,
+        17855,
+        17857,
+        17859,
+        17861,
+        17863,
+        17866,
+        17868,
+        17870,
+        17872,
+        17874,
+        17876,
+        17878,
+        17880,
+        17882,
+        17884,
+        17886,
+        13399,
+        13611,
+        12023,
+        3843,
+        11726,
+        5821,
+        14488,
+        10315,
+        16031,
+        2928,
+        2304,
+        764,
+        13148
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        17845,
+        17847,
+        17849,
+        17851,
+        17853,
+        17855,
+        17857,
+        17859,
+        17861,
+        17863,
+        17866,
+        17868,
+        17870,
+        17872,
+        17874,
+        17876,
+        17878,
+        17880,
+        17882,
+        17884,
+        13399,
+        13611,
+        12023,
+        3843,
+        11726,
+        5821,
+        14488,
+        10315,
+        16031,
+        2928,
+        2304,
+        764,
+        13148
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        17886
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        17886
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        1861,
+        6248,
+        5651,
+        6838,
+        1149
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49220,
+      "full_history_tokens": 223397,
+      "cortext_working_tokens": 478,
+      "cortext_retrieved_tokens": 276,
+      "cortext_context_tokens": 754,
+      "traditional_chat_rag_tokens": 49220,
+      "cortext_latency_ms": 139.662193,
+      "normal_rag_total_latency_ms": 265.251173,
+      "normal_rag_retrieval_latency_ms": 263.838059,
+      "judge_prompt_tokens_estimate": 761272,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 8500,
+      "probe_event_index": 8500,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1730151600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 11
+      },
+      "winner": "cortext_native",
+      "winner_alias": "B",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet B provides the immediate source-aligned context for the current text turn with enough recent history and far less unrelated noise than the other packets.",
+      "judge_raw": {
+        "winner": "B",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet B provides the immediate source-aligned context for the current text turn with enough recent history and far less unrelated noise than the other packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "traditional_chat_rag": "C",
+          "compacting_session": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "traditional_chat_rag",
+          "D": "compacting_session"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate preceding exchange with strong temporal alignment and source_id alignment, plus limited related prior text; some extra unrelated snippets add modest noise."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "relevance": 3.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 4.0,
+          "source_grounding": 3.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate text lead-in and many source_id-aligned events, but the large compacted source blob and extensive unrelated text history create heavy noise and weaker source grounding for summarized material."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 3.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains the immediate lead-in with source_id and temporal alignment, but it is embedded in a very large amount of unrelated text history noise."
+        },
+        "compacting_session": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate preceding exchange with good temporal alignment, but it also includes extensive unrelated prior text and a non-informative source blob, creating high noise."
+        }
+      },
+      "cortext_memory_ids": [
+        17845,
+        17847,
+        17849,
+        17851,
+        17853,
+        17855,
+        17857,
+        17859,
+        17861,
+        17863,
+        17866,
+        17868,
+        17870,
+        17872,
+        17874,
+        17876,
+        17878,
+        17880,
+        17882,
+        17884,
+        17886,
+        13399,
+        13611,
+        12023,
+        3843,
+        11726,
+        5821,
+        14488,
+        10315,
+        16031,
+        2928,
+        2304,
+        764,
+        13148
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        17845,
+        17847,
+        17849,
+        17851,
+        17853,
+        17855,
+        17857,
+        17859,
+        17861,
+        17863,
+        17866,
+        17868,
+        17870,
+        17872,
+        17874,
+        17876,
+        17878,
+        17880,
+        17882,
+        17884,
+        13399,
+        13611,
+        12023,
+        3843,
+        11726,
+        5821,
+        14488,
+        10315,
+        16031,
+        2928,
+        2304,
+        764,
+        13148
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        17886
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        17886
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        1861,
+        6248,
+        5651,
+        6838,
+        1149
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49220,
+      "full_history_tokens": 223397,
+      "cortext_working_tokens": 478,
+      "cortext_retrieved_tokens": 276,
+      "cortext_context_tokens": 754,
+      "traditional_chat_rag_tokens": 49220,
+      "cortext_latency_ms": 139.662193,
+      "normal_rag_total_latency_ms": 265.251173,
+      "normal_rag_retrieval_latency_ms": 263.838059,
+      "judge_prompt_tokens_estimate": 761272,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 9000,
+      "probe_event_index": 9000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1739253600000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 23
+      },
+      "winner": "cortext_native",
+      "winner_alias": "A",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet A provides the immediate temporally aligned context needed for the current turn with much less unrelated text history than the other complete but very noisy packets.",
+      "judge_raw": {
+        "winner": "A",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet A provides the immediate temporally aligned context needed for the current turn with much less unrelated text history than the other complete but very noisy packets."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "cortext_native": "A",
+          "traditional_chat_rag": "B",
+          "compacting_session": "C",
+          "full_history_upper_bound": "D"
+        },
+        "label_to_real": {
+          "A": "cortext_native",
+          "B": "traditional_chat_rag",
+          "C": "compacting_session",
+          "D": "full_history_upper_bound"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the immediate prior turn and recent source_id-aligned context with good temporal alignment; some unrelated older text history adds noise and one earlier relevant source-backed detail is missing."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "B",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains complete source_id-aligned recent context and earlier source-backed evidence, but it is embedded in a very large amount of unrelated text history and compacted summary noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full text history contains the relevant recent source_id-aligned events, but the overwhelming amount of unrelated older text history makes it extremely noisy for this turn."
+        },
+        "compacting_session": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the full temporally aligned recent sequence and relevant source-backed evidence near the end, but the packet has extensive unrelated text history noise and no useful compaction summary."
+        }
+      },
+      "cortext_memory_ids": [
+        18895,
+        18897,
+        18899,
+        18901,
+        18903,
+        18905,
+        18907,
+        18910,
+        18912,
+        18914,
+        18916,
+        18918,
+        18920,
+        18922,
+        18924,
+        18927,
+        18929,
+        18931,
+        18933,
+        18935,
+        18937,
+        8405,
+        7760,
+        7342,
+        5878,
+        7345,
+        8351,
+        1446,
+        10638,
+        13099,
+        16503,
+        1391,
+        8372,
+        7670,
+        8850,
+        16507,
+        16499
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        18895,
+        18897,
+        18899,
+        18901,
+        18903,
+        18905,
+        18907,
+        18910,
+        18912,
+        18914,
+        18916,
+        18918,
+        18920,
+        18922,
+        18924,
+        18927,
+        18929,
+        18931,
+        18933,
+        18935,
+        8405,
+        7760,
+        7342,
+        5878,
+        7345,
+        8351,
+        1446,
+        10638,
+        13099,
+        16503,
+        1391,
+        8372,
+        7670,
+        8850,
+        16507,
+        16499
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        18937
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        18937
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        7846,
+        5190,
+        4988,
+        5995,
+        0
+      ],
+      "rolling_history_tokens": 49117,
+      "normal_rag_context_tokens": 49165,
+      "full_history_tokens": 235571,
+      "cortext_working_tokens": 661,
+      "cortext_retrieved_tokens": 430,
+      "cortext_context_tokens": 1091,
+      "traditional_chat_rag_tokens": 49165,
+      "cortext_latency_ms": 150.570959,
+      "normal_rag_total_latency_ms": 283.139292,
+      "normal_rag_retrieval_latency_ms": 280.96001,
+      "judge_prompt_tokens_estimate": 828370,
+      "media_attachments": {
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 9000,
+      "probe_event_index": 9000,
+      "repetition": 1,
+      "query": {
+        "timestamp": 1739253600000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 23
+      },
+      "winner": "compacting_session",
+      "winner_alias": "B",
+      "failure_reason": "compacting_session_advantage",
+      "winner_reason": "Packet B provides the best balance of direct relevance, sufficient temporally aligned text history, clear source grounding, and lower noise than the exhaustive or compacted alternatives.",
+      "judge_raw": {
+        "winner": "B",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet B provides the best balance of direct relevance, sufficient temporally aligned text history, clear source grounding, and lower noise than the exhaustive or compacted alternatives."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "compacting_session": "B",
+          "traditional_chat_rag": "C",
+          "cortext_native": "D"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "compacting_session",
+          "C": "traditional_chat_rag",
+          "D": "cortext_native"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "D",
+          "relevance": 4.0,
+          "sufficiency": 3.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history is temporally aligned and includes the immediate lead-in to the current turn with clear source_id alignment, but it omits earlier source-backed evidence about the specific prior experience, so sufficiency is only partial; some unrelated text noise follows."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Compacted text history includes the relevant temporally aligned recent exchange and earlier source-backed evidence, but it is mixed with extensive unrelated excerpts and a source blob/summary style that adds substantial noise."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "relevance": 4.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history contains the temporally aligned recent source-backed evidence and source_id alignment needed for the current turn, including the relevant prior museum/trip exchange, but it is extremely noisy with a very large amount of unrelated text history."
+        },
+        "compacting_session": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 3.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Text history includes the directly relevant temporally aligned exchange immediately before the current turn plus earlier source-backed evidence about the same location and experience; source_id alignment is clear, with moderate unrelated prior text noise."
+        }
+      },
+      "cortext_memory_ids": [
+        18895,
+        18897,
+        18899,
+        18901,
+        18903,
+        18905,
+        18907,
+        18910,
+        18912,
+        18914,
+        18916,
+        18918,
+        18920,
+        18922,
+        18924,
+        18927,
+        18929,
+        18931,
+        18933,
+        18935,
+        18937,
+        8405,
+        7760,
+        7342,
+        5878,
+        7345,
+        8351,
+        1446,
+        10638,
+        13099,
+        16503,
+        1391,
+        8372,
+        7670,
+        8850,
+        16507,
+        16499
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        18895,
+        18897,
+        18899,
+        18901,
+        18903,
+        18905,
+        18907,
+        18910,
+        18912,
+        18914,
+        18916,
+        18918,
+        18920,
+        18922,
+        18924,
+        18927,
+        18929,
+        18931,
+        18933,
+        18935,
+        8405,
+        7760,
+        7342,
+        5878,
+        7345,
+        8351,
+        1446,
+        10638,
+        13099,
+        16503,
+        1391,
+        8372,
+        7670,
+        8850,
+        16507,
+        16499
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        18937
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        18937
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        7846,
+        5190,
+        4988,
+        5995,
+        0
+      ],
+      "rolling_history_tokens": 49117,
+      "normal_rag_context_tokens": 49165,
+      "full_history_tokens": 235571,
+      "cortext_working_tokens": 661,
+      "cortext_retrieved_tokens": 430,
+      "cortext_context_tokens": 1091,
+      "traditional_chat_rag_tokens": 49165,
+      "cortext_latency_ms": 150.570959,
+      "normal_rag_total_latency_ms": 283.139292,
+      "normal_rag_retrieval_latency_ms": 280.96001,
+      "judge_prompt_tokens_estimate": 828370,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 9000,
+      "probe_event_index": 9000,
+      "repetition": 2,
+      "query": {
+        "timestamp": 1739253600000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 23
+      },
+      "winner": "cortext_native",
+      "winner_alias": "A",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet A provides the best balance of directly relevant, temporally aligned immediate text history and relatively low noise; broader packets add useful earlier source-backed context but are much noisier.",
+      "judge_raw": {
+        "winner": "A",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet A provides the best balance of directly relevant, temporally aligned immediate text history and relatively low noise; broader packets add useful earlier source-backed context but are much noisier."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "cortext_native": "A",
+          "traditional_chat_rag": "B",
+          "compacting_session": "C",
+          "full_history_upper_bound": "D"
+        },
+        "label_to_real": {
+          "A": "cortext_native",
+          "B": "traditional_chat_rag",
+          "C": "compacting_session",
+          "D": "full_history_upper_bound"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "A",
+          "relevance": 5.0,
+          "sufficiency": 4.0,
+          "noise": 2.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Strong immediate text history with source_id alignment and close temporal alignment to the current turn; some unrelated older text history adds moderate noise, and one earlier related source-backed event is missing."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "B",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 4.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 4.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains the immediate text history plus earlier source-backed evidence with strong temporal alignment, but the large compacted source blob and extensive unrelated text history make it very noisy."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "D",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 5.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Full source-backed text history includes the relevant recent events and temporal alignment, but the extremely large amount of unrelated text history makes it maximally noisy."
+        },
+        "compacting_session": {
+          "judge_key": "C",
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 3.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Contains contiguous source-backed text history including the relevant earlier and immediate events with strong temporal alignment; substantial unrelated prior text history creates noise."
+        }
+      },
+      "cortext_memory_ids": [
+        18895,
+        18897,
+        18899,
+        18901,
+        18903,
+        18905,
+        18907,
+        18910,
+        18912,
+        18914,
+        18916,
+        18918,
+        18920,
+        18922,
+        18924,
+        18927,
+        18929,
+        18931,
+        18933,
+        18935,
+        18937,
+        8405,
+        7760,
+        7342,
+        5878,
+        7345,
+        8351,
+        1446,
+        10638,
+        13099,
+        16503,
+        1391,
+        8372,
+        7670,
+        8850,
+        16507,
+        16499
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        18895,
+        18897,
+        18899,
+        18901,
+        18903,
+        18905,
+        18907,
+        18910,
+        18912,
+        18914,
+        18916,
+        18918,
+        18920,
+        18922,
+        18924,
+        18927,
+        18929,
+        18931,
+        18933,
+        18935,
+        8405,
+        7760,
+        7342,
+        5878,
+        7345,
+        8351,
+        1446,
+        10638,
+        13099,
+        16503,
+        1391,
+        8372,
+        7670,
+        8850,
+        16507,
+        16499
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        18937
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        18937
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        7846,
+        5190,
+        4988,
+        5995,
+        0
+      ],
+      "rolling_history_tokens": 49117,
+      "normal_rag_context_tokens": 49165,
+      "full_history_tokens": 235571,
+      "cortext_working_tokens": 661,
+      "cortext_retrieved_tokens": 430,
+      "cortext_context_tokens": 1091,
+      "traditional_chat_rag_tokens": 49165,
+      "cortext_latency_ms": 150.570959,
+      "normal_rag_total_latency_ms": 283.139292,
+      "normal_rag_retrieval_latency_ms": 280.96001,
+      "judge_prompt_tokens_estimate": 828370,
+      "media_attachments": {
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "compacting_session": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    }
+  ]
+}

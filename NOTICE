@@ -1,0 +1,60 @@
+Cortext Third-Party Notices
+===========================
+
+This source distribution vendors a small set of third-party or separately
+maintained components under `third_party/`. Their complete license texts remain
+in the vendored source directories. This file is a release-facing index of the
+notices most relevant to Cortext distributions.
+
+SQLite
+------
+
+Location: `third_party/sqlite/`
+Version: 3.51.0
+Upstream: https://sqlite.org/
+License: Public domain for the SQLite deliverable code and documentation.
+
+SQLite's own license notice is in `third_party/sqlite/LICENSE.md`. That file
+also documents build-system helper files that are not public domain but are not
+part of the SQLite deliverable linked by Cortext.
+
+sqlite-vec
+----------
+
+Location: `third_party/sqlite-vec/`
+Version: 0.1.7-alpha.2
+Upstream: https://github.com/asg017/sqlite-vec
+License: Dual MIT OR Apache-2.0.
+
+The upstream license texts are in:
+
+* `third_party/sqlite-vec/LICENSE-MIT`
+* `third_party/sqlite-vec/LICENSE-APACHE`
+
+sqlite-objstore
+---------------
+
+Location: `third_party/sqlite-objstore/`
+Version: 0.1.0
+Upstream: https://github.com/augmem/sqlite-objstore
+License: Apache-2.0.
+
+`sqlite-objstore` is maintained by the same organization as Cortext. It is
+listed here for vendored-source inventory completeness rather than as an
+external attribution gap. Its complete license text is in
+`third_party/sqlite-objstore/LICENSE`, and its bundled third-party notices are
+in `third_party/sqlite-objstore/THIRD_PARTY_NOTICES.md`.
+
+BLAKE3
+------
+
+Location: `third_party/sqlite-objstore/third_party/blake3/`
+Upstream: https://github.com/BLAKE3-team/BLAKE3
+License: CC0-1.0, with Apache-2.0 and Apache-2.0 with LLVM exceptions texts
+also bundled by upstream for consumers who prefer those terms.
+
+The upstream license texts are in:
+
+* `third_party/sqlite-objstore/third_party/blake3/LICENSE_CC0`
+* `third_party/sqlite-objstore/third_party/blake3/LICENSE_A2`
+* `third_party/sqlite-objstore/third_party/blake3/LICENSE_A2LLVM`

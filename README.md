@@ -49,7 +49,7 @@ samples, all 27 judgments completed across four text-only systems. The strict
 gates passed: judge prompt fits context, full-history prompt fits judge context,
 no future or current-turn leakage, hidden labels absent, text-only RAG
 baselines. Artifact:
-`eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
+`docs/paper/artifacts/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
 
 A post-optimization full replay on the same 9,130-turn MSC slice preserved the
 native probe behavior exactly while flattening graph-retrieval latency. The 9
@@ -57,7 +57,7 @@ progress checkpoints reported `GraphRetrieve.total` between 13.7 ms and 27.7
 ms, and the 9 judged probe turns reported 21.8-28.6 ms. Non-timing probe fields,
 retrieved/working memory IDs, retrieval counts, memory counts, and consolidation
 counts matched the saved baseline exactly. Artifact:
-`build/graph_profile/full_msc_verify_final/summary.json`.
+`docs/paper/artifacts/graph_profile/full_msc_verify_final/summary_slim.json`.
 
 A follow-up 128k-capped RAG ablation on the same probes used six blinded
 systems and three hosted `gpt-5.5` judgments per probe. Cortext won 6/9 probes
@@ -69,7 +69,7 @@ tokens under a 128,000 context cap; actual OpenAI usage was 1,871,994 prompt
 tokens and 39,001 completion tokens. Mean context tokens were 816 for Cortext,
 88 for semantic vector RAG, 224 for lexical RAG, 15,999 for rolling-window
 chat, 15,999 for hybrid RAG, and 7,110 for compaction. Artifact:
-`eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
+`docs/paper/artifacts/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
 
 An earlier local blind-judge pass (2026-06-28) on a one-year sparse replay,
 judged by Gemma4-12B-AWQ over vLLM at a 131,072-token context, completed 93/93

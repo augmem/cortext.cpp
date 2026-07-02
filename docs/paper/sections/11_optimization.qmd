@@ -76,7 +76,7 @@ checkpoints, `GraphRetrieve.total` was 13.7-27.7 ms after optimization versus
 31.4-323.5 ms in the baseline. Across the 9 judged probe turns,
 `GraphRetrieve.total` was 21.8-28.6 ms after optimization versus 81.6-303.6 ms
 in the baseline. The verification artifact is
-`build/graph_profile/full_msc_verify_final/summary.json`.
+`docs/paper/artifacts/graph_profile/full_msc_verify_final/summary_slim.json`.
 
 ## Verification Gates
 

@@ -1,0 +1,15 @@
+# Vendored dependency versions
+
+This file records third-party and separately maintained source trees that are
+tracked directly in this repository rather than consumed as submodules.
+
+| Component | Location | Version / snapshot | Upstream | License |
+|---|---|---|---|---|
+| SQLite | `third_party/sqlite/` | 3.51.0 (`third_party/sqlite/VERSION`) | https://sqlite.org/ | Public domain for SQLite deliverables; see `third_party/sqlite/LICENSE.md` |
+| sqlite-vec | `third_party/sqlite-vec/` | 0.1.7-alpha.2 (`third_party/sqlite-vec/VERSION`) | https://github.com/asg017/sqlite-vec | MIT OR Apache-2.0 |
+| sqlite-objstore | `third_party/sqlite-objstore/` | 0.1.0 (`project(sqlite_objstore VERSION 0.1.0)`) | https://github.com/augmem/sqlite-objstore | Apache-2.0; maintained by Augmem |
+| BLAKE3 | `third_party/sqlite-objstore/third_party/blake3/` | Bundled with the vendored sqlite-objstore snapshot | https://github.com/BLAKE3-team/BLAKE3 | CC0-1.0 or Apache-2.0 variants; see bundled license files |
+
+Last vendored-tree refresh affecting SQLite/sqlite-vec/sqlite-objstore in this
+repository: `578a05c619cf15972fd105e438a349dc83827d20` (2026-06-28,
+"Prepare production release without realtime labeling").
