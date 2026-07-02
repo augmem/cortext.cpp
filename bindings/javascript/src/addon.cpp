@@ -873,9 +873,10 @@ Version (napi_env env, napi_callback_info info)
 napi_value
 LastError (napi_env env, napi_callback_info info)
 {
+  const char *message = cortext_last_error ();
   napi_value result;
   NAPI_RETURN_IF_FAILED (
-      env, napi_create_string_utf8 (env, cortext_last_error (),
+      env, napi_create_string_utf8 (env, message ? message : "",
                                     NAPI_AUTO_LENGTH, &result));
   return result;
 }
