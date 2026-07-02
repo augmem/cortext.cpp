@@ -1,0 +1,766 @@
+{
+  "active_history_token_budget": 49152,
+  "consolidation_runs": 714,
+  "daily_consolidation": true,
+  "db_association_count": 17719,
+  "db_long_term_memory_count": 9364,
+  "db_memory_count": 10099,
+  "db_working_memory_count": 21,
+  "mean_encode_ms": 5.55656990405257,
+  "mean_hydrate_ms": 1.153420140963856,
+  "mean_process_ms": 38.57466667699878,
+  "mean_total_ms": 45.28474561434841,
+  "normal_rag_retrieval": "raw_chat_vector",
+  "normal_rag_vector_final_k": 5,
+  "note": "Slim tracked summary; omits packet text, full working-set curve, consolidation event payloads, and detailed retrieval traces from the 21 MB local artifact.",
+  "peak_rss_mb": 3869.375,
+  "probe_count": 9,
+  "probe_stride": 500,
+  "probes": [
+    {
+      "cortext_context_tokens": 1130,
+      "cortext_encode_ms": 4.143884,
+      "cortext_hydrate_ms": 5.800807,
+      "cortext_process_ms": 39.829991,
+      "cortext_retrieved_items": 13,
+      "cortext_retrieved_memory_ids": [
+        1719,
+        1740,
+        1744,
+        1723,
+        15,
+        2199,
+        1588,
+        6642,
+        6204,
+        5085,
+        8664,
+        6924,
+        2208
+      ],
+      "cortext_retrieved_tokens": 356,
+      "cortext_total_ms": 49.774782,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        10478,
+        10480,
+        10482,
+        10484,
+        10486,
+        10488,
+        10490,
+        10493,
+        10495,
+        10497,
+        10499,
+        10501,
+        10503,
+        10505,
+        10507,
+        10509,
+        10511,
+        10513,
+        10515,
+        10518,
+        10520
+      ],
+      "cortext_working_tokens": 774,
+      "event_index": 5000,
+      "full_history_tokens": 133986,
+      "normal_rag_context_tokens": 49231,
+      "normal_rag_retrieval_latency_ms": 152.918491,
+      "normal_rag_total_latency_ms": 154.092526,
+      "query": {
+        "modality": "text",
+        "source_id": "Contact",
+        "timestamp": 1667647200000,
+        "tokens": 15
+      },
+      "top_operation_ms": [
+        {
+          "ms": 21.907212,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 21.812813,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 9.175463,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.424468,
+          "operation": "SignalProcessor.commit_transaction"
+        },
+        {
+          "ms": 0.382268,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        }
+      ]
+    },
+    {
+      "cortext_context_tokens": 801,
+      "cortext_encode_ms": 6.218085,
+      "cortext_hydrate_ms": 3.553746,
+      "cortext_process_ms": 42.039073,
+      "cortext_retrieved_items": 11,
+      "cortext_retrieved_memory_ids": [
+        15,
+        11,
+        19,
+        8536,
+        841,
+        2174,
+        9604,
+        7139,
+        8590,
+        10691,
+        6701
+      ],
+      "cortext_retrieved_tokens": 273,
+      "cortext_total_ms": 51.811044,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        11529,
+        11531,
+        11533,
+        11535,
+        11537,
+        11541,
+        11543,
+        11545,
+        11547,
+        11549,
+        11551,
+        11553,
+        11555,
+        11557,
+        11559,
+        11561,
+        11563,
+        11566,
+        11568,
+        11570,
+        11572
+      ],
+      "cortext_working_tokens": 528,
+      "event_index": 5500,
+      "full_history_tokens": 147126,
+      "normal_rag_context_tokens": 49184,
+      "normal_rag_retrieval_latency_ms": 175.787449,
+      "normal_rag_total_latency_ms": 176.955434,
+      "query": {
+        "modality": "text",
+        "source_id": "Contact",
+        "timestamp": 1675712400000,
+        "tokens": 27
+      },
+      "top_operation_ms": [
+        {
+          "ms": 22.637729,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 22.5216,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 10.360779,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.418478,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        },
+        {
+          "ms": 0.360808,
+          "operation": "SignalProcessor.commit_transaction"
+        }
+      ]
+    },
+    {
+      "cortext_context_tokens": 938,
+      "cortext_encode_ms": 0.00619,
+      "cortext_hydrate_ms": 7.066622,
+      "cortext_process_ms": 44.643402,
+      "cortext_retrieved_items": 13,
+      "cortext_retrieved_memory_ids": [
+        8536,
+        4490,
+        19,
+        15,
+        10014,
+        7087,
+        10018,
+        11,
+        10383,
+        10788,
+        10111,
+        11217,
+        6922
+      ],
+      "cortext_retrieved_tokens": 248,
+      "cortext_total_ms": 51.716314,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        12584,
+        12586,
+        12589,
+        12591,
+        12593,
+        12595,
+        12597,
+        12599,
+        12601,
+        12603,
+        12605,
+        12607,
+        12609,
+        12611,
+        12614,
+        12616,
+        12618,
+        12620,
+        12622,
+        12624,
+        12626
+      ],
+      "cortext_working_tokens": 690,
+      "event_index": 6000,
+      "full_history_tokens": 160840,
+      "normal_rag_context_tokens": 49170,
+      "normal_rag_retrieval_latency_ms": 187.793252,
+      "normal_rag_total_latency_ms": 189.148656,
+      "query": {
+        "modality": "text",
+        "source_id": "User",
+        "timestamp": 1683777600000,
+        "tokens": 7
+      },
+      "top_operation_ms": [
+        {
+          "ms": 23.659735,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 23.540726,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 10.433858,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.466738,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        },
+        {
+          "ms": 0.398459,
+          "operation": "SignalProcessor.commit_transaction"
+        }
+      ]
+    },
+    {
+      "cortext_context_tokens": 1261,
+      "cortext_encode_ms": 4.168043,
+      "cortext_hydrate_ms": 7.44151,
+      "cortext_process_ms": 48.057169,
+      "cortext_retrieved_items": 12,
+      "cortext_retrieved_memory_ids": [
+        11859,
+        11851,
+        6849,
+        11855,
+        6853,
+        8758,
+        6308,
+        6839,
+        6835,
+        5177,
+        7618,
+        9630
+      ],
+      "cortext_retrieved_tokens": 548,
+      "cortext_total_ms": 59.666862,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        13632,
+        13634,
+        13636,
+        13638,
+        13640,
+        13642,
+        13645,
+        13647,
+        13649,
+        13651,
+        13653,
+        13655,
+        13657,
+        13659,
+        13661,
+        13663,
+        13665,
+        13667,
+        13670,
+        13672,
+        13674
+      ],
+      "cortext_working_tokens": 713,
+      "event_index": 6500,
+      "full_history_tokens": 172569,
+      "normal_rag_context_tokens": 49217,
+      "normal_rag_retrieval_latency_ms": 204.059187,
+      "normal_rag_total_latency_ms": 205.305882,
+      "query": {
+        "modality": "text",
+        "source_id": "User",
+        "timestamp": 1694348400000,
+        "tokens": 18
+      },
+      "top_operation_ms": [
+        {
+          "ms": 24.784432,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 24.617052,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 12.265101,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.487828,
+          "operation": "SignalProcessor.commit_transaction"
+        },
+        {
+          "ms": 0.433909,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        }
+      ]
+    },
+    {
+      "cortext_context_tokens": 1036,
+      "cortext_encode_ms": 4.476942,
+      "cortext_hydrate_ms": 8.194108,
+      "cortext_process_ms": 50.868617,
+      "cortext_retrieved_items": 13,
+      "cortext_retrieved_memory_ids": [
+        9143,
+        8607,
+        11817,
+        10766,
+        6348,
+        11,
+        11325,
+        19,
+        8637,
+        8629,
+        2174,
+        11217,
+        12351
+      ],
+      "cortext_retrieved_tokens": 335,
+      "cortext_total_ms": 63.539827,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        14686,
+        14688,
+        14690,
+        14692,
+        14694,
+        14696,
+        14698,
+        14700,
+        14702,
+        14704,
+        14706,
+        14708,
+        14712,
+        14714,
+        14716,
+        14718,
+        14720,
+        14722,
+        14724,
+        14726,
+        14728
+      ],
+      "cortext_working_tokens": 701,
+      "event_index": 7000,
+      "full_history_tokens": 185885,
+      "normal_rag_context_tokens": 49185,
+      "normal_rag_retrieval_latency_ms": 222.865782,
+      "normal_rag_total_latency_ms": 224.452845,
+      "query": {
+        "modality": "text",
+        "source_id": "User",
+        "timestamp": 1701895200000,
+        "tokens": 19
+      },
+      "top_operation_ms": [
+        {
+          "ms": 26.259555,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 26.110416,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 12.871899,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.665697,
+          "operation": "SignalProcessor.commit_transaction"
+        },
+        {
+          "ms": 0.469488,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        }
+      ]
+    },
+    {
+      "cortext_context_tokens": 1124,
+      "cortext_encode_ms": 10.573978,
+      "cortext_hydrate_ms": 6.353485,
+      "cortext_process_ms": 52.821259,
+      "cortext_retrieved_items": 12,
+      "cortext_retrieved_memory_ids": [
+        11464,
+        10907,
+        2697,
+        2701,
+        9233,
+        8615,
+        2656,
+        581,
+        8523,
+        10788,
+        13157,
+        11325
+      ],
+      "cortext_retrieved_tokens": 436,
+      "cortext_total_ms": 69.748832,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        15739,
+        15741,
+        15744,
+        15746,
+        15748,
+        15750,
+        15752,
+        15754,
+        15756,
+        15758,
+        15760,
+        15762,
+        15764,
+        15766,
+        15770,
+        15772,
+        15774,
+        15776,
+        15778,
+        15780,
+        15782
+      ],
+      "cortext_working_tokens": 688,
+      "event_index": 7500,
+      "full_history_tokens": 198354,
+      "normal_rag_context_tokens": 49196,
+      "normal_rag_retrieval_latency_ms": 249.517776,
+      "normal_rag_total_latency_ms": 250.89994,
+      "query": {
+        "modality": "text",
+        "source_id": "User",
+        "timestamp": 1711515600000,
+        "tokens": 54
+      },
+      "top_operation_ms": [
+        {
+          "ms": 26.267105,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 26.090206,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 14.438792,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.563047,
+          "operation": "SignalProcessor.commit_transaction"
+        },
+        {
+          "ms": 0.447708,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        }
+      ]
+    },
+    {
+      "cortext_context_tokens": 1048,
+      "cortext_encode_ms": 6.859583,
+      "cortext_hydrate_ms": 6.805103,
+      "cortext_process_ms": 55.733078,
+      "cortext_retrieved_items": 13,
+      "cortext_retrieved_memory_ids": [
+        3271,
+        3266,
+        15086,
+        8203,
+        12648,
+        2044,
+        16429,
+        14459,
+        10810,
+        15927,
+        12182,
+        2701,
+        13087
+      ],
+      "cortext_retrieved_tokens": 291,
+      "cortext_total_ms": 69.397904,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        16790,
+        16792,
+        16794,
+        16796,
+        16798,
+        16800,
+        16802,
+        16804,
+        16806,
+        16808,
+        16810,
+        16812,
+        16816,
+        16818,
+        16820,
+        16822,
+        16824,
+        16826,
+        16828,
+        16830,
+        16832
+      ],
+      "cortext_working_tokens": 757,
+      "event_index": 8000,
+      "full_history_tokens": 211227,
+      "normal_rag_context_tokens": 49194,
+      "normal_rag_retrieval_latency_ms": 254.541426,
+      "normal_rag_total_latency_ms": 255.828871,
+      "query": {
+        "modality": "text",
+        "source_id": "User",
+        "timestamp": 1721049600000,
+        "tokens": 25
+      },
+      "top_operation_ms": [
+        {
+          "ms": 27.631009,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 27.50034,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 15.179099,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.626707,
+          "operation": "SignalProcessor.commit_transaction"
+        },
+        {
+          "ms": 0.518977,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        }
+      ]
+    },
+    {
+      "cortext_context_tokens": 770,
+      "cortext_encode_ms": 3.115628,
+      "cortext_hydrate_ms": 9.804711,
+      "cortext_process_ms": 59.169284,
+      "cortext_retrieved_items": 13,
+      "cortext_retrieved_memory_ids": [
+        13399,
+        13611,
+        12023,
+        3843,
+        11726,
+        5821,
+        14488,
+        10315,
+        16031,
+        2928,
+        2304,
+        764,
+        13148
+      ],
+      "cortext_retrieved_tokens": 276,
+      "cortext_total_ms": 72.089683,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        17845,
+        17847,
+        17849,
+        17851,
+        17853,
+        17855,
+        17857,
+        17859,
+        17861,
+        17863,
+        17866,
+        17868,
+        17870,
+        17872,
+        17874,
+        17876,
+        17878,
+        17880,
+        17882,
+        17884,
+        17886
+      ],
+      "cortext_working_tokens": 494,
+      "event_index": 8500,
+      "full_history_tokens": 223397,
+      "normal_rag_context_tokens": 49220,
+      "normal_rag_retrieval_latency_ms": 268.49027,
+      "normal_rag_total_latency_ms": 269.914404,
+      "query": {
+        "modality": "text",
+        "source_id": "User",
+        "timestamp": 1730151600000,
+        "tokens": 11
+      },
+      "top_operation_ms": [
+        {
+          "ms": 28.775645,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 28.620875,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 15.881866,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.717247,
+          "operation": "SignalProcessor.commit_transaction"
+        },
+        {
+          "ms": 0.457878,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        }
+      ]
+    },
+    {
+      "cortext_context_tokens": 1120,
+      "cortext_encode_ms": 5.374269,
+      "cortext_hydrate_ms": 13.279107,
+      "cortext_process_ms": 58.286167,
+      "cortext_retrieved_items": 16,
+      "cortext_retrieved_memory_ids": [
+        8405,
+        7760,
+        7342,
+        5878,
+        7345,
+        8351,
+        1446,
+        10638,
+        13099,
+        16503,
+        1391,
+        8372,
+        7670,
+        8850,
+        16507,
+        16499
+      ],
+      "cortext_retrieved_tokens": 430,
+      "cortext_total_ms": 76.939693,
+      "cortext_working_items": 21,
+      "cortext_working_memory_ids": [
+        18895,
+        18897,
+        18899,
+        18901,
+        18903,
+        18905,
+        18907,
+        18910,
+        18912,
+        18914,
+        18916,
+        18918,
+        18920,
+        18922,
+        18924,
+        18927,
+        18929,
+        18931,
+        18933,
+        18935,
+        18937
+      ],
+      "cortext_working_tokens": 690,
+      "event_index": 9000,
+      "full_history_tokens": 235571,
+      "normal_rag_context_tokens": 49165,
+      "normal_rag_retrieval_latency_ms": 286.737437,
+      "normal_rag_total_latency_ms": 288.921759,
+      "query": {
+        "modality": "text",
+        "source_id": "Contact",
+        "timestamp": 1739253600000,
+        "tokens": 23
+      },
+      "top_operation_ms": [
+        {
+          "ms": 27.471781,
+          "operation": "cortext::operations::GraphAugmentedRetrieveCandidates"
+        },
+        {
+          "ms": 27.339241,
+          "operation": "GraphRetrieve.total"
+        },
+        {
+          "ms": 16.778783,
+          "operation": "SignalProcessor.snapshot_context"
+        },
+        {
+          "ms": 0.597657,
+          "operation": "SignalProcessor.commit_transaction"
+        },
+        {
+          "ms": 0.453568,
+          "operation": "cortext::operations::DetectMemoryUsage"
+        }
+      ]
+    }
+  ],
+  "processed_text_messages": 9130,
+  "retrieval_events_during_ingest": 9,
+  "retrieval_items_during_ingest": 116,
+  "skipped_transcript_messages": 0,
+  "source_artifact": "build/graph_profile/full_msc_verify_final/summary.json",
+  "wall_ms": 528091,
+  "wall_ms_excluding_consolidation": 417227.896707,
+  "warmup_events": 5000
+}

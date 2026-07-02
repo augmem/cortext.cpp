@@ -1,0 +1,2190 @@
+{
+  "schema": "chat_replay_live_run_multimodal_judge_v8",
+  "summary_path": "eval_runs/msc_gemma4_temporal_fix_20260701T204155Z/summary.json",
+  "db_path": "eval_runs/msc_gemma4_temporal_fix_20260701T204155Z/msc.sqlite",
+  "input_dir": "eval_runs/msc_gemma4_temporal_fix_20260701T204155Z/input",
+  "judge_model": "gemma4-12b-awq",
+  "judge_provider": "openai_chat_completions",
+  "judge_base_url": "http://127.0.0.1:9000/v1",
+  "judge_env_file": "eval_runs/msc_gemma4_temporal_fix_20260701T204155Z/local_vllm_9000.env",
+  "judge_media_capabilities": {
+    "source": "openai_chat_completions_assumption",
+    "model": "gemma4-12b-awq",
+    "available": true,
+    "capabilities": [
+      "text"
+    ],
+    "text": true,
+    "image": false,
+    "audio": false,
+    "error": ""
+  },
+  "remote_provider_allowed": true,
+  "public_benchmark": true,
+  "native_cortext_only": true,
+  "multimodal_judge": false,
+  "protocol": {
+    "packet_blinding": true,
+    "packet_labels": [
+      "A",
+      "B",
+      "C"
+    ],
+    "judge_repetitions": 1,
+    "judge_seed": 42,
+    "judge_start_index": 0,
+    "judge_limit": -1,
+    "judge_index_stride": 1,
+    "judge_index_offset": 0,
+    "expected_judgments": 9,
+    "judge_timeout_s": 1200,
+    "judge_context_window_tokens": 262144,
+    "openai_temperature_policy": "omitted_for_gpt_5_5_provider_default",
+    "ollama_keep_alive": "",
+    "early_stop_prior_quality_delta_sum": 0.0,
+    "early_stop_prior_judgment_count": 0,
+    "bootstrap_samples": 500,
+    "bootstrap_unit": "probe",
+    "packet_surface": "structurally_normalized_event_evidence_v1",
+    "systems": [
+      "cortext_native",
+      "traditional_chat_rag",
+      "full_history_upper_bound"
+    ],
+    "base_systems": [
+      "cortext_native",
+      "traditional_chat_rag",
+      "full_history_upper_bound"
+    ],
+    "rag_ablation_systems": [],
+    "score_fields": [
+      "relevance",
+      "sufficiency",
+      "noise",
+      "temporal_correctness",
+      "source_grounding",
+      "modality_grounding"
+    ],
+    "quality_composite_definition": "relevance + sufficiency - 0.25*noise",
+    "quality_composite_weights": {
+      "relevance": 1.0,
+      "sufficiency": 1.0,
+      "noise": -0.25
+    },
+    "token_estimate_policy": "estimated_text_tokens=max(1, ceil(chars/4)); attached image/audio evidence counted as a small placeholder for prompt-fit checks, not provider-tokenized usage",
+    "cortext_packet_source": {
+      "probe_time_summary_snapshot": 9
+    },
+    "normal_rag_baseline": "rolling text chat history until compaction plus text RAG hits",
+    "normal_rag_vector_search_multiplier": 8,
+    "normal_rag_vector_search_k_policy": "min(prior_text_rows, max(rag_top_k, rag_top_k * normal_rag_vector_search_multiplier)) before dedupe",
+    "normal_rag_vector_candidate_k_policy": "final unique text RAG packet cap after vector-search fanout",
+    "traditional_chat_rag_compaction_summary_policy": "deterministic_extractive_prior_chat",
+    "full_history_upper_bound": "prior text history only",
+    "compacting_session": "session that summarizes itself when near its context budget",
+    "system_descriptions": {
+      "cortext_native": "native Cortext working memory plus STM/LTM graph retrieval",
+      "traditional_chat_rag": "rolling text history until compaction plus text vector RAG hits",
+      "full_history_upper_bound": "prior text history only",
+      "compacting_session": "session that summarizes itself when near its context budget"
+    },
+    "daily_consolidation_required_for_release": true,
+    "default_knobs_required_for_release": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "judge_media_capabilities": {
+      "source": "openai_chat_completions_assumption",
+      "model": "gemma4-12b-awq",
+      "available": true,
+      "capabilities": [
+        "text"
+      ],
+      "text": true,
+      "image": false,
+      "audio": false,
+      "error": ""
+    },
+    "checkpoint_rows": "eval_runs/msc_gemma4_temporal_fix_20260701T204155Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.rows.jsonl",
+    "checkpoint_resume_enabled": true,
+    "checkpoint_unique_rows_loaded": 9,
+    "checkpoint_duplicate_rows_ignored": 0,
+    "checkpoint_malformed_rows_ignored": 0,
+    "checkpoint_out_of_scope_rows_ignored": 0,
+    "checkpoint_rows_skipped_during_resume": 9
+  },
+  "cortext_audio_image_transcript_shortcuts": false,
+  "output_contains_private_text": false,
+  "output_contains_public_benchmark_text": true,
+  "reason_privacy_policy": "Judge reasons are instructed to be structural only, but the artifact is treated as private because local judges may still paraphrase content.",
+  "daily_consolidation": true,
+  "deep_consolidation": false,
+  "source_id_policy": "User and Contact are opaque conversation provenance source IDs; media is not encoded into source_id",
+  "timeline_policy": "transcript messages and media files are processed in timestamp order; text uses internal replay timestamped ingress so non-probe turns can skip context hydration, media uses internal replay timestamped ingress, and benchmark consolidation uses internal replay timestamped consolidation",
+  "processed": {
+    "text": 9130,
+    "audio": 0,
+    "image": 0,
+    "video": 0,
+    "media_failures": 0
+  },
+  "media_memory_map_audit": {
+    "schema": "cortext_judge_media_memory_map_audit_v1",
+    "db_media_occurrence_count": 0,
+    "selected_timeline_media_doc_count": 0,
+    "mapped_media_doc_count": 0,
+    "unmatched_db_media_occurrence_count": 0,
+    "unused_selected_timeline_media_doc_count": 0,
+    "unmatched_db_media_occurrences_sample": [],
+    "policy": "audio/image DB signal rows must map to selected timeline media by shared speaker source_id, modality, and timestamp"
+  },
+  "tokens": {
+    "active_history_token_budget": 49152,
+    "mean_rolling_history_tokens": 49138.88888888889,
+    "mean_full_history_tokens": 185439.44444444444,
+    "context_limit_memories": -1,
+    "mean_cortext_working_tokens": 643.1111111111111,
+    "mean_cortext_retrieved_tokens": 354.8888888888889,
+    "mean_cortext_context_tokens": 998.0,
+    "mean_traditional_chat_rag_tokens": 49195.77777777778,
+    "mean_context_tokens_by_system": {
+      "cortext_native": 819.3333333333334,
+      "traditional_chat_rag": 46427.333333333336,
+      "full_history_upper_bound": 174918.66666666666
+    },
+    "mean_cortext_token_savings_vs_traditional_chat_rag": 0.9797137062349525,
+    "judge_context_window_tokens": 262144,
+    "mean_judge_prompt_tokens_estimate": 260572.0,
+    "max_judge_prompt_tokens_estimate": 260602,
+    "token_count_policy": "estimated_text_tokens=max(1, ceil(chars/4)); attached image/audio evidence counted as a small placeholder for prompt-fit checks, not provider-tokenized usage"
+  },
+  "normal_rag_compaction": {
+    "compacted_items": 46450,
+    "compacted_original_tokens": 1236065,
+    "compacted_summary_tokens": 9360,
+    "compaction_events": 9,
+    "mean_compaction_latency_ms": 1.3593545555555557,
+    "mean_retrieval_latency_ms": 216.41444966666666,
+    "mean_total_latency_ms": 217.77380422222222,
+    "probe_count": 9,
+    "probe_events": 9,
+    "raw_items": 16550,
+    "raw_tokens": 432890
+  },
+  "normal_rag_retrieval": "raw_chat_vector",
+  "normal_rag_baseline_modality": "text_only",
+  "normal_rag_vector_query_encoder": "AIST-87M-GGUF",
+  "normal_rag_vector_candidate_k": 5,
+  "normal_rag_vector_final_k": 5,
+  "normal_rag_vector_search_multiplier": 8,
+  "normal_rag_vector_search_k_policy": "min(prior_text_rows, max(rag_top_k, rag_top_k * normal_rag_vector_search_multiplier)) before dedupe",
+  "normal_rag_vector_candidate_k_policy": "final unique text RAG packet cap after vector-search fanout",
+  "latency": {
+    "mean_cortext_probe_latency_ms": 56.967419444444445,
+    "mean_ingest_total_ms": 42.68921653450168,
+    "wall_ms": 495044
+  },
+  "db_metrics": {
+    "memories": 10100,
+    "long_term_memories": 9364,
+    "working_memories": 21,
+    "associations": 17457,
+    "facts": 0,
+    "soft_anchor_links": 15,
+    "signals": 9865,
+    "source_backed_memories": 9130
+  },
+  "judged": 9,
+  "dry_run_prompts_only": false,
+  "dry_run_prompts": [],
+  "expected_judgments": 9,
+  "missing_judgments": 0,
+  "judgment_complete": true,
+  "checkpoint_rows_path": "eval_runs/msc_gemma4_temporal_fix_20260701T204155Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.rows.jsonl",
+  "checkpoint_stats": {
+    "unique_rows_loaded": 9
+  },
+  "checkpoint_rows_skipped_during_resume": 9,
+  "probe_count": 9,
+  "judge_repetitions": 1,
+  "early_stop": null,
+  "quality": {
+    "cortext_native": {
+      "judged": 9,
+      "wins": 2,
+      "mean_relevance": 1.4444444444444444,
+      "mean_sufficiency": 1.4444444444444444,
+      "mean_noise": 0.0,
+      "mean_temporal_correctness": 1.6666666666666667,
+      "mean_source_grounding": 1.2222222222222223,
+      "mean_modality_grounding": 0.0
+    },
+    "traditional_chat_rag": {
+      "judged": 9,
+      "wins": 2,
+      "mean_relevance": 1.1111111111111112,
+      "mean_sufficiency": 1.2222222222222223,
+      "mean_noise": 0.0,
+      "mean_temporal_correctness": 1.5555555555555556,
+      "mean_source_grounding": 1.2222222222222223,
+      "mean_modality_grounding": 0.0
+    },
+    "full_history_upper_bound": {
+      "judged": 9,
+      "wins": 0,
+      "mean_relevance": 0.1111111111111111,
+      "mean_sufficiency": 0.1111111111111111,
+      "mean_noise": 0.0,
+      "mean_temporal_correctness": 1.2222222222222223,
+      "mean_source_grounding": 1.2222222222222223,
+      "mean_modality_grounding": 0.0
+    }
+  },
+  "confidence_intervals": {
+    "unit": "probe",
+    "bootstrap_samples": 500,
+    "probe_count": 9,
+    "systems": {
+      "cortext_native": {
+        "win_rate": {
+          "n": 9,
+          "mean": 0.2222222222222222,
+          "ci95": [
+            0.0,
+            0.5555555555555556
+          ]
+        },
+        "relevance": {
+          "n": 9,
+          "mean": 1.4444444444444444,
+          "ci95": [
+            0.0,
+            2.7249999999999974
+          ]
+        },
+        "sufficiency": {
+          "n": 9,
+          "mean": 1.4444444444444444,
+          "ci95": [
+            0.4444444444444444,
+            2.9472222222222197
+          ]
+        },
+        "noise": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "temporal_correctness": {
+          "n": 9,
+          "mean": 1.6666666666666667,
+          "ci95": [
+            0.4444444444444444,
+            3.3333333333333335
+          ]
+        },
+        "source_grounding": {
+          "n": 9,
+          "mean": 1.2222222222222223,
+          "ci95": [
+            0.0,
+            2.8361111111111086
+          ]
+        },
+        "modality_grounding": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "traditional_chat_rag": {
+        "win_rate": {
+          "n": 9,
+          "mean": 0.2222222222222222,
+          "ci95": [
+            0.0,
+            0.5555555555555556
+          ]
+        },
+        "relevance": {
+          "n": 9,
+          "mean": 1.1111111111111112,
+          "ci95": [
+            0.2222222222222222,
+            2.2222222222222223
+          ]
+        },
+        "sufficiency": {
+          "n": 9,
+          "mean": 1.2222222222222223,
+          "ci95": [
+            0.3333333333333333,
+            2.3333333333333335
+          ]
+        },
+        "noise": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "temporal_correctness": {
+          "n": 9,
+          "mean": 1.5555555555555556,
+          "ci95": [
+            0.4444444444444444,
+            2.6666666666666665
+          ]
+        },
+        "source_grounding": {
+          "n": 9,
+          "mean": 1.2222222222222223,
+          "ci95": [
+            0.0,
+            2.502777777777775
+          ]
+        },
+        "modality_grounding": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "full_history_upper_bound": {
+        "win_rate": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "relevance": {
+          "n": 9,
+          "mean": 0.1111111111111111,
+          "ci95": [
+            0.0,
+            0.3333333333333333
+          ]
+        },
+        "sufficiency": {
+          "n": 9,
+          "mean": 0.1111111111111111,
+          "ci95": [
+            0.0,
+            0.3333333333333333
+          ]
+        },
+        "noise": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "temporal_correctness": {
+          "n": 9,
+          "mean": 1.2222222222222223,
+          "ci95": [
+            0.1111111111111111,
+            2.7777777777777777
+          ]
+        },
+        "source_grounding": {
+          "n": 9,
+          "mean": 1.2222222222222223,
+          "ci95": [
+            0.1111111111111111,
+            2.502777777777775
+          ]
+        },
+        "modality_grounding": {
+          "n": 9,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    "tokens": {
+      "cortext_savings_vs_traditional_chat_rag": {
+        "n": 9,
+        "mean": 0.979713662367565,
+        "ci95": [
+          0.9781863389665635,
+          0.9816040743349345
+        ]
+      }
+    }
+  },
+  "failure_reasons": {
+    "rag_context_advantage": 2,
+    "unrelated_retrieval": 3,
+    "cortext_wins": 2,
+    "missing_source_link": 1,
+    "tie_or_unclear": 1
+  },
+  "judge_validation": {},
+  "fairness_checks": {
+    "cortext_audio_image_transcript_shortcuts": false,
+    "traditional_chat_rag_text_only": true,
+    "full_history_text_only": true,
+    "no_future_context_violations": true,
+    "no_current_turn_context_inclusions": true,
+    "blind_prompt_hidden_labels_absent": true,
+    "traditional_chat_rag_contentful_compaction": true,
+    "judge_prompt_fits_context_window": true,
+    "full_history_prompt_fits_judge_context": true,
+    "judge_supports_attached_audio": false,
+    "judge_supports_attached_images": false,
+    "attached_audio_judged_when_present": true,
+    "attached_images_judged_when_present": true,
+    "media_memory_map_complete": true,
+    "counters": {
+      "cortext_native_non_prior_memory_rows_excluded": 9,
+      "cortext_native_non_prior_working_rows_excluded": 9,
+      "cortext_native_non_prior_retrieved_rows_excluded": 0,
+      "traditional_chat_rag_compaction_events": 9,
+      "traditional_chat_rag_contentful_compaction": 9,
+      "full_history_oldest_messages_dropped_for_judge_prompt_fit": 46211
+    }
+  },
+  "media_attachments": {
+    "enabled": false,
+    "max_media_per_system": 0,
+    "count_policy": "max_media_per_system=-1 attaches all source blobs present in each packet; conversion policies below may still clip or frame-reduce media for local judge input",
+    "audio_max_seconds": 30,
+    "audio_policy": "audio source blobs converted to mono 16 kHz WAV and clipped to the first 30 seconds for local multimodal judge input",
+    "image_policy": "image source blobs converted to a 768x768 padded JPEG for local judge input",
+    "video_policy": "video source blobs represented by one 768x768 padded JPEG frame for local judge input",
+    "cortext_native": {
+      "image": 0,
+      "audio": 0,
+      "skipped": 0
+    },
+    "traditional_chat_rag": {
+      "image": 0,
+      "audio": 0,
+      "skipped": 0
+    },
+    "full_history_upper_bound": {
+      "image": 0,
+      "audio": 0,
+      "skipped": 0
+    },
+    "by_system": {
+      "cortext_native": {
+        "image": 0,
+        "audio": 0,
+        "skipped": 0
+      },
+      "traditional_chat_rag": {
+        "image": 0,
+        "audio": 0,
+        "skipped": 0
+      },
+      "full_history_upper_bound": {
+        "image": 0,
+        "audio": 0,
+        "skipped": 0
+      }
+    }
+  },
+  "openai_usage": {
+    "this_process": {},
+    "by_model": {},
+    "note": "Usage is captured from OpenAI API responses made by this process; checkpoint-resumed rows from previous invocations are not re-billed here."
+  },
+  "judgments": [
+    {
+      "event_index": 5000,
+      "probe_event_index": 5000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1667647200000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 15
+      },
+      "winner": "traditional_chat_rag",
+      "winner_alias": "C",
+      "failure_reason": "rag_context_advantage",
+      "winner_reason": "Packet C is the best choice because it provides a comprehensive, compressed summary of the entire conversation history, ensuring all relevant context is captured for the current turn's questions about moving and personal life.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C is the best choice because it provides a comprehensive, compressed summary of the entire conversation history, ensuring all relevant context is captured for the current turn's questions about moving and personal life."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "cortext_native": "A",
+          "full_history_upper_bound": "B",
+          "traditional_chat_rag": "C"
+        },
+        "label_to_real": {
+          "A": "cortext_native",
+          "B": "full_history_upper_bound",
+          "C": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "A",
+          "context_tokens": 1012,
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 0.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Packet A contains the history for the current turn and the preceding turn, providing relevant context regarding the user's interest in moving, work as a life coach, and the current conversation's timeline."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "context_tokens": 46589,
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 0.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Packet C provides a dense summary of the conversation history leading up to the current turn, covering the user's plans for New Mexico/Washington, work history, and personal status."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "B",
+          "context_tokens": 126470,
+          "relevance": 1.0,
+          "sufficiency": 1.0,
+          "noise": 0.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "Packet B contains very old conversation history and is mostly unrelated to the current turn's topic of moving and personal updates."
+        }
+      },
+      "cortext_memory_ids": [
+        10479,
+        10481,
+        10483,
+        10485,
+        10487,
+        10489,
+        10491,
+        10494,
+        10496,
+        10498,
+        10500,
+        10502,
+        10504,
+        10506,
+        10508,
+        10510,
+        10512,
+        10514,
+        10516,
+        10519,
+        10521,
+        10518,
+        10478,
+        10495,
+        10482,
+        10484,
+        10486,
+        10505,
+        10414,
+        10071,
+        10408,
+        10390,
+        10497,
+        10499
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        10479,
+        10481,
+        10483,
+        10485,
+        10487,
+        10489,
+        10491,
+        10494,
+        10496,
+        10498,
+        10500,
+        10502,
+        10504,
+        10506,
+        10508,
+        10510,
+        10512,
+        10514,
+        10516,
+        10519,
+        10518,
+        10478,
+        10495,
+        10482,
+        10484,
+        10486,
+        10505,
+        10414,
+        10071,
+        10408,
+        10390,
+        10497,
+        10499
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        10521
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        10521
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        4077,
+        1,
+        3476,
+        817,
+        2949
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49231,
+      "full_history_tokens": 133986,
+      "cortext_working_tokens": 753,
+      "cortext_retrieved_tokens": 441,
+      "cortext_context_tokens": 1194,
+      "traditional_chat_rag_tokens": 49231,
+      "cortext_latency_ms": 47.095492,
+      "normal_rag_total_latency_ms": 149.327075,
+      "normal_rag_retrieval_latency_ms": 148.199149,
+      "judge_prompt_tokens_estimate": 260522,
+      "media_attachments": {
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 5500,
+      "probe_event_index": 5500,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1675712400000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 27
+      },
+      "winner": "tie_or_unclear",
+      "winner_alias": "tie_or_unclear",
+      "failure_reason": "unrelated_retrieval",
+      "winner_reason": "None of the provided packets contain the specific information regarding the cost of the items or the user's financial situation.",
+      "judge_raw": {
+        "winner": "tie_or_unclear",
+        "failure_reason": "unrelated_retrieval",
+        "winner_reason": "None of the provided packets contain the specific information regarding the cost of the items or the user's financial situation."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "traditional_chat_rag": "C"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "context_tokens": 695,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "This packet covers social interactions and personal history, but lacks information about job costs or financial constraints."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "context_tokens": 46563,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "This summary includes unrelated history about music, travel, and personal life, not the cost of the items mentioned."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "context_tokens": 138860,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The content in this packet is unrelated to the current turn's question about cost and jobs."
+        }
+      },
+      "cortext_memory_ids": [
+        11530,
+        11532,
+        11534,
+        11536,
+        11538,
+        11542,
+        11544,
+        11546,
+        11548,
+        11550,
+        11552,
+        11554,
+        11556,
+        11558,
+        11560,
+        11562,
+        11564,
+        11567,
+        11569,
+        11571,
+        11573,
+        11412,
+        11437,
+        11563,
+        11441,
+        11418,
+        11568,
+        11559,
+        11549,
+        11521,
+        11553,
+        11535,
+        11557,
+        11555
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        11530,
+        11532,
+        11534,
+        11536,
+        11538,
+        11542,
+        11544,
+        11546,
+        11548,
+        11550,
+        11552,
+        11554,
+        11556,
+        11558,
+        11560,
+        11562,
+        11564,
+        11567,
+        11569,
+        11571,
+        11412,
+        11437,
+        11563,
+        11441,
+        11418,
+        11568,
+        11559,
+        11549,
+        11521,
+        11553,
+        11535,
+        11557,
+        11555
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        11573
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        11573
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        5016,
+        4563,
+        3459,
+        1628,
+        4566
+      ],
+      "rolling_history_tokens": 49142,
+      "normal_rag_context_tokens": 49184,
+      "full_history_tokens": 147126,
+      "cortext_working_tokens": 495,
+      "cortext_retrieved_tokens": 383,
+      "cortext_context_tokens": 878,
+      "traditional_chat_rag_tokens": 49184,
+      "cortext_latency_ms": 50.681408,
+      "normal_rag_total_latency_ms": 170.907859,
+      "normal_rag_retrieval_latency_ms": 169.776724,
+      "judge_prompt_tokens_estimate": 260593,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 6000,
+      "probe_event_index": 6000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1683777600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 7
+      },
+      "winner": "traditional_chat_rag",
+      "winner_alias": "C",
+      "failure_reason": "rag_context_advantage",
+      "winner_reason": "Packet C provides the broader conversational history, allowing the model to see multiple work-related exchanges (gas station, stunt double, life coach) to determine the user's current identity.",
+      "judge_raw": {
+        "winner": "C",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet C provides the broader conversational history, allowing the model to see multiple work-related exchanges (gas station, stunt double, life coach) to determine the user's current identity."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "traditional_chat_rag": "C"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "context_tokens": 826,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains conversation about cars, concerts, and personal interests, not work."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "context_tokens": 46502,
+          "relevance": 1.0,
+          "sufficiency": 2.0,
+          "noise": 0.0,
+          "temporal_correctness": 1.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains a large history where the user is asked 'What do you do for a living?' (event 4406) and is told they work at a gas station (event 5002) and was an actor/stunt double (event 5082/5882), but the specific answer to 'What do you do for a living?' for the current user is not clearly established as it spa"
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "context_tokens": 151824,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains early unrelated conversation about rafting, weather, and pets, not the current work-related question."
+        }
+      },
+      "cortext_memory_ids": [
+        12585,
+        12587,
+        12590,
+        12592,
+        12594,
+        12596,
+        12598,
+        12600,
+        12602,
+        12604,
+        12606,
+        12608,
+        12610,
+        12612,
+        12615,
+        12617,
+        12619,
+        12621,
+        12623,
+        12625,
+        12627,
+        12616,
+        12620,
+        12624,
+        12348,
+        12480,
+        12508,
+        12482,
+        12551,
+        12597,
+        12609,
+        12614,
+        12555,
+        12601
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        12585,
+        12587,
+        12590,
+        12592,
+        12594,
+        12596,
+        12598,
+        12600,
+        12602,
+        12604,
+        12606,
+        12608,
+        12610,
+        12612,
+        12615,
+        12617,
+        12619,
+        12621,
+        12623,
+        12625,
+        12616,
+        12620,
+        12624,
+        12348,
+        12480,
+        12508,
+        12482,
+        12551,
+        12597,
+        12609,
+        12614,
+        12555,
+        12601
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        12627
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        12627
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        4058,
+        3437,
+        4935,
+        5866,
+        4942
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49170,
+      "full_history_tokens": 160840,
+      "cortext_working_tokens": 678,
+      "cortext_retrieved_tokens": 327,
+      "cortext_context_tokens": 1005,
+      "traditional_chat_rag_tokens": 49170,
+      "cortext_latency_ms": 47.410531,
+      "normal_rag_total_latency_ms": 186.68051599999998,
+      "normal_rag_retrieval_latency_ms": 185.340532,
+      "judge_prompt_tokens_estimate": 260576,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 6500,
+      "probe_event_index": 6500,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1694348400000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 18
+      },
+      "winner": "tie_or_unclear",
+      "winner_alias": "tie_or_unclear",
+      "failure_reason": "unrelated_retrieval",
+      "winner_reason": "All packets contain historical text that is unrelated to the specific coaching swimming activity mentioned in the current turn.",
+      "judge_raw": {
+        "winner": "tie_or_unclear",
+        "failure_reason": "unrelated_retrieval",
+        "winner_reason": "All packets contain historical text that is unrelated to the specific coaching swimming activity mentioned in the current turn."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "full_history_upper_bound": "B",
+          "cortext_native": "C"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "full_history_upper_bound",
+          "C": "cortext_native"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "C",
+          "context_tokens": 855,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains conversations about cars, records, and physical fitness, but lacks any specific context related to the current coaching swimming context."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "context_tokens": 46448,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains unrelated history regarding rabbit care, Taylor Swift, and personal demographics that do not connect to the current turn's specific topic of coaching swimming."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "B",
+          "context_tokens": 162803,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains history regarding personal history, sports, and some swimming references, but it does not address the specific coaching activity mentioned in the current turn."
+        }
+      },
+      "cortext_memory_ids": [
+        13633,
+        13635,
+        13637,
+        13639,
+        13641,
+        13643,
+        13646,
+        13648,
+        13650,
+        13652,
+        13654,
+        13656,
+        13658,
+        13660,
+        13662,
+        13664,
+        13666,
+        13668,
+        13671,
+        13673,
+        13675,
+        13672,
+        13585,
+        13566,
+        13670,
+        13667,
+        13663,
+        13594,
+        13550,
+        13596,
+        13472,
+        13564,
+        13589
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        13633,
+        13635,
+        13637,
+        13639,
+        13641,
+        13643,
+        13646,
+        13648,
+        13650,
+        13652,
+        13654,
+        13656,
+        13658,
+        13660,
+        13662,
+        13664,
+        13666,
+        13668,
+        13671,
+        13673,
+        13672,
+        13585,
+        13566,
+        13670,
+        13667,
+        13663,
+        13594,
+        13550,
+        13596,
+        13472,
+        13564,
+        13589
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        13675
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        13675
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        391,
+        2989,
+        2965,
+        3004,
+        4824
+      ],
+      "rolling_history_tokens": 49138,
+      "normal_rag_context_tokens": 49217,
+      "full_history_tokens": 172569,
+      "cortext_working_tokens": 690,
+      "cortext_retrieved_tokens": 341,
+      "cortext_context_tokens": 1031,
+      "traditional_chat_rag_tokens": 49217,
+      "cortext_latency_ms": 55.481948,
+      "normal_rag_total_latency_ms": 199.962273,
+      "normal_rag_retrieval_latency_ms": 198.792277,
+      "judge_prompt_tokens_estimate": 260574,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 7000,
+      "probe_event_index": 7000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1701895200000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 19
+      },
+      "winner": "cortext_native",
+      "winner_alias": "A",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet A provides the most direct and relevant history regarding the dating apps mentioned in the current turn.",
+      "judge_raw": {
+        "winner": "A",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet A provides the most direct and relevant history regarding the dating apps mentioned in the current turn."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "cortext_native": "A",
+          "full_history_upper_bound": "B",
+          "traditional_chat_rag": "C"
+        },
+        "label_to_real": {
+          "A": "cortext_native",
+          "B": "full_history_upper_bound",
+          "C": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "A",
+          "context_tokens": 903,
+          "relevance": 4.0,
+          "sufficiency": 4.0,
+          "noise": 0.0,
+          "temporal_correctness": 4.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains relevant text history about dating apps and a job search, aligning with the current turn's mention of match.com and Bumble."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "context_tokens": 46408,
+          "relevance": 2.0,
+          "sufficiency": 2.0,
+          "noise": 0.0,
+          "temporal_correctness": 4.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The summary provides some context on the user's jobs and lifestyle but lacks the specific detail of the dating app discussion."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "B",
+          "context_tokens": 175366,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains unrelated history regarding pets and family, which is not the focus of the current turn."
+        }
+      },
+      "cortext_memory_ids": [
+        14687,
+        14689,
+        14691,
+        14693,
+        14695,
+        14697,
+        14699,
+        14701,
+        14703,
+        14705,
+        14707,
+        14709,
+        14713,
+        14715,
+        14717,
+        14719,
+        14721,
+        14723,
+        14725,
+        14727,
+        14729,
+        14686,
+        14724,
+        14720,
+        14718,
+        14722,
+        14690,
+        14643,
+        14604,
+        14726,
+        14692,
+        14669,
+        14716
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        14687,
+        14689,
+        14691,
+        14693,
+        14695,
+        14697,
+        14699,
+        14701,
+        14703,
+        14705,
+        14707,
+        14709,
+        14713,
+        14715,
+        14717,
+        14719,
+        14721,
+        14723,
+        14725,
+        14727,
+        14686,
+        14724,
+        14720,
+        14718,
+        14722,
+        14690,
+        14643,
+        14604,
+        14726,
+        14692,
+        14669,
+        14716
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        14729
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        14729
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        6980,
+        1214,
+        1564,
+        3279,
+        6101
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49185,
+      "full_history_tokens": 185885,
+      "cortext_working_tokens": 677,
+      "cortext_retrieved_tokens": 401,
+      "cortext_context_tokens": 1078,
+      "traditional_chat_rag_tokens": 49185,
+      "cortext_latency_ms": 56.805173,
+      "normal_rag_total_latency_ms": 219.034337,
+      "normal_rag_retrieval_latency_ms": 217.575102,
+      "judge_prompt_tokens_estimate": 260576,
+      "media_attachments": {
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 7500,
+      "probe_event_index": 7500,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1711515600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 54
+      },
+      "winner": "tie_or_unclear",
+      "winner_alias": "tie_or_unclear",
+      "failure_reason": "missing_source_link",
+      "winner_reason": "None of the packets provide specific context regarding the user's father being homeless.",
+      "judge_raw": {
+        "winner": "tie_or_unclear",
+        "failure_reason": "missing_source_link",
+        "winner_reason": "None of the packets provide specific context regarding the user's father being homeless."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "traditional_chat_rag": "C"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "context_tokens": 837,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "No link to personal history or current father status."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "context_tokens": 46364,
+          "relevance": 1.0,
+          "sufficiency": 1.0,
+          "noise": 0.0,
+          "temporal_correctness": 1.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "Summary contains information about the user's past but lacks specific personal history details like the father's status."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "context_tokens": 187082,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "No link to personal history or current father status."
+        }
+      },
+      "cortext_memory_ids": [
+        15740,
+        15742,
+        15745,
+        15747,
+        15749,
+        15751,
+        15753,
+        15755,
+        15757,
+        15759,
+        15761,
+        15763,
+        15765,
+        15767,
+        15771,
+        15773,
+        15775,
+        15777,
+        15779,
+        15781,
+        15783,
+        15780,
+        15774,
+        15688,
+        15678,
+        15778,
+        15684,
+        15586,
+        15758,
+        15756,
+        15760,
+        15731,
+        15764,
+        15762
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        15740,
+        15742,
+        15745,
+        15747,
+        15749,
+        15751,
+        15753,
+        15755,
+        15757,
+        15759,
+        15761,
+        15763,
+        15765,
+        15767,
+        15771,
+        15773,
+        15775,
+        15777,
+        15779,
+        15781,
+        15780,
+        15774,
+        15688,
+        15678,
+        15778,
+        15684,
+        15586,
+        15758,
+        15756,
+        15760,
+        15731,
+        15764,
+        15762
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        15783
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        15783
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        2199,
+        1828,
+        7170,
+        6254,
+        246
+      ],
+      "rolling_history_tokens": 49131,
+      "normal_rag_context_tokens": 49196,
+      "full_history_tokens": 198354,
+      "cortext_working_tokens": 629,
+      "cortext_retrieved_tokens": 389,
+      "cortext_context_tokens": 1018,
+      "traditional_chat_rag_tokens": 49196,
+      "cortext_latency_ms": 63.820825,
+      "normal_rag_total_latency_ms": 240.159883,
+      "normal_rag_retrieval_latency_ms": 238.832398,
+      "judge_prompt_tokens_estimate": 260597,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 8000,
+      "probe_event_index": 8000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1721049600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 25
+      },
+      "winner": "tie_or_unclear",
+      "winner_alias": "tie_or_unclear",
+      "failure_reason": "tie_or_unclear",
+      "winner_reason": "No packet provides the specific context for the user's 'great time' or the specific event mentioned in the current turn.",
+      "judge_raw": {
+        "winner": "tie_or_unclear",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "No packet provides the specific context for the user's 'great time' or the specific event mentioned in the current turn."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "full_history_upper_bound": "A",
+          "cortext_native": "B",
+          "traditional_chat_rag": "C"
+        },
+        "label_to_real": {
+          "A": "full_history_upper_bound",
+          "B": "cortext_native",
+          "C": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "context_tokens": 869,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 1.0,
+          "source_grounding": 1.0,
+          "modality_grounding": 0.0,
+          "reason": "This packet contains a long conversation about personal lives, dogs, and cars, but does not address the current turn's context of a 'great time' or specific local events."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "context_tokens": 46354,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 1.0,
+          "modality_grounding": 0.0,
+          "reason": "This is a summarized history of various disconnected topics (pets, careers, travel) and does not contain the specific event from the current turn."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "A",
+          "context_tokens": 199201,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 1.0,
+          "source_grounding": 1.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains a historical dialogue about bunnies, personal history, and current jobs that are unrelated to the current turn's content."
+        }
+      },
+      "cortext_memory_ids": [
+        16791,
+        16793,
+        16795,
+        16797,
+        16799,
+        16801,
+        16803,
+        16805,
+        16807,
+        16809,
+        16811,
+        16813,
+        16817,
+        16819,
+        16821,
+        16823,
+        16825,
+        16827,
+        16829,
+        16831,
+        16833,
+        15805,
+        16281,
+        16816,
+        16769,
+        16820,
+        16830,
+        16767,
+        16783,
+        16779,
+        16824,
+        16828,
+        16810
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        16791,
+        16793,
+        16795,
+        16797,
+        16799,
+        16801,
+        16803,
+        16805,
+        16807,
+        16809,
+        16811,
+        16813,
+        16817,
+        16819,
+        16821,
+        16823,
+        16825,
+        16827,
+        16829,
+        16831,
+        15805,
+        16281,
+        16816,
+        16769,
+        16820,
+        16830,
+        16767,
+        16783,
+        16779,
+        16824,
+        16828,
+        16810
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        16833
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        16833
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        5023,
+        6004,
+        2134,
+        3062,
+        7170
+      ],
+      "rolling_history_tokens": 49122,
+      "normal_rag_context_tokens": 49194,
+      "full_history_tokens": 211227,
+      "cortext_working_tokens": 727,
+      "cortext_retrieved_tokens": 317,
+      "cortext_context_tokens": 1044,
+      "traditional_chat_rag_tokens": 49194,
+      "cortext_latency_ms": 61.478675,
+      "normal_rag_total_latency_ms": 250.377442,
+      "normal_rag_retrieval_latency_ms": 249.121927,
+      "judge_prompt_tokens_estimate": 260565,
+      "media_attachments": {
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 8500,
+      "probe_event_index": 8500,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1730151600000,
+        "source_id": "User",
+        "modality": "text",
+        "tokens": 11
+      },
+      "winner": "tie_or_unclear",
+      "winner_alias": "tie_or_unclear",
+      "failure_reason": "unrelated_retrieval",
+      "winner_reason": "All provided packets contain historical chat logs that are irrelevant to the current turn's specific query.",
+      "judge_raw": {
+        "winner": "tie_or_unclear",
+        "failure_reason": "unrelated_retrieval",
+        "winner_reason": "All provided packets contain historical chat logs that are irrelevant to the current turn's specific query."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "traditional_chat_rag": "A",
+          "cortext_native": "B",
+          "full_history_upper_bound": "C"
+        },
+        "label_to_real": {
+          "A": "traditional_chat_rag",
+          "B": "cortext_native",
+          "C": "full_history_upper_bound"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "B",
+          "context_tokens": 512,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains historical text that does not address the current turn."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "A",
+          "context_tokens": 46349,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains history that is unrelated to the current turn's specific content."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "C",
+          "context_tokens": 210620,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 0.0,
+          "source_grounding": 0.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains unrelated history and does not provide context for the current turn."
+        }
+      },
+      "cortext_memory_ids": [
+        17846,
+        17848,
+        17850,
+        17852,
+        17854,
+        17856,
+        17858,
+        17860,
+        17862,
+        17864,
+        17867,
+        17869,
+        17871,
+        17873,
+        17875,
+        17877,
+        17879,
+        17881,
+        17883,
+        17885,
+        17887,
+        17884,
+        17882,
+        17866,
+        17878,
+        17876,
+        17868,
+        17870,
+        17874,
+        17880,
+        17675,
+        17735,
+        17751,
+        17739
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        17846,
+        17848,
+        17850,
+        17852,
+        17854,
+        17856,
+        17858,
+        17860,
+        17862,
+        17864,
+        17867,
+        17869,
+        17871,
+        17873,
+        17875,
+        17877,
+        17879,
+        17881,
+        17883,
+        17885,
+        17884,
+        17882,
+        17866,
+        17878,
+        17876,
+        17868,
+        17870,
+        17874,
+        17880,
+        17675,
+        17735,
+        17751,
+        17739
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        17887
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        17887
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        1861,
+        6248,
+        5651,
+        6838,
+        1149
+      ],
+      "rolling_history_tokens": 49150,
+      "normal_rag_context_tokens": 49220,
+      "full_history_tokens": 223397,
+      "cortext_working_tokens": 478,
+      "cortext_retrieved_tokens": 214,
+      "cortext_context_tokens": 692,
+      "traditional_chat_rag_tokens": 49220,
+      "cortext_latency_ms": 62.619771,
+      "normal_rag_total_latency_ms": 262.339184,
+      "normal_rag_retrieval_latency_ms": 261.00504,
+      "judge_prompt_tokens_estimate": 260543,
+      "media_attachments": {
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    },
+    {
+      "event_index": 9000,
+      "probe_event_index": 9000,
+      "repetition": 0,
+      "query": {
+        "timestamp": 1739253600000,
+        "source_id": "Contact",
+        "modality": "text",
+        "tokens": 23
+      },
+      "winner": "cortext_native",
+      "winner_alias": "A",
+      "failure_reason": "cortext_wins",
+      "winner_reason": "Packet A provides the direct, recent dialogue regarding the user's specific travel plans to Paris and the Musee d'Orsay, which perfectly aligns with the current turn.",
+      "judge_raw": {
+        "winner": "A",
+        "failure_reason": "winner_best_context",
+        "winner_reason": "Packet A provides the direct, recent dialogue regarding the user's specific travel plans to Paris and the Musee d'Orsay, which perfectly aligns with the current turn."
+      },
+      "packet_blinding": {
+        "enabled": true,
+        "real_to_label": {
+          "cortext_native": "A",
+          "full_history_upper_bound": "B",
+          "traditional_chat_rag": "C"
+        },
+        "label_to_real": {
+          "A": "cortext_native",
+          "B": "full_history_upper_bound",
+          "C": "traditional_chat_rag"
+        }
+      },
+      "systems": {
+        "cortext_native": {
+          "judge_key": "A",
+          "context_tokens": 865,
+          "relevance": 5.0,
+          "sufficiency": 5.0,
+          "noise": 0.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "The packet contains the most recent and relevant conversation regarding the user's upcoming trip to Paris and the visit to the Musee d'Orsay."
+        },
+        "traditional_chat_rag": {
+          "judge_key": "C",
+          "context_tokens": 46269,
+          "relevance": 1.0,
+          "sufficiency": 1.0,
+          "noise": 0.0,
+          "temporal_correctness": 3.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "This is a summary packet. While it mentions the user's interests in art and Europe, it is not as specific or current as Packet A."
+        },
+        "full_history_upper_bound": {
+          "judge_key": "B",
+          "context_tokens": 222042,
+          "relevance": 0.0,
+          "sufficiency": 0.0,
+          "noise": 0.0,
+          "temporal_correctness": 5.0,
+          "source_grounding": 5.0,
+          "modality_grounding": 0.0,
+          "reason": "This packet contains unrelated history about sports, watches, and personal details that do not relate to the current turn."
+        }
+      },
+      "cortext_memory_ids": [
+        18896,
+        18898,
+        18900,
+        18902,
+        18904,
+        18906,
+        18908,
+        18911,
+        18913,
+        18915,
+        18917,
+        18919,
+        18921,
+        18923,
+        18925,
+        18928,
+        18930,
+        18932,
+        18934,
+        18936,
+        18938,
+        18844,
+        18542,
+        18931,
+        18924,
+        18922,
+        18929,
+        18914,
+        18899,
+        18893,
+        18920,
+        18916,
+        18912
+      ],
+      "cortext_packet_source": "probe_time_summary_snapshot",
+      "cortext_judged_memory_ids": [
+        18896,
+        18898,
+        18900,
+        18902,
+        18904,
+        18906,
+        18908,
+        18911,
+        18913,
+        18915,
+        18917,
+        18919,
+        18921,
+        18923,
+        18925,
+        18928,
+        18930,
+        18932,
+        18934,
+        18936,
+        18844,
+        18542,
+        18931,
+        18924,
+        18922,
+        18929,
+        18914,
+        18899,
+        18893,
+        18920,
+        18916,
+        18912
+      ],
+      "cortext_current_turn_memory_ids_excluded": [],
+      "cortext_current_turn_working_ids_excluded": [],
+      "cortext_current_turn_retrieved_ids_excluded": [],
+      "cortext_non_prior_memory_ids_excluded": [
+        18938
+      ],
+      "cortext_non_prior_working_ids_excluded": [
+        18938
+      ],
+      "cortext_non_prior_retrieved_ids_excluded": [],
+      "rag_top_k_indices": [
+        7846,
+        5190,
+        4988,
+        5995,
+        0
+      ],
+      "rolling_history_tokens": 49117,
+      "normal_rag_context_tokens": 49165,
+      "full_history_tokens": 235571,
+      "cortext_working_tokens": 661,
+      "cortext_retrieved_tokens": 381,
+      "cortext_context_tokens": 1042,
+      "traditional_chat_rag_tokens": 49165,
+      "cortext_latency_ms": 67.312952,
+      "normal_rag_total_latency_ms": 281.175669,
+      "normal_rag_retrieval_latency_ms": 279.086898,
+      "judge_prompt_tokens_estimate": 260602,
+      "media_attachments": {
+        "cortext_native": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "full_history_upper_bound": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "traditional_chat_rag": {
+          "image": 0,
+          "audio": 0,
+          "skipped": 0
+        },
+        "enabled": false
+      },
+      "judge_adjustments": []
+    }
+  ]
+}

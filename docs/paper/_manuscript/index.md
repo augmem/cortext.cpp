@@ -3397,7 +3397,7 @@ to 480 oldest full-history documents while preserving
 `full_history_prompt_fits_judge_context`; this constrains the
 full-history comparator rather than the Cortext packet. The aggregate
 artifact is
-`eval_runs/release_eval_20260628_gemma4_vllm/current_sparse_1y_system_ggml_20260628T0713Z/judge_vllm_gemma4_12b_awq_131k_rep3.json`.
+`docs/paper/artifacts/release_eval_20260628_gemma4_vllm/current_sparse_1y_system_ggml_20260628T0713Z/judge_vllm_gemma4_12b_awq_131k_rep3.json`.
 
 ### Hosted Meta MSC Frontier-Judge Probe
 
@@ -3514,7 +3514,7 @@ across Cortext, full history, and compaction. It does not support a
 completed sufficiency-match claim: mean sufficiency was lower for
 Cortext (4.41) than traditional chat+RAG (4.67) and the hosted
 compaction rollup baseline (4.63). The aggregate artifact is
-`eval_runs/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
+`docs/paper/artifacts/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
 
 ### 128k RAG-Ablation Probe
 
@@ -3630,7 +3630,7 @@ both probe majority (6/9) and row count (19/27) while substantially
 reducing context and judged noise against retrieval-only,
 rolling-context, hybrid RAG, and compaction-style packet variants. The
 aggregate artifact is
-`eval_runs/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
+`docs/paper/artifacts/msc_rag_ablation_128k_gpt55_20260630T_actual/judge_openai_gpt55_rag_ablation_128k.json`.
 
 ### Local Temporal-Scoring Fix A/B
 
@@ -3702,9 +3702,9 @@ and retrieved items during ingest fell from 116 to 113. The result is
 too small for a release-quality quality verdict, but it is strong enough
 to prevent claiming the temporal fix as an MSC-quality win without a
 larger frozen-probe rerun. Artifacts:
-`eval_runs/msc_gemma4_temporal_baseline_20260701T200553Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.json`
+`docs/paper/artifacts/msc_gemma4_temporal_baseline_20260701T200553Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.json`
 and
-`eval_runs/msc_gemma4_temporal_fix_20260701T204155Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.json`.
+`docs/paper/artifacts/msc_gemma4_temporal_fix_20260701T204155Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.json`.
 
 ## Research-Branch Ablations and Negative Results
 
@@ -4152,7 +4152,7 @@ full-stack release stress verdict: at a horizon where windowed
 strategies compact or discard old context, Cortext stays competitive
 with the full-history upper bound while spending roughly two orders of
 magnitude less context than chat RAG. The artifact is
-`eval_runs/replay_v8_context_blowout/judge_gemma4_12b_local_context128_prioronly.json`.
+`docs/paper/artifacts/replay_v8_context_blowout/judge_gemma4_12b_local_context128_prioronly.json`.
 
 ## Experimental Interpretation
 
@@ -4482,7 +4482,7 @@ saved baseline. At 1,000-event progress checkpoints,
 31.4-323.5 ms in the baseline. Across the 9 judged probe turns,
 `GraphRetrieve.total` was 21.8-28.6 ms after optimization versus
 81.6-303.6 ms in the baseline. The verification artifact is
-`build/graph_profile/full_msc_verify_final/summary.json`.
+`docs/paper/artifacts/graph_profile/full_msc_verify_final/summary_slim.json`.
 
 ## Verification Gates
 

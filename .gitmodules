@@ -1,12 +1,3 @@
-[submodule "third_party/sqlite-vec"]
-	path = third_party/sqlite-vec
-	url = https://github.com/asg017/sqlite-vec
-[submodule "third_party/sqlite"]
-	path = third_party/sqlite
-	url = https://github.com/sqlite/sqlite.git
-[submodule "third_party/sqlite-objstore"]
-	path = third_party/sqlite-objstore
-	url = https://github.com/augmem/sqlite-objstore.git
 [submodule "third_party/planum.cpp"]
 	path = third_party/planum.cpp
 	url = https://github.com/augmem/planum.cpp.git
