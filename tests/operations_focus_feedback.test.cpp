@@ -14,35 +14,49 @@ using cortext::operations::InitializeFocusPriors;
 namespace
 {
 
-static OperationContext
-MakeContext (double focus, double stability)
+Signal
+MakeSignal ()
 {
   Signal s;
   s.embedding = Eigen::VectorXf::Ones (4);
   s.timestamp = 1;
   s.source_id = "test";
+  return s;
+}
 
-  static ProcessorContext pctx;
-  pctx = ProcessorContext (); // reset
-
+SignalProcessor::Config
+MakeConfig (double focus, double stability)
+{
   SignalProcessor::Config cfg;
-
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = focus;
   cfg.stability = stability;
-
-  OperationContext ctx (s, pctx, cfg);
-  InitializeFocusPriors init;
-  init.Execute (ctx, cortext::testing::GetNullTransaction ());
-  return ctx;
+  return cfg;
 }
+
+struct FocusFeedbackFixture
+{
+  Signal signal;
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  OperationContext ctx;
+
+  FocusFeedbackFixture (double focus, double stability)
+      : signal (MakeSignal ()), pctx (), cfg (MakeConfig (focus, stability)),
+        ctx (signal, pctx, cfg)
+  {
+    InitializeFocusPriors init;
+    init.Execute (ctx, cortext::testing::GetNullTransaction ());
+  }
+};
 
 } // namespace
 
 TEST_CASE ("Alg15 positive contextual gain boosts relevance and narrows width",
            "[operations][focus_feedback]")
 {
-  auto ctx = MakeContext (0.8, 0.5);
+  FocusFeedbackFixture fixture (0.8, 0.5);
+  auto &ctx = fixture.ctx;
   auto &pctx = ctx.GetProcessorContext ();
 
   const double prev_wr = pctx.weight_relevance;
@@ -65,7 +79,8 @@ TEST_CASE (
     "Alg15 non-positive gain widens attention, leaves relevance unchanged",
     "[operations][focus_feedback]")
 {
-  auto ctx = MakeContext (0.7, 0.5);
+  FocusFeedbackFixture fixture (0.7, 0.5);
+  auto &ctx = fixture.ctx;
   auto &pctx = ctx.GetProcessorContext ();
 
   const double prev_wr = pctx.weight_relevance;

@@ -284,8 +284,8 @@ TEST_CASE ("Alg21 memory-scoped RIF recovery survives embedding fork",
   ProcessorContext pctx;
   pctx.recent_context_embeddings.push_back (ctx_vec);
   pctx.retrieval_suppression_memory_ids.insert (100LL);
-  OperationContext ctx (MakeSignal (ctx_vec, 1'000'000), pctx, cfg,
-                        store.get ());
+  auto signal = MakeSignal (ctx_vec, 1'000'000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetRetrievedMemoryEmbeddings (
       std::unordered_map<long long, Eigen::VectorXf>{ { 421LL, ctx_vec } });
   ctx.SetRetrievedMemoryCandidates (

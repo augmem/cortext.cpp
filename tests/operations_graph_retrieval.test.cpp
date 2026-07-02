@@ -462,8 +462,8 @@ TEST_CASE ("Graph retrieval returns refreshed output after reconstruction",
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   ProcessorContext pctx;
-  OperationContext ctx (MakeSignal (query, 2'000'000), pctx, cfg,
-                        store.get ());
+  auto signal = MakeSignal (query, 2'000'000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetShouldCheckRetrieval (true);
   ctx.SetWriteExclusionTs (2'000'000);
 

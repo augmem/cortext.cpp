@@ -19,7 +19,7 @@ jobs:
         sudo apt-get install -y cmake build-essential pkg-config libsqlite3-dev
 
     - name: Configure CMake
-      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON
 
     - name: Build
       run: cmake --build build -j8
@@ -38,10 +38,61 @@ jobs:
         docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel bash -lc '
           pacman -Syu --noconfirm cmake make gcc pkgconf sqlite git
           git config --global --add safe.directory /workspace
-          cmake -S . -B build-arch -DCMAKE_BUILD_TYPE=Release -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+          cmake -S . -B build-arch -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON
           cmake --build build-arch -j"$(nproc)"
           ./build-arch/tests/cortext_tests "~[aist]" --reporter compact
         '
+
+  ubuntu-aist:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential pkg-config libsqlite3-dev
+
+    - name: Cache AIST q8_0 model
+      uses: actions/cache@v4
+      with:
+        path: models/AIST-87M-GGUF/AIST-87M_q8_0.gguf
+        key: aist-q8_0-bf4c49954eccc65183f1a97e44606e86c7ee5a4fea500457124b687a3ec97898
+
+    - name: Ensure AIST q8_0 model
+      run: python3 scripts/download_aist_model.py --models-dir models --quant q8_0
+
+    - name: Configure CMake
+      run: cmake -S . -B build-aist -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+
+    - name: Build
+      run: cmake --build build-aist -j8
+
+    - name: Test AIST
+      run: ./build-aist/tests/cortext_tests '[aist]' --reporter compact
+
+  ubuntu-sanitizers:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential pkg-config libsqlite3-dev
+
+    - name: Configure CMake
+      run: cmake -S . -B build-sanitizers -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON -DCORTEXT_ENABLE_ASAN=ON -DCORTEXT_ENABLE_UBSAN=ON
+
+    - name: Build
+      run: cmake --build build-sanitizers -j8
+
+    - name: Test
+      env:
+        ASAN_OPTIONS: detect_leaks=0
+      run: ./build-sanitizers/tests/cortext_tests '~[aist]' --reporter compact
 
   wasm-browser:
     runs-on: ubuntu-latest
