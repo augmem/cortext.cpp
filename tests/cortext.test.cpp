@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -237,6 +238,87 @@ TEST_CASE ("Cortext media overloads validate source media before encoding",
   REQUIRE_THROWS_AS (
       ctx->ProcessImage (pixel, 1, 1, 3, "stream/source", missing_data),
       std::invalid_argument);
+}
+
+TEST_CASE ("Cortext media ingress validates processing inputs before use",
+           "[cortext][media][safety][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_audio_enabled = false;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  cortext::Cortext::Media empty_media{};
+  const std::uint8_t pixel[3] = { 0, 0, 0 };
+  std::vector<float> pcm (16000, 0.01f);
+
+  SECTION ("ProcessAudio rejects NULL PCM")
+  {
+    REQUIRE_THROWS_AS (ctx->ProcessAudio (nullptr, 1, "stream/source"),
+                       std::invalid_argument);
+  }
+
+  SECTION ("ProcessAudio media overload rejects NULL PCM")
+  {
+    REQUIRE_THROWS_AS (
+        ctx->ProcessAudio (nullptr, 1, "stream/source", empty_media),
+        std::invalid_argument);
+  }
+
+  SECTION ("ProcessImage rejects NULL data")
+  {
+    REQUIRE_THROWS_AS (
+        ctx->ProcessImage (nullptr, 1, 1, 3, "stream/source"),
+        std::invalid_argument);
+  }
+
+  SECTION ("ProcessImage rejects non-positive dimensions")
+  {
+    REQUIRE_THROWS_AS (
+        ctx->ProcessImage (pixel, 0, 1, 3, "stream/source"),
+        std::invalid_argument);
+    REQUIRE_THROWS_AS (
+        ctx->ProcessImage (pixel, 1, -1, 3, "stream/source"),
+        std::invalid_argument);
+    REQUIRE_THROWS_AS (
+        ctx->ProcessImage (pixel, 1, 1, 0, "stream/source"),
+        std::invalid_argument);
+  }
+
+  SECTION ("ProcessImage media overload rejects invalid dimensions")
+  {
+    REQUIRE_THROWS_AS (
+        ctx->ProcessImage (pixel, 1, 1, -1, "stream/source", empty_media),
+        std::invalid_argument);
+  }
+
+  SECTION ("replay audio ingress rejects NULL PCM")
+  {
+    REQUIRE_THROWS_AS (
+        cortext::internal::ReplayIngress::ProcessAudioAt (
+            *ctx, nullptr, 1, "stream/replay", 1573184762000ULL),
+        std::invalid_argument);
+  }
+
+  SECTION ("replay image ingress rejects invalid image input")
+  {
+    REQUIRE_THROWS_AS (
+        cortext::internal::ReplayIngress::ProcessImageAt (
+            *ctx, pixel, 1, 0, 3, "stream/replay", 1573184762000ULL),
+        std::invalid_argument);
+  }
+
+  SECTION ("valid inputs still pass validation")
+  {
+    REQUIRE_NOTHROW (ctx->ProcessAudio (pcm.data (), pcm.size (),
+                                        "stream/source"));
+    REQUIRE_NOTHROW (ctx->ProcessImage (pixel, 1, 1, 3, "stream/source"));
+  }
 }
 
 TEST_CASE ("timestamped replay persists working memory source timestamps",

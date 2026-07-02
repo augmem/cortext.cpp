@@ -146,6 +146,34 @@ RawImageMime (int width, int height, int channels)
 }
 #endif
 
+#if !defined(CORTEXT_DISABLE_AUDIO)
+void
+ValidateAudioInput (const float *pcm)
+{
+  if (pcm == nullptr)
+    {
+      throw std::invalid_argument ("pcm must not be NULL");
+    }
+}
+#endif
+
+#if !defined(CORTEXT_DISABLE_IMAGE)
+void
+ValidateImageInput (const std::uint8_t *data, int width, int height,
+                    int channels)
+{
+  if (data == nullptr)
+    {
+      throw std::invalid_argument ("data must not be NULL");
+    }
+  if (width <= 0 || height <= 0 || channels <= 0)
+    {
+      throw std::invalid_argument (
+          "width, height, and channels must be positive");
+    }
+}
+#endif
+
 #if !defined(CORTEXT_DISABLE_AUDIO) || !defined(CORTEXT_DISABLE_IMAGE)
 void
 ValidateMedia (const Cortext::Media &media)
@@ -2000,6 +2028,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   (void)retention;
   ThrowAudioSupportDisabled ();
 #else
+  ValidateAudioInput (pcm);
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
@@ -2076,6 +2105,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   (void)retention;
   ThrowAudioSupportDisabled ();
 #else
+  ValidateAudioInput (pcm);
   ValidateMedia (media);
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   const auto total_start = std::chrono::steady_clock::now ();
@@ -2149,6 +2179,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   (void)retention;
   ThrowImageSupportDisabled ();
 #else
+  ValidateImageInput (data, width, height, channels);
   telemetry::ScopedSpan span ("cortext.api.process_image");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
@@ -2226,6 +2257,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   (void)retention;
   ThrowImageSupportDisabled ();
 #else
+  ValidateImageInput (data, width, height, channels);
   ValidateMedia (media);
   telemetry::ScopedSpan span ("cortext.api.process_image");
   const auto total_start = std::chrono::steady_clock::now ();
@@ -2306,10 +2338,7 @@ Cortext::EmbedAudio (const float *pcm, std::size_t num_samples) const
   (void)num_samples;
   ThrowAudioSupportDisabled ();
 #else
-  if (pcm == nullptr)
-    {
-      throw std::invalid_argument ("pcm must not be NULL");
-    }
+  ValidateAudioInput (pcm);
   std::vector<float> embedding;
   telemetry::ScopedSpan span ("cortext.api.embed_audio");
   impl_->encoder->EncodeAudio (pcm, num_samples, embedding);
@@ -2335,15 +2364,7 @@ Cortext::EmbedImage (const std::uint8_t *data, int width, int height,
   (void)channels;
   ThrowImageSupportDisabled ();
 #else
-  if (data == nullptr)
-    {
-      throw std::invalid_argument ("data must not be NULL");
-    }
-  if (width <= 0 || height <= 0 || channels <= 0)
-    {
-      throw std::invalid_argument (
-          "width, height, and channels must be positive");
-    }
+  ValidateImageInput (data, width, height, channels);
   std::vector<float> embedding;
   telemetry::ScopedSpan span ("cortext.api.embed_image");
   impl_->encoder->EncodeImage (data, width, height, channels, embedding);
@@ -2437,6 +2458,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   (void)retention;
   ThrowAudioSupportDisabled ();
 #else
+  ValidateAudioInput (pcm);
   telemetry::ScopedSpan span ("cortext.internal.replay.process_audio_at");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
@@ -2513,6 +2535,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   (void)retention;
   ThrowImageSupportDisabled ();
 #else
+  ValidateImageInput (data, width, height, channels);
   telemetry::ScopedSpan span ("cortext.internal.replay.process_image_at");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision = cortext.impl_->signal_filter.EvaluateImage (
