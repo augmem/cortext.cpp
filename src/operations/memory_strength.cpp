@@ -16,6 +16,7 @@
 #include <cmath>
 #include <functional>
 #include <optional>
+#include <set>
 #include <typeinfo>
 #include <unordered_set>
 #include <vector>
@@ -72,6 +73,91 @@ ForEachChunk (std::size_t count, const std::function<void (std::size_t,
           = std::min (count, begin + kEvictionSqlChunkSize);
       fn (begin, end);
     }
+}
+
+std::vector<std::vector<unsigned char> >
+SelectEvictionBlobIds (Transaction &tx,
+                       const std::vector<long long> &memory_ids)
+{
+  std::vector<std::vector<unsigned char> > blob_ids;
+  std::set<std::vector<unsigned char> > seen_blob_ids;
+  ForEachChunk (memory_ids.size (), [&] (std::size_t begin,
+                                         std::size_t end) {
+    const std::string placeholders
+        = eviction_policy::MakePlaceholders (end - begin);
+    std::vector<std::any> params;
+    params.reserve ((end - begin) * 3);
+    AppendParams (params, memory_ids, begin, end);
+    AppendParams (params, memory_ids, begin, end);
+    AppendParams (params, memory_ids, begin, end);
+    auto rows = tx.Execute (
+        "SELECT blob_id FROM memories "
+        "WHERE memory_id IN (" + placeholders + ") "
+        "  AND blob_id IS NOT NULL "
+        "UNION "
+        "SELECT blob_id FROM signals "
+        "WHERE memory_id IN (" + placeholders + ") "
+        "  AND blob_id IS NOT NULL "
+        "UNION "
+        "SELECT blob_id FROM memory_reconstructions "
+        "WHERE memory_id IN (" + placeholders + ") "
+        "  AND blob_id IS NOT NULL",
+        params);
+    for (const auto &row : rows)
+      {
+        const auto it = row.find ("blob_id");
+        if (it == row.end ())
+          {
+            continue;
+          }
+        auto blob_id = store::BlobFromAny (it->second);
+        if (!blob_id.empty () && seen_blob_ids.insert (blob_id).second)
+          {
+            blob_ids.push_back (std::move (blob_id));
+          }
+      }
+  });
+  return blob_ids;
+}
+
+bool
+ObjstoreBlobStillReferenced (Transaction &tx,
+                             const std::vector<unsigned char> &blob_id)
+{
+  auto rows = tx.Execute (
+      "SELECT ("
+      "  EXISTS(SELECT 1 FROM memories WHERE blob_id = ?) "
+      "  OR EXISTS(SELECT 1 FROM signals WHERE blob_id = ?) "
+      "  OR EXISTS(SELECT 1 FROM memory_reconstructions WHERE blob_id = ?)"
+      ") AS referenced",
+      { blob_id, blob_id, blob_id });
+  if (rows.empty () || rows[0].count ("referenced") == 0)
+    {
+      return false;
+    }
+  return store::AnyToLongLong (rows[0].at ("referenced")).value_or (0) != 0;
+}
+
+long long
+DeleteOrphanedObjstoreBlobs (
+    Transaction &tx, const std::vector<std::vector<unsigned char> > &blob_ids)
+{
+  long long deleted = 0;
+  for (const auto &blob_id : blob_ids)
+    {
+      if (ObjstoreBlobStillReferenced (tx, blob_id))
+        {
+          continue;
+        }
+      auto rows = tx.Execute ("SELECT objstore_delete(?1) AS deleted",
+                              { blob_id });
+      if (!rows.empty () && rows[0].count ("deleted") != 0
+          && store::AnyToLongLong (rows[0].at ("deleted")).value_or (0) != 0)
+        {
+          ++deleted;
+        }
+    }
+  return deleted;
 }
 
 const std::any *
@@ -610,6 +696,13 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       "MemoryStrength.eviction_select_reconstruction_embeddings_sql",
       ElapsedMillis (reconstruction_embedding_select_start));
 
+  const auto objstore_blob_select_start = SteadyClock::now ();
+  const auto evictable_blob_ids
+      = SelectEvictionBlobIds (tx, evictable_memory_ids);
+  context.AddOperationTiming (
+      "MemoryStrength.eviction_select_objstore_blobs_sql",
+      ElapsedMillis (objstore_blob_select_start));
+
   const auto eviction_insert_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),
                 [&] (std::size_t begin, std::size_t end) {
@@ -707,6 +800,12 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   context.AddOperationTiming ("MemoryStrength.eviction_delete_memories_sql",
                               ElapsedMillis (memory_delete_start));
 
+  const auto objstore_delete_start = SteadyClock::now ();
+  const long long evicted_blob_count
+      = DeleteOrphanedObjstoreBlobs (tx, evictable_blob_ids);
+  context.AddOperationTiming ("MemoryStrength.eviction_delete_objstore_blobs_sql",
+                              ElapsedMillis (objstore_delete_start));
+
   const auto embedding_delete_start = SteadyClock::now ();
   ForEachChunk (evictable_embedding_ids.size (),
                 [&] (std::size_t begin, std::size_t end) {
@@ -742,7 +841,9 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                          telemetry::Attribute::Int64 ("storage_used_bytes",
                                                       frontier.storage_used_bytes),
                          telemetry::Attribute::Int64 ("storage_threshold_bytes",
-                                                      frontier.storage_threshold_bytes) });
+                                                      frontier.storage_threshold_bytes),
+                         telemetry::Attribute::Int64 ("evicted_blob_count",
+                                                      evicted_blob_count) });
 }
 
 } // namespace cortext::operations

@@ -7,6 +7,7 @@
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/utils.hpp>
 
 
 using cortext::OperationContext;
@@ -95,6 +96,29 @@ MakeSignal (int dim, uint64_t ts = 1)
   s.timestamp = ts;
   s.source_id = "test";
   return s;
+}
+
+std::vector<unsigned char>
+PutObjstoreBlob (cortext::Store &store,
+                 const std::vector<unsigned char> &payload)
+{
+  auto rows = store.Execute ("SELECT objstore_put(?1) AS id", { payload });
+  REQUIRE (rows.size () == 1);
+  REQUIRE (rows[0].count ("id") == 1);
+  auto blob_id = cortext::store::BlobFromAny (rows[0].at ("id"));
+  REQUIRE_FALSE (blob_id.empty ());
+  return blob_id;
+}
+
+long long
+CountObjstoreBlob (cortext::Store &store,
+                   const std::vector<unsigned char> &blob_id)
+{
+  auto rows = store.Execute (
+      "SELECT COUNT(*) AS cnt FROM objstore_data WHERE id = ?",
+      { blob_id });
+  REQUIRE (rows.size () == 1);
+  return std::any_cast<long long> (rows[0].at ("cnt"));
 }
 
 } // namespace
@@ -643,6 +667,134 @@ TEST_CASE (
       "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
       { 9900LL });
   REQUIRE (std::any_cast<long long> (embedding_rows[0].at ("cnt")) == 1LL);
+}
+
+TEST_CASE (
+    "Algorithm 18 deletes orphan objstore blobs for evicted memories",
+    "[op18][memory_strength][eviction]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> vec (kEmbeddingDim, 0.0f);
+  vec[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 9900LL, vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 9903LL, vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 9901LL, 9900LL, "weak",
+                                  "LONG_TERM", 0.1, 1000);
+
+  const auto memory_blob = PutObjstoreBlob (
+      *store, std::vector<unsigned char>{ 1, 2, 3, 4 });
+  const auto signal_blob = PutObjstoreBlob (
+      *store, std::vector<unsigned char>{ 5, 6, 7, 8 });
+  const auto reconstruction_blob = PutObjstoreBlob (
+      *store, std::vector<unsigned char>{ 9, 10, 11, 12 });
+  store->Execute ("UPDATE memories SET blob_id = ? WHERE memory_id = ?",
+                  { memory_blob, 9901LL });
+  store->Execute (
+      "INSERT INTO signals("
+      "signal_id, memory_id, source_id, embedding_id, blob_id, timestamp, "
+      "modality, mime, serial_position, created_at) "
+      "VALUES(?, ?, 'weak', ?, ?, ?, 'text', 'text/plain', 0, ?)",
+      { 9904LL, 9901LL, 9900LL, signal_blob, 1100LL, 1100LL });
+  store->Execute (
+      "INSERT INTO memory_reconstructions("
+      "reconstruction_id, memory_id, embedding_id, blob_id, created_at, "
+      "uncertainty, trigger, source_confidence, context_similarity) "
+      "VALUES(?, ?, ?, ?, ?, ?, 'retrieval', ?, ?)",
+      { 9905LL, 9901LL, 9903LL, reconstruction_blob, 1200LL, 0.1, 0.9,
+        0.8 });
+
+  REQUIRE (CountObjstoreBlob (*store, memory_blob) == 1LL);
+  REQUIRE (CountObjstoreBlob (*store, signal_blob) == 1LL);
+  REQUIRE (CountObjstoreBlob (*store, reconstruction_blob) == 1LL);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::operations::eviction::EvictionPolicyOverride override;
+  override.consolidation_gate_enabled = false;
+  override.periphery_cutoff = 0.5;
+  cortext::operations::eviction::ScopedEvictionPolicyOverride scoped_override (
+      override);
+
+  cortext::ProcessorContext pctx;
+  auto signal = MakeSignal (4, 2000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+
+  cortext::operations::UpdateMemoryStrength update_strength;
+  auto tx = store->Begin ();
+  update_strength.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto memory_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
+      { 9901LL });
+  REQUIRE (std::any_cast<long long> (memory_rows[0].at ("cnt")) == 0LL);
+
+  REQUIRE (CountObjstoreBlob (*store, memory_blob) == 0LL);
+  REQUIRE (CountObjstoreBlob (*store, signal_blob) == 0LL);
+  REQUIRE (CountObjstoreBlob (*store, reconstruction_blob) == 0LL);
+}
+
+TEST_CASE (
+    "Algorithm 18 keeps objstore blobs referenced by surviving memories",
+    "[op18][memory_strength][eviction]")
+{
+  auto unique_store = cortext::SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> vec (kEmbeddingDim, 0.0f);
+  vec[0] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 9910LL, vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 9911LL, vec, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 9912LL, 9910LL, "weak",
+                                  "LONG_TERM", 0.1, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 9913LL, 9911LL, "strong",
+                                  "LONG_TERM", 0.9, 1000);
+
+  const auto shared_blob = PutObjstoreBlob (
+      *store, std::vector<unsigned char>{ 21, 22, 23, 24 });
+  store->Execute ("UPDATE memories SET blob_id = ? WHERE memory_id IN (?, ?)",
+                  { shared_blob, 9912LL, 9913LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  cortext::operations::eviction::EvictionPolicyOverride override;
+  override.consolidation_gate_enabled = false;
+  override.periphery_cutoff = 0.5;
+  cortext::operations::eviction::ScopedEvictionPolicyOverride scoped_override (
+      override);
+
+  cortext::ProcessorContext pctx;
+  auto signal = MakeSignal (4, 2000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+
+  cortext::operations::UpdateMemoryStrength update_strength;
+  auto tx = store->Begin ();
+  update_strength.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto weak_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
+      { 9912LL });
+  REQUIRE (std::any_cast<long long> (weak_rows[0].at ("cnt")) == 0LL);
+
+  auto strong_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM memories WHERE memory_id = ?",
+      { 9913LL });
+  REQUIRE (std::any_cast<long long> (strong_rows[0].at ("cnt")) == 1LL);
+
+  REQUIRE (CountObjstoreBlob (*store, shared_blob) == 1LL);
 }
 
 TEST_CASE (

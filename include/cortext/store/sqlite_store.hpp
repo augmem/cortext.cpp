@@ -190,7 +190,7 @@ public:
   void Close () override;
 
   /// @brief Trigger WAL checkpoint.
-  /// @param full If true, use RESTART mode (waits for readers);
+  /// @param full If true, use TRUNCATE mode (waits for readers and shrinks WAL);
   /// otherwise PASSIVE (non-blocking).
   void Checkpoint (bool full = false);
 
