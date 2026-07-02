@@ -2,6 +2,7 @@
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/processor.hpp>
+#include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 
@@ -34,6 +35,22 @@ struct RecordOrderOp : IOperation
 
   std::vector<int> *order;
   int id = 0;
+};
+
+struct CaptureAccumulatorCountOp : IOperation
+{
+  explicit CaptureAccumulatorCountOp (std::size_t *count) : count (count) {}
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    if (count)
+      {
+        *count = ctx.GetProcessorContext ().accumulator_states.size ();
+      }
+  }
+
+  std::size_t *count;
 };
 
 TEST_CASE ("SignalProcessor processes and flushes to SQLite", "[processor]")
@@ -88,4 +105,33 @@ TEST_CASE ("SignalProcessor executes pipeline in order", "[processor][order]")
   proc.Process (s);
 
   REQUIRE (order == std::vector<int> { 1, 2, 3 });
+}
+
+TEST_CASE ("SignalProcessor treats persisted accumulators as volatile",
+           "[processor][accumulator]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  cortext::testing::InitializeCoreSchema (*store);
+  store->Execute (
+      "INSERT INTO accumulators(source_id, n, t_start, last_signal_ts) "
+      "VALUES('stale/source', 3, 1000, 2000)",
+      {});
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  std::size_t accumulator_count = 999;
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<CaptureAccumulatorCountOp> (&accumulator_count));
+
+  SignalProcessor proc (cfg, store, std::move (pipeline));
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (2);
+  s.timestamp = 3000;
+  s.source_id = "test";
+
+  proc.Process (s);
+
+  REQUIRE (accumulator_count == 0);
 }

@@ -758,115 +758,6 @@ BlobToEigen (const std::any &blob)
   return result;
 }
 
-inline std::vector<char>
-SerializeEmbeddingWindow (const std::vector<Eigen::VectorXf> &window)
-{
-  std::uint32_t dim = 0;
-  std::uint32_t count = 0;
-  for (const auto &emb : window)
-    {
-      if (emb.size () > 0)
-        {
-          dim = static_cast<std::uint32_t> (emb.size ());
-          break;
-        }
-    }
-  if (dim == 0)
-    {
-      return {};
-    }
-
-  std::vector<float> data;
-  data.reserve (window.size () * static_cast<size_t> (dim));
-  for (const auto &emb : window)
-    {
-      if (emb.size () != static_cast<Eigen::Index> (dim))
-        {
-          continue;
-        }
-      data.insert (data.end (), emb.data (), emb.data () + emb.size ());
-      ++count;
-    }
-
-  if (count == 0)
-    {
-      return {};
-    }
-
-  const size_t header_bytes = sizeof (std::uint32_t) * 2;
-  const size_t payload_bytes = static_cast<size_t> (count) * dim * sizeof (float);
-  std::vector<char> blob (header_bytes + payload_bytes);
-  std::memcpy (blob.data (), &count, sizeof (std::uint32_t));
-  std::memcpy (blob.data () + sizeof (std::uint32_t), &dim, sizeof (std::uint32_t));
-  std::memcpy (blob.data () + header_bytes, data.data (), payload_bytes);
-  return blob;
-}
-
-inline std::vector<Eigen::VectorXf>
-DeserializeEmbeddingWindow (const std::any &blob)
-{
-  const char *data = nullptr;
-  size_t size = 0;
-
-  if (blob.type () == typeid (std::vector<char>))
-    {
-      const auto &vec = std::any_cast<const std::vector<char> &> (blob);
-      data = vec.data ();
-      size = vec.size ();
-    }
-  else if (blob.type () == typeid (std::vector<unsigned char>))
-    {
-      const auto &vec
-          = std::any_cast<const std::vector<unsigned char> &> (blob);
-      data = reinterpret_cast<const char *> (vec.data ());
-      size = vec.size ();
-    }
-
-  if (!data || size < sizeof (std::uint32_t) * 2)
-    {
-      return {};
-    }
-
-  std::uint32_t count = 0;
-  std::uint32_t dim = 0;
-  std::memcpy (&count, data, sizeof (std::uint32_t));
-  std::memcpy (&dim, data + sizeof (std::uint32_t), sizeof (std::uint32_t));
-
-  if (count == 0 || dim == 0)
-    {
-      return {};
-    }
-
-  const size_t header_bytes = sizeof (std::uint32_t) * 2;
-  const size_t expected = header_bytes + static_cast<size_t> (count) * dim * sizeof (float);
-  if (size < header_bytes + sizeof (float) * dim)
-    {
-      return {};
-    }
-
-  if (size < expected)
-    {
-      const size_t available = size - header_bytes;
-      count = static_cast<std::uint32_t> (available / (dim * sizeof (float)));
-      if (count == 0)
-        {
-          return {};
-        }
-    }
-
-  std::vector<Eigen::VectorXf> window;
-  window.reserve (count);
-  const char *cursor = data + header_bytes;
-  for (std::uint32_t i = 0; i < count; ++i)
-    {
-      Eigen::VectorXf emb (static_cast<Eigen::Index> (dim));
-      std::memcpy (emb.data (), cursor, static_cast<size_t> (dim) * sizeof (float));
-      cursor += static_cast<size_t> (dim) * sizeof (float);
-      window.push_back (std::move (emb));
-    }
-  return window;
-}
-
 // Serialize blender P matrix (2D vector of doubles) to flat float vector
 inline std::vector<float>
 SerializeMatrix (const std::vector<std::vector<double> > &mat)
@@ -1897,92 +1788,6 @@ LoadSoftAnchors (Store &store, ProcessorContext &ctx)
     }
 }
 
-// v2 Schema: Load accumulators from ACCUMULATORS table (renamed from accumulator_state)
-void
-LoadAccumulators (Store &store, ProcessorContext &ctx)
-{
-  try
-    {
-      auto rows = store.Execute ("SELECT * FROM accumulators");
-      for (const auto &row : rows)
-        {
-          auto source_id_it = row.find ("source_id");
-          if (source_id_it == row.end () || !source_id_it->second.has_value ())
-            continue;
-
-          std::string source_id;
-          if (source_id_it->second.type () == typeid (std::string))
-            source_id = std::any_cast<std::string> (source_id_it->second);
-          else
-            continue;
-
-          AccumulatorState state;
-
-          // v2: Load episode_id (FK to episodes table)
-          state.episode_id = ExtractInt64 (row, "episode_id", 0);
-
-          // Load embeddings
-          auto mu_it = row.find ("mu_acc");
-          if (mu_it != row.end () && mu_it->second.has_value ())
-            state.mu_acc = BlobToEigen (mu_it->second);
-
-          auto c_it = row.find ("c_t");
-          if (c_it != row.end () && c_it->second.has_value ())
-            state.c_t = BlobToEigen (c_it->second);
-
-          auto peak_it = row.find ("e_peak");
-          if (peak_it != row.end () && peak_it->second.has_value ())
-            state.e_peak = BlobToEigen (peak_it->second);
-
-          // Load scalars
-          state.drift_acc = ExtractDouble (row, "drift_acc", 0.0);
-          state.s_sum = ExtractDouble (row, "s_sum", 0.0);
-          state.s_max = ExtractDouble (row, "s_max", 0.0);
-          state.s_emotion_max = ExtractDouble (row, "emo_max", 0.0);
-          state.s_arousal_sum = ExtractDouble (row, "arousal_sum", 0.0);
-          state.n_signals
-              = static_cast<int> (ExtractInt64 (row, "n", 0));
-          state.t_start
-              = static_cast<uint64_t> (ExtractInt64 (row, "t_start", 0));
-          state.last_write_ts
-              = static_cast<uint64_t> (ExtractInt64 (row, "last_write_ts", 0));
-          state.last_signal_ts
-              = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_ts", 0));
-          state.eta_acc = ExtractDouble (row, "eta_acc", 0.0);
-          state.coherence_prev = ExtractDouble (row, "coherence_prev", 0.0);
-          state.drift_accum = ExtractDouble (row, "drift_accum", 0.0);
-          state.drift_at_last_interrupt
-              = ExtractDouble (row, "drift_at_last_interrupt", 0.0);
-          state.drift_acc_pacing
-              = ExtractDouble (row, "drift_acc_pacing", 0.0);
-
-          auto x_last_it = row.find ("x_last_check");
-          if (x_last_it != row.end () && x_last_it->second.has_value ())
-            state.x_last_check = BlobToEigen (x_last_it->second);
-
-          auto prev_it = row.find ("prev_x");
-          if (prev_it != row.end () && prev_it->second.has_value ())
-            state.prev_x = BlobToEigen (prev_it->second);
-
-          auto window_it = row.find ("acc_signals_window");
-          if (window_it != row.end () && window_it->second.has_value ())
-            {
-              state.acc_signals_window
-                  = DeserializeEmbeddingWindow (window_it->second);
-            }
-
-          ctx.accumulator_states[source_id] = std::move (state);
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load accumulators",
-          { telemetry::Attribute::String ("component", "signal_processor"),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-}
-
 } // namespace
 
 SignalProcessor::SignalProcessor (const Config &config,
@@ -2038,7 +1843,8 @@ SignalProcessor::SignalProcessor (const Config &config,
       LoadWorkingMemory (*store_, *context_, config_,
                          now_ms);                                  // From MEMORIES
       LoadSoftAnchors (*store_, *context_);
-      LoadAccumulators (*store_, *context_);                       // From ACCUMULATORS
+      // Accumulators are volatile staging state. Durable memories and working
+      // memory are restored, but unfinished accumulator windows are discarded.
     }
 
   if (!loaded_state && context_)
@@ -2294,7 +2100,6 @@ SignalProcessor::Flush ()
   FinalizeEpisode (tx.get (), nullptr);
   PersistState (*tx);           // v2: Unified state
   PersistWorkingMemory (*tx, true); // v2: To MEMORIES
-  PersistAccumulators (*tx);    // v2: To ACCUMULATORS
   const auto now_ms = clock_->NowMillis ();
   StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
   if (object_tx)
@@ -2386,7 +2191,8 @@ SignalProcessor::FinalizeEpisode (Transaction *tx,
   // at restore time using F/S/T-derived runtime limits. No separate sliding
   // window tables need to be persisted.
   //
-  // Note: State, WM, and Accumulators persisted by caller (Flush/Process)
+  // Note: State and WM are persisted by callers. Accumulators are volatile
+  // staging state; unfinished windows are intentionally discarded on restart.
 
   telemetry::AddCounter ("cortext.episode_commit_total", 1);
   span.SetStatusOk ();
@@ -2944,69 +2750,6 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
   if (all_slots_clean)
     {
       context_->wm_slots_dirty = false;
-    }
-}
-
-// v2 Schema: Persist accumulators to ACCUMULATORS table
-void
-SignalProcessor::PersistAccumulators (Transaction &tx)
-{
-  if (!context_)
-    return;
-
-  // Clear old entries
-  tx.Execute ("DELETE FROM accumulators", {});
-
-  // Insert current accumulator states
-  for (const auto &[source_id, state] : context_->accumulator_states)
-    {
-      // Skip empty/reset accumulators
-      if (state.n_signals == 0 && state.mu_acc.size () == 0)
-        continue;
-
-      std::vector<float> mu_blob;
-      if (state.mu_acc.size () > 0)
-        mu_blob = ToFloatVector (state.mu_acc);
-
-      std::vector<float> peak_blob;
-      if (state.e_peak.size () > 0)
-        peak_blob = ToFloatVector (state.e_peak);
-
-      std::vector<float> ctx_blob;
-      if (state.c_t.size () > 0)
-        ctx_blob = ToFloatVector (state.c_t);
-
-      std::vector<float> last_check_blob;
-      if (state.x_last_check.size () > 0)
-        last_check_blob = ToFloatVector (state.x_last_check);
-
-      std::vector<float> prev_x_blob;
-      if (state.prev_x.size () > 0)
-        prev_x_blob = ToFloatVector (state.prev_x);
-
-      std::vector<char> window_blob;
-      if (!state.acc_signals_window.empty ())
-        {
-          window_blob = SerializeEmbeddingWindow (state.acc_signals_window);
-        }
-
-      tx.Execute (
-          "INSERT INTO accumulators "
-          "(source_id, episode_id, mu_acc, c_t, drift_acc, s_sum, s_max, n, "
-          " e_peak, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, "
-          " drift_acc_pacing, x_last_check, prev_x, acc_signals_window, "
-          " t_start, last_write_ts, last_signal_ts, eta_acc, coherence_prev) "
-          "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, "
-          "?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
-          { source_id, state.episode_id, mu_blob, ctx_blob, state.drift_acc,
-            state.s_sum, state.s_max, static_cast<long long> (state.n_signals),
-            peak_blob, state.s_emotion_max, state.s_arousal_sum,
-            state.drift_accum, state.drift_at_last_interrupt,
-            state.drift_acc_pacing, last_check_blob, prev_x_blob, window_blob,
-            static_cast<long long> (state.t_start),
-            static_cast<long long> (state.last_write_ts),
-            static_cast<long long> (state.last_signal_ts), state.eta_acc,
-            state.coherence_prev });
     }
 }
 

@@ -150,7 +150,6 @@ private:
   void PersistState (Transaction &tx);           // Unified STATE table
   void PersistWorkingMemory (Transaction &tx, bool force = false,
                              OperationContext *op_context = nullptr);
-  void PersistAccumulators (Transaction &tx);    // ACCUMULATORS table
 
   Config config_;
   std::shared_ptr<Clock> clock_;
