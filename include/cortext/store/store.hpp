@@ -62,6 +62,10 @@ public:
 };
 
 /// @brief Protocol for objects that support transactional operations.
+///
+/// Transaction objects are single-owner handles. Implementations are not
+/// required to serialize concurrent calls, so callers must not use the same
+/// Transaction instance from multiple threads without external synchronization.
 class Transaction
 {
 public:
@@ -90,6 +94,11 @@ protected:
 };
 
 /// @brief Database store with transaction support.
+///
+/// Store instances are single-owner handles. Implementations may keep mutable
+/// connection, transaction-stack, and statement-cache state and are not
+/// required to serialize concurrent calls to the same instance. Use one owner
+/// thread, or provide external synchronization if a store must be shared.
 class Store
 {
 public:

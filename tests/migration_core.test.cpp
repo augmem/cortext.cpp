@@ -5,15 +5,75 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/schema.hpp>
 #include <cortext/processor/operation_set.hpp>
+#include <any>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <set>
+#include <string>
+#include <vector>
 
 using namespace cortext;
+
+namespace
+{
+
+class RecordingMigrationStore : public Store
+{
+public:
+    std::vector<std::string> queries;
+    int begin_count = 0;
+
+    std::vector<std::map<std::string, std::any> >
+    Execute(const std::string& query,
+            const std::vector<std::any>& params = {}) override
+    {
+        (void)params;
+        queries.push_back(query);
+        return {};
+    }
+
+    std::unique_ptr<Transaction> Begin() override
+    {
+        ++begin_count;
+        throw StoreError("ApplyMigrations should not call Store::Begin");
+    }
+
+    void Commit() override
+    {
+        queries.push_back("Store::Commit");
+    }
+
+    void Rollback() override
+    {
+        queries.push_back("Store::Rollback");
+    }
+
+    void Close() override
+    {
+    }
+};
+
+} // namespace
 
 namespace cortext::store
 {
 std::set<int64_t> DebugGetAppliedMigrationIdsForTest (Store &store);
+}
+
+TEST_CASE("Migrations lock the full pass before reading applied ids",
+          "[schema][migration]") {
+    RecordingMigrationStore store;
+
+    cortext::store::ApplyMigrations(store);
+
+    REQUIRE(store.begin_count == 0);
+    REQUIRE(store.queries.size() > 3);
+    REQUIRE(store.queries[0] == "BEGIN IMMEDIATE");
+    REQUIRE(store.queries[1].find(
+                "CREATE TABLE IF NOT EXISTS cortext_schema_migrations") == 0);
+    REQUIRE(store.queries[2] == "SELECT id FROM cortext_schema_migrations");
+    REQUIRE(store.queries.back() == "COMMIT");
 }
 
 TEST_CASE("Migrations apply core tables automatically", "[schema][migration]") {

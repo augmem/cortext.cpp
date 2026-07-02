@@ -248,6 +248,12 @@ default, but embedders can own persistence topology.
 - `cortext::Store` and `cortext::Transaction` define the database boundary for
   schema, query, and transactional work. `SQLiteStore` is the built-in
   implementation.
+- Store and transaction instances are single-owner handles: do not call methods
+  concurrently on the same instance unless the caller provides external
+  synchronization. For multiple instances or processes pointed at the same
+  database, use a single writer per database; Cortext does not merge concurrent
+  writer state. Schema migrations take a SQLite `BEGIN IMMEDIATE` write lock up
+  front so concurrent startup cannot race on the applied migration set.
 - `cortext::ObjectStore` and `cortext::ObjectTransaction` define
   content-addressed payload storage. `SqlObjectStore` is the current
   sqlite-objstore-backed implementation over a `Store`.

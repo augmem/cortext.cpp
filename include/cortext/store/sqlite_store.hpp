@@ -143,6 +143,12 @@ private:
 };
 
 /// @brief SQLite database store with transaction support.
+///
+/// SQLiteStore is a single-owner handle. Do not call methods concurrently on
+/// the same instance unless the caller provides external synchronization. The
+/// transaction stack and prepared-statement cache assume serialized access.
+/// Multiple SQLiteStore instances may open the same database, but Cortext's
+/// runtime state model assumes one writer per database.
 class SQLiteStore : public Store
 {
 public:
