@@ -27,15 +27,13 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/sqlite3.h
 
 add_executable(sqlite_lemon tool/lemon.c)
 add_executable(sqlite_mkkeywordhash tool/mkkeywordhash.c)
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/parse.y
-    ${CMAKE_CURRENT_BINARY_DIR}/parse.y
-    COPYONLY
-)
 add_custom_command(
     OUTPUT
         ${CMAKE_CURRENT_BINARY_DIR}/parse.c
         ${CMAKE_CURRENT_BINARY_DIR}/parse.h
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/parse.y
+            ${CMAKE_CURRENT_BINARY_DIR}/parse.y
     COMMAND sqlite_lemon -T${CMAKE_CURRENT_SOURCE_DIR}/tool/lempar.c
             ${CMAKE_CURRENT_BINARY_DIR}/parse.y
     DEPENDS
