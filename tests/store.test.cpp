@@ -7,7 +7,6 @@
 #include <cortext/store/utils.hpp>
 #include <algorithm>
 #include <any>
-#include <ctime>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -24,11 +23,7 @@ class UnsupportedBindParam
 std::string
 create_temp_db ()
 {
-  auto temp_dir = std::filesystem::temp_directory_path ();
-  auto db_path
-      = temp_dir
-        / ("test_store_" + std::to_string (std::time (nullptr)) + ".db");
-  return db_path.string ();
+  return cortext::testing::UniqueTempPath ("test_store_", ".db").string ();
 }
 
 // Helper function to clean up temporary database file

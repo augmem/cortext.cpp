@@ -1,8 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "test_helpers.hpp"
 #include "cortext/core/thread_config.hpp"
 
-#include <cstdlib>
 #include <thread>
 
 TEST_CASE ("Thread configuration", "[core][thread_config]")
@@ -22,8 +22,7 @@ TEST_CASE ("Thread configuration", "[core][thread_config]")
 
   SECTION ("GetEmbedThreadCount returns default when env not set")
   {
-    // Unset the env var to ensure default behavior
-    unsetenv ("CORTEXT_EMBED_THREADS");
+    cortext::testing::ScopedEnvVar embed_threads ("CORTEXT_EMBED_THREADS");
 
     auto threads = cortext::core::GetEmbedThreadCount ();
     REQUIRE (threads >= 1);
@@ -32,8 +31,7 @@ TEST_CASE ("Thread configuration", "[core][thread_config]")
 
   SECTION ("GetInferThreadCount returns default when env not set")
   {
-    // Unset the env var to ensure default behavior
-    unsetenv ("CORTEXT_INFER_THREADS");
+    cortext::testing::ScopedEnvVar infer_threads ("CORTEXT_INFER_THREADS");
 
     auto threads = cortext::core::GetInferThreadCount ();
     REQUIRE (threads >= 1);
@@ -42,51 +40,46 @@ TEST_CASE ("Thread configuration", "[core][thread_config]")
 
   SECTION ("GetEmbedThreadCount respects environment variable")
   {
-    setenv ("CORTEXT_EMBED_THREADS", "8", 1);
+    cortext::testing::ScopedEnvVar embed_threads ("CORTEXT_EMBED_THREADS",
+                                                  "8");
 
     auto threads = cortext::core::GetEmbedThreadCount ();
     CHECK (threads == 8);
-
-    unsetenv ("CORTEXT_EMBED_THREADS");
   }
 
   SECTION ("GetInferThreadCount respects environment variable")
   {
-    setenv ("CORTEXT_INFER_THREADS", "16", 1);
+    cortext::testing::ScopedEnvVar infer_threads ("CORTEXT_INFER_THREADS",
+                                                  "16");
 
     auto threads = cortext::core::GetInferThreadCount ();
     CHECK (threads == 16);
-
-    unsetenv ("CORTEXT_INFER_THREADS");
   }
 
   SECTION ("Invalid env var falls back to default")
   {
-    setenv ("CORTEXT_EMBED_THREADS", "invalid", 1);
+    cortext::testing::ScopedEnvVar embed_threads ("CORTEXT_EMBED_THREADS",
+                                                  "invalid");
 
     auto threads = cortext::core::GetEmbedThreadCount ();
     CHECK (threads == cortext::core::DefaultThreadCount ());
-
-    unsetenv ("CORTEXT_EMBED_THREADS");
   }
 
   SECTION ("Negative env var falls back to default")
   {
-    setenv ("CORTEXT_INFER_THREADS", "-5", 1);
+    cortext::testing::ScopedEnvVar infer_threads ("CORTEXT_INFER_THREADS",
+                                                  "-5");
 
     auto threads = cortext::core::GetInferThreadCount ();
     CHECK (threads == cortext::core::DefaultThreadCount ());
-
-    unsetenv ("CORTEXT_INFER_THREADS");
   }
 
   SECTION ("Zero env var falls back to default")
   {
-    setenv ("CORTEXT_EMBED_THREADS", "0", 1);
+    cortext::testing::ScopedEnvVar embed_threads ("CORTEXT_EMBED_THREADS",
+                                                  "0");
 
     auto threads = cortext::core::GetEmbedThreadCount ();
     CHECK (threads == cortext::core::DefaultThreadCount ());
-
-    unsetenv ("CORTEXT_EMBED_THREADS");
   }
 }
