@@ -34,8 +34,10 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/src/parse.y
             ${CMAKE_CURRENT_BINARY_DIR}/parse.y
-    COMMAND sqlite_lemon -T${CMAKE_CURRENT_SOURCE_DIR}/tool/lempar.c
-            ${CMAKE_CURRENT_BINARY_DIR}/parse.y
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/tool/lempar.c
+            ${CMAKE_CURRENT_BINARY_DIR}/lempar.c
+    COMMAND sqlite_lemon -Tlempar.c parse.y
     DEPENDS
         sqlite_lemon
         ${CMAKE_CURRENT_SOURCE_DIR}/tool/lempar.c
