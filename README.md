@@ -4,13 +4,19 @@
 
 Cortext turns live text, audio, and image streams into durable, source-backed
 memory. It stores compact traces, builds graph associations, retrieves relevant
-context, and runs explicit shallow consolidation in a local C++20 runtime.
+context, and runs explicit shallow consolidation in a local C++20 runtime. It
+began as memory augmentation for a family member living with dementia
+(see [Motivation](#motivation)); the same engine serves long-horizon LLM
+memory.
 
 What makes it different:
 
 - **Closed-loop control:** retrieval outcomes, prediction error, storage
   pressure, and consolidation feedback update three continuous knobs:
   **Focus (F)**, **Sensitivity (S)**, and **Stability (T)**.
+- **Belief revision:** a correction writes a durable `supersedes` edge to the
+  stale memory it replaces; retrieval ranks the correction first and keeps the
+  old fact as demoted history.
 - **Multimodal memory:** text, audio, speech, and image inputs share one AIST
   embedding space.
 - **Small native surface:** C++20 library, stable C ABI, and bindings for
@@ -22,10 +28,13 @@ What makes it different:
 
 ## Results Snapshot
 
-The headline result is a hosted frontier-judge eval on a public Meta
-Multi-Session Chat slice. Cortext won 7 of 9 probes by majority, won 21 of 27
-blind judgment rows, and used 97.97% fewer context tokens than traditional
-chat+RAG.
+Cortext's operating point is a deliberate tradeoff. In a hosted frontier-judge
+eval on a public Meta Multi-Session Chat slice, it gave up a 0.26 gap in mean
+judged sufficiency against traditional chat+RAG (4.41 vs 4.67 on a 5-point
+scale) in exchange for **97.97% fewer context tokens per turn** (998 vs
+49,196) — and the blind judge still preferred Cortext's packets, 7 of 9 probes
+by majority and 21 of 27 judgment rows, because they carried roughly a third
+of the noise (1.85 vs 4.70).
 
 | Eval | Result | Context Cost |
 |---|---|---:|
@@ -34,10 +43,17 @@ chat+RAG.
 | One-year sparse replay, local Gemma4 judge | Cortext 47/93 raw wins | 467 tokens vs 7,447 for chat+RAG |
 | Long-horizon mechanism sweep | No removal improved the stack | Mechanisms retained under the hard-cut rule |
 
-Caveat: this is not a full raw-sufficiency-match claim yet. In the hosted MSC
-run, traditional chat+RAG and compaction scored slightly higher mean
-sufficiency. Cortext's current win is context cost, judge preference, lower
-noise, and a smaller production surface.
+Unlimited context is not the alternative it sounds like: the hosted eval
+includes a full-history upper-bound arm, and it took 1 of 27 blind rows. At
+the separate 18,000-message stress horizon, keeping full history inside a
+131k judge window meant dropping 123,359 items. On device the comparison is
+starker than a tradeoff: a 49k-token prompt per turn costs seconds of prefill
+on local hardware, while Cortext's ~1k-token packets keep retrieval realtime.
+
+Caveat, stated plainly: this is not a raw-sufficiency-match claim yet. In the
+hosted MSC run, traditional chat+RAG and compaction scored slightly higher
+mean sufficiency. Cortext's measured win is context cost, blind-judge
+preference, lower noise, and a smaller production surface.
 
 Full protocols, caveats, and artifacts are in
 `docs/paper/sections/9_experimental.qmd` and the generated manuscript at
@@ -45,7 +61,7 @@ Full protocols, caveats, and artifacts are in
 
 ## Status
 
-Cortext v1.1.4 is the hard-cut production line: the embedding and graph memory
+Cortext v1.1.5 is the hard-cut production line: the embedding and graph memory
 engine, release-hardening fixes, and the current bindings. Older research
 components are preserved in git history but not shipped in the runtime surface.
 
@@ -79,6 +95,41 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_EXAMPLES=ON
 cmake --build build -j
 ./build/examples/topical_chat_analysis/cortext_topical_chat_analysis --help
 ```
+
+## Try It In A Minute
+
+`cortext_cli` (built with `-DCORTEXT_BUILD_EXAMPLES=ON`, output under
+`build/tools/cli/`) is a durable memory you can talk to from the shell.
+Memories persist in the SQLite file across invocations:
+
+```bash
+alias cortext='./build/tools/cli/cortext_cli --db bailey.db --models models'
+
+cortext remember "Bailey is allergic to bee stings and needs Benadryl within 10 minutes."
+cortext remember "The vet appointment for Bailey is on July 12 at 9am with Dr. Okafor."
+
+cortext recall "what should the vet know about the dog?"
+#  1. [#3 · cli/main · ... · rel 0.91] The vet appointment for Bailey is on July 12 at 9am with Dr. Okafor.
+#  2. [#1 · cli/main · ... · rel 0.80] Bailey is allergic to bee stings and needs Benadryl within 10 minutes.
+```
+
+Corrections supersede stale facts instead of competing with them:
+
+```bash
+cortext remember "Correction: the vet appointment was moved to July 14 at 2pm."
+
+cortext recall "when is the vet appointment?" --top 1
+#  1. [#5 · cli/main · ... · rel 0.92] Correction: the vet appointment was moved to July 14 at 2pm.
+```
+
+The July 12 memory is demoted at retrieval but kept as history.
+
+`cortext repl` opens an interactive session (`/recall`, `/consolidate`,
+`/stats`), `remember -` ingests one memory per stdin line for bulk import, and
+`scripts/run-chat.sh` builds and launches the repl in one step. `recall` is
+ephemeral: the query triggers retrieval but is not stored, so queries never
+compete with real memories. Pass `--durable` to also store the query as a
+stream event under the `cli/recall` source.
 
 ## C++ Quickstart
 
@@ -247,7 +298,8 @@ Then open `http://localhost:8000/examples/web/`.
 - `tests/`: Catch2 test suite.
 - `examples/`: benchmarks, demos, and smoke tests.
 - `bindings/`: Python, Go, JavaScript/TypeScript, Dart, and WebAssembly FFI.
-- `scripts/`, `tools/`: experiment harnesses and offline utilities.
+- `scripts/`, `tools/`: the `cortext_cli` tool, experiment harnesses, and
+  offline utilities.
 - `docs/paper/`: manuscript source, generated markdown, and artifacts.
 - `models/`, `third_party/`: local model assets and vendored dependencies.
 
