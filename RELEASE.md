@@ -120,12 +120,12 @@ node -e "const c=require('./bindings/javascript'); if (c.version() !== '1.1.6') 
 ## Zig CLI Gate
 
 ```bash
-zig build -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 test -x zig-out/bin/cortext_cli || test -s zig-out/bin/cortext_cli.exe
-zig build -Dtarget=x86_64-linux-gnu -Dshared=false -Dcli=true -Dfetch-aist-model=false
-zig build -Dtarget=x86_64-windows-gnu -Dshared=false -Dcli=true -Dfetch-aist-model=false
-zig build -Dtarget=x86_64-macos -Dshared=false -Dcli=true -Dfetch-aist-model=false
-zig build -Dtarget=aarch64-macos -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 ```
 
 ## Browser WebAssembly Gate
@@ -147,7 +147,9 @@ deterministic model-free CI where applicable:
 - Debug ASan+UBSan non-AIST job.
 - Browser WebAssembly bundle build.
 - Zig host and Linux cross-build smoke checks.
-- Zig-installed `cortext_cli` checked on Ubuntu, macOS, and Windows runners.
+- Zig-installed native `cortext_cli` checked on Ubuntu and Windows runners;
+  target artifacts checked for Linux, Windows, macOS x86_64, and macOS
+  aarch64.
 
 ## Documentation Gate
 

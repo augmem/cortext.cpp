@@ -143,7 +143,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact: cortext_cli
+          - os: windows-latest
+            artifact: cortext_cli.exe
 
     steps:
     - uses: actions/checkout@v4
@@ -154,13 +158,49 @@ jobs:
 
     - name: Build installable Zig CLI
       shell: bash
-      run: zig build -Dshared=false -Dcli=true -Dfetch-aist-model=false
+      run: zig build -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 
     - name: Check installed CLI artifact
       shell: bash
       run: |
         if [[ "${RUNNER_OS}" == "Windows" ]]; then
-          test -s zig-out/bin/cortext_cli.exe
+          test -s "zig-out/bin/${{ matrix.artifact }}"
         else
-          test -x zig-out/bin/cortext_cli
+          test -x "zig-out/bin/${{ matrix.artifact }}"
         fi
+
+  zig-cli-targets:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            artifact: cortext_cli
+          - target: x86_64-windows-gnu
+            artifact: cortext_cli.exe
+          - target: x86_64-macos
+            artifact: cortext_cli
+          - target: aarch64-macos
+            artifact: cortext_cli
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: 0.15.2
+
+    - name: Build Zig CLI target artifact
+      shell: bash
+      run: |
+        zig build \
+          -Dtarget=${{ matrix.target }} \
+          -Doptimize=ReleaseFast \
+          -Dshared=false \
+          -Dcli=true \
+          -Dfetch-aist-model=false
+
+    - name: Check target CLI artifact
+      shell: bash
+      run: test -s "zig-out/bin/${{ matrix.artifact }}"
