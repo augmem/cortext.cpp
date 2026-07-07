@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const cortext_version = "1.1.6";
+
 const sqlite_header_template = @embedFile("third_party/sqlite/src/sqlite.h.in");
 
 const cortext_cpp_sources = &.{
@@ -121,6 +123,11 @@ const ggml_cpu_sources = &.{
 const ggml_cpu_x86_sources = &.{
     "src/ggml-cpu/arch/x86/quants.c",
     "src/ggml-cpu/arch/x86/repack.cpp",
+};
+
+const ggml_cpu_arm_sources = &.{
+    "src/ggml-cpu/arch/arm/quants.c",
+    "src/ggml-cpu/arch/arm/repack.cpp",
 };
 
 const sqlite_c_sources = &.{
@@ -405,6 +412,7 @@ pub fn build(b: *std.Build) void {
     mod.addCMacro("SQLITE_VEC_OMIT_FS", "1");
     mod.addCMacro("CORTEXT_EMBED_OBJSTORE", "1");
     mod.addCMacro("CORTEXT_DISABLE_OPENTELEMETRY", "1");
+    mod.addCMacro("CORTEXT_VERSION", b.fmt("\"{s}\"", .{cortext_version}));
     mod.addCMacro("BLAKE3_NO_SSE2", "1");
     mod.addCMacro("BLAKE3_NO_SSE41", "1");
     mod.addCMacro("BLAKE3_NO_AVX2", "1");
@@ -465,6 +473,12 @@ pub fn build(b: *std.Build) void {
             });
             if (target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .x86) {
                 addGgmlSources(mod, ggml, ggml_cpu_x86_sources, &.{
+                    "-w",
+                    "-D_GLIBCXX_ASSERTIONS",
+                });
+            }
+            if (target.result.cpu.arch.isArm() or target.result.cpu.arch.isAARCH64()) {
+                addGgmlSources(mod, ggml, ggml_cpu_arm_sources, &.{
                     "-w",
                     "-D_GLIBCXX_ASSERTIONS",
                 });

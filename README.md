@@ -247,11 +247,20 @@ Cortext provides:
 
 Bindings live under `bindings/`:
 
-- `bindings/python`: `ctypes`
+- `bindings/python`: `ctypes` package released as `augmem.cortext`
 - `bindings/go`: `cgo`
 - `bindings/javascript`: Node-API plus TypeScript declarations
 - `bindings/dart`: `dart:ffi`
 - `bindings/wasm`: browser ES-module wrapper over the WebAssembly C ABI
+
+Build the Python release wheel with bundled Zig shared libraries for Linux,
+macOS, and Windows on x86_64 and aarch64:
+
+```bash
+python scripts/build_python_package.py
+```
+
+Set `ZIG=/path/to/zig` or pass `--zig /path/to/zig` when Zig is not on `PATH`.
 
 Build the shared library for FFI consumers:
 

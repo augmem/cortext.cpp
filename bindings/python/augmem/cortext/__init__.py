@@ -4,6 +4,7 @@ import ctypes
 import ctypes.util
 import json
 import os
+import platform
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
@@ -287,12 +288,61 @@ class ObjectStoreProvider:
         pass
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+_SUPPORTED_NATIVE_TARGETS = {
+    "linux-aarch64",
+    "linux-x86_64",
+    "macos-aarch64",
+    "macos-x86_64",
+    "windows-aarch64",
+    "windows-x86_64",
+}
+
+_DLL_DIRECTORY_HANDLES: list[Any] = []
+
+
+def _package_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _platform_tag() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        os_tag = "macos"
+    elif system == "linux":
+        os_tag = "linux"
+    elif system == "windows":
+        os_tag = "windows"
+    else:
+        os_tag = system or "unknown"
+
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x64"}:
+        arch = "x86_64"
+    elif machine == "arm64":
+        arch = "aarch64"
+    else:
+        arch = machine or "unknown"
+
+    return f"{os_tag}-{arch}"
+
+
+def _library_name_for_tag(tag: str) -> str:
+    os_tag = tag.split("-", 1)[0]
+    if os_tag == "macos":
+        return "libcortext.dylib"
+    if os_tag == "windows":
+        return "cortext.dll"
+    return "libcortext.so"
+
+
+def _repo_root() -> Path | None:
+    for parent in (_package_dir(), *_package_dir().parents):
+        if (parent / "build.zig").is_file() and (parent / "CMakeLists.txt").is_file():
+            return parent
+    return None
 
 
 def _candidate_library_paths() -> list[Path]:
-    root = _repo_root()
     names = ("libcortext.dylib", "libcortext.so", "cortext.dll", "libcortext.dll")
     candidates: list[Path] = []
 
@@ -300,16 +350,34 @@ def _candidate_library_paths() -> list[Path]:
     if env_path:
         candidates.append(Path(env_path).expanduser())
 
-    for directory in (
-        root / "build" / "ffi-release",
-        root / "build" / "ffi-release" / "lib",
-        root / "zig-out" / "lib",
-        root / "install" / "lib",
-    ):
-        for name in names:
-            candidates.append(directory / name)
+    tag = _platform_tag()
+    if tag in _SUPPORTED_NATIVE_TARGETS:
+        candidates.append(_package_dir() / "native" / tag / _library_name_for_tag(tag))
+
+    for name in names:
+        candidates.append(_package_dir() / name)
+
+    root = _repo_root()
+    if root is not None:
+        for directory in (
+            root / "build" / "ffi-release",
+            root / "build" / "ffi-release" / "lib",
+            root / "zig-out" / "lib",
+            root / "zig-out" / "bin",
+            root / "install" / "lib",
+            root / "install" / "bin",
+        ):
+            for name in names:
+                candidates.append(directory / name)
 
     return candidates
+
+
+def _load_cdll(path: Path | str) -> ctypes.CDLL:
+    library_path = Path(path) if not isinstance(path, str) else Path(path)
+    if os.name == "nt" and library_path.parent and hasattr(os, "add_dll_directory"):
+        _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(os.fspath(library_path.parent)))
+    return ctypes.CDLL(os.fspath(path))
 
 
 def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
@@ -492,21 +560,23 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
 
 def load_library(path: str | os.PathLike[str] | None = None) -> ctypes.CDLL:
     if path is not None:
-        return _configure_library(ctypes.CDLL(os.fspath(path)))
+        return _configure_library(_load_cdll(Path(path)))
 
     for candidate in _candidate_library_paths():
         if candidate.exists():
-            return _configure_library(ctypes.CDLL(os.fspath(candidate)))
+            return _configure_library(_load_cdll(candidate))
 
     discovered = ctypes.util.find_library("cortext")
     if discovered:
         return _configure_library(ctypes.CDLL(discovered))
 
     searched = "\n".join(str(candidate) for candidate in _candidate_library_paths())
+    supported = ", ".join(sorted(_SUPPORTED_NATIVE_TARGETS))
     raise CortextError(
         "Could not locate the Cortext shared library. "
-        "Build it with "
-        "`cmake --preset ffi-release && cmake --build --preset ffi-release --target cortext`, "
+        f"Current platform tag is {_platform_tag()}; bundled wheels support: {supported}. "
+        "Build a wheel with `python scripts/build_python_package.py`, build a local shared "
+        "library with `cmake --preset ffi-release && cmake --build --preset ffi-release --target cortext`, "
         "or set CORTEXT_LIBRARY_PATH.\n"
         f"Searched:\n{searched}"
     )

@@ -1,10 +1,19 @@
-# cortext Python Binding
+# augmem.cortext Python Binding
 
-This package loads the native Cortext shared library with `ctypes`.
+This package loads the native Cortext shared library with `ctypes`. Release
+wheels are built with bundled Zig-produced native libraries for:
+
+- `linux-x86_64`
+- `linux-aarch64`
+- `macos-x86_64`
+- `macos-aarch64`
+- `windows-x86_64`
+- `windows-aarch64`
 
 ## Build
 
-From the repository root:
+For a local source build without bundled native libraries, build the shared
+library from the repository root:
 
 ```bash
 cmake --preset ffi-release
@@ -14,11 +23,19 @@ cmake --build --preset ffi-release --target cortext
 Set `CORTEXT_LIBRARY_PATH=/path/to/libcortext.so` when loading a non-default
 library.
 
+To build the release wheel with bundled native libraries:
+
+```bash
+python scripts/build_python_package.py
+```
+
+Set `ZIG=/path/to/zig` or pass `--zig /path/to/zig` when Zig is not on `PATH`.
+
 ## Use
 
 ```bash
 PYTHONPATH=bindings/python python3 - <<'PY'
-import cortext
+import augmem.cortext as cortext
 
 with cortext.Cortext(db_path=":memory:", models_dir="models") as engine:
     print(cortext.version())
