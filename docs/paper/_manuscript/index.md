@@ -3786,18 +3786,35 @@ production runtime ships: `WMBaseCapacity` in
 
 ### Single-Mechanism Removal Arms
 
-The sweep ran 18 arms at capacity 21: 12 single-mechanism removals and 6
-ACT-R gate promotions. The control judged 22/39 wins, 3.95 sufficiency,
-0.67 noise, and 503 packet tokens. Three caveats bound the reading. The
-win column saturates from recency coverage at 1,200 messages, so
-mechanism value shows in sufficiency, noise, and tokens rather than
-wins. Single-repetition sufficiency deltas under about 0.15 are not
-signal. The consolidation-family arms are expected-null at this length,
-because consolidation exists to keep month-old content reachable and a
-short replay serves most probes from recent memory.
+The removal record has two protocol groups and should not be read as one
+pooled table. The June capacity-21 sweep used the legacy 39-probe
+control: 22/39 wins, 3.95 sufficiency, 0.67 noise, and 503 packet
+tokens. The July 6 neuromodulator follow-up used an MSC validation slice
+with the same capacity-21 stack shape but a different local Qwen-Omni
+32k judge setup. Its measured same-protocol control was 17/39 wins, 3.50
+sufficiency, 1.21 noise, and 755 packet tokens. Because the July control
+moved by roughly the same amount as the four removal arms, July deltas
+below are computed only against the measured July control.
 
-Each removal arm disabled one mechanism and ran a full 39-probe screen
-against the control.
+Three caveats bound both readings. The win column saturates from recency
+coverage at 1,200 messages, so mechanism value shows in sufficiency,
+noise, and tokens rather than wins. Single-repetition sufficiency deltas
+under about 0.15 are not signal. The consolidation-family arms are
+expected-null at this length, because consolidation exists to keep
+month-old content reachable and a short replay serves most probes from
+recent memory.
+
+Before the July 6 follow-up, synaptic-tag targeting was fixed to tag the
+stored spike memory and same-source temporal neighbors rather than the
+newest memories by `created_at`. The follow-up then ran the measured
+control plus four neuromodulator-layer removals: neuromodulator effect
+scales, synaptic tagging, the encode/retrieve oscillator, and the
+emotion/mood threshold cascade. All five July arms completed 39/39
+judgments and passed the prompt-fit and context-leak gates. The
+aggregate artifact is
+`docs/paper/artifacts/neuromodulator_mechanism_sweep_20260706T232135Z/mechanism_sweep_summary.json`.
+
+The June removal arms below are read only against the June control.
 
 <table>
 <colgroup>
@@ -3918,15 +3935,98 @@ against the control.
 </tbody>
 </table>
 
-Two removals cost measurable packet quality and stayed in v1. Removing
-temporal retrieval cost 0.21 sufficiency and nearly doubled noise, the
-largest hygiene loss in the sweep. Removing the predictive bonus cost
-0.16 sufficiency and added 30 percent packet bloat. Removing the
-metacognitive layer was mildly positive and had no long-horizon story to
-defer to, which supported cutting it in v1. Removing daily consolidation
-was also mildly positive at this horizon, but we deferred that arm
-because consolidation-family verdicts require long-horizon runs. The
-remaining removal arms were null.
+In the June removal set, temporal retrieval and predictive
+pre-activation stayed because their removal cost measurable packet
+quality or packet size. Removing the metacognitive layer was mildly
+positive and had no long-horizon story to defer to, which supported
+cutting it in v1. Removing daily consolidation was also mildly positive
+at this horizon, but we deferred that arm because consolidation-family
+verdicts require long-horizon runs. The remaining removal arms were null
+or long-horizon deferred as labeled.
+
+The July follow-up rows below are read only against the July measured
+control.
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>arm</th>
+<th style="text-align: right;">wins</th>
+<th style="text-align: right;">sufficiency</th>
+<th style="text-align: right;">noise</th>
+<th style="text-align: right;">tokens</th>
+<th style="text-align: right;">delta vs July control</th>
+<th>reading</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>control</td>
+<td style="text-align: right;">17/39</td>
+<td style="text-align: right;">3.50</td>
+<td style="text-align: right;">1.21</td>
+<td style="text-align: right;">755</td>
+<td style="text-align: right;">0.00</td>
+<td>measured control</td>
+</tr>
+<tr>
+<td>neuromodulator_effect_scales removed</td>
+<td style="text-align: right;">14/39</td>
+<td style="text-align: right;">3.28</td>
+<td style="text-align: right;">0.99</td>
+<td style="text-align: right;">755</td>
+<td style="text-align: right;">-0.22</td>
+<td>removal hurts; retained</td>
+</tr>
+<tr>
+<td>synaptic_tagging removed</td>
+<td style="text-align: right;">16/39</td>
+<td style="text-align: right;">3.61</td>
+<td style="text-align: right;">1.36</td>
+<td style="text-align: right;">759</td>
+<td style="text-align: right;">+0.10</td>
+<td>null at this horizon; long-horizon/correctness verdict open</td>
+</tr>
+<tr>
+<td>encode_retrieve_oscillator removed</td>
+<td style="text-align: right;">18/39</td>
+<td style="text-align: right;">3.48</td>
+<td style="text-align: right;">1.12</td>
+<td style="text-align: right;">755</td>
+<td style="text-align: right;">-0.03</td>
+<td>null; cut candidate</td>
+</tr>
+<tr>
+<td>emotion_mood_threshold_cascade removed</td>
+<td style="text-align: right;">19/39</td>
+<td style="text-align: right;">3.48</td>
+<td style="text-align: right;">1.16</td>
+<td style="text-align: right;">751</td>
+<td style="text-align: right;">-0.03</td>
+<td>null; cut candidate</td>
+</tr>
+</tbody>
+</table>
+
+The same-protocol control changes the July interpretation. Removing
+neuromodulator effect scales still costs 0.22 sufficiency, above the
+0.15 signal floor, so that aggregate effect-scale layer remains
+supported by this screen. The other three removals are within the null
+band once compared to the measured July control. Synaptic tagging still
+has an independent correctness fix because tags must target the memory
+that produced the spike and its same-source temporal neighbors, but this
+short replay does not prove the mechanism’s quality value. The
+encode/retrieve oscillator and emotion/mood threshold cascade remain cut
+candidates rather than keep verdicts.
 
 ### ACT-R Gate Promotion Arms
 
@@ -4018,17 +4118,21 @@ gate.
 
 ### Negative Results Summary
 
-The 18-arm sweep rejects the activation-gating direction for the current
-v1 runtime. All six ACT-R gate-promotion arms failed to beat the default
-stack, and the `all_gates` arm was harmful: sufficiency fell from 3.95
+The removal record separates three outcomes. The ACT-R gate-promotion
+branch still rejects the activation-gating direction for the current v1
+runtime: all six gate-promotion arms failed to beat the default stack,
+and the `all_gates` arm was harmful because sufficiency fell from 3.95
 to 3.72 while noise rose from 0.67 to 0.95. The metacognitive layer was
 cut because its removal was mildly positive at this horizon and it had
-no deferred long-horizon case. Temporal retrieval and predictive
-pre-activation stayed because their removal produced the clearest
-quality or packet-size losses. These verdicts do not remove the
-ACT-R-inspired activation ledger retained in retrieval traces; that
-ledger records ranking evidence for observability and audits, not an
-additional scoring gate.
+no deferred long-horizon case. The July neuromodulator follow-up does
+not support the earlier four-keep interpretation: only neuromodulator
+effect scales clear the short-horizon signal floor against a measured
+same-protocol control. Synaptic tagging is retained as a corrected
+targeting behavior pending longer-horizon evidence, while the
+encode/retrieve oscillator and emotion/mood threshold cascade remain cut
+candidates. These verdicts do not remove the ACT-R-inspired activation
+ledger retained in retrieval traces; that ledger records ranking
+evidence for observability and audits, not an additional scoring gate.
 
 ### Working-Memory Partition Failure
 
