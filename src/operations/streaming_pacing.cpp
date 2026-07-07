@@ -32,6 +32,7 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   auto &acc = it->second;
 
   const bool at_boundary = context.GetFlushRequired ();
+  const bool ephemeral_query = signal.retention == Retention::Ephemeral;
 
   const Eigen::VectorXf *x_ptr = &signal.embedding;
   if (acc.mu_acc.size () > 0)
@@ -74,11 +75,13 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   const double retrieval_bias_threshold
       = core::StreamingRetrievalBiasThreshold (cfg.focus, cfg.sensitivity,
                                                cfg.stability);
-  const bool bias_ok = (retrieval_bias >= retrieval_bias_threshold)
+  const bool bias_ok = ephemeral_query
+                       || (retrieval_bias >= retrieval_bias_threshold)
                        || at_boundary || force_check;
   const bool should_check
-      = (at_boundary || exceeds_threshold || force_check)
-        && (adjacent_ok || at_boundary || force_check) && bias_ok;
+      = ephemeral_query
+        || ((at_boundary || exceeds_threshold || force_check)
+            && (adjacent_ok || at_boundary || force_check) && bias_ok);
 
   context.SetShouldCheckRetrieval (should_check);
 
@@ -99,7 +102,8 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Double ("since_last_retrieval_s", since_last_s),
     telemetry::Attribute::Double ("retrieval_bias_threshold",
                                   retrieval_bias_threshold),
-    telemetry::Attribute::Double ("retrieval_bias", retrieval_bias)
+    telemetry::Attribute::Double ("retrieval_bias", retrieval_bias),
+    telemetry::Attribute::Bool ("ephemeral_query", ephemeral_query)
   });
 }
 

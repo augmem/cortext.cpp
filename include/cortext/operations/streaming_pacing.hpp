@@ -12,6 +12,7 @@ namespace cortext::operations
 /// - If drift_acc_pacing > pacing_thresh(S): should_check_retrieval = true
 /// - If drift_acc_pacing > max_wait_drift(F): force check regardless
 /// - Boundary flush also triggers retrieval checks
+/// - Ephemeral signals are query-style ingress and always trigger retrieval
 /// - Resets drift_acc_pacing and updates x_last_check on trigger
 class CheckStreamingPacing
     : public Operation<Requires<tags::FlushRequired>, Satisfies<tags::ShouldCheckRetrieval> >
