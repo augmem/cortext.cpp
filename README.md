@@ -1,117 +1,153 @@
 # Cortext
 
-**Long-term memory for AI apps and agents — local, realtime, and ~50× fewer
-context tokens than chat+RAG.**
+[![Release](https://img.shields.io/github/v/release/augmem/cortext)](https://github.com/augmem/cortext/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/augmem.cortext)](https://pypi.org/project/augmem.cortext/)
+[![npm](https://img.shields.io/npm/v/@augmem/cortext)](https://www.npmjs.com/package/@augmem/cortext)
 
-Cortext gives a long-running assistant, agent, or device a durable memory.
-You feed it a stream of events — chat turns, audio, images — and on every
-call it returns a small packet (typically under 1,000 tokens) of the stored
-memories most relevant to the current moment, ready to drop into an LLM
-prompt or surface in a UI. It decides on its own what is worth storing, how
-memories associate, which facts have been superseded by corrections, and what
-to let fade. There is no manual memory management and no cloud dependency:
-everything runs on-device in a C++20 runtime against a local SQLite file and
-a bundled 87M-parameter embedding model.
+Local multimodal memory for AI apps, agents, devices, and humans.
 
-Use it when a conversation or agent outlives its context window. Instead of
-re-sending tens of thousands of tokens of history or maintaining a RAG
-pipeline, you send Cortext's ~1k-token packet — in blind LLM-judge evals it
-beat traditional chat+RAG on 7 of 9 probes while using 97.97% fewer context
-tokens (see [Benchmarks](#benchmarks) and [Tradeoffs](#tradeoffs)). Cortext
-began as memory augmentation for a family member living with dementia
-(see [Motivation](#motivation)); the same engine serves long-horizon LLM
-memory.
+Cortext is a C++20 memory engine that ingests text, audio, and image signals,
+stores durable memory traces in SQLite, and returns a small context packet of
+relevant memories on later calls. It is designed for long-running assistants
+and realtime applications that need memory without sending an entire history
+window back to an LLM.
 
-What makes it different:
+Links: [Releases](https://github.com/augmem/cortext/releases) /
+[Python](bindings/python/README.md) /
+[JavaScript](bindings/javascript/README.md) /
+[Paper](docs/paper/_manuscript/index.md) /
+[Roadmap](ROADMAP.md)
 
-- **Closed-loop control:** retrieval outcomes, prediction error, storage
-  pressure, and consolidation feedback update three continuous knobs:
-  **Focus (F)**, **Sensitivity (S)**, and **Stability (T)**.
-- **Belief revision:** a correction writes a durable `supersedes` edge to the
-  stale memory it replaces; retrieval ranks the correction first and keeps the
-  old fact as demoted history.
-- **Multimodal memory:** text, audio, speech, and image inputs share one AIST
-  embedding space.
-- **Small native surface:** C++20 library, stable C ABI, and bindings for
-  Python, Go, JavaScript/TypeScript, Dart, and WebAssembly.
-- **Durable by default:** SQLite metadata, sqlite-objstore payload storage, and
-  extension seams for embedders that own persistence.
-- **Evidence tracked with the code:** experiment artifacts and manuscript
-  sections live under `docs/paper/`.
+## Recent Changes
 
-## Benchmarks
+- `v1.1.9`: package examples use real OpenAI Chat Completions message arrays.
+- `v1.1.8`: PyPI and npm packages ship cross-platform native libraries/addons
+  and download the verified AIST q8_0 model into a user cache on first use.
+- Public C++ `Retention::Ephemeral` is the no-storage query path: it still
+  updates live context and retrieves memory, but does not store the query.
+- Command-line tools are built with `CORTEXT_BUILD_TOOLS=ON`; examples remain
+  behind `CORTEXT_BUILD_EXAMPLES=ON`.
 
-How these are measured: a long multi-session conversation is replayed through
-each memory system; at probe points a judge LLM asks a question whose answer
-appeared sessions earlier, and blind-scores each system's context packet for
-relevance, sufficiency, and noise without knowing which system produced it.
-Systems compared: Cortext, traditional chat+RAG, a full-history upper bound,
-and compaction/rolling-window baselines.
+## Hot Topics
 
-Headline (hosted frontier judge, public Meta Multi-Session Chat slice, 9
-probes × 3 repetitions): **Cortext won 7 of 9 probes by majority and 21 of 27
-blind judgment rows, using 998 context tokens per turn versus 49,196 for
-traditional chat+RAG — 97.97% fewer.** Its packets also carried roughly a
-third of the judged noise (1.85 vs 4.70).
+- **Query without polluting memory:** use `Retention::Ephemeral` from C++ or
+  `cortext_cli recall`; durable writes remain explicit.
+- **Belief revision:** corrections are represented as graph-native
+  `supersedes` relationships so stale facts are demoted rather than deleted.
+- **Runtime assets:** C++ builds fetch the AIST GGUF model by default; PyPI and
+  npm packages keep registries small and cache the verified model at runtime.
+- **Context packet shape:** `retrieved_memory` and `working_memory` contain
+  memory objects with content blobs and scores, not bare strings.
 
-| Eval | Result | Context Cost |
-|---|---|---:|
-| MSC hosted frontier judge, 9 probes, 3 reps | Cortext 7/9 probe wins, 21/27 row wins | 998 tokens vs 49,196 for chat+RAG |
-| MSC 128k RAG ablation, 6 systems | Cortext 6/9 probe wins, 19/27 row wins | 816 tokens; compaction 7,110; rolling window 15,999 |
-| One-year sparse replay, local Gemma4 judge | Cortext 47/93 raw wins | 467 tokens vs 7,447 for chat+RAG |
-| Long-horizon mechanism sweep | No removal improved the stack | Mechanisms retained under the hard-cut rule |
+## Quick Start
 
-Unlimited context is not the alternative it sounds like: the hosted eval
-includes a full-history upper-bound arm, and it took 1 of 27 blind rows. At
-the separate 18,000-message stress horizon, keeping full history inside a
-131k judge window meant dropping 123,359 items. On device the comparison is
-starker still: a 49k-token prompt per turn costs seconds of prefill on local
-hardware, while Cortext's ~1k-token packets keep retrieval realtime.
+Choose the surface you need.
 
-Full protocols, caveats, and artifacts are in
-`docs/paper/sections/9_experimental.qmd` and the generated manuscript at
-`docs/paper/_manuscript/index.md`.
+Python:
 
-## Tradeoffs
+```bash
+pip install augmem.cortext
+```
 
-Chosen limits, stated plainly:
+Node.js / TypeScript:
 
-- **A little sufficiency for a lot of context.** This is not a
-  raw-sufficiency-match claim: in the hosted run, chat+RAG and compaction
-  scored slightly higher mean judged sufficiency (4.67 and 4.63 vs 4.41 on a
-  5-point scale). Cortext's measured win is context cost, blind-judge
-  preference, and much lower noise. If you can afford ~50k tokens per turn
-  and the prefill latency that comes with them, full context is still more
-  complete.
-- **Pinned local encoder.** Retrieval quality rides on the bundled AIST-87M
-  GGUF model (downloaded at build). Every database pins the encoder
-  fingerprint that produced its embeddings, so you cannot hot-swap embedding
-  models over an existing memory store.
-- **Single writer per database.** One process owns writes; there is no
-  multi-device sync or concurrent-writer merge yet.
-- **Source-backed traces, not distilled facts.** v1 stores what it saw and
-  retrieves it. There is no LLM extraction or summarization layer rewriting
-  memories — deliberately, so every retrieved memory traces to a real input.
-- **Native build.** C++20 and CMake today. Bindings for Python, Go,
-  JavaScript/TypeScript, Dart, and WebAssembly ship in-tree, but there is no
-  `pip install` yet.
+```bash
+npm install @augmem/cortext
+```
 
-## Status
+C++ from source:
 
-Cortext v1.1.6 is the hard-cut production line: the embedding and graph memory
-engine, release-hardening fixes, and the current bindings. Older research
-components are preserved in git history but not shipped in the runtime surface.
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build -R cortext_tests --output-on-failure
+```
 
-## Build And Test
+Build the CLI:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_BUILD_TOOLS=ON
+cmake --build build -j --target cortext_cli
+./build/tools/cli/cortext_cli --help
+```
+
+The default CMake build downloads the required AIST model into `models/`.
+For offline setup, prefetch it explicitly:
+
+```bash
+python3 scripts/download_aist_model.py --output-dir models --quant q8_0
+```
+
+## Try It
+
+`cortext_cli` is a small public-API smoke test and a useful local memory tool.
+It writes durable memories to a SQLite file and supports ephemeral recall.
+
+```bash
+./build/tools/cli/cortext_cli --db bailey.db remember \
+  "Bailey is allergic to bee stings and needs Benadryl within 10 minutes."
+
+./build/tools/cli/cortext_cli --db bailey.db remember \
+  "The vet appointment for Bailey is on July 12 at 9am with Dr. Okafor."
+
+./build/tools/cli/cortext_cli --db bailey.db recall \
+  "what should the vet know about the dog?"
+```
+
+Corrections supersede stale facts:
+
+```bash
+./build/tools/cli/cortext_cli --db bailey.db remember \
+  "Correction: the vet appointment was moved to July 14 at 2pm."
+
+./build/tools/cli/cortext_cli --db bailey.db recall \
+  "when is the vet appointment?" --top 1
+```
+
+Other CLI commands:
+
+```bash
+./build/tools/cli/cortext_cli --db memory.db repl
+./build/tools/cli/cortext_cli --db memory.db remember - < facts.txt
+./build/tools/cli/cortext_cli --db memory.db consolidate
+```
+
+`recall` is ephemeral by default. Pass `--durable` if you also want the recall
+query stored under the `cli/recall` source.
+
+## Description
+
+Cortext is built around a local feedback loop:
+
+- **Durable memory:** signal metadata in SQLite, payloads in sqlite-objstore,
+  and vector retrieval through sqlite-vec.
+- **Multimodal embeddings:** text, audio, speech, and image inputs share one
+  AIST-87M GGUF retrieval space.
+- **Three control knobs:** Focus (F), Sensitivity (S), and Stability (T)
+  derive thresholds, decay, storage cadence, consolidation, and retrieval
+  behavior.
+- **Graph-native context:** memories are connected by reinforcement,
+  sequence, soft anchors, consolidation, and supersession edges.
+- **Small native surface:** C++ facade, stable C ABI, and bindings for Python,
+  Go, JavaScript/TypeScript, Dart, and WebAssembly.
+- **Research traceability:** experiments, ablations, and manuscript sections
+  live in `docs/paper/` next to the implementation.
+
+Use Cortext when an app or agent outlives its context window. Instead of
+resending tens of thousands of history tokens or maintaining a separate RAG
+pipeline, you ask Cortext for the current memory packet and inject the returned
+retrieval results into your model or UI.
+
+## Build
 
 Requirements:
 
 - C++20 compiler
-- CMake
-- Git and Python 3 for default dependency/model bootstrap
+- CMake 3.16+
+- Git and Python 3 for dependency/model bootstrap
 
-The default build fetches bundled native dependencies and downloads the required
-AIST GGUF model plus vocab into `models/`.
+Standard debug build:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -119,21 +155,13 @@ cmake --build build -j
 ctest --test-dir build -R cortext_tests --output-on-failure
 ```
 
-Model-free CI-style test gate:
+Model-free CI-style gate:
 
 ```bash
 ./build/tests/cortext_tests '~[aist]' --reporter compact
 ```
 
-Command-line tools:
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_TOOLS=ON
-cmake --build build -j --target cortext_cli
-./build/tools/cli/cortext_cli --help
-```
-
-Examples:
+Build examples:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_EXAMPLES=ON
@@ -141,88 +169,81 @@ cmake --build build -j --target cortext_topical_chat_analysis
 ./build/examples/topical_chat_analysis/cortext_topical_chat_analysis --help
 ```
 
-## Try It In A Minute
-
-`cortext_cli` (built with `-DCORTEXT_BUILD_TOOLS=ON`, output under
-`build/tools/cli/`) is a durable memory you can talk to from the shell.
-Memories persist in the SQLite file across invocations:
-
-```bash
-alias cortext='./build/tools/cli/cortext_cli --db bailey.db'
-
-cortext remember "Bailey is allergic to bee stings and needs Benadryl within 10 minutes."
-cortext remember "The vet appointment for Bailey is on July 12 at 9am with Dr. Okafor."
-
-cortext recall "what should the vet know about the dog?"
-#  1. [#3 · cli/main · ... · rel 0.91] The vet appointment for Bailey is on July 12 at 9am with Dr. Okafor.
-#  2. [#1 · cli/main · ... · rel 0.80] Bailey is allergic to bee stings and needs Benadryl within 10 minutes.
-```
-
-Corrections supersede stale facts instead of competing with them:
-
-```bash
-cortext remember "Correction: the vet appointment was moved to July 14 at 2pm."
-
-cortext recall "when is the vet appointment?" --top 1
-#  1. [#5 · cli/main · ... · rel 0.92] Correction: the vet appointment was moved to July 14 at 2pm.
-```
-
-The July 12 memory is demoted at retrieval but kept as history.
-
-`cortext repl` opens an interactive session (`/recall`, `/consolidate`,
-`/stats`), `remember -` ingests one memory per stdin line for bulk import, and
-`scripts/run-chat.sh` builds and launches the repl in one step. `recall` is
-ephemeral: the query triggers retrieval but is not stored, so queries never
-compete with real memories. Pass `--durable` to also store the query as a
-stream event under the `cli/recall` source.
-
-## Zig CLI Install
-
-Zig is the packaging path for installable CLI artifacts. It builds the C++20
-engine and installs `cortext_cli` under `zig-out/bin` without requiring the
-CMake examples surface:
+Build an installable CLI with Zig:
 
 ```bash
 zig build -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 ./zig-out/bin/cortext_cli --help
 ```
 
-Build release artifacts by selecting a target triple. The runtime model assets
-still ship separately under `models/`.
+Cross-build CLI artifacts:
 
 ```bash
 zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=aarch64-linux-gnu -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 ```
 
-## C++ Quickstart
+Important CMake options:
+
+- `CORTEXT_BUILD_TOOLS=ON`: build command-line tools.
+- `CORTEXT_BUILD_EXAMPLES=ON`: build examples and benchmark demos.
+- `CORTEXT_FETCH_AIST_MODEL=ON`: download AIST during build.
+- `CORTEXT_AIST_MODEL_QUANT=q8_0`: choose `q8_0`, `q5_1`, or `all`.
+- `CORTEXT_FETCH_GGML=ON`: fetch and build bundled GGML.
+- `CORTEXT_USE_SYSTEM_GGML=ON`: use a preinstalled GGML for packagers.
+- `CORTEXT_EXPERIMENT_HOOKS=OFF`: compile out eval-only ablation hooks.
+
+## C++ API
 
 ```cpp
 #include <cortext/cortext.hpp>
 
 #include <iostream>
+#include <string>
 
-int main()
+std::string MemoryText (const cortext::Cortext::Context::Memory &memory)
+{
+  std::string text;
+  for (const auto &blob : memory.content)
+    {
+      if (!text.empty ())
+        {
+          text.push_back (' ');
+        }
+      text.append (blob.begin (), blob.end ());
+    }
+  return text;
+}
+
+int main ()
 {
   cortext::Cortext::Config cfg;
-  cfg.focus = 0.7;        // F: attentional precision
-  cfg.sensitivity = 0.5;  // S: reactivity to surprise
-  cfg.stability = 0.8;    // T: plasticity vs. retention
+  cfg.focus = 0.7;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.8;
 
   auto engine = cortext::Cortext::Create (cfg, "memory.db");
 
-  auto context = engine->ProcessText ("Bailey likes tennis balls.", "chat/main");
-  for (const auto &memory : context.retrieved_memory)
+  engine->ProcessText ("The garage door code is 8841.", "chat/main");
+
+  auto ctx = engine->ProcessText (
+      "garage door code",
+      "chat/query",
+      cortext::Retention::Ephemeral);
+
+  for (const auto &memory : ctx.retrieved_memory)
     {
-      std::cout << memory.id << " " << memory.source_id << "\n";
+      std::cout << memory.relevance << " " << MemoryText (memory) << "\n";
     }
 
-  auto embedding = engine->EmbedText ("embed without storing");
-  std::cout << "embedding dims: " << embedding.size () << "\n";
+  if (ctx.consolidation_recommended)
+    {
+      engine->Consolidate ();
+    }
 
-  engine->Consolidate ();
   engine->Flush ();
 }
 ```
@@ -232,91 +253,144 @@ Public entrypoints:
 - C++ API: `include/cortext/cortext.hpp`
 - C API: `include/cortext/capi.h`
 
-## API Surface
+Core calls:
 
-Cortext provides:
+- `ProcessText`, `ProcessAudio`, `ProcessImage`: process a signal and store it
+  by default.
+- `Retention::Ephemeral`: process and retrieve without storing the input.
+- `EmbedText`, `EmbedAudio`, `EmbedImage`: embedding-only calls that do not
+  mutate memory state.
+- `Consolidate`: explicit shallow consolidation.
+- `Flush`: commit pending episode writes.
+- `Reset`: reset volatile processor state while keeping durable memory.
 
-- Text, audio, and image processing calls that store durable memory.
-- Text, audio, and image embed-only calls that do not mutate memory.
-- Working-memory and long-term retrieval packets returned as JSON.
-- Explicit shallow consolidation through `Consolidate()` /
-  `cortext_consolidate_json()`.
-- Volatile state reset through `Reset()` / `cortext_reset()` while durable
-  memories remain.
-- SQLite-backed default storage plus callback seams for external stores.
+## Context Packet
 
-Bindings live under `bindings/`:
+Processing calls return `Cortext::Context` in C++ and JSON through the C API
+and language bindings.
 
-- `bindings/python`: `ctypes` package released as `augmem.cortext`
-- `bindings/go`: `cgo`
-- `bindings/javascript`: Node-API plus TypeScript declarations
-- `bindings/dart`: `dart:ffi`
-- `bindings/wasm`: browser ES-module wrapper over the WebAssembly C ABI
+Top-level fields include:
 
-Build the Python release wheel with bundled Zig shared libraries for Linux,
-macOS, and Windows on x86_64 and aarch64:
+- `retrieved_memory`: long-term memories selected for the current signal.
+- `working_memory`: active short-term memory slots.
+- `embedding`: the current signal embedding when requested.
+- `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior.
+- `consolidation_recommended`, `consolidation_required`: maintenance hints.
+- `output`: scores, write decisions, operation timings, and storage ids.
+- `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
 
-```bash
-python scripts/build_python_package.py
+Memory entries are objects, not strings. In JSON they look like:
+
+```json
+{
+  "id": 1,
+  "source_id": "chat/main",
+  "timestamp": 1783463360158,
+  "modality": "text",
+  "mimetype": "text/plain",
+  "content": [
+    {
+      "base64": "VGhlIGdhcmFnZSBkb29yIGNvZGUgaXMgODg0MS4=",
+      "size_bytes": 29
+    }
+  ],
+  "relevance": 0.96,
+  "salience": 0.0,
+  "contradiction": 0.0,
+  "retrieved_count": 1,
+  "used_count": 0,
+  "soft_anchors": []
+}
 ```
 
-Set `ZIG=/path/to/zig` or pass `--zig /path/to/zig` when Zig is not on `PATH`.
+For C++ callers, `Memory::content` is already raw bytes. For JSON callers,
+decode `content[].base64` according to `mimetype`.
 
-Build the shared library for FFI consumers:
+## Bindings
+
+- Python: `bindings/python`, published as `augmem.cortext`
+- JavaScript/TypeScript: `bindings/javascript`, published as `@augmem/cortext`
+- Go: `bindings/go`
+- Dart: `bindings/dart`
+- WebAssembly: `bindings/wasm`
+
+Build Python wheels with bundled native libraries:
 
 ```bash
-cmake --preset ffi-release
-cmake --build --preset ffi-release --target cortext
+python3 scripts/build_python_package.py --zig /path/to/zig --skip-models
 ```
 
-Node's native addon uses the Node-enabled preset:
+Build the npm package:
 
 ```bash
-cmake --preset ffi-release-node
-cmake --build --preset ffi-release-node --target cortext cortext_node
+python3 scripts/build_javascript_package.py --zig /path/to/zig --skip-models
 ```
+
+Registry packages do not embed the 135 MB AIST q8_0 model. Python and npm
+wrappers resolve a bundled/local model if present, otherwise download and
+checksum-verify q8_0 into the user cache on first engine creation. Native C++
+and CLI users should keep the model under `models/` or set
+`CORTEXT_AIST_MODEL_PATH`.
 
 ## Runtime Model
 
-Cortext's required encoder is `augmem/AIST-87M` in GGUF layout under
-`models/AIST-87M-GGUF/`. The engine auto-discovers `AIST-87M_q8_0.gguf` or
-`AIST-87M_q5_1.gguf`, or you can pin a model path with
-`CORTEXT_AIST_MODEL_PATH`. If the model cannot be resolved, engine creation
-fails instead of silently switching embedding spaces.
+Cortext requires the AIST-87M GGUF encoder. The runtime searches:
 
-AIST maps text, audio, speech, and images into one retrieval space. Audio inputs
-use 16 kHz mono float32 PCM. Image inputs use row-major RGB/RGBA bytes with
+1. `CORTEXT_AIST_MODEL_PATH`
+2. `models/AIST-87M-GGUF/AIST-87M_q8_0.gguf`
+3. `models/AIST-87M-GGUF/AIST-87M_q5_1.gguf`
+
+The tokenizer vocab is expected under `models/mdbr-leaf-ir/vocab.txt`.
+
+AIST maps text, audio, and images into one retrieval space. Audio inputs are
+16 kHz mono float32 PCM. Image inputs are row-major RGB/RGBA bytes with
 explicit width, height, and channel count.
 
-Important build flags:
+Every database pins the encoder fingerprint that produced its embeddings.
+Changing encoder assets for an existing database fails loudly instead of
+silently comparing vectors from different spaces.
 
-- `CORTEXT_FETCH_AIST_MODEL=ON`: download AIST during build.
-- `CORTEXT_AIST_MODEL_QUANT=q8_0`: choose `q8_0`, `q5_1`, or `all`.
-- `CORTEXT_FETCH_GGML=ON`: fetch and build bundled GGML.
-- `CORTEXT_USE_SYSTEM_GGML=ON`: use a preinstalled GGML for packagers.
-- `CORTEXT_EXPERIMENT_HOOKS=OFF`: compile out eval-only ablation hooks.
+Useful environment variables:
 
-Operational environment variables are intentionally narrow. Most deployments
-only need model/runtime overrides (`CORTEXT_AIST_MODEL_PATH`,
-`CORTEXT_AIST_THREADS`, `CORTEXT_AIST_N_GPU_LAYERS`) and SQLite tuning
-(`CORTEXT_SQLITE_*`, `CORTEXT_OBJSTORE_*`) when packaging or profiling.
+- `CORTEXT_AIST_MODEL_PATH`: explicit model file.
+- `CORTEXT_AIST_THREADS`: native runtime thread count.
+- `CORTEXT_AIST_N_GPU_LAYERS`: GPU offload layer hint.
+- `CORTEXT_AIST_CONTEXT_LENGTH`: tokenizer/runtime context length.
+- `CORTEXT_SQLITE_*`, `CORTEXT_OBJSTORE_*`: storage tuning for packagers and
+  profiling.
 
-Every database pins the encoder fingerprint that produced its embeddings,
-because mixing embedding spaces corrupts retrieval. `source_id` is opaque
-provenance for grouping and hydration, not a hidden behavior switch.
-
-## Storage Model
+## Storage
 
 Cortext separates metadata from payload storage:
 
-- `cortext::Store` / `cortext::Transaction` define the database boundary.
-- `SQLiteStore` is the built-in metadata store.
-- `cortext::ObjectStore` / `cortext::ObjectTransaction` define payload storage.
-- `SqlObjectStore` is the built-in sqlite-objstore implementation.
+- `cortext::Store` / `cortext::Transaction`: database boundary.
+- `SQLiteStore`: built-in metadata store.
+- `cortext::ObjectStore` / `cortext::ObjectTransaction`: payload boundary.
+- `SqlObjectStore`: built-in sqlite-objstore implementation.
 
-Store and transaction instances are single-owner handles. For multiple
-processes or instances pointed at the same database, use a single writer per
-database; Cortext does not merge concurrent writer state.
+Store and transaction instances are single-owner handles. Use a single writer
+per database; Cortext does not merge concurrent writer state.
+
+## Benchmarks
+
+Long-horizon evals replay multi-session conversations through each memory
+system. At probe points, a judge LLM blind-scores each context packet for
+relevance, sufficiency, and noise.
+
+Headline hosted frontier judge run on a public Meta Multi-Session Chat slice:
+Cortext won 7 of 9 probes by majority and 21 of 27 blind judgment rows, using
+998 context tokens per turn versus 49,196 for traditional chat+RAG.
+
+| Eval | Result | Context Cost |
+| --- | --- | ---: |
+| MSC hosted frontier judge, 9 probes, 3 reps | Cortext 7/9 probe wins, 21/27 row wins | 998 tokens vs 49,196 for chat+RAG |
+| MSC 128k RAG ablation, 6 systems | Cortext 6/9 probe wins, 19/27 row wins | 816 tokens; compaction 7,110; rolling window 15,999 |
+| One-year sparse replay, local Gemma4 judge | Cortext 47/93 raw wins | 467 tokens vs 7,447 for chat+RAG |
+| Long-horizon mechanism sweep | No removal improved the stack | Mechanisms retained under the hard-cut rule |
+
+Full protocols, caveats, and artifacts are in
+`docs/paper/sections/9_experimental.qmd` and
+`docs/paper/_manuscript/index.md`.
 
 ## How It Works
 
@@ -341,11 +415,11 @@ flowchart TD
     control -.-> consolidation
 ```
 
-The production loop is built from small operations in `src/operations/`.
-Retrieval combines embedding similarity, durable graph edges,
-reconstruction-aware ranking, and temporal scoring. Feedback adjusts F/S/T so
-later writes, decay, thresholds, attention width, and consolidation cadence
-adapt to the stream.
+The production loop is composed from small operations in `src/operations/`.
+Retrieval combines embedding similarity, graph edges, temporal scoring,
+supersession demotion, soft anchors, and working-memory state. Feedback updates
+F/S/T so later writes, decay, thresholds, attention width, and consolidation
+cadence adapt to the stream.
 
 ## WebAssembly
 
@@ -366,6 +440,20 @@ python3 -m http.server 8000
 
 Then open `http://localhost:8000/examples/web/`.
 
+## Tradeoffs
+
+- **Context reduction over maximal sufficiency.** Cortext is optimized to
+  return a small, relevant packet. Full history can be more complete if you can
+  afford the tokens and prefill latency.
+- **Pinned local encoder.** Databases are tied to the embedding model
+  fingerprint that produced them.
+- **Single writer per database.** Multi-device sync and concurrent-writer merge
+  are not implemented.
+- **Source-backed traces.** v1 stores and retrieves observed signals; it does
+  not run an LLM fact extraction layer that rewrites memories.
+- **Native runtime.** C++20 and local model assets are part of the core
+  deployment story.
+
 ## Repository Layout
 
 - `include/`, `src/`: public headers and C++ implementation.
@@ -373,7 +461,7 @@ Then open `http://localhost:8000/examples/web/`.
 - `tests/`: Catch2 test suite.
 - `examples/`: benchmarks, demos, and smoke tests.
 - `bindings/`: Python, Go, JavaScript/TypeScript, Dart, and WebAssembly FFI.
-- `scripts/`, `tools/`: the `cortext_cli` tool, experiment harnesses, and
+- `scripts/`, `tools/`: CLI, release packaging, experiment harnesses, and
   offline utilities.
 - `docs/paper/`: manuscript source, generated markdown, and artifacts.
 - `models/`, `third_party/`: local model assets and vendored dependencies.
@@ -398,3 +486,7 @@ preserve continuity, confidence, and independence.
 The same architecture is useful for long-horizon LLM memory, but the primary
 motivation is human: a realtime system that notices what matters, surfaces
 relevant context, and does not force the user to manage memory by hand.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
