@@ -28,6 +28,12 @@ Callers invoke `Consolidate()` or process a maintenance signal with
 application's control while still letting the engine derive recommendation flags
 from the three knobs.
 
+The consolidation operations still live in the full operation chain. On ordinary
+signals `EvaluateConsolidation` returns because `force_consolidation` is false,
+and the downstream gate, cluster, shallow replay, and graph-build stages no-op.
+The `consolidation_recommended` and `consolidation_required` outputs are hints
+for the caller; they do not schedule maintenance work by themselves.
+
 A caller can use the following external scheduling rule:
 
 ```text

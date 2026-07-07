@@ -1,6 +1,6 @@
 # Interrupt Gate and Streaming Integration {#sec-interrupt}
 
-The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. The interrupt thresholds, candidate weights, maturity scaling, boundary multiplier, and refractory dynamics in this section are named policies derived from the three knobs (F, S, T). The runtime also contains environment-controlled diagnostics outside this core gate.
+The interrupt gate controls when retrieved memories enter active context during streaming generation. The gate balances novelty value against disruption cost. The interrupt gate operates on memory-level context, using centroids (μ_acc) rather than individual signal embeddings for novelty and relevance computation. The interrupt thresholds, candidate weights, maturity scaling, boundary multiplier, and refractory dynamics in this section are named policies derived from the three knobs (F, S, T). Eval-only ablation diagnostics exist only in builds compiled with `CORTEXT_EXPERIMENT_HOOKS=ON`; default production builds ignore those environment controls.
 
 **Note:** As defined in Section 1, all knob symbols here use the midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we use a lighter bias \( \tilde{S}_{affect} = \mathrm{BiasMid}(S, -0.06) \) to preserve mid‑range affect modulation.
 

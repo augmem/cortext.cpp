@@ -134,7 +134,8 @@ This replaces the earlier front-loaded boost that applied 60%/30%/10% to fast/me
 
 Co-retrieved memories also form *reinforces* edges in the ASSOCIATIONS graph.
 These edges are strengthened during retrieval/use and **only decayed during
-explicit consolidation cycles** (triggered externally via `cortext.consolidate()`),
+explicit consolidation cycles** (triggered externally via `Consolidate()` or
+`cortext_consolidate`),
 matching the system’s “idle-time consolidation” policy. This prevents per-turn
 decay from erasing fresh reinforcement and keeps runtime retrieval updates
 stable while still allowing long-term pruning during consolidation.

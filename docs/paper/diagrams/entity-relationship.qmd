@@ -7,8 +7,9 @@ provider backend.
 Note: This diagram emphasizes the core memory/signal/association schema. Later
 migrations also add memory eviction and reconstruction tables, meta-learning
 coefficients, and soft-anchor state/link tables.
-Note: Consolidation is external-only; callers invoke `cortext.consolidate()`
-explicitly rather than scheduling it automatically.
+Note: Consolidation is external-only; callers invoke C++ `Consolidate()`, C ABI
+`cortext_consolidate`, or process a maintenance signal with
+`force_consolidation`, rather than scheduling it automatically.
 Note: Shallow consolidation may attach existing LABEL nodes by embedding
 similarity, but the engine no longer seeds a static label bank or refines labels
 with an internal LLM.
@@ -56,7 +57,7 @@ erDiagram
         int episode_id PK
         int start_ts "timestamp (ms)"
         int end_ts "timestamp (ms), IDX partial NULL"
-        text boundary_type "drift|explicit|timeout|capacity"
+        text boundary_type "drift|explicit|inactivity|capacity"
         blob centroid "256d aggregate vector"
         int created_at "timestamp (ms)"
     }
@@ -70,7 +71,7 @@ erDiagram
         int episode_id FK "IDX with start_ts"
         int embedding_id FK "aggregate embedding (centroid)"
         blob blob_id FK "optional summary content"
-        text source_id "chat/user, chat/assistant"
+        text source_id "opaque source stream id"
         text kind "WORKING|LONG_TERM|ASSOCIATION|LABEL, IDX"
         text label "human readable name (for LABEL kind)"
         int start_ts "timestamp (ms)"

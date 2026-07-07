@@ -118,6 +118,12 @@ reranker. The operation runs after memory storage, consumes the stored memory id
 and current representative embedding, and compares the current signal only
 against prior soft-anchor state.
 
+When a model exposes a 1536-dimensional soft-anchor embedding, the runtime uses
+the semantic/entity/full slices described in @sec-soft-anchor. When only the
+standard 256-dimensional retrieval embedding is available, it falls back to a
+single normalized view for all three centroids and lowers entity quality with a
+knob-derived prior.
+
 Schema migration 6 adds:
 
 ```text

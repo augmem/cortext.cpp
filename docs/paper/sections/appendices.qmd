@@ -101,105 +101,81 @@ These rules resolve empty-store and small-store cases to preserve causality and 
 
 # Appendix D. Main Loop Execution Order and Normative Invariants {#sec-app-loop .unnumbered}
 
-This ordering is canonical and supersedes any other sequence described elsewhere in the document.
+This ordering is canonical and supersedes any other sequence described elsewhere in the document. It mirrors the production `BuildRootOperationSet` stage order: `CoreStage`, `StorageStage`, `RetrievalStage`, then `FeedbackStage`. Probe mode runs only `CoreStage` plus `RetrievalStage`.
 
 Canonical single-step pseudocode (timestep t):
 
 ```
 # Main loop (single timestep t)
 now_s, now_ms, x_t ← read_inputs()
-update_accumulator_embedding(x_t)  # updates μ_acc for current unit
-recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores prior μ_acc
 
-# Structural metrics + uncertainty
-coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(μ_acc)
-x_pred_ema ← update_prediction_ema(x_pred_ema, μ_acc, T)  # after surprisal_t
+# CoreStage
+initialize_embedded_centroids_and_priors()
+coherence_t ← compute_coherence()
+μ_acc ← update_accumulator_embedding(x_t)
+drift_accum ← update_cumulative_drift(x_t)
+focus_spread_t ← compute_focus_spread()
+prediction_error_t ← update_embedding_prediction_error()
 u_t ← update_uncertainty(...)
-
-# Adaptation + scoring
-update_control_parameters(...)
-score_t ← compute_composite_score(...)
-score_stream.append(score_t)
+update_focus_sensitivity_mood_and_effective_focus()
+metrics_t ← compute_structural_and_affective_metrics()
+update_neuromodulators_and_metric_weights()
+score_t ← compute_composite_score(metrics_t)
 update_accumulator_scores(score_t, μ_acc)
-signal_stream.append(μ_acc)
-
-# Threshold updates
-θ_target ← prior_evidence_blend(...)
-Δθ_* ← compute_threshold_deltas(...)
-θ_dynamic ← update_theta_dynamic(...)
-hysteresis ← update_hysteresis(...)
-
-# Accumulator + boundary
-update_accumulator(...)
-boundary_score ← compute_boundary_score(...)
+update_precision_delta_and_threshold()
+recent_context ← append_recent_context(μ_acc)
+boundary_score, should_flush ← detect_boundary(capacity_pressure, inactivity_boost)
 spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
-should_flush ← boundary_decision(boundary_score, time_caps, spike_bypass)
-θ_memory ← θ_dynamic × M_write_refrac
-write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
-Δwrites ← 1 if write_memory else 0  # computed immediately after write decision
+write_memory ← compute_write_gate(force_write, should_flush, spike_bypass)
+Δwrites ← 1 if write_memory else 0
 
-# Post-write and retrieval (q_retrieval captured before any reset)
-if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
-q_retrieval ← l2_normalize(μ_acc)  # cache current-unit query
+# StorageStage
+stored_memory_id ← maybe_commit_memory_unit(write_memory)
+update_soft_anchor(stored_memory_id)
+apply_synaptic_tagging(stored_memory_id)
+persist_signal_metrics(stored_memory_id)
+
+# RetrievalStage (q_retrieval is captured before any accumulator reset)
+q_retrieval ← l2_normalize(μ_acc)
 streaming_pacing_check()
 graph_retrieval(q_retrieval)
 update_rate_state(Δwrites)
-if should_flush: reset_accumulator()  # regardless of write outcome
+compute_mni_gate_decision()
+detect_memory_usage_and_update_reinforcement()
 
-# Interrupt gate (consumes retrieved candidates)
-interrupt_gate_check()
-if allow_interrupt and not should_flush and not spike_bypass:
-    pending_abort ← true
-    pending_mem ← selected_candidate_embedding
-
-# Next signal: accept if closer to selected memory, else resume.
-if pending_abort:
-    if cos(x_t, pending_mem) > cos(x_t, μ_acc):
-        reset_accumulator()
-    pending_abort ← false
+# FeedbackStage
+update_retrieval_competition()
+apply_predictive_preactivation()
+apply_reconsolidation()
+apply_focus_sensitivity_stability_feedback()
+apply_influence_feedback()
+apply_serial_position_and_strength_effects()
+run_emotional_consolidation()
+update_working_memory()
+reset_accumulator_after_flush_or_interrupt()
+if signal.force_consolidation:
+    evaluate_consolidation()
+    gate_cluster_and_shallow_replay()
+    build_memory_graph()
+update_emotional_cascade()
+update_meta_learning()
 ```
 
 The normative execution order for a single timestep t:
 
 1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
-2.  **Update Accumulator (Embedding):** Update `μ_acc` with `x_t` (no score aggregation yet).
-3.  **Prepare Context:** Retrieve `recent_context ← tail(signal_stream, n_ctx(T))` (prior μ_acc values only).
-4.  **Compute Structural Metrics:** `coherence_struct`, `focus_spread`, `drift`, `surprisal` using `μ_acc`, then update `x_pred_ema` for the next step.
-5.  **Update Uncertainty:** `u(t)`.
-6.  **Compute Adaptation Dynamics:**
-    *   Update `α_F(t)`, `α_T(t)`.
-    *   Update `weight_relevance`, `half_life`.
-    *   Update `emotion` and `mood` state.
-7.  **Compute Composite Score:**
-    *   Compute all 12 metrics.
-    *   Update RLS weights `W_blend`.
-    *   Compute `score_t`. Append to `score_stream`.
-    *   Update accumulator score aggregates (`s_sum`, `s_max`, `e_peak`) using `score_t`.
-    *   Append `μ_acc` to `signal_stream`.
-8.  **Update Thresholds:**
-    *   Compute `θ_target` (prior/evidence).
-    *   Compute `Δθ` terms (homeo, sens, prec, emo, mood).
-    *   Update `θ_dynamic`. Update `hysteresis`.
-9.  **Execute Memory Accumulation:**
-    *   Accumulator now holds `μ_acc`, `drift_acc`, `s_max`, etc.
-    *   Compute `boundary_score` and `should_flush`.
-    *   Check `spike_bypass` using the effective spike margin scaled by
-        `mem_maturity` and `coherence_t`.
-    *   Compute `S_window` and `θ_memory`.
-    *   Decide `write_memory`.
-10. **Post-Write Updates and Retrieval:**
-    *   If `write_memory`: Write to `memory_stream`. Update `last_write_ts`.
-    *   Cache `q_retrieval ← μ_acc` before any accumulator reset.
-    *   Run streaming pacing and retrieval using `q_retrieval`.
-    *   Update `rate_state` (homeostatic controller).
-    *   If `should_flush` (regardless of write): Call `reset_accumulator()`.
-11. **Run Interrupt Gate:** Check for streaming interrupt using retrieved candidates (already filtered by write‑exclusion and WM overlap during retrieval).
-12. **Interrupt Abort (if allowed):** Mark a pending abort when an interrupt is permitted outside a flush/spike event. On the next signal, compare similarity to the selected memory vs current μ_acc; if the new signal aligns more with the selected memory, reset to drop partial utterances, otherwise resume.
+2.  **Run CoreStage:** initialize priors, update accumulator/drift, compute uncertainty, adaptation, metrics, neuromodulators, composite score, threshold, boundary, spike bypass, and write gate.
+3.  **Run StorageStage:** write the memory unit when the write gate opens, then update Soft Anchor, synaptic tagging, and signal metric persistence from the stored memory id.
+4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any reset, run streaming pacing and graph retrieval, update rate state from the current write decision, compute the MNI gate, and record memory usage/reinforcement.
+5.  **Run FeedbackStage:** apply retrieval competition, predictive pre-activation, reconsolidation, F/S/T feedback, serial-position and strength updates, emotional consolidation, working memory, accumulator reset, optional forced consolidation, graph build, emotional cascade, and meta-learning.
+6.  **Interrupt Abort:** If the MNI gate marked a pending abort, the next signal compares similarity to the selected memory against the current unit and resets only when the new signal aligns more with the selected memory.
 
 Timing notes:
+
 *   `now_s()` is captured at step 1 and reused for all Δt computations in this timestep.
-*   Threshold updates in step 7 use the score computed in step 6.
-*   Rate updates in step 9 use Δwrites from the current step’s `write_memory` decision.
+*   Threshold updates in `CoreStage` use the score computed earlier in the same stage.
+*   Rate updates in `RetrievalStage` use Δwrites from the current step's `write_memory` decision.
+*   Accumulator resets happen in `FeedbackStage`, after storage, retrieval, MNI, memory-usage detection, and working-memory updates have consumed the current-unit query.
 
 **Normative Invariants:**
 *   **Causality:** Step `k` uses only values computed in steps `1` through `k` or retained from `t-1`.
