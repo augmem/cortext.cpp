@@ -3796,10 +3796,10 @@ sufficiency, 1.21 noise, and 755 packet tokens. Because the July control
 moved by roughly the same amount as the four removal arms, July deltas
 below are computed only against the measured July control.
 
-Three caveats bound both readings. The win column saturates from recency
-coverage at 1,200 messages, so mechanism value shows in sufficiency,
-noise, and tokens rather than wins. Single-repetition sufficiency deltas
-under about 0.15 are not signal. The consolidation-family arms are
+The June win column saturates from recency coverage at 1,200 messages,
+so mechanism value in that group shows in sufficiency, noise, and tokens
+rather than wins. Single-repetition sufficiency deltas under about 0.15
+are not signal in either group. The June consolidation-family arms are
 expected-null at this length, because consolidation exists to keep
 month-old content reachable and a short replay serves most probes from
 recent memory.
