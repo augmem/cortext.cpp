@@ -61,32 +61,64 @@ with cortext.Cortext("memory.sqlite", config=cfg) as memory:
 Use `":memory:"` for a temporary engine. Use a file path when memories should
 survive process restarts.
 
-## LLM Memory Loop
+## Chat Completions Memory Loop
 
 The normal loop is simple:
 
 1. Call `process_text` for turns or observations you are willing to remember.
 2. On later turns, read `ctx["retrieved_memory"]`.
-3. Add the top snippets to the LLM prompt.
+3. Pass those snippets as context messages to Chat Completions.
 4. Call `consolidate()` when Cortext recommends it.
 
+Install the OpenAI SDK and set `OPENAI_API_KEY`:
+
+```bash
+pip install openai
+```
+
 ```python
-ctx = memory.process_text(
-    user_message,
-    source_id=f"conversation/{conversation_id}",
-    include_embedding=False,
-)
+from openai import OpenAI
+import augmem.cortext as cortext
+import os
 
-memories = "\n".join(
-    f"- {m.get('text', '')}" for m in ctx.get("retrieved_memory", [])[:6]
-)
+client = OpenAI()
+memory = cortext.Cortext("memory.sqlite")
 
-prompt = f"""Relevant memory:
-{memories or "- none"}
+def answer(conversation_id: str, user_message: str) -> str:
+    ctx = memory.process_text(
+        user_message,
+        source_id=f"conversation/{conversation_id}",
+        include_embedding=False,
+    )
 
-User:
-{user_message}
-"""
+    memories = "\n".join(
+        f"- {m.get('text', '')}"
+        for m in ctx.get("retrieved_memory", [])[:6]
+        if m.get("text")
+    )
+
+    completion = client.chat.completions.create(
+        model=os.environ.get("OPENAI_MODEL", "gpt-5-mini"),
+        messages=[
+            {
+                "role": "developer",
+                "content": (
+                    "Use the supplied Cortext memories when they are relevant. "
+                    "Ignore them when they are not relevant."
+                ),
+            },
+            {
+                "role": "developer",
+                "content": f"Cortext retrieved memory:\n{memories or '- none'}",
+            },
+            {"role": "user", "content": user_message},
+        ],
+    )
+
+    if ctx.get("consolidation_recommended"):
+        memory.consolidate()
+
+    return completion.choices[0].message.content or ""
 ```
 
 Durable-write warning: `process_text`, `process_audio`, and `process_image`
