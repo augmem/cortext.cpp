@@ -42,6 +42,7 @@ compile_commands.json
 *.wasm
 *.js
 !bindings/javascript/index.js
+!bindings/javascript/model-bootstrap.js
 !bindings/wasm/*.js
 !examples/web/*.js
 !third_party/sqlite-objstore/tests/opfs_worker.js

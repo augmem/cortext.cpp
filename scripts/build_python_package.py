@@ -106,6 +106,22 @@ def clean_package_models() -> None:
     (PACKAGE_MODELS / ".gitkeep").touch()
 
 
+def clean_python_build_metadata() -> None:
+    for path in PYTHON_ROOT.glob("*.egg-info"):
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    for path in (PYTHON_ROOT / "build").glob("bdist*"):
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    build_lib = PYTHON_ROOT / "build" / "lib"
+    if build_lib.exists():
+        shutil.rmtree(build_lib)
+
+
 def ensure_source_models(quant: str) -> None:
     run(
         [
@@ -225,6 +241,7 @@ def has_module(module: str) -> bool:
 
 
 def build_wheel(build_sdist: bool, check: bool) -> None:
+    clean_python_build_metadata()
     if DIST_ROOT.exists():
         shutil.rmtree(DIST_ROOT)
     if has_module("build.__main__"):

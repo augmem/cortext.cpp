@@ -1,7 +1,7 @@
 "use strict";
 
-const fs = require("fs");
 const path = require("path");
+const { ensureDefaultAistModelPathSync } = require("./model-bootstrap");
 
 const supportedNativeTargets = new Set([
   "darwin-arm64",
@@ -14,28 +14,6 @@ const supportedNativeTargets = new Set([
 
 function platformTag() {
   return `${process.platform}-${process.arch}`;
-}
-
-function aistModelPath(dir) {
-  const candidates = [
-    path.join(dir, "AIST-87M-GGUF", "AIST-87M_q8_0.gguf"),
-    path.join(dir, "AIST-87M-GGUF", "AIST-87M_q5_1.gguf"),
-  ];
-  return candidates.find((candidate) => fs.existsSync(candidate));
-}
-
-function defaultAistModelPath() {
-  const packageModels = path.join(__dirname, "models");
-  const packageModel = aistModelPath(packageModels);
-  if (packageModel) {
-    return packageModel;
-  }
-  const repoModels = path.join(__dirname, "..", "..", "models");
-  const repoModel = aistModelPath(repoModels);
-  if (repoModel) {
-    return repoModel;
-  }
-  return undefined;
 }
 
 const candidates = [
@@ -88,7 +66,7 @@ class Cortext extends native.NativeCortext {
       "CORTEXT_AIST_MODEL_PATH"
     );
     const previousModelEnv = process.env.CORTEXT_AIST_MODEL_PATH;
-    const defaultModel = defaultAistModelPath();
+    const defaultModel = hadModelEnv ? undefined : ensureDefaultAistModelPathSync();
     if (!hadModelEnv && defaultModel) {
       process.env.CORTEXT_AIST_MODEL_PATH = defaultModel;
     }
