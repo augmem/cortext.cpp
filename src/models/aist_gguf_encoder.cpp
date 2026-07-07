@@ -19,11 +19,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && __has_include(<Accelerate/Accelerate.h>)
 #ifndef ACCELERATE_NEW_LAPACK
 #define ACCELERATE_NEW_LAPACK
 #endif
 #include <Accelerate/Accelerate.h>
+#define CORTEXT_HAS_ACCELERATE 1
+#else
+#define CORTEXT_HAS_ACCELERATE 0
 #endif
 
 #if defined(CORTEXT_ENABLE_GGML)
@@ -1109,7 +1112,7 @@ MulRowsByWeightTranspose (const float *rows, int row_count,
 {
     std::vector<float> out (
         static_cast<std::size_t> (row_count * out_count), 0.0F);
-#if defined(__APPLE__)
+#if CORTEXT_HAS_ACCELERATE
   cblas_sgemm (CblasRowMajor, CblasNoTrans, CblasTrans, row_count,
                out_count, col_count, 1.0F, rows, col_count,
                weight.data.data (), col_count, 0.0F, out.data (),

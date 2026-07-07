@@ -115,7 +115,11 @@ file_backend_force_disk_full (void)
   const char *flag = getenv ("OBJSTORE_FORCE_DISK_FULL");
   if (flag != NULL && flag[0] != '\0')
     {
+#if defined(_WIN32)
+      _putenv_s ("OBJSTORE_FORCE_DISK_FULL", "");
+#else
       unsetenv ("OBJSTORE_FORCE_DISK_FULL");
+#endif
       return true;
     }
   return false;

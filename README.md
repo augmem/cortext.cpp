@@ -98,7 +98,7 @@ Chosen limits, stated plainly:
 
 ## Status
 
-Cortext v1.1.5 is the hard-cut production line: the embedding and graph memory
+Cortext v1.1.6 is the hard-cut production line: the embedding and graph memory
 engine, release-hardening fixes, and the current bindings. Older research
 components are preserved in git history but not shipped in the runtime surface.
 
@@ -125,17 +125,25 @@ Model-free CI-style test gate:
 ./build/tests/cortext_tests '~[aist]' --reporter compact
 ```
 
+Command-line tools:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_TOOLS=ON
+cmake --build build -j --target cortext_cli
+./build/tools/cli/cortext_cli --help
+```
+
 Examples:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_EXAMPLES=ON
-cmake --build build -j
+cmake --build build -j --target cortext_topical_chat_analysis
 ./build/examples/topical_chat_analysis/cortext_topical_chat_analysis --help
 ```
 
 ## Try It In A Minute
 
-`cortext_cli` (built with `-DCORTEXT_BUILD_EXAMPLES=ON`, output under
+`cortext_cli` (built with `-DCORTEXT_BUILD_TOOLS=ON`, output under
 `build/tools/cli/`) is a durable memory you can talk to from the shell.
 Memories persist in the SQLite file across invocations:
 
@@ -167,6 +175,27 @@ The July 12 memory is demoted at retrieval but kept as history.
 ephemeral: the query triggers retrieval but is not stored, so queries never
 compete with real memories. Pass `--durable` to also store the query as a
 stream event under the `cli/recall` source.
+
+## Zig CLI Install
+
+Zig is the packaging path for installable CLI artifacts. It builds the C++20
+engine and installs `cortext_cli` under `zig-out/bin` without requiring the
+CMake examples surface:
+
+```bash
+zig build -Dshared=false -Dcli=true -Dfetch-aist-model=false
+./zig-out/bin/cortext_cli --help
+```
+
+Build release artifacts by selecting a target triple. The runtime model assets
+still ship separately under `models/`.
+
+```bash
+zig build -Dtarget=x86_64-linux-gnu -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-windows-gnu -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-macos -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=aarch64-macos -Dshared=false -Dcli=true -Dfetch-aist-model=false
+```
 
 ## C++ Quickstart
 

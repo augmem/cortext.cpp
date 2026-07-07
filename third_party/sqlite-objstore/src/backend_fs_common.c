@@ -8,7 +8,22 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
+#if defined(_WIN32)
+#include <direct.h>
+#endif
+
+static int
+objstore_fs_mkdir_one (const char *path)
+{
+#if defined(_WIN32)
+  return _mkdir (path);
+#else
+  return mkdir (path, 0777);
+#endif
+}
 
 char *
 objstore_fs_path_join (const char *lhs, const char *rhs)
@@ -49,7 +64,7 @@ objstore_fs_mkdirs (const char *path)
       if (*p == '/')
         {
           *p = '\0';
-          if (mkdir (mutable_path, 0777) != 0 && errno != EEXIST)
+          if (objstore_fs_mkdir_one (mutable_path) != 0 && errno != EEXIST)
             {
               rc = SQLITE_IOERR;
               goto done;
@@ -57,7 +72,7 @@ objstore_fs_mkdirs (const char *path)
           *p = '/';
         }
     }
-  if (mkdir (mutable_path, 0777) != 0 && errno != EEXIST)
+  if (objstore_fs_mkdir_one (mutable_path) != 0 && errno != EEXIST)
     {
       rc = SQLITE_IOERR;
     }

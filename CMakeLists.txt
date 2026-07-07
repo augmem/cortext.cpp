@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cortext VERSION 1.1.5 LANGUAGES C CXX)
+project(cortext VERSION 1.1.6 LANGUAGES C CXX)
 
 set(CORTEXT_TARGET_IOS OFF)
 if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_OSX_SYSROOT MATCHES "iphone")
@@ -25,6 +25,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(BUILD_TESTING "Build tests" ON)
 option(CORTEXT_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 option(CORTEXT_BUILD_EXAMPLES "Build examples" OFF)
+option(CORTEXT_BUILD_TOOLS "Build command-line tools" OFF)
 option(CORTEXT_BUILD_NODE_BINDINGS "Build Node.js addon bindings" OFF)
 option(BUILD_WASM "Build WebAssembly version" OFF)
 option(CORTEXT_WASM_EXPORT_ALL "Export all functions in WASM build" OFF)
@@ -835,5 +836,8 @@ endif()
 
 if(CORTEXT_BUILD_EXAMPLES AND NOT EMSCRIPTEN)
   add_subdirectory(examples)
+endif()
+
+if(CORTEXT_BUILD_TOOLS AND NOT EMSCRIPTEN)
   add_subdirectory(tools)
 endif()
