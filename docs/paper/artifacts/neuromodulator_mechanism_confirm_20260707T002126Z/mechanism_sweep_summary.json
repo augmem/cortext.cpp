@@ -1,0 +1,97 @@
+{
+  "arms": {
+    "control": {
+      "artifact": "eval_runs/neuromodulator_mechanism_confirm_20260707T002126Z/control/judge.json",
+      "delta_sufficiency_vs_control": 0.0,
+      "judged": 117,
+      "judgment_complete": true,
+      "mean_context_tokens": 754.7692307692307,
+      "mean_noise": 1.2675213675213677,
+      "mean_sufficiency": 3.572649572649573,
+      "missing_judgments": 0,
+      "probe_count": 39,
+      "reading_by_sufficiency_rule": "measured_control",
+      "wins": 50
+    },
+    "emotion_mood_threshold_cascade": {
+      "artifact": "eval_runs/neuromodulator_mechanism_confirm_20260707T002126Z/emotion_mood_threshold_cascade/judge.json",
+      "delta_sufficiency_vs_control": -0.13760683760683756,
+      "judged": 117,
+      "judgment_complete": true,
+      "mean_context_tokens": 751.025641025641,
+      "mean_noise": 1.1581196581196582,
+      "mean_sufficiency": 3.4350427350427353,
+      "missing_judgments": 0,
+      "probe_count": 39,
+      "reading_by_sufficiency_rule": "null",
+      "wins": 45
+    },
+    "encode_retrieve_oscillator": {
+      "artifact": "eval_runs/neuromodulator_mechanism_confirm_20260707T002126Z/encode_retrieve_oscillator/judge.json",
+      "delta_sufficiency_vs_control": -0.48923076923076936,
+      "judged": 117,
+      "judgment_complete": true,
+      "mean_context_tokens": 754.7692307692307,
+      "mean_noise": 1.205384615384615,
+      "mean_sufficiency": 3.0834188034188035,
+      "missing_judgments": 0,
+      "probe_count": 39,
+      "reading_by_sufficiency_rule": "removal_hurts",
+      "wins": 39
+    },
+    "neuromodulator_effect_scales": {
+      "artifact": "eval_runs/neuromodulator_mechanism_confirm_20260707T002126Z/neuromodulator_effect_scales/judge.json",
+      "delta_sufficiency_vs_control": -0.1277777777777782,
+      "judged": 117,
+      "judgment_complete": true,
+      "mean_context_tokens": 754.5641025641025,
+      "mean_noise": 1.1196581196581197,
+      "mean_sufficiency": 3.4448717948717946,
+      "missing_judgments": 0,
+      "probe_count": 39,
+      "reading_by_sufficiency_rule": "null",
+      "wins": 42
+    },
+    "synaptic_tagging": {
+      "artifact": "eval_runs/neuromodulator_mechanism_confirm_20260707T002126Z/synaptic_tagging/judge.json",
+      "delta_sufficiency_vs_control": -0.19658119658119677,
+      "judged": 117,
+      "judgment_complete": true,
+      "mean_context_tokens": 758.5641025641025,
+      "mean_noise": 1.0914529914529914,
+      "mean_sufficiency": 3.376068376068376,
+      "missing_judgments": 0,
+      "probe_count": 39,
+      "reading_by_sufficiency_rule": "removal_hurts",
+      "wins": 44
+    }
+  },
+  "protocol": {
+    "control_reference": {
+      "artifact": "eval_runs/neuromodulator_mechanism_confirm_20260707T002126Z/control/judge.json",
+      "judged": 117,
+      "mean_context_tokens": 754.7692307692307,
+      "mean_noise": 1.2675213675213677,
+      "mean_sufficiency": 3.572649572649573,
+      "wins": 50
+    },
+    "judge_repetitions": 3,
+    "legacy_june_control_reference": {
+      "judged": 39,
+      "mean_context_tokens": 503,
+      "mean_noise": 0.67,
+      "mean_sufficiency": 3.95,
+      "wins": 22
+    },
+    "max_dialogs": 25,
+    "probe_stride": 30,
+    "screen": "capacity-21 MSC 39-probe single-mechanism removal",
+    "verdict_rules": {
+      "long_horizon_null_policy": "defer consolidation-style mechanisms rather than keep",
+      "sufficiency_delta_signal_floor": 0.15
+    },
+    "warmup_events": 20
+  },
+  "root": "eval_runs/neuromodulator_mechanism_confirm_20260707T002126Z",
+  "schema": "cortext_neuromodulator_mechanism_sweep_summary_v1"
+}
