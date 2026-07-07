@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const cortext_version = "1.1.7";
+const cortext_version = "1.1.8";
 
 const sqlite_header_template = @embedFile("third_party/sqlite/src/sqlite.h.in");
 
@@ -313,7 +313,7 @@ pub fn build(b: *std.Build) void {
         .name = "cortext",
         .linkage = if (shared) .dynamic else .static,
         .root_module = mod,
-        .version = .{ .major = 1, .minor = 1, .patch = 7 },
+        .version = .{ .major = 1, .minor = 1, .patch = 8 },
     });
 
     if (fetch_aist_model) {

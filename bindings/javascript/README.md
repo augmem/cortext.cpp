@@ -1,12 +1,14 @@
 # @augmem/cortext
 
 Node.js and TypeScript bindings for Cortext, the on-device memory engine behind
-augmem. Use it to persist user or application context, retrieve relevant
-memories on later turns, and inject those memories into an agent or LLM prompt.
+augmem. Use it to persist text, audio, and image signals, then retrieve relevant
+context for agents, apps, and LLM prompts.
 
-The npm package ships with prebuilt N-API addons and the default AIST GGUF
-embedding asset, so normal installs do not need a compiler or a separate model
-download.
+The npm package ships cross-platform prebuilt N-API addons for supported
+desktop/server platforms. It does not embed the large AIST GGUF model. On first
+engine creation, the wrapper uses `CORTEXT_AIST_MODEL_PATH` if set, then any
+bundled/local model already present, otherwise it downloads the default AIST
+GGUF model into the user cache and verifies its checksum before use.
 
 ## Install
 
@@ -14,23 +16,20 @@ download.
 npm install @augmem/cortext
 ```
 
-Supported package targets:
-
-- `linux-x64`
-- `linux-arm64`
-- `darwin-x64`
-- `darwin-arm64`
-- `win32-x64`
-- `win32-arm64`
-
-Node.js 18 or newer is required.
-
-## Quickstart
-
 ```ts
 import { Cortext, version } from "@augmem/cortext";
 
 console.log(version());
+```
+
+Node.js 18+ is required. Release packages target `linux-x64`, `linux-arm64`,
+`darwin-x64`, `darwin-arm64`, `win32-x64`, and `win32-arm64` where prebuilds
+are published.
+
+## Quickstart
+
+```ts
+import { Cortext } from "@augmem/cortext";
 
 const memory = new Cortext(
   {
@@ -42,11 +41,9 @@ const memory = new Cortext(
 );
 
 try {
-  memory.processText(
-    "The garage door code is 8841.",
-    "user/profile",
-    { includeEmbedding: false }
-  );
+  memory.processText("The garage door code is 8841.", "user/profile", {
+    includeEmbedding: false,
+  });
 
   const ctx = memory.processText(
     "We are leaving soon. What should I remember about the garage?",
@@ -66,23 +63,21 @@ try {
 }
 ```
 
-Use `new Cortext(":memory:")` for a temporary in-memory engine. Use a file path
-when memory should survive process restarts.
-
-CommonJS works too:
+Use `new Cortext(":memory:")` for a temporary engine. Use a file path when
+memories should survive process restarts. CommonJS is also supported:
 
 ```js
 const { Cortext } = require("@augmem/cortext");
 const memory = new Cortext("memory.sqlite");
 ```
 
-## Using It With an LLM
+## LLM Memory Loop
 
-The usual server-side loop is:
+The normal server-side loop is simple:
 
-1. Store durable context with `processText`.
+1. Call `processText` for turns or observations you are willing to remember.
 2. On later turns, read `ctx.retrieved_memory`.
-3. Add the top memory snippets to your model prompt.
+3. Add the top snippets to the model prompt.
 4. Call `consolidate()` when Cortext recommends it.
 
 ```ts
@@ -92,7 +87,7 @@ const ctx = memory.processText(userMessage, `conversation/${conversationId}`, {
 
 const memories = (ctx.retrieved_memory ?? [])
   .slice(0, 6)
-  .map((m) => `- ${m.text}`)
+  .map((m) => `- ${m.text ?? ""}`)
   .join("\n");
 
 const prompt = `Relevant memory:
@@ -102,10 +97,85 @@ User:
 ${userMessage}`;
 ```
 
-Important: `processText` is durable in the current JavaScript API. It can
-retrieve memory, but it also writes the input signal into the configured store.
-Use it for turns you are willing to remember. Use `embedText` for embedding-only
-work that must not mutate memory.
+Durable-write warning: `processText`, `processAudio`, and `processImage`
+retrieve context and also write the input signal to the configured store. Do
+not use them as read-only queries for content that should not be remembered.
+Use `embedText`, `embedAudio`, or `embedImage` for embedding-only work.
+
+## Returned Context
+
+`processText`, `processAudio`, and `processImage` return parsed objects from
+the native context packet. Common fields:
+
+- `retrieved_memory`: long-term memories selected for the current signal.
+- `working_memory`: short-term active context.
+- `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior
+  flags.
+- `consolidation_recommended`, `consolidation_required`: maintenance hints.
+- `output`: scores, storage decisions, filter status, and operation timings.
+- `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
+- `embedding`, `embedding_dimension`: present only when requested.
+
+Memory entries commonly include `text`, `source_id`, `timestamp`, `modality`,
+`mimetype`, `rel`, usage counts, scores, and soft-anchor metadata. For prompt
+assembly, pass `{ includeEmbedding: false }`; embeddings are large and rarely
+needed in the returned packet.
+
+## Audio and Image
+
+Audio input is a `Float32Array` containing 16 kHz mono PCM:
+
+```ts
+const pcm = new Float32Array(16000);
+const ctx = memory.processAudio(pcm, "mic/main", { includeEmbedding: false });
+```
+
+Image input is row-major RGB or RGBA bytes:
+
+```ts
+const rgb = new Uint8Array(64 * 64 * 3);
+const ctx = memory.processImage(rgb, 64, 64, 3, "camera/main", {
+  includeEmbedding: false,
+});
+```
+
+Use media variants when you want to store original bytes next to the canonical
+signal:
+
+```ts
+const media = { data: jpegBytes, mimetype: "image/jpeg" };
+const ctx = memory.processImageWithMedia(
+  rgb,
+  64,
+  64,
+  3,
+  "camera/main",
+  media,
+  { includeEmbedding: false }
+);
+```
+
+## Runtime Assets and Model Cache
+
+The package contains the native `cortext.node` addon for supported platforms.
+The AIST GGUF model is intentionally not embedded in registry packages because
+of npm size constraints.
+
+Model resolution on engine creation:
+
+1. `CORTEXT_AIST_MODEL_PATH=/path/to/AIST-87M_q8_0.gguf`
+2. A bundled or checkout-local model, if one exists.
+3. Download the default AIST GGUF model to the user cache and verify its
+   checksum before loading it.
+
+The first run may need network access and enough cache space for the model
+(roughly 135-142 MiB, depending on quantization). Later runs reuse the verified
+cache. Set `CORTEXT_MODEL_CACHE_DIR` to control the cache root, or set
+`CORTEXT_AIST_MODEL_PATH` for offline deployments and pinned model files.
+
+Native addon override:
+
+- `CORTEXT_NODE_ADDON_PATH=/path/to/cortext.node`
 
 ## API Shape
 
@@ -128,10 +198,8 @@ Core methods:
 - `flush()`
 - `reset()`
 
-Every `process*` and `embed*` method also has a `*Json` variant that returns
-the native JSON string.
-
-`ProcessOptions`:
+Every `process*`, `embed*`, and `consolidate` method also has a `*Json` variant
+that returns the raw native JSON string.
 
 ```ts
 interface ProcessOptions {
@@ -140,71 +208,17 @@ interface ProcessOptions {
 }
 ```
 
-Use `{ includeEmbedding: false }` for prompt-injection workflows; returning the
-embedding in every context packet is usually unnecessary.
+## Troubleshooting
 
-## Returned Context
-
-`processText`, `processAudio`, and `processImage` return parsed objects from
-the native context packet. The most useful fields are:
-
-- `retrieved_memory`: long-term memories selected for this signal.
-- `working_memory`: short-term active context.
-- `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior
-  flags.
-- `consolidation_recommended`, `consolidation_required`: maintenance hints.
-- `output`: scores, storage decisions, filter status, and operation timings.
-- `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
-- `embedding`, `embedding_dimension`: present only when requested.
-
-Memory entries include `text`, `source_id`, `timestamp`, `modality`,
-`mimetype`, `rel`, usage counts, metric scores, and soft-anchor metadata.
-
-## Audio and Image
-
-Audio input is `Float32Array` containing 16 kHz mono PCM:
-
-```ts
-const pcm = new Float32Array(16000);
-const ctx = memory.processAudio(pcm, "mic/main", { includeEmbedding: false });
-```
-
-Image input is row-major RGB or RGBA bytes:
-
-```ts
-const rgb = new Uint8Array(64 * 64 * 3);
-const ctx = memory.processImage(rgb, 64, 64, 3, "camera/main");
-```
-
-Use media variants when you want to store original bytes next to the canonical
-signal:
-
-```ts
-const media = { data: jpegBytes, mimetype: "image/jpeg" };
-const ctx = memory.processImageWithMedia(
-  rgb,
-  64,
-  64,
-  3,
-  "camera/main",
-  media
-);
-```
-
-## Runtime Assets
-
-Normal installs include:
-
-- A prebuilt `cortext.node` for the current supported platform.
-- The default AIST GGUF embedding asset and tokenizer vocabulary.
-
-Override paths only for local development or custom assets:
-
-- `CORTEXT_NODE_ADDON_PATH=/path/to/cortext.node`
-- `CORTEXT_AIST_MODEL_PATH=/path/to/AIST-87M_q8_0.gguf`
-
-If the package cannot load a native addon, the thrown error lists every path it
-tried and the supported target tags.
+- First engine creation is slow: the model may be downloading and verifying.
+- Model download fails: check network access, cache write permission, or set
+  `CORTEXT_AIST_MODEL_PATH` to a local GGUF file.
+- Checksum failure: remove the partially downloaded cache file and retry.
+- Native addon cannot be loaded: install a package for a supported target or
+  set `CORTEXT_NODE_ADDON_PATH`.
+- Very large context objects: call `processText(..., { includeEmbedding: false })`.
+- Need a clean temporary run: use `new Cortext(":memory:")`.
+- Native failure details: call `lastError()` immediately after the exception.
 
 ## Build From Source
 
@@ -213,15 +227,15 @@ From the repository root:
 ```bash
 cd bindings/javascript
 npm run build
+export CORTEXT_AIST_MODEL_PATH="$PWD/../../models/AIST-87M-GGUF/AIST-87M_q8_0.gguf"
 ```
 
-Build the release tarball with all prebuilt addons and the bundled AIST asset:
+Build a release tarball with native addons:
 
 ```bash
-npm run build:package -- --zig /path/to/zig
+npm run build:package -- --zig /path/to/zig --skip-models
 ```
 
-The generated tarball is written to `bindings/javascript/dist/`.
-
-For browser demos, use the separate Emscripten wrapper under `bindings/wasm`
-and serve `examples/web/` from the repository root.
+The tarball is written to `bindings/javascript/dist/`. Registry packages should
+include native addons but leave the large AIST model to the runtime cache path
+above.

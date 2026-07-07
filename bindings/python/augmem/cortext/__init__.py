@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import hashlib
 import json
 import os
 import platform
+import tempfile
+import urllib.error
+import urllib.request
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
@@ -299,6 +303,23 @@ _SUPPORTED_NATIVE_TARGETS = {
 
 _DLL_DIRECTORY_HANDLES: list[Any] = []
 
+_AIST_REPO = "augmem/AIST-87M-GGUF"
+_AIST_REVISION = "main"
+_AIST_MODEL_FILE = {
+    "filename": "AIST-87M_q8_0.gguf",
+    "sha256": "bf4c49954eccc65183f1a97e44606e86c7ee5a4fea500457124b687a3ec97898",
+    "size": 141491936,
+}
+_TOKENIZER_REPO = "bert-base-uncased"
+_TOKENIZER_REVISION = "main"
+_TOKENIZER_FILE = {
+    "filename": "vocab.txt",
+    "target": Path("mdbr-leaf-ir") / "vocab.txt",
+    "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+    "size": 231508,
+}
+_DOWNLOAD_TIMEOUT_SECONDS = 60
+
 
 def _package_dir() -> Path:
     return Path(__file__).resolve().parent
@@ -350,6 +371,139 @@ def _aist_model_path(root: Path) -> Path | None:
     return next((path for path in candidates if path.is_file()), None)
 
 
+def _hf_url(repo: str, revision: str, filename: str) -> str:
+    return f"https://huggingface.co/{repo}/resolve/{revision}/{filename}?download=1"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_file(path: Path, expected_sha256: str, expected_size: int) -> bool:
+    return (
+        path.is_file()
+        and path.stat().st_size == expected_size
+        and _sha256_file(path) == expected_sha256
+    )
+
+
+def _model_cache_dir() -> Path:
+    override = os.environ.get("CORTEXT_MODEL_CACHE_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    if platform.system().lower() == "windows":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        root = Path(base).expanduser() if base else Path.home() / "AppData" / "Local"
+    elif platform.system().lower() == "darwin":
+        root = Path.home() / "Library" / "Caches"
+    else:
+        root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")).expanduser()
+
+    return root / "augmem" / "cortext" / "models"
+
+
+def _download_file(url: str, dest: Path, expected_sha256: str, expected_size: int) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{dest.name}.", suffix=".tmp", dir=os.fspath(dest.parent)
+    )
+    os.close(fd)
+    tmp = Path(tmp_name)
+
+    headers = {"User-Agent": "cortext-python-model-bootstrap/1.0"}
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        request = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(
+            request, timeout=_DOWNLOAD_TIMEOUT_SECONDS
+        ) as response, tmp.open("wb") as out:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+        actual_size = tmp.stat().st_size
+        actual_sha256 = _sha256_file(tmp)
+        if actual_size != expected_size:
+            raise CortextError(
+                f"downloaded {dest.name} has size {actual_size}, expected {expected_size}"
+            )
+        if actual_sha256 != expected_sha256:
+            raise CortextError(
+                f"downloaded {dest.name} has sha256 {actual_sha256}, expected {expected_sha256}"
+            )
+        tmp.replace(dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _ensure_verified_file(
+    url: str, dest: Path, expected_sha256: str, expected_size: int
+) -> None:
+    if _verify_file(dest, expected_sha256, expected_size):
+        return
+    try:
+        _download_file(url, dest, expected_sha256, expected_size)
+    except urllib.error.HTTPError as exc:
+        raise CortextError(
+            f"could not download Cortext model asset {dest.name}: HTTP {exc.code}. "
+            "Set CORTEXT_AIST_MODEL_PATH to an existing AIST GGUF file or retry later."
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise CortextError(
+            f"could not download Cortext model asset {dest.name}: {exc.reason}. "
+            "Set CORTEXT_AIST_MODEL_PATH to an existing AIST GGUF file or retry later."
+        ) from exc
+
+
+def _cached_default_aist_model_path(cache_root: Path) -> Path | None:
+    model_path = cache_root / "AIST-87M-GGUF" / _AIST_MODEL_FILE["filename"]
+    tokenizer_path = cache_root / _TOKENIZER_FILE["target"]
+    if _verify_file(
+        model_path,
+        str(_AIST_MODEL_FILE["sha256"]),
+        int(_AIST_MODEL_FILE["size"]),
+    ) and _verify_file(
+        tokenizer_path,
+        str(_TOKENIZER_FILE["sha256"]),
+        int(_TOKENIZER_FILE["size"]),
+    ):
+        return model_path
+    return None
+
+
+def _ensure_cached_default_aist_model_path() -> Path:
+    cache_root = _model_cache_dir()
+    if cached := _cached_default_aist_model_path(cache_root):
+        return cached
+
+    model_path = cache_root / "AIST-87M-GGUF" / _AIST_MODEL_FILE["filename"]
+    tokenizer_path = cache_root / _TOKENIZER_FILE["target"]
+    _ensure_verified_file(
+        _hf_url(_AIST_REPO, _AIST_REVISION, str(_AIST_MODEL_FILE["filename"])),
+        model_path,
+        str(_AIST_MODEL_FILE["sha256"]),
+        int(_AIST_MODEL_FILE["size"]),
+    )
+    _ensure_verified_file(
+        _hf_url(_TOKENIZER_REPO, _TOKENIZER_REVISION, str(_TOKENIZER_FILE["filename"])),
+        tokenizer_path,
+        str(_TOKENIZER_FILE["sha256"]),
+        int(_TOKENIZER_FILE["size"]),
+    )
+    return model_path
+
+
 def _default_aist_model_path() -> str | None:
     package_models = _package_dir() / "models"
     if model_path := _aist_model_path(package_models):
@@ -361,7 +515,8 @@ def _default_aist_model_path() -> str | None:
         if model_path := _aist_model_path(repo_models):
             return os.fspath(model_path)
 
-    return None
+    return os.fspath(_ensure_cached_default_aist_model_path())
+
 
 
 def _candidate_library_paths() -> list[Path]:
@@ -1031,9 +1186,9 @@ class Cortext:
         self._object_provider_bridge = (
             _ObjectProviderBridge(object_store) if object_store is not None else None
         )
-        default_model_path = _default_aist_model_path()
         had_model_env = "CORTEXT_AIST_MODEL_PATH" in os.environ
         previous_model_env = os.environ.get("CORTEXT_AIST_MODEL_PATH")
+        default_model_path = None if had_model_env else _default_aist_model_path()
         if not had_model_env and default_model_path is not None:
             os.environ["CORTEXT_AIST_MODEL_PATH"] = default_model_path
         try:
