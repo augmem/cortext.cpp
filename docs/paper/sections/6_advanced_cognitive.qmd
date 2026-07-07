@@ -492,15 +492,16 @@ if source_confidence(m) < lerp(0.15, 0.45, T):
 ```
 
 Belief revision is graph-native and modality-agnostic. On a durable memory
-write, the stored embedding is compared with a knob-bounded set of prior memory
-embeddings. If the current step's contradiction pressure clears
-`SupersessionContradictionThreshold(F,S,T)` and pairwise similarity clears
-`SupersessionSimilarityThreshold(F,S,T)`, the runtime writes a directed
-`supersedes` edge from the new memory to the older memory:
+write, the stored embedding is compared with a knob-bounded nearest-neighbor
+set of prior memory embeddings. If pairwise similarity lands in the
+supersession band, the runtime writes a directed `supersedes` edge from the new
+memory to the older memory:
 
 ```
-if contradiction_t ≥ θ_supersede_contra(F,S,T)
-   and cos(e_new, e_old) ≥ θ_supersede_sim(F,S,T):
+θ_topic ← SupersessionSimilarityThreshold(F,S,T)
+θ_dup   ← SupersessionDuplicateThreshold(F,S,T)
+
+if θ_topic ≤ cos(e_new, e_old) < θ_dup:
     associations.add(e_new → e_old, type = "supersedes",
                      weight = SupersessionEdgeWeight(cos,F,S,T))
     contradiction_count(e_old) += 1
@@ -509,7 +510,8 @@ if contradiction_t ≥ θ_supersede_contra(F,S,T)
 Retrieval traverses `supersedes` edges so a replacement can surface when a
 query first hits the stale assertion. The superseded target is demoted by
 `RetrievalSupersededMemoryPenalty(F,S,T) × edge_weight`, but remains retrievable
-as historical evidence.
+as historical evidence. The number of written supersession edges is capped by
+`SupersessionMaxEdges(F,S,T)`.
 
 ## Constructive Recall and Controlled Distortion
 

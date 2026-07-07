@@ -268,6 +268,83 @@ TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
            == AnyToLongLong (before_signals[0].at ("n")));
 }
 
+TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
+           "[cortext][belief_revision][eval][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  const std::string stale_vet
+      = "Bailey's vet appointment is July 12 at 8am.";
+  const std::string corrected_vet
+      = "Bailey's July 12 vet appointment is canceled. "
+        "The appointment moved to July 14 at 9am.";
+  const std::string stale_pill
+      = "Bailey takes the morning pill at 8am.";
+  const std::string corrected_pill
+      = "The doctor changed Bailey's morning pill to 9am.";
+
+  auto ingest_vet = ctx->ProcessTextAt (stale_vet, "cli/main", 1000ULL);
+  auto correct_vet = ctx->ProcessTextAt (corrected_vet, "cli/main", 2000ULL);
+  auto ingest_pill = ctx->ProcessTextAt (stale_pill, "cli/main", 3000ULL);
+  auto correct_pill = ctx->ProcessTextAt (corrected_pill, "cli/main",
+                                          4000ULL);
+
+  REQUIRE (ingest_vet.output.stored_memory_id.has_value ());
+  REQUIRE (correct_vet.output.stored_memory_id.has_value ());
+  REQUIRE (ingest_pill.output.stored_memory_id.has_value ());
+  REQUIRE (correct_pill.output.stored_memory_id.has_value ());
+
+  auto edge_rows = store->Execute (
+      "SELECT source_memory_id, target_memory_id FROM associations "
+      "WHERE edge_type = 'supersedes'");
+  REQUIRE (edge_rows.size () >= 2);
+
+  auto assert_correction_precedes_stale =
+      [] (const cortext::Cortext::Context &recalled,
+          const std::string &corrected, const std::string &stale) {
+        std::size_t corrected_index = recalled.retrieved_memory.size ();
+        std::size_t stale_index = recalled.retrieved_memory.size ();
+        for (std::size_t i = 0; i < recalled.retrieved_memory.size (); ++i)
+          {
+            const std::string text = TextFromMemory (
+                recalled.retrieved_memory[i]);
+            if (text.find (corrected) != std::string::npos)
+              {
+                corrected_index = std::min (corrected_index, i);
+              }
+            if (text.find (stale) != std::string::npos)
+              {
+                stale_index = std::min (stale_index, i);
+              }
+          }
+        REQUIRE (corrected_index < recalled.retrieved_memory.size ());
+        if (stale_index < recalled.retrieved_memory.size ())
+          {
+            REQUIRE (corrected_index < stale_index);
+          }
+      };
+
+  auto vet_recall = ctx->ProcessTextAt (
+      "When is Bailey's vet appointment?", "cli/recall", 5000ULL,
+      cortext::Retention::Ephemeral);
+  assert_correction_precedes_stale (vet_recall, corrected_vet, stale_vet);
+
+  auto pill_recall = ctx->ProcessTextAt (
+      "When is Bailey's morning pill?", "cli/recall", 6000ULL,
+      cortext::Retention::Ephemeral);
+  assert_correction_precedes_stale (pill_recall, corrected_pill, stale_pill);
+}
+
 TEST_CASE ("internal replay ingress preserves media event timestamps",
            "[cortext][replay][media][aist]")
 {
