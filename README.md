@@ -1,10 +1,23 @@
 # Cortext
 
-**A closed-loop memory engine for streaming AI.**
+**Long-term memory for AI apps and agents — local, realtime, and ~50× fewer
+context tokens than chat+RAG.**
 
-Cortext turns live text, audio, and image streams into durable, source-backed
-memory. It stores compact traces, builds graph associations, retrieves relevant
-context, and runs explicit shallow consolidation in a local C++20 runtime. It
+Cortext gives a long-running assistant, agent, or device a durable memory.
+You feed it a stream of events — chat turns, audio, images — and on every
+call it returns a small packet (typically under 1,000 tokens) of the stored
+memories most relevant to the current moment, ready to drop into an LLM
+prompt or surface in a UI. It decides on its own what is worth storing, how
+memories associate, which facts have been superseded by corrections, and what
+to let fade. There is no manual memory management and no cloud dependency:
+everything runs on-device in a C++20 runtime against a local SQLite file and
+a bundled 87M-parameter embedding model.
+
+Use it when a conversation or agent outlives its context window. Instead of
+re-sending tens of thousands of tokens of history or maintaining a RAG
+pipeline, you send Cortext's ~1k-token packet — in blind LLM-judge evals it
+beat traditional chat+RAG on 7 of 9 probes while using 97.97% fewer context
+tokens (see [Benchmarks](#benchmarks) and [Tradeoffs](#tradeoffs)). Cortext
 began as memory augmentation for a family member living with dementia
 (see [Motivation](#motivation)); the same engine serves long-horizon LLM
 memory.
@@ -26,15 +39,20 @@ What makes it different:
 - **Evidence tracked with the code:** experiment artifacts and manuscript
   sections live under `docs/paper/`.
 
-## Results Snapshot
+## Benchmarks
 
-Cortext's operating point is a deliberate tradeoff. In a hosted frontier-judge
-eval on a public Meta Multi-Session Chat slice, it gave up a 0.26 gap in mean
-judged sufficiency against traditional chat+RAG (4.41 vs 4.67 on a 5-point
-scale) in exchange for **97.97% fewer context tokens per turn** (998 vs
-49,196) — and the blind judge still preferred Cortext's packets, 7 of 9 probes
-by majority and 21 of 27 judgment rows, because they carried roughly a third
-of the noise (1.85 vs 4.70).
+How these are measured: a long multi-session conversation is replayed through
+each memory system; at probe points a judge LLM asks a question whose answer
+appeared sessions earlier, and blind-scores each system's context packet for
+relevance, sufficiency, and noise without knowing which system produced it.
+Systems compared: Cortext, traditional chat+RAG, a full-history upper bound,
+and compaction/rolling-window baselines.
+
+Headline (hosted frontier judge, public Meta Multi-Session Chat slice, 9
+probes × 3 repetitions): **Cortext won 7 of 9 probes by majority and 21 of 27
+blind judgment rows, using 998 context tokens per turn versus 49,196 for
+traditional chat+RAG — 97.97% fewer.** Its packets also carried roughly a
+third of the judged noise (1.85 vs 4.70).
 
 | Eval | Result | Context Cost |
 |---|---|---:|
@@ -47,17 +65,36 @@ Unlimited context is not the alternative it sounds like: the hosted eval
 includes a full-history upper-bound arm, and it took 1 of 27 blind rows. At
 the separate 18,000-message stress horizon, keeping full history inside a
 131k judge window meant dropping 123,359 items. On device the comparison is
-starker than a tradeoff: a 49k-token prompt per turn costs seconds of prefill
-on local hardware, while Cortext's ~1k-token packets keep retrieval realtime.
-
-Caveat, stated plainly: this is not a raw-sufficiency-match claim yet. In the
-hosted MSC run, traditional chat+RAG and compaction scored slightly higher
-mean sufficiency. Cortext's measured win is context cost, blind-judge
-preference, lower noise, and a smaller production surface.
+starker still: a 49k-token prompt per turn costs seconds of prefill on local
+hardware, while Cortext's ~1k-token packets keep retrieval realtime.
 
 Full protocols, caveats, and artifacts are in
 `docs/paper/sections/9_experimental.qmd` and the generated manuscript at
 `docs/paper/_manuscript/index.md`.
+
+## Tradeoffs
+
+Chosen limits, stated plainly:
+
+- **A little sufficiency for a lot of context.** This is not a
+  raw-sufficiency-match claim: in the hosted run, chat+RAG and compaction
+  scored slightly higher mean judged sufficiency (4.67 and 4.63 vs 4.41 on a
+  5-point scale). Cortext's measured win is context cost, blind-judge
+  preference, and much lower noise. If you can afford ~50k tokens per turn
+  and the prefill latency that comes with them, full context is still more
+  complete.
+- **Pinned local encoder.** Retrieval quality rides on the bundled AIST-87M
+  GGUF model (downloaded at build). Every database pins the encoder
+  fingerprint that produced its embeddings, so you cannot hot-swap embedding
+  models over an existing memory store.
+- **Single writer per database.** One process owns writes; there is no
+  multi-device sync or concurrent-writer merge yet.
+- **Source-backed traces, not distilled facts.** v1 stores what it saw and
+  retrieves it. There is no LLM extraction or summarization layer rewriting
+  memories — deliberately, so every retrieved memory traces to a real input.
+- **Native build.** C++20 and CMake today. Bindings for Python, Go,
+  JavaScript/TypeScript, Dart, and WebAssembly ship in-tree, but there is no
+  `pip install` yet.
 
 ## Status
 
