@@ -34,7 +34,6 @@ struct Options
   std::filesystem::path audio_path;
   std::filesystem::path text_path;
   std::filesystem::path output_dir = "build/signal_filter_bench";
-  std::string models_dir = "models";
   int width = 640;
   int height = 480;
   int channels = 3;
@@ -142,7 +141,6 @@ PrintUsage ()
       << "  --text-step-seconds <value>\n"
       << "  --max-items <n>\n"
       << "  --output-dir <path>\n"
-      << "  --models-dir <path>\n"
       << "  --fixed-threshold <value>\n"
       << "  --base-threshold <value>\n"
       << "  --heartbeat-seconds <value>\n"
@@ -192,8 +190,6 @@ ParseArgs (int argc, char *argv[])
         opts.text_path = argv[++i];
       else if (arg == "--output-dir" && i + 1 < argc)
         opts.output_dir = argv[++i];
-      else if (arg == "--models-dir" && i + 1 < argc)
-        opts.models_dir = argv[++i];
       else if (arg == "--width" && i + 1 < argc)
         opts.width = ParseInt (argv[++i]);
       else if (arg == "--height" && i + 1 < argc)
@@ -1052,7 +1048,7 @@ ProcessRun (const ModalityRun &run, const Options &opts)
   const auto db_path = opts.output_dir
                        / ("signal_filter_" + run.modality + "_"
                           + opts.process_policy + ".sqlite");
-  auto ctx = cortext::Cortext::Create (cfg, db_path.string (), opts.models_dir);
+  auto ctx = cortext::Cortext::Create (cfg, db_path.string ());
   const auto start = std::chrono::steady_clock::now ();
 
   if (run.modality == "image")

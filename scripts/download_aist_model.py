@@ -110,10 +110,10 @@ def selected_quants(value: str) -> list[str]:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--models-dir",
+        "--output-dir",
         default="models",
         type=pathlib.Path,
-        help="Repository model root. AIST files are placed under AIST-87M-GGUF/.",
+        help="Model asset output root. AIST files are placed under AIST-87M-GGUF/.",
     )
     parser.add_argument(
         "--quant",
@@ -144,7 +144,8 @@ def main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    model_root = args.models_dir / "AIST-87M-GGUF"
+    output_dir = args.output_dir
+    model_root = output_dir / "AIST-87M-GGUF"
     for quant in selected_quants(args.quant):
         spec = FILES[quant]
         dest = model_root / spec["filename"]
@@ -170,7 +171,7 @@ def main(argv: list[str]) -> int:
             return 1
         print(f"[OK] downloaded and verified {dest}")
 
-    tokenizer_dest = args.models_dir / TOKENIZER_FILE["target"]
+    tokenizer_dest = output_dir / TOKENIZER_FILE["target"]
     if not args.force and verify(
         tokenizer_dest, TOKENIZER_FILE["sha256"], TOKENIZER_FILE["size"]
     ):

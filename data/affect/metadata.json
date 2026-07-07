@@ -44,7 +44,7 @@
       "file": "violation_low_256.npy"
     }
   },
-  "models_meta": {
+  "model_assets_meta": {
     "bytes": 275931120,
     "exists": true,
     "files": 12,

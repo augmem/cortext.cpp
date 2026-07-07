@@ -19,7 +19,7 @@ class CortextBindings {
     ffi.Pointer<T> Function<T extends ffi.NativeType>(String symbolName) lookup,
   ) : _lookup = lookup;
 
-  /// @brief Creates a Cortext instance with default models directory.
+  /// @brief Creates a Cortext instance.
   /// @param focus Focus knob value in [0.0, 1.0].
   /// @param sensitivity Sensitivity knob value in [0.0, 1.0].
   /// @param stability Stability knob value in [0.0, 1.0].
@@ -27,7 +27,6 @@ class CortextBindings {
   /// @return Handle to the created instance, or NULL on failure.
   ///
   /// The returned handle must be freed with cortext_free().
-  /// Default models directory is "models".
   cortext_handle cortext_create(
     double focus,
     double sensitivity,
@@ -68,13 +67,11 @@ class CortextBindings {
   /// @brief Creates a Cortext instance from a binding-friendly config struct.
   /// @param cfg Optional configuration. NULL uses the library defaults.
   /// @param db_path Path to SQLite database file.
-  /// @param models_dir Optional path to model assets. NULL uses the default.
   cortext_handle cortext_create_with_config(
     ffi.Pointer<cortext_config> cfg,
     ffi.Pointer<ffi.Char> db_path,
-    ffi.Pointer<ffi.Char> models_dir,
   ) {
-    return _cortext_create_with_config(cfg, db_path, models_dir);
+    return _cortext_create_with_config(cfg, db_path);
   }
 
   late final _cortext_create_with_configPtr =
@@ -83,7 +80,6 @@ class CortextBindings {
           cortext_handle Function(
             ffi.Pointer<cortext_config>,
             ffi.Pointer<ffi.Char>,
-            ffi.Pointer<ffi.Char>,
           )
         >
       >('cortext_create_with_config');
@@ -91,55 +87,6 @@ class CortextBindings {
       .asFunction<
         cortext_handle Function(
           ffi.Pointer<cortext_config>,
-          ffi.Pointer<ffi.Char>,
-          ffi.Pointer<ffi.Char>,
-        )
-      >();
-
-  /// @brief Creates a Cortext instance with custom models directory.
-  /// @param focus Focus knob value in [0.0, 1.0].
-  /// @param sensitivity Sensitivity knob value in [0.0, 1.0].
-  /// @param stability Stability knob value in [0.0, 1.0].
-  /// @param db_path Path to SQLite database file (e.g., "memory.db" or ":memory:").
-  /// @param models_dir Path to directory containing Cortext model assets.
-  /// @return Handle to the created instance, or NULL on failure.
-  ///
-  /// The returned handle must be freed with cortext_free().
-  cortext_handle cortext_create_with_models(
-    double focus,
-    double sensitivity,
-    double stability,
-    ffi.Pointer<ffi.Char> db_path,
-    ffi.Pointer<ffi.Char> models_dir,
-  ) {
-    return _cortext_create_with_models(
-      focus,
-      sensitivity,
-      stability,
-      db_path,
-      models_dir,
-    );
-  }
-
-  late final _cortext_create_with_modelsPtr =
-      _lookup<
-        ffi.NativeFunction<
-          cortext_handle Function(
-            ffi.Double,
-            ffi.Double,
-            ffi.Double,
-            ffi.Pointer<ffi.Char>,
-            ffi.Pointer<ffi.Char>,
-          )
-        >
-      >('cortext_create_with_models');
-  late final _cortext_create_with_models = _cortext_create_with_modelsPtr
-      .asFunction<
-        cortext_handle Function(
-          double,
-          double,
-          double,
-          ffi.Pointer<ffi.Char>,
           ffi.Pointer<ffi.Char>,
         )
       >();

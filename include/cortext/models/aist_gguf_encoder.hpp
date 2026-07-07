@@ -57,7 +57,7 @@ struct AistRuntimeStats
 };
 
 std::optional<std::filesystem::path>
-ResolveAistGgufModelPath (const std::filesystem::path &models_dir,
+ResolveAistGgufModelPath (const std::filesystem::path &asset_root,
                           const std::filesystem::path &override_path = {});
 
 AistModelInfo InspectAistGgufModel (const std::filesystem::path &model_path);

@@ -28,7 +28,6 @@ struct Options
 {
   std::filesystem::path assets_dir = "build/real_multimodal_episode_assets";
   std::filesystem::path output_dir = "build/real_multimodal_episode_bench";
-  std::string models_dir = "models";
 };
 
 struct Event
@@ -86,8 +85,7 @@ void
 PrintUsage ()
 {
   std::cout << "Usage: cortext_real_multimodal_episode_bench"
-            << " [--assets-dir <path>] [--output-dir <path>]"
-            << " [--models <path>]\n";
+            << " [--assets-dir <path>] [--output-dir <path>]\n";
 }
 
 Options
@@ -109,10 +107,6 @@ ParseArgs (int argc, char **argv)
       else if (arg == "--output-dir" && i + 1 < argc)
         {
           opts.output_dir = argv[++i];
-        }
-      else if (arg == "--models" && i + 1 < argc)
-        {
-          opts.models_dir = argv[++i];
         }
       else
         {
@@ -441,8 +435,7 @@ ProcessScenario (const Scenario &scenario, const Options &opts)
 
   std::vector<nlohmann::json> steps;
   {
-    auto engine = cortext::Cortext::Create (cfg, db_path.string (),
-                                            opts.models_dir);
+    auto engine = cortext::Cortext::Create (cfg, db_path.string ());
     for (const auto &event : scenario.events)
       {
         cortext::Cortext::Context ctx;

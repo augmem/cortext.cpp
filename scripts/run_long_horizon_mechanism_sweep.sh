@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="${ROOT:-eval_runs/long_horizon_mechanism_sweep_$(date -u +%Y%m%dT%H%M%SZ)}"
 BUILD_DIR="${BUILD_DIR:-build-mechanism-hooks}"
-MODELS_DIR="${MODELS_DIR:-models}"
 INPUT_DIR="${INPUT_DIR:-/shared/Memory/Julie}"
 MAX_MESSAGES="${MAX_MESSAGES:-18000}"
 MEDIA_LIMIT="${MEDIA_LIMIT:-128}"
@@ -126,7 +125,6 @@ run_arm() {
     --input-dir "${INPUT_DIR}"
     --db "${db}"
     --out "${summary}"
-    --models "${MODELS_DIR}"
     --max-messages "${MAX_MESSAGES}"
     --media-limit "${MEDIA_LIMIT}"
     --warmup-events "${WARMUP_EVENTS}"

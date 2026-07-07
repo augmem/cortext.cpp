@@ -2920,65 +2920,65 @@ public:
     return false;
   }
 
-	  const std::string &
-	  BackendName () const
-	  {
-	    static const std::string none = "not_used";
-	    return none;
-	  }
+  const std::string &
+  BackendName () const
+  {
+    static const std::string none = "not_used";
+    return none;
+  }
 
-	  bool
-	  UsesFullTextGraph () const
-	  {
-	    return false;
-	  }
+  bool
+  UsesFullTextGraph () const
+  {
+    return false;
+  }
 
-	  bool
-	  UsesFullImageGraph () const
-	  {
-	    return false;
-	  }
+  bool
+  UsesFullImageGraph () const
+  {
+    return false;
+  }
 
-	  bool
-	  UsesFullAudioGraph () const
-	  {
-	    return false;
-	  }
+  bool
+  UsesFullAudioGraph () const
+  {
+    return false;
+  }
 
-	  const std::string &
-	  FullTextGraphError () const
-	  {
-	    static const std::string error
-	        = "ggml kernel runtime was not compiled into this build";
-	    return error;
-	  }
+  const std::string &
+  FullTextGraphError () const
+  {
+    static const std::string error
+        = "ggml kernel runtime was not compiled into this build";
+    return error;
+  }
 
-	  std::vector<float>
-	  Linear (const std::vector<float> &, const std::string &)
-	  {
-	    throw std::runtime_error ("ggml kernel runtime unavailable");
-	  }
+  std::vector<float>
+  Linear (const std::vector<float> &, const std::string &)
+  {
+    throw std::runtime_error ("ggml kernel runtime unavailable");
+  }
 
-	  std::vector<float>
-	  EncodeTextTokensFullGraph (const std::vector<int> &)
-	  {
-	    throw std::runtime_error ("ggml kernel runtime unavailable");
-	  }
+  std::vector<float>
+  EncodeTextTokensFullGraph (const std::vector<int> &)
+  {
+    throw std::runtime_error ("ggml kernel runtime unavailable");
+  }
 
-	  std::vector<float>
-	  EncodeImageFullGraph (const std::vector<float> &)
-	  {
-	    throw std::runtime_error ("ggml kernel runtime unavailable");
-	  }
+  std::vector<float>
+  EncodeImageFullGraph (const std::vector<float> &)
+  {
+    throw std::runtime_error ("ggml kernel runtime unavailable");
+  }
 
-	  std::vector<float>
-	  EncodeAudioFullGraph (const std::vector<float> &)
-	  {
-	    throw std::runtime_error ("ggml kernel runtime unavailable");
-	  }
+  std::vector<float>
+  EncodeAudioFullGraph (const std::vector<float> &)
+  {
+    throw std::runtime_error ("ggml kernel runtime unavailable");
+  }
 
-	  RowMatrix
-	  LinearRows (const RowMatrix &, const std::string &)
+  RowMatrix
+  LinearRows (const RowMatrix &, const std::string &)
   {
     throw std::runtime_error ("ggml kernel runtime unavailable");
   }
@@ -3807,7 +3807,7 @@ private:
 };
 
 std::optional<std::filesystem::path>
-ResolveAistGgufModelPath (const std::filesystem::path &models_dir,
+ResolveAistGgufModelPath (const std::filesystem::path &asset_root,
                           const std::filesystem::path &override_path)
 {
   const std::string env_path = GetEnvOrDefault ("CORTEXT_AIST_MODEL_PATH");
@@ -3831,10 +3831,10 @@ ResolveAistGgufModelPath (const std::filesystem::path &models_dir,
                                 + env_path);
     }
 
-  std::vector<std::filesystem::path> search_bases{ models_dir };
-  if (models_dir.has_parent_path ())
+  std::vector<std::filesystem::path> search_bases{ asset_root };
+  if (asset_root.has_parent_path ())
     {
-      search_bases.push_back (models_dir.parent_path ());
+      search_bases.push_back (asset_root.parent_path ());
     }
   std::vector<std::filesystem::path> roots;
   for (const auto &base : search_bases)
@@ -4111,11 +4111,13 @@ AistGgufEncoder::Load (const AistGgufConfig &config)
 #if defined(CORTEXT_REQUIRE_AIST_GGML_KERNELS)
       if (!runtime_->UsesKernelOps ())
         {
+          const std::string kernel_status = runtime_->KernelBackendName ();
           throw std::runtime_error (
               "AIST ggml kernel ops are required because Cortext audio "
               "support is enabled; provide ggml at build time or "
               "configure with CORTEXT_ENABLE_AUDIO=OFF and "
-              "CORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD=ON.");
+              "CORTEXT_ALLOW_UNSUPPORTED_TEXT_ONLY_BUILD=ON. Kernel status: "
+              + kernel_status);
         }
 #endif
       info_.runtime_available = true;

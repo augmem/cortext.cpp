@@ -219,7 +219,7 @@ extern "C"
   CORTEXT_EXPORT void cortext_process_json_options_init (
       cortext_process_json_options *options);
 
-  /// @brief Creates a Cortext instance with default models directory.
+  /// @brief Creates a Cortext instance.
   /// @param focus Focus knob value in [0.0, 1.0].
   /// @param sensitivity Sensitivity knob value in [0.0, 1.0].
   /// @param stability Stability knob value in [0.0, 1.0].
@@ -227,7 +227,6 @@ extern "C"
   /// @return Handle to the created instance, or NULL on failure.
   ///
   /// The returned handle must be freed with cortext_free().
-  /// Default models directory is "models".
   CORTEXT_EXPORT cortext_handle cortext_create (double focus, double sensitivity,
                                                 double stability,
                                                 const char *db_path);
@@ -238,18 +237,13 @@ extern "C"
   /// @brief Creates a Cortext instance from a binding-friendly config struct.
   /// @param cfg Optional configuration. NULL uses the library defaults.
   /// @param db_path Path to SQLite database file.
-  /// @param models_dir Optional path to model assets. NULL uses the default
-  ///   model root.
   CORTEXT_EXPORT cortext_handle
-  cortext_create_with_config (const cortext_config *cfg, const char *db_path,
-                              const char *models_dir);
+  cortext_create_with_config (const cortext_config *cfg, const char *db_path);
 
   /// @brief Creates a Cortext instance using an externally owned DB provider.
   /// @param cfg Optional configuration. NULL uses the library defaults.
   /// @param callbacks Required synchronous DB callback table.
   /// @param user_data Opaque pointer passed to every callback.
-  /// @param models_dir Optional path to model assets. NULL uses the default
-  ///   model root.
   /// @return Handle to the created instance, or NULL on failure.
   ///
   /// Cortext does not close the provider or take ownership of user_data. The
@@ -258,34 +252,20 @@ extern "C"
   /// same SQL-level blob functions Cortext currently uses for payload storage.
   CORTEXT_EXPORT cortext_handle cortext_create_with_store_callbacks (
       const cortext_config *cfg, const cortext_db_callbacks *callbacks,
-      void *user_data, const char *models_dir);
+      void *user_data);
 
   /// @brief Creates a Cortext instance using external DB and object providers.
   CORTEXT_EXPORT cortext_handle
   cortext_create_with_store_and_object_callbacks (
       const cortext_config *cfg, const cortext_db_callbacks *db_callbacks,
       void *db_user_data, const cortext_object_callbacks *object_callbacks,
-      void *object_user_data, const char *models_dir);
+      void *object_user_data);
 
   /// @brief Creates a Cortext instance with SQLite DB and external object store.
   CORTEXT_EXPORT cortext_handle
   cortext_create_with_config_and_object_callbacks (
       const cortext_config *cfg, const char *db_path,
-      const cortext_object_callbacks *object_callbacks, void *object_user_data,
-      const char *models_dir);
-
-  /// @brief Creates a Cortext instance with custom models directory.
-  /// @param focus Focus knob value in [0.0, 1.0].
-  /// @param sensitivity Sensitivity knob value in [0.0, 1.0].
-  /// @param stability Stability knob value in [0.0, 1.0].
-  /// @param db_path Path to SQLite database file (e.g., "memory.db" or ":memory:").
-  /// @param models_dir Path to the local model root directory.
-  /// @return Handle to the created instance, or NULL on failure.
-  ///
-  /// The returned handle must be freed with cortext_free().
-  CORTEXT_EXPORT cortext_handle
-  cortext_create_with_models (double focus, double sensitivity, double stability,
-                              const char *db_path, const char *models_dir);
+      const cortext_object_callbacks *object_callbacks, void *object_user_data);
 
   /// @brief Frees a Cortext instance and releases all resources.
   /// @param h Handle to the instance to free. Safe to pass NULL.

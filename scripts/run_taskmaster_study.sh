@@ -5,7 +5,6 @@ ROOT="${1:-logs/taskmaster_study_$(date +%Y%m%d_%H%M%S)}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 HARNESS="${HARNESS:-scripts/run_memory_harness.py}"
 DATA="${DATA:-data/taskmaster/valid.jsonl}"
-MODELS_DIR="${MODELS_DIR:-models}"
 
 if [[ ! -f "${DATA}" ]]; then
   echo "Missing ${DATA}. Run scripts/prepare_taskmaster.py first." >&2
@@ -16,7 +15,6 @@ mkdir -p "${ROOT}"
 
 COMMON_ARGS=(
   --binary build/examples/topical_chat_analysis/cortext_topical_chat_analysis
-  --models "${MODELS_DIR}"
   --data "${DATA}"
   --no-baseline
   --no-multi

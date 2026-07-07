@@ -1,5 +1,6 @@
 "use strict";
 
+const fs = require("fs");
 const path = require("path");
 
 const supportedNativeTargets = new Set([
@@ -13,6 +14,28 @@ const supportedNativeTargets = new Set([
 
 function platformTag() {
   return `${process.platform}-${process.arch}`;
+}
+
+function aistModelPath(dir) {
+  const candidates = [
+    path.join(dir, "AIST-87M-GGUF", "AIST-87M_q8_0.gguf"),
+    path.join(dir, "AIST-87M-GGUF", "AIST-87M_q5_1.gguf"),
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+function defaultAistModelPath() {
+  const packageModels = path.join(__dirname, "models");
+  const packageModel = aistModelPath(packageModels);
+  if (packageModel) {
+    return packageModel;
+  }
+  const repoModels = path.join(__dirname, "..", "..", "models");
+  const repoModel = aistModelPath(repoModels);
+  if (repoModel) {
+    return repoModel;
+  }
+  return undefined;
 }
 
 const candidates = [
@@ -59,6 +82,31 @@ function normalizeMedia(media, mediaMimeType, options) {
 }
 
 class Cortext extends native.NativeCortext {
+  constructor(config, dbPath) {
+    const hadModelEnv = Object.prototype.hasOwnProperty.call(
+      process.env,
+      "CORTEXT_AIST_MODEL_PATH"
+    );
+    const previousModelEnv = process.env.CORTEXT_AIST_MODEL_PATH;
+    const defaultModel = defaultAistModelPath();
+    if (!hadModelEnv && defaultModel) {
+      process.env.CORTEXT_AIST_MODEL_PATH = defaultModel;
+    }
+    try {
+      if (typeof config === "string") {
+        super(config);
+      } else {
+        super(config, dbPath);
+      }
+    } finally {
+      if (!hadModelEnv) {
+        delete process.env.CORTEXT_AIST_MODEL_PATH;
+      } else {
+        process.env.CORTEXT_AIST_MODEL_PATH = previousModelEnv;
+      }
+    }
+  }
+
   processTextJson(text, sourceId, options) {
     return super.processTextJson(text, sourceId, options);
   }

@@ -7,7 +7,6 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 HARNESS="${HARNESS:-scripts/run_memory_harness.py}"
 DATA="${DATA:-data/mechanism_eval/valid.jsonl}"
 ANSWER_KEY="${ANSWER_KEY:-data/mechanism_eval/valid.answer_key.jsonl}"
-MODELS_DIR="${MODELS_DIR:-models}"
 
 mkdir -p "${ROOT}"
 
@@ -16,7 +15,6 @@ if [[ ! -f "${DATA}" ]]; then
 fi
 COMMON_ARGS=(
   --binary build/examples/topical_chat_analysis/cortext_topical_chat_analysis
-  --models "${MODELS_DIR}"
   --data "${DATA}"
   --no-baseline
   --no-multi

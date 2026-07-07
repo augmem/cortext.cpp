@@ -1,8 +1,12 @@
 # augmem.cortext
 
-Python bindings for the Cortext memory engine used by augmem. The package loads
-the native Cortext shared library with `ctypes` and exposes a small Python API
-for processing text, audio, and image signals into memory-aware context.
+Python bindings for Cortext, the on-device memory engine behind augmem. Use it
+to turn text, audio, and image signals into persistent memories, then retrieve
+relevant context for an app, agent, notebook, or LLM prompt.
+
+The wheel is designed to work out of the box: it includes the native Cortext
+library for the common desktop/server platforms and the default AIST GGUF
+embedding asset. No separate model download is required for a normal install.
 
 ## Install
 
@@ -10,23 +14,17 @@ for processing text, audio, and image signals into memory-aware context.
 pip install augmem.cortext
 ```
 
-The import name is:
-
 ```python
 import augmem.cortext as cortext
+
+print(cortext.version())
 ```
 
-## Supported Wheels
+Supported release wheel platforms:
 
-Release wheels are intended to include the native Cortext library for:
-
-- Linux: `x86_64`, `aarch64`
-- macOS: `x86_64`, `aarch64`
-- Windows: `x86_64`, `aarch64`
-
-If your platform is not covered, build the native library locally and set
-`CORTEXT_LIBRARY_PATH` to the resulting `libcortext.so`, `libcortext.dylib`, or
-`cortext.dll`.
+- Linux `x86_64` and `aarch64`
+- macOS `x86_64` and Apple Silicon
+- Windows `x86_64` and `aarch64`
 
 ## Quickstart
 
@@ -34,132 +32,176 @@ If your platform is not covered, build the native library locally and set
 import augmem.cortext as cortext
 
 cfg = cortext.Config(
-    focus=0.55,
-    sensitivity=0.5,
-    stability=0.65,
+    focus=0.55,       # retrieval selectivity
+    sensitivity=0.50, # responsiveness to new/surprising signals
+    stability=0.65,   # preference for durable, stable context
 )
 
-with cortext.Cortext(
-    db_path="memory.sqlite",
-    models_dir="models",
-    config=cfg,
-) as engine:
-    first = engine.process_text(
-        "Bailey is preparing for a product demo on Friday.",
-        "chat/main",
+with cortext.Cortext("memory.sqlite", config=cfg) as memory:
+    memory.process_text(
+        "The garage door code is 8841.",
+        source_id="user/profile",
+        include_embedding=False,
+    )
+    memory.process_text(
+        "Mina's vet appointment is July 12 at 4pm.",
+        source_id="chat/morning",
         include_embedding=False,
     )
 
-    second = engine.process_text(
-        "What should I remember about Bailey's week?",
-        "chat/main",
+    ctx = memory.process_text(
+        "We are leaving soon. What should I remember about the garage?",
+        source_id="chat/assistant",
         include_embedding=False,
     )
 
-    for memory in second["retrieved_memory"]:
-        print(memory["text"])
+    for item in ctx["retrieved_memory"]:
+        print(item["text"], item["rel"])
 
-    if second["consolidation_recommended"]:
-        engine.consolidate()
+    if ctx["consolidation_recommended"]:
+        memory.consolidate()
 
-    engine.flush()
+    memory.flush()
 ```
 
-Use `db_path=":memory:"` for a session-local engine that does not persist after
-the process exits. Use a file path when you want memory to survive restarts.
+Use `":memory:"` instead of a file path for a temporary engine that disappears
+when the process exits.
 
-## No-Storage Calls
+## Using It With an LLM
 
-`process_text`, `process_audio`, and `process_image` process the signal through
-the memory pipeline and may write to the configured store.
+The basic loop is:
 
-For embedding-only work, use the `embed_*` calls. They return vectors and do not
-mutate memory state:
+1. Store user-approved or application-observed context with `process_text`.
+2. On later turns, call `process_text` and read `ctx["retrieved_memory"]`.
+3. Insert those memory snippets into your prompt.
+4. Call `consolidate()` when `consolidation_recommended` is true.
+
+Example prompt assembly:
 
 ```python
-with cortext.Cortext(db_path=":memory:", models_dir="models") as engine:
-    embedding = engine.embed_text("embed this without storing it")
-    print(len(embedding))
+ctx = memory.process_text(
+    user_message,
+    source_id=f"conversation/{conversation_id}",
+    include_embedding=False,
+)
+
+memories = "\n".join(
+    f"- {m['text']}" for m in ctx["retrieved_memory"][:6]
+)
+
+prompt = f"""Relevant memory:
+{memories or "- none"}
+
+User:
+{user_message}
+"""
 ```
 
-The Python binding does not currently expose the C++ `Retention::Ephemeral`
-processing option. If you need a fully ephemeral processing session, create the
-engine with `db_path=":memory:"`.
+Important: `process_text` is durable in the current Python API. It can retrieve
+memory, but it also writes the input signal into the configured store. Use it
+for turns you are willing to remember. Use `embed_text` for embedding-only work
+that must not mutate memory.
 
-## Configuration
+## API Shape
 
-`Config` exposes Cortext's three main knobs plus feature toggles:
+```python
+memory = cortext.Cortext(
+    db_path="memory.sqlite",
+    config=cortext.Config(),
+    library_path=None,  # optional native library override
+)
+```
 
-- `focus`: raises selectivity and favors higher-confidence context.
-- `sensitivity`: controls how readily new or surprising signals trigger memory
-  behavior.
-- `stability`: favors longer-lived context and more stable continuity.
+Core methods:
 
-All three knobs are floats and default to `0.5`.
+- `process_text(text, source_id, include_embedding=True) -> dict`
+- `process_audio(pcm, source_id, include_embedding=True) -> dict`
+- `process_image(data, width, height, channels, source_id, include_embedding=True) -> dict`
+- `embed_text(text) -> list[float]`
+- `embed_audio(pcm) -> list[float]`
+- `embed_image(data, width, height, channels) -> list[float]`
+- `consolidate() -> dict`
+- `flush()`, `reset()`, `close()`
 
-Additional booleans default to the values in `Config`: `affect_interrupt`,
-`affect_retrieval`, `reinforcement_enabled`, `procedural_enabled`,
-`sequential_edges_enabled`, `signal_filter_audio_enabled`,
-`signal_filter_image_enabled`, and `signal_filter_text_enabled`.
+Each `process_*` method also has a `*_json` variant that returns the raw JSON
+string from the native API.
 
 ## Returned Context
 
-`process_*` methods return decoded JSON dictionaries. The `process_*_json`
-methods return the raw JSON string.
+`process_*` returns a dictionary with the memory packet and diagnostics for the
+current signal. The most commonly used fields are:
 
-At a high level, a context contains:
-
-- `working_memory`: active short-term context slots.
-- `retrieved_memory`: long-term memories selected for the current signal.
+- `retrieved_memory`: long-term memories selected for this signal.
+- `working_memory`: short-term active context.
 - `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior
   flags.
-- `consolidation_recommended`, `consolidation_required`: consolidation hints.
-- `output`: scores, decisions, stored IDs, filter status, and operation timings.
-- `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: timing fields.
-- `embedding` and `embedding_dimension` when `include_embedding=True`.
+- `consolidation_recommended`, `consolidation_required`: maintenance hints.
+- `output`: scores, storage decisions, filter status, and operation timings.
+- `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
+- `embedding`, `embedding_dimension`: included only when requested.
 
-Memory entries include fields such as `text`, `source_id`, `timestamp`,
-`modality`, `mimetype`, usage counts, metric scores, and `soft_anchors`.
+Memory entries include `text`, `source_id`, `timestamp`, `modality`,
+`mimetype`, `rel`, usage counts, metric scores, and soft-anchor metadata.
 
-Pass `include_embedding=False` to `process_*` when you do not need the embedding
-in the returned dictionary.
+For prompt injection, pass `include_embedding=False`; embeddings are large and
+usually not needed in the response packet.
 
-## Audio, Image, and Media
+## Audio and Image
 
-Audio input is 16 kHz mono float32 PCM:
+Audio input is 16 kHz mono float PCM:
 
 ```python
 pcm = [0.0] * 16000
-ctx = engine.process_audio(pcm, "mic/main", include_embedding=False)
+ctx = memory.process_audio(pcm, "mic/main", include_embedding=False)
 ```
 
-Image input is row-major RGB or RGBA bytes with explicit dimensions:
+Image input is row-major RGB or RGBA bytes:
 
 ```python
-ctx = engine.process_image(rgb_bytes, width, height, 3, "camera/main")
+rgb = bytes([0, 0, 0] * 64 * 64)
+ctx = memory.process_image(rgb, 64, 64, 3, "camera/main")
 ```
 
-`process_audio_with_media` and `process_image_with_media` can store original
-media bytes alongside the canonical processing input. Pass `media_mimetype`
-whenever media bytes are provided, or use `cortext.Media(data, mimetype)`.
+Use `process_audio_with_media` or `process_image_with_media` when you want to
+store original media bytes alongside the canonical signal:
 
-## Models and Native Runtime
+```python
+media = cortext.Media(data=jpeg_bytes, mimetype="image/jpeg")
+ctx = memory.process_image_with_media(rgb, 64, 64, 3, "camera/main", media)
+```
 
-`models_dir` points to local model assets used by the native engine. In a source
-checkout this is usually `models`. In an application, ship or mount the model
-directory you want Cortext to use and pass that path to `Cortext(...)`.
+## Runtime Assets
 
-Library loading order is:
+Normal wheels include:
 
-1. `library_path=` passed to `Cortext`.
-2. `CORTEXT_LIBRARY_PATH`.
-3. The bundled wheel native library for the current platform.
-4. Local development build locations in a Cortext source checkout.
-5. The system library search path.
+- `libcortext.so`, `libcortext.dylib`, or `cortext.dll` for supported
+  platforms.
+- The default AIST GGUF embedding asset and tokenizer vocabulary.
 
-## Local Source Build
+Override paths only when you are doing local development or testing a custom
+asset:
 
-For development from a source checkout without bundled native libraries:
+- `CORTEXT_LIBRARY_PATH=/path/to/libcortext.so`
+- `CORTEXT_AIST_MODEL_PATH=/path/to/AIST-87M_q8_0.gguf`
+
+Library loading order is `library_path=`, `CORTEXT_LIBRARY_PATH`, bundled
+library, local checkout build outputs, then the system library search path.
+
+## Troubleshooting
+
+- `Could not locate the Cortext shared library`: install a supported wheel, set
+  `CORTEXT_LIBRARY_PATH`, or pass `library_path=...`.
+- Engine creation fails: check write permission for `db_path`; for local builds,
+  check `CORTEXT_AIST_MODEL_PATH`.
+- Very large context dictionaries: call `process_text(...,
+  include_embedding=False)`.
+- Need a clean temporary run: use `cortext.Cortext(":memory:")`.
+- Native failure details: call `cortext.last_error()` immediately after the
+  exception.
+
+## Build From Source
+
+For local development without bundled artifacts:
 
 ```bash
 cmake --preset ffi-release
@@ -167,28 +209,10 @@ cmake --build --preset ffi-release --target cortext
 export CORTEXT_LIBRARY_PATH="$PWD/build/ffi-release/libcortext.so"
 ```
 
-On macOS the library is `libcortext.dylib`; on Windows it is `cortext.dll`.
-
-To build the release wheel with bundled native libraries:
+Build a release wheel with bundled native libraries and the AIST asset:
 
 ```bash
-python scripts/build_python_package.py
+python scripts/build_python_package.py --zig /path/to/zig
 ```
 
-Set `ZIG=/path/to/zig` or pass `--zig /path/to/zig` when Zig is not on `PATH`.
-
-## Troubleshooting
-
-- `Could not locate the Cortext shared library`: install a wheel for a supported
-  platform, pass `library_path=...`, or set `CORTEXT_LIBRARY_PATH`.
-- Engine creation fails: check that `models_dir` points to valid model assets
-  and that the process can read/write `db_path`.
-- Windows DLL load failures: make sure dependent DLLs are next to `cortext.dll`
-  or on the DLL search path.
-- Large responses: call `process_text(..., include_embedding=False)` or the
-  equivalent audio/image method to omit the returned embedding.
-- Need caller-owned storage: implement `DBProvider` and optionally
-  `ObjectStoreProvider`, then pass them as `store=` and `object_store=`.
-
-Use `cortext.version()` to confirm the loaded native library version and
-`cortext.last_error()` when debugging native failures.
+The generated wheel is written to `bindings/python/dist/`.

@@ -20,18 +20,16 @@ namespace cortext::benchmark
 class BenchmarkTextEncoder final : public Encoder
 {
 public:
-  explicit BenchmarkTextEncoder (std::string models_dir = "models")
-      : models_dir_ (std::move (models_dir))
+  BenchmarkTextEncoder ()
   {
-    auto selection = internal::CreatePreferredTextEncoder (models_dir_);
+    auto selection = internal::CreatePreferredTextEncoder ();
     backend_name_ = selection.backend_name;
     resolved_model_path_ = selection.resolved_path;
     encoder_ = std::move (selection.encoder);
     if (!encoder_)
       {
         throw std::runtime_error (
-            "Preferred benchmark text encoder could not be constructed under "
-            + models_dir_);
+            "Preferred benchmark text encoder could not be constructed");
       }
   }
 
@@ -135,27 +133,10 @@ private:
     return inserted.first->second;
   }
 
-  std::string models_dir_;
   std::string backend_name_;
   std::filesystem::path resolved_model_path_;
   std::unique_ptr<Encoder> encoder_;
   std::unordered_map<std::string, std::vector<float>> cache_;
 };
-
-inline std::string
-ParseModelsDirArg (int argc, char **argv,
-                   const std::string &default_models_dir = "models")
-{
-  for (int i = 1; i < argc; ++i)
-    {
-      const std::string arg (argv[i]);
-      constexpr const char *prefix = "--models=";
-      if (arg.rfind (prefix, 0) == 0)
-        {
-          return arg.substr (std::char_traits<char>::length (prefix));
-        }
-    }
-  return default_models_dir;
-}
 
 } // namespace cortext::benchmark

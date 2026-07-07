@@ -12,7 +12,39 @@ export interface CortextConfig {
   signalFilterTextEnabled?: boolean;
 }
 
-export type CortextContext = Record<string, unknown>;
+export interface CortextMemory {
+  id?: number | string;
+  memory_id?: number | string;
+  text?: string;
+  source_id?: string;
+  timestamp?: number;
+  modality?: string;
+  mimetype?: string;
+  rel?: number;
+  salience?: number;
+  contradiction?: number;
+  usage_count?: number;
+  soft_anchors?: unknown[];
+  [key: string]: unknown;
+}
+
+export interface CortextContext {
+  retrieved_memory?: CortextMemory[];
+  working_memory?: CortextMemory[];
+  should_interrupt?: boolean;
+  interrupt_aborted?: boolean;
+  at_boundary?: boolean;
+  consolidation_recommended?: boolean;
+  consolidation_required?: boolean;
+  output?: Record<string, unknown>;
+  embedding?: number[];
+  embedding_dimension?: number;
+  encode_ms?: number;
+  process_ms?: number;
+  hydrate_ms?: number;
+  total_ms?: number;
+  [key: string]: unknown;
+}
 export interface CortextEmbedding {
   embedding: number[];
   dimension: number;
@@ -29,7 +61,11 @@ export interface ProcessOptions {
 }
 
 export declare class Cortext {
-  constructor(config?: CortextConfig, dbPath?: string, modelsDir?: string);
+  constructor(
+    config?: CortextConfig | null,
+    dbPath?: string | null
+  );
+  constructor(dbPath: string);
   processTextJson(
     text: string,
     sourceId: string,

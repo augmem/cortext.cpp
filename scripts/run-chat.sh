@@ -67,4 +67,4 @@ if [[ "${build_only}" == "1" ]]; then
   exit 0
 fi
 
-exec "${cli_bin}" --db "${CORTEXT_CHAT_DB}" --models "${repo_root}/models" repl
+exec "${cli_bin}" --db "${CORTEXT_CHAT_DB}" repl

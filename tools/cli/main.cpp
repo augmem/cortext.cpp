@@ -28,7 +28,6 @@ namespace
 struct CliOptions
 {
   std::string db_path = "cortext_memory.db";
-  std::string models_dir = "models";
   std::string source_id = "cli/main";
   bool source_id_overridden = false;
   double focus = 0.7;
@@ -55,7 +54,6 @@ void PrintUsage (std::ostream &out)
       << "Options:\n"
       << "  --db PATH          SQLite database path (default: cortext_memory.db,\n"
       << "                     or CORTEXT_CLI_DB)\n"
-      << "  --models DIR       models directory (default: models, or CORTEXT_MODELS_DIR)\n"
       << "  --source ID        provenance stream id (default: cli/main)\n"
       << "  --focus X          F knob in [0,1] (default 0.7)\n"
       << "  --sensitivity X    S knob in [0,1] (default 0.5)\n"
@@ -380,11 +378,6 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
     {
       options.db_path = env_db;
     }
-  if (const char *env_models = std::getenv ("CORTEXT_MODELS_DIR"))
-    {
-      options.models_dir = env_models;
-    }
-
   std::vector<std::string> args (argv + 1, argv + argc);
   std::size_t i = 0;
   auto take_value = [&] (const std::string &flag) -> const std::string * {
@@ -414,9 +407,8 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
           options.durable_recall = true;
           continue;
         }
-      if (arg == "--db" || arg == "--models" || arg == "--source"
-          || arg == "--focus" || arg == "--sensitivity" || arg == "--stability"
-          || arg == "--top")
+      if (arg == "--db" || arg == "--source" || arg == "--focus"
+          || arg == "--sensitivity" || arg == "--stability" || arg == "--top")
         {
           const std::string *value = take_value (arg);
           if (value == nullptr)
@@ -426,10 +418,6 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
           if (arg == "--db")
             {
               options.db_path = *value;
-            }
-          else if (arg == "--models")
-            {
-              options.models_dir = *value;
             }
           else if (arg == "--source")
             {
@@ -514,14 +502,13 @@ int main (int argc, char **argv)
   std::unique_ptr<cortext::Cortext> engine;
   try
     {
-      engine = cortext::Cortext::Create (config, options.db_path,
-                                         options.models_dir);
+      engine = cortext::Cortext::Create (config, options.db_path);
     }
   catch (const std::exception &error)
     {
       std::cerr << "failed to open cortext engine: " << error.what () << "\n"
-                << "hint: pass --models <dir> containing AIST-87M-GGUF, or "
-                   "set CORTEXT_AIST_MODEL_PATH\n";
+                << "hint: set CORTEXT_AIST_MODEL_PATH to an AIST .gguf file "
+                   "if the bundled/default model is unavailable\n";
       return 1;
     }
 

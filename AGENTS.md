@@ -47,7 +47,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Node.js headers / N-API v8 - optional Node addon build path in `CMakeLists.txt` and `bindings/javascript/src/addon.cpp`.
 ## Configuration
 - Build toggles are controlled through CMake options in `CMakeLists.txt` and presets in `CMakePresets.json`.
-- Runtime model discovery is driven by the `models_dir` argument on `cortext::Cortext::Create()` in `include/cortext/cortext.hpp` and by encoder/backend resolution in `src/encoder/text_encoder_factory.hpp`.
+- Runtime model discovery is handled by encoder/backend resolution in `src/encoder/text_encoder_factory.hpp`, using bundled/default assets or `CORTEXT_AIST_MODEL_PATH` for explicit overrides.
 - Important runtime overrides are read from environment variables in:
 - `.env` files: not detected by filename in the repo root during this scan.
 - Root build graph: `CMakeLists.txt`

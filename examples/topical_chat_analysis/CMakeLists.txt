@@ -9,7 +9,7 @@ target_link_libraries(cortext_topical_chat_analysis PRIVATE
   nlohmann_json::nlohmann_json
 )
 
-if(NOT CORTEXT_DISABLE_OPENTELEMETRY)
+if(NOT CORTEXT_DISABLE_OPENTELEMETRY AND CORTEXT_OPENTELEMETRY_EXPORTERS)
   target_link_libraries(cortext_topical_chat_analysis PRIVATE
     opentelemetry-cpp::api
     opentelemetry-cpp::logs

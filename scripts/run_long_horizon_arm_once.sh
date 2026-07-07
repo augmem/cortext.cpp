@@ -17,7 +17,6 @@ if [[ -z "${ROOT:-}" ]]; then
 fi
 
 BUILD_DIR="${BUILD_DIR:-build-mechanism-hooks}"
-MODELS_DIR="${MODELS_DIR:-models}"
 INPUT_DIR="${INPUT_DIR:-/shared/Memory/Julie}"
 MAX_MESSAGES="${MAX_MESSAGES:-18000}"
 MEDIA_LIMIT="${MEDIA_LIMIT:-128}"
@@ -145,7 +144,6 @@ if [[ ! -f "${summary}" ]]; then
       --input-dir "${INPUT_DIR}"
       --db "${db}"
       --out "${summary}"
-      --models "${MODELS_DIR}"
       --max-messages "${MAX_MESSAGES}"
       --media-limit "${MEDIA_LIMIT}"
       --warmup-events "${WARMUP_EVENTS}"

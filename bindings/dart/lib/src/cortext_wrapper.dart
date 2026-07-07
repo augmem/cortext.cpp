@@ -162,14 +162,12 @@ final class CortextLibrary {
 final class Cortext {
   Cortext({
     this.dbPath = ':memory:',
-    this.modelsDir,
     this.config,
     String? libraryPath,
     CortextLibrary? library,
   }) : _library = library ?? CortextLibrary.open(libraryPath: libraryPath) {
     final nativeConfig = calloc<cortext_config>();
     Pointer<Utf8>? dbPathPointer;
-    Pointer<Utf8>? modelsDirPointer;
 
     try {
       _library.bindings.cortext_config_init(nativeConfig);
@@ -198,14 +196,10 @@ final class Cortext {
       }
 
       dbPathPointer = dbPath.toNativeUtf8();
-      if (modelsDir != null) {
-        modelsDirPointer = modelsDir!.toNativeUtf8();
-      }
 
       _handle = _library.bindings.cortext_create_with_config(
         nativeConfig,
         dbPathPointer.cast(),
-        modelsDirPointer?.cast() ?? nullptr,
       );
       if (_handle == nullptr) {
         _throwLastError('cortext_create_with_config failed');
@@ -215,14 +209,10 @@ final class Cortext {
       if (dbPathPointer != null) {
         malloc.free(dbPathPointer);
       }
-      if (modelsDirPointer != null) {
-        malloc.free(modelsDirPointer);
-      }
     }
   }
 
   final String dbPath;
-  final String? modelsDir;
   final Config? config;
   final CortextLibrary _library;
   Pointer<Void> _handle = nullptr;

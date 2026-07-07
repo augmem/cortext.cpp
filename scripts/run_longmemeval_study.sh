@@ -7,7 +7,6 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 HARNESS="${HARNESS:-scripts/run_memory_harness.py}"
 DATA="${DATA:-data/longmemeval/valid.jsonl}"
 ANSWER_KEY="${ANSWER_KEY:-data/longmemeval/valid.answer_key.jsonl}"
-MODELS_DIR="${MODELS_DIR:-models}"
 
 if [[ ! -f "${DATA}" ]]; then
   echo "Missing ${DATA}. Run scripts/prepare_longmemeval.py first." >&2
@@ -18,7 +17,6 @@ mkdir -p "${ROOT}"
 
 "${PYTHON_BIN}" "${HARNESS}" \
   --binary build/examples/topical_chat_analysis/cortext_topical_chat_analysis \
-  --models "${MODELS_DIR}" \
   --data "${DATA}" \
   --out "${ROOT}/retrieval_smoke" \
   --no-multi \

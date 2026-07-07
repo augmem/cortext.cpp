@@ -1186,7 +1186,7 @@ extern "C"
     cfg.focus = focus;
     cfg.sensitivity = sensitivity;
     cfg.stability = stability;
-    return cortext_create_with_config (&cfg, db_path, "models");
+    return cortext_create_with_config (&cfg, db_path);
   }
 
   void
@@ -1247,8 +1247,7 @@ extern "C"
   }
 
   cortext_handle
-  cortext_create_with_config (const cortext_config *cfg, const char *db_path,
-                              const char *models_dir)
+  cortext_create_with_config (const cortext_config *cfg, const char *db_path)
   {
     if (!db_path)
       {
@@ -1259,8 +1258,7 @@ extern "C"
     try
       {
         auto inst = cortext::Cortext::Create (
-            config_from_c (cfg), std::string (db_path),
-            std::string (models_dir ? models_dir : "models"));
+            config_from_c (cfg), std::string (db_path));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }
@@ -1279,7 +1277,7 @@ extern "C"
   cortext_handle
   cortext_create_with_store_callbacks (
       const cortext_config *cfg, const cortext_db_callbacks *callbacks,
-      void *user_data, const char *models_dir)
+      void *user_data)
   {
     if (!callbacks)
       {
@@ -1297,8 +1295,7 @@ extern "C"
       {
         auto store = std::make_shared<CallbackStore> (*callbacks, user_data);
         auto inst = cortext::Cortext::Create (
-            config_from_c (cfg), std::move (store),
-            std::string (models_dir ? models_dir : "models"));
+            config_from_c (cfg), std::move (store));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }
@@ -1318,7 +1315,7 @@ extern "C"
   cortext_create_with_store_and_object_callbacks (
       const cortext_config *cfg, const cortext_db_callbacks *db_callbacks,
       void *db_user_data, const cortext_object_callbacks *object_callbacks,
-      void *object_user_data, const char *models_dir)
+      void *object_user_data)
   {
     if (!db_callbacks)
       {
@@ -1349,7 +1346,7 @@ extern "C"
             *object_callbacks, object_user_data);
         auto inst = cortext::Cortext::Create (
             config_from_c (cfg), std::move (store), std::move (object_store),
-            std::string (models_dir ? models_dir : "models"));
+            std::shared_ptr<cortext::Clock>{});
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }
@@ -1368,8 +1365,7 @@ extern "C"
   cortext_handle
   cortext_create_with_config_and_object_callbacks (
       const cortext_config *cfg, const char *db_path,
-      const cortext_object_callbacks *object_callbacks, void *object_user_data,
-      const char *models_dir)
+      const cortext_object_callbacks *object_callbacks, void *object_user_data)
   {
     if (!db_path)
       {
@@ -1393,8 +1389,7 @@ extern "C"
             *object_callbacks, object_user_data);
         auto inst = cortext::Cortext::Create (
             config_from_c (cfg), std::string (db_path),
-            std::move (object_store),
-            std::string (models_dir ? models_dir : "models"));
+            std::move (object_store));
         clear_last_error ();
         return reinterpret_cast<cortext_handle> (inst.release ());
       }
@@ -1408,25 +1403,6 @@ extern "C"
         set_last_error ("internal error");
         return nullptr;
       }
-  }
-
-  cortext_handle
-  cortext_create_with_models (double focus, double sensitivity,
-                              double stability, const char *db_path,
-                              const char *models_dir)
-  {
-    if (!db_path || !models_dir)
-      {
-        set_last_error ("db_path and models_dir must not be NULL");
-        return nullptr;
-      }
-
-    cortext_config cfg{};
-    cortext_config_init (&cfg);
-    cfg.focus = focus;
-    cfg.sensitivity = sensitivity;
-    cfg.stability = stability;
-    return cortext_create_with_config (&cfg, db_path, models_dir);
   }
 
   void

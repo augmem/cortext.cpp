@@ -1296,7 +1296,6 @@ struct Cortext::Impl
   Config cfg;
   internal::SignalFilter signal_filter;
   std::string db_path;
-  std::string models_dir;
 
   std::unique_ptr<Encoder> encoder;
   std::shared_ptr<cortext::Clock> clock;
@@ -1309,9 +1308,8 @@ struct Cortext::Impl
 
   Impl (const Config &c, std::shared_ptr<cortext::Store> supplied_store,
         std::shared_ptr<cortext::ObjectStore> supplied_object_store,
-        std::string models, std::shared_ptr<cortext::Clock> supplied_clock)
+        std::shared_ptr<cortext::Clock> supplied_clock)
       : cfg (c), signal_filter (MakeSignalFilterConfig (c)),
-        models_dir (std::move (models)),
         clock (std::move (supplied_clock)),
         store (std::move (supplied_store)),
         object_store (std::move (supplied_object_store))
@@ -1329,7 +1327,7 @@ struct Cortext::Impl
         object_store = std::make_shared<cortext::SqlObjectStore> (store);
       }
 
-    auto text_encoder = internal::CreatePreferredTextEncoder (models_dir);
+    auto text_encoder = internal::CreatePreferredTextEncoder ();
     // Pin every precomputed vector to the encoder that produced it. The
     // runtime similarity space is the 256-d Matryoshka slice (see the vec0
     // schema in store/schema.cpp); comparing vectors across encoder spaces
@@ -1345,12 +1343,11 @@ struct Cortext::Impl
         object_store);
   }
 
-  Impl (const Config &c, std::string db, std::string models,
+  Impl (const Config &c, std::string db,
         std::shared_ptr<cortext::Clock> supplied_clock)
       : Impl (c, std::shared_ptr<cortext::Store> (
                      cortext::SQLiteStore::Create (db.c_str ())),
-              nullptr,
-              std::move (models), std::move (supplied_clock))
+              nullptr, std::move (supplied_clock))
   {
     db_path = std::move (db);
   }
@@ -1750,135 +1747,109 @@ struct Cortext::Impl
 };
 
 std::unique_ptr<Cortext>
-Cortext::Create (const Config &cfg, const std::string &db_path,
-                 const std::string &models_dir)
+Cortext::Create (const Config &cfg, const std::string &db_path)
 {
-  return Cortext::Create (cfg, db_path, models_dir, nullptr);
+  return Cortext::Create (cfg, db_path, std::shared_ptr<Clock>{});
 }
 
 std::unique_ptr<Cortext>
 Cortext::Create (const Config &cfg, const std::string &db_path,
-                 const std::string &models_dir,
                  std::shared_ptr<Clock> clock)
 {
   return std::unique_ptr<Cortext> (
-      new Cortext (cfg, db_path, models_dir, std::move (clock)));
+      new Cortext (cfg, db_path, std::move (clock)));
+}
+
+std::unique_ptr<Cortext>
+Cortext::Create (const Config &cfg, const std::string &db_path,
+                 std::shared_ptr<ObjectStore> object_store)
+{
+  return Cortext::Create (cfg, db_path, std::move (object_store),
+                          std::shared_ptr<Clock>{});
 }
 
 std::unique_ptr<Cortext>
 Cortext::Create (const Config &cfg, const std::string &db_path,
                  std::shared_ptr<ObjectStore> object_store,
-                 const std::string &models_dir)
-{
-  return Cortext::Create (cfg, db_path, std::move (object_store), models_dir,
-                          nullptr);
-}
-
-std::unique_ptr<Cortext>
-Cortext::Create (const Config &cfg, const std::string &db_path,
-                 std::shared_ptr<ObjectStore> object_store,
-                 const std::string &models_dir, std::shared_ptr<Clock> clock)
+                 std::shared_ptr<Clock> clock)
 {
   return std::unique_ptr<Cortext> (
-      new Cortext (cfg, db_path, std::move (object_store), models_dir,
-                   std::move (clock)));
+      new Cortext (cfg, db_path, std::move (object_store), std::move (clock)));
 }
 
 std::unique_ptr<Cortext>
-Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
-                 const std::string &models_dir)
+Cortext::Create (const Config &cfg, std::shared_ptr<Store> store)
 {
-  return Cortext::Create (cfg, std::move (store), models_dir, nullptr);
+  return Cortext::Create (cfg, std::move (store), std::shared_ptr<Clock>{});
 }
 
 std::unique_ptr<Cortext>
 Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
-                 const std::string &models_dir, std::shared_ptr<Clock> clock)
+                 std::shared_ptr<Clock> clock)
 {
   return std::unique_ptr<Cortext> (
-      new Cortext (cfg, std::move (store), models_dir, std::move (clock)));
+      new Cortext (cfg, std::move (store), std::move (clock)));
 }
 
 std::unique_ptr<Cortext>
 Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
-                 std::shared_ptr<ObjectStore> object_store,
-                 const std::string &models_dir)
+                 std::shared_ptr<ObjectStore> object_store)
 {
   return Cortext::Create (cfg, std::move (store), std::move (object_store),
-                          models_dir, nullptr);
+                          std::shared_ptr<Clock>{});
 }
 
 std::unique_ptr<Cortext>
 Cortext::Create (const Config &cfg, std::shared_ptr<Store> store,
                  std::shared_ptr<ObjectStore> object_store,
-                 const std::string &models_dir, std::shared_ptr<Clock> clock)
+                 std::shared_ptr<Clock> clock)
 {
   return std::unique_ptr<Cortext> (
       new Cortext (cfg, std::move (store), std::move (object_store),
-                   models_dir, std::move (clock)));
+                   std::move (clock)));
 }
 
 Cortext::Cortext (const Config &cfg, const std::string &db_path,
-                  const std::string &models_dir)
-    : Cortext (cfg, db_path, models_dir, nullptr)
-{
-}
-
-Cortext::Cortext (const Config &cfg, const std::string &db_path,
-                  const std::string &models_dir,
                   std::shared_ptr<Clock> clock)
-    : impl_ (std::make_unique<Impl> (cfg, db_path, models_dir,
-                                     std::move (clock)))
+    : impl_ (std::make_unique<Impl> (cfg, db_path, std::move (clock)))
+{
+}
+
+Cortext::Cortext (const Config &cfg, const std::string &db_path,
+                  std::shared_ptr<ObjectStore> object_store)
+    : Cortext (cfg, db_path, std::move (object_store), nullptr)
 {
 }
 
 Cortext::Cortext (const Config &cfg, const std::string &db_path,
                   std::shared_ptr<ObjectStore> object_store,
-                  const std::string &models_dir)
-    : Cortext (cfg, db_path, std::move (object_store), models_dir, nullptr)
-{
-}
-
-Cortext::Cortext (const Config &cfg, const std::string &db_path,
-                  std::shared_ptr<ObjectStore> object_store,
-                  const std::string &models_dir,
                   std::shared_ptr<Clock> clock)
     : impl_ (std::make_unique<Impl> (
           cfg,
           std::shared_ptr<cortext::Store> (
               cortext::SQLiteStore::Create (db_path.c_str ())),
-          std::move (object_store), models_dir, std::move (clock)))
+          std::move (object_store), std::move (clock)))
 {
 }
 
 Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
-                  const std::string &models_dir)
-    : Cortext (cfg, std::move (store), models_dir, nullptr)
-{
-}
-
-Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
-                  const std::string &models_dir,
                   std::shared_ptr<Clock> clock)
     : impl_ (std::make_unique<Impl> (cfg, std::move (store), nullptr,
-                                     models_dir, std::move (clock)))
+                                     std::move (clock)))
+{
+}
+
+Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
+                  std::shared_ptr<ObjectStore> object_store)
+    : Cortext (cfg, std::move (store), std::move (object_store), nullptr)
 {
 }
 
 Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
                   std::shared_ptr<ObjectStore> object_store,
-                  const std::string &models_dir)
-    : Cortext (cfg, std::move (store), std::move (object_store), models_dir,
-               nullptr)
-{
-}
-
-Cortext::Cortext (const Config &cfg, std::shared_ptr<Store> store,
-                  std::shared_ptr<ObjectStore> object_store,
-                  const std::string &models_dir,
                   std::shared_ptr<Clock> clock)
     : impl_ (std::make_unique<Impl> (cfg, std::move (store),
-                                     std::move (object_store), models_dir,
+                                     std::move (object_store),
                                      std::move (clock)))
 {
 }

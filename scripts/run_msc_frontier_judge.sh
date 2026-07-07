@@ -5,7 +5,6 @@ ROOT="${ROOT:-eval_runs/msc_frontier_qwen_omni_$(date -u +%Y%m%dT%H%M%SZ)}"
 SPLIT="${SPLIT:-validation}"
 MAX_DIALOGS="${MAX_DIALOGS:-0}"
 MAX_SESSIONS="${MAX_SESSIONS:-0}"
-MODELS_DIR="${MODELS_DIR:-models}"
 BUILD_DIR="${BUILD_DIR:-build}"
 ENV_FILE="${CORTEXT_EVAL_ENV_FILE:-${ENV_FILE:-}}"
 JUDGE_PROVIDER="${JUDGE_PROVIDER:-openai}"
@@ -62,7 +61,6 @@ DB="${ROOT}/msc.sqlite"
   --input-dir "${ROOT}/input" \
   --db "${DB}" \
   --out "${SUMMARY}" \
-  --models "${MODELS_DIR}" \
   --max-messages -1 \
   --warmup-events "${WARMUP_EVENTS}" \
   --probe-stride "${PROBE_STRIDE}" \
