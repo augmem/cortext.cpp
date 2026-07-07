@@ -1,7 +1,15 @@
-# cortext-js
+# @augmem/cortext
 
 The JavaScript package is a Node-API addon with TypeScript declarations. The
-browser WebAssembly wrapper lives separately in `bindings/wasm`.
+browser WebAssembly wrapper lives separately in `bindings/wasm`. Release
+packages include bundled N-API addons for:
+
+- `linux-x64`
+- `linux-arm64`
+- `darwin-x64`
+- `darwin-arm64`
+- `win32-x64`
+- `win32-arm64`
 
 ## Build
 
@@ -18,16 +26,18 @@ That builds:
 
 Set `CORTEXT_NODE_ADDON_PATH` to load a specific `.node` file.
 
-The core shared library can also be built with Zig for other FFI consumers:
+To build the npm tarball with bundled native addons:
 
 ```bash
-npm run build:zig
+npm run build:package
 ```
+
+Set `ZIG=/path/to/zig` or pass `--zig /path/to/zig` when Zig is not on `PATH`.
 
 ## Use
 
 ```js
-const { Cortext, version } = require("./bindings/javascript");
+const { Cortext, version } = require("@augmem/cortext");
 
 const engine = new Cortext(undefined, ":memory:", "models");
 console.log(version());
