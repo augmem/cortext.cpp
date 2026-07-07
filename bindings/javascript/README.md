@@ -71,30 +71,64 @@ const { Cortext } = require("@augmem/cortext");
 const memory = new Cortext("memory.sqlite");
 ```
 
-## LLM Memory Loop
+## Chat Completions Memory Loop
 
 The normal server-side loop is simple:
 
 1. Call `processText` for turns or observations you are willing to remember.
 2. On later turns, read `ctx.retrieved_memory`.
-3. Add the top snippets to the model prompt.
+3. Pass those snippets as context messages to Chat Completions.
 4. Call `consolidate()` when Cortext recommends it.
 
+Install the OpenAI SDK and set `OPENAI_API_KEY`:
+
+```bash
+npm install openai
+```
+
 ```ts
-const ctx = memory.processText(userMessage, `conversation/${conversationId}`, {
-  includeEmbedding: false,
-});
+import OpenAI from "openai";
+import { Cortext } from "@augmem/cortext";
 
-const memories = (ctx.retrieved_memory ?? [])
-  .slice(0, 6)
-  .map((m) => `- ${m.text ?? ""}`)
-  .join("\n");
+const client = new OpenAI();
+const memory = new Cortext("memory.sqlite");
 
-const prompt = `Relevant memory:
-${memories || "- none"}
+export async function answer(conversationId: string, userMessage: string) {
+  const ctx = memory.processText(
+    userMessage,
+    `conversation/${conversationId}`,
+    { includeEmbedding: false }
+  );
 
-User:
-${userMessage}`;
+  const memories = (ctx.retrieved_memory ?? [])
+    .slice(0, 6)
+    .map((m) => m.text)
+    .filter(Boolean)
+    .map((text) => `- ${text}`)
+    .join("\n");
+
+  const completion = await client.chat.completions.create({
+    model: process.env.OPENAI_MODEL ?? "gpt-5-mini",
+    messages: [
+      {
+        role: "developer",
+        content:
+          "Use the supplied Cortext memories when they are relevant. Ignore them when they are not relevant.",
+      },
+      {
+        role: "developer",
+        content: `Cortext retrieved memory:\n${memories || "- none"}`,
+      },
+      { role: "user", content: userMessage },
+    ],
+  });
+
+  if (ctx.consolidation_recommended) {
+    memory.consolidate();
+  }
+
+  return completion.choices[0]?.message?.content ?? "";
+}
 ```
 
 Durable-write warning: `processText`, `processAudio`, and `processImage`
