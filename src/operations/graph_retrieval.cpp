@@ -43,6 +43,7 @@ struct Candidate
   double seed_score = 0.0;
   double graph_score = 0.0;
   double temporal_score = 0.0;
+  double superseded_penalty = 0.0;
   double score = 0.0;
 };
 
@@ -392,6 +393,8 @@ InsertOrBoost (std::unordered_map<long long, Candidate> &candidates,
                                          candidate.graph_score);
       it->second.temporal_score = std::max (it->second.temporal_score,
                                             candidate.temporal_score);
+      it->second.superseded_penalty = std::max (
+          it->second.superseded_penalty, candidate.superseded_penalty);
       it->second.score = std::max (it->second.score, candidate.score);
       if (it->second.source_id.empty ())
         {
@@ -475,6 +478,66 @@ SourceExpansionRowsFromSurface (const ProcessorContext &p_ctx,
       std::sort (rows.begin (), rows.end (), by_source_neighbor_order);
     }
   return rows;
+}
+
+void
+ApplySupersessionDemotion (
+    Transaction &tx, std::unordered_map<long long, Candidate> &candidates,
+    double F, double S, double T)
+{
+  if (candidates.empty ())
+    {
+      return;
+    }
+
+  std::vector<std::any> params;
+  params.reserve (candidates.size ());
+  std::string values;
+  for (const auto &[memory_id, candidate] : candidates)
+    {
+      (void)candidate;
+      if (memory_id <= 0)
+        {
+          continue;
+        }
+      if (!values.empty ())
+        {
+          values += ",";
+        }
+      values += "(?)";
+      params.push_back (memory_id);
+    }
+  if (values.empty ())
+    {
+      return;
+    }
+
+  const auto rows = tx.Execute (
+      "WITH candidate(id) AS (VALUES " + values + ") "
+      "SELECT a.target_memory_id AS memory_id, "
+      "       MAX(COALESCE(a.weight, 0.0)) AS superseded_weight "
+      "FROM associations a "
+      "JOIN candidate c ON c.id = a.target_memory_id "
+      "WHERE a.edge_type = 'supersedes' "
+      "GROUP BY a.target_memory_id",
+      params);
+  const double penalty_weight
+      = core::RetrievalSupersededMemoryPenalty (F, S, T);
+  for (const auto &row : rows)
+    {
+      const long long memory_id = AnyLongLong (row, "memory_id");
+      auto it = candidates.find (memory_id);
+      if (it == candidates.end ())
+        {
+          continue;
+        }
+      const double superseded_weight = core::Clamp (
+          AnyDouble (row, "superseded_weight"), 0.0, 1.0);
+      const double penalty = penalty_weight * superseded_weight;
+      it->second.superseded_penalty = std::max (
+          it->second.superseded_penalty, penalty);
+      it->second.score = std::max (0.0, it->second.score - penalty);
+    }
 }
 
 } // namespace
@@ -844,7 +907,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           "                         'reinforces', 'causes', "
           "                         'derived_from', 'next_in_episode', "
           "                         'prev_in_episode', "
-          "                         'within_same_event') "
+          "                         'within_same_event', "
+          "                         'supersedes') "
           "  GROUP BY memory_id "
           "  ORDER BY graph_weight DESC, memory_id DESC "
           "  LIMIT ?"
@@ -1321,6 +1385,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
     }
 
   start_profile_timing ();
+  ApplySupersessionDemotion (tx, candidates, F, S, T);
   std::vector<Candidate> ranked;
   ranked.reserve (candidates.size ());
   for (auto &[id, candidate] : candidates)
@@ -1357,6 +1422,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           trace.temporal_score = ranked[i].temporal_score;
           trace.activation.base_level = ranked[i].seed_score;
           trace.activation.spreading_activation = ranked[i].graph_score;
+          trace.activation.partial_match_penalty
+              = ranked[i].superseded_penalty;
           trace.activation.activation_total = ranked[i].score;
           retrieval_trace::RejectedCandidate rejected;
           rejected.candidate = trace;
@@ -1511,6 +1578,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       trace.temporal_score = candidate.temporal_score;
       trace.activation.base_level = candidate.seed_score;
       trace.activation.spreading_activation = candidate.graph_score;
+      trace.activation.partial_match_penalty = candidate.superseded_penalty;
       trace.activation.activation_total = candidate.score;
       trace_ranked.push_back (trace);
     }

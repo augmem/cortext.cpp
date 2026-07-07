@@ -2535,6 +2535,25 @@ active context:
     if source_confidence(m) < lerp(0.15, 0.45, T):
         downrank_or_hold(m)
 
+Belief revision is graph-native and modality-agnostic. On a durable
+memory write, the stored embedding is compared with a knob-bounded set
+of prior memory embeddings. If the current step’s contradiction pressure
+clears `SupersessionContradictionThreshold(F,S,T)` and pairwise
+similarity clears `SupersessionSimilarityThreshold(F,S,T)`, the runtime
+writes a directed `supersedes` edge from the new memory to the older
+memory:
+
+    if contradiction_t ≥ θ_supersede_contra(F,S,T)
+       and cos(e_new, e_old) ≥ θ_supersede_sim(F,S,T):
+        associations.add(e_new → e_old, type = "supersedes",
+                         weight = SupersessionEdgeWeight(cos,F,S,T))
+        contradiction_count(e_old) += 1
+
+Retrieval traverses `supersedes` edges so a replacement can surface when
+a query first hits the stale assertion. The superseded target is demoted
+by `RetrievalSupersededMemoryPenalty(F,S,T) × edge_weight`, but remains
+retrievable as historical evidence.
+
 ## Constructive Recall and Controlled Distortion
 
 Constructive recall is now implemented as a two-layer memory view:
@@ -3276,6 +3295,27 @@ test case** and **2 assertions**.
 
 An examples-enabled build also completed after configuring with
 `CORTEXT_BUILD_EXAMPLES=ON`.
+
+On 2026-07-07, the belief-revision supersession patch added a focused
+modality-agnostic regression/eval. The storage probe uses an
+image-modality signal and explicit contradiction metric pressure; it
+verifies that the new memory writes a directed `supersedes` edge to a
+high-similarity older memory without inspecting payload text. The
+retrieval probe presents an older exact embedding match and a newer
+less-exact replacement connected by `supersedes`; graph retrieval ranks
+the replacement first, keeps the older memory in the packet, and records
+a nonzero supersession penalty in the activation ledger.
+
+``` bash
+./build/tests/cortext_tests \
+  "MemoryStorage writes modality-agnostic supersedes edges"
+
+./build/tests/cortext_tests \
+  "Graph retrieval demotes superseded stale memories"
+```
+
+Both focused probes passed locally. This is a correctness eval for the
+stale fact failure mode, not a broad retrieval-quality claim.
 
 ## Retrieval Behavior After Removal
 

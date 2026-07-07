@@ -10,6 +10,7 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 
@@ -22,6 +23,23 @@ namespace
 {
 
 constexpr int kEmbeddingDim = 256;
+
+Eigen::VectorXf
+UnitVec (int dim)
+{
+  Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
+  v[dim] = 1.0f;
+  return v;
+}
+
+Eigen::VectorXf
+VectorWithCosineToDim0 (float cosine)
+{
+  Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
+  v[0] = cosine;
+  v[1] = std::sqrt (std::max (0.0f, 1.0f - cosine * cosine));
+  return v;
+}
 
 class SeedStorageInputsOp : public IOperation
 {
@@ -417,6 +435,80 @@ TEST_CASE ("MemoryStorage stores memory even when no payload",
   REQUIRE (sig_rows.size () == 1);
   auto sig_blob_id = BlobFromAny (sig_rows[0].at ("blob_id"));
   REQUIRE (sig_blob_id.empty ());
+}
+
+TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
+           "[operations][memory_storage][supersession]")
+{
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  const Eigen::VectorXf stale_embedding = UnitVec (0);
+  const Eigen::VectorXf correction_embedding = VectorWithCosineToDim0 (0.94f);
+  cortext::testing::SeedEmbeddingV2 (*store, 100, stale_embedding, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 10, 100, "belief/source",
+                                  "LONG_TERM", 1.0, 1000);
+
+  Signal s;
+  s.embedding = correction_embedding;
+  s.timestamp = 2000;
+  s.source_id = "belief/source";
+  s.modality = "image";
+  s.mimetype = "image/custom-test";
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+
+  AccumulatorState acc;
+  acc.mu_acc = s.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.8;
+  acc.s_max = 0.8;
+  acc.t_start = s.timestamp;
+  {
+    SignalRecord rec;
+    rec.embedding = s.embedding;
+    rec.timestamp = s.timestamp;
+    rec.modality = s.modality;
+    rec.mime = s.mimetype;
+    rec.score = 0.8;
+    rec.serial_position = 0;
+    acc.signals.push_back (std::move (rec));
+  }
+  pctx.accumulator_states[s.source_id] = std::move (acc);
+
+  OperationContext ctx (s, pctx, cfg, store);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (s.embedding);
+  ctx.SetMetric (operations::Metric::contradiction, 1.0);
+
+  MemoryStorage op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE (ctx.GetStoredMemoryId ().has_value ());
+  const long long correction_memory_id = *ctx.GetStoredMemoryId ();
+  auto edge_rows = store->Execute (
+      "SELECT weight FROM associations "
+      "WHERE source_memory_id = ? "
+      "  AND target_memory_id = ? "
+      "  AND edge_type = 'supersedes'",
+      { correction_memory_id, 10LL });
+  REQUIRE (edge_rows.size () == 1);
+  REQUIRE (std::any_cast<double> (edge_rows[0].at ("weight")) > 0.0);
+
+  auto stale_rows = store->Execute (
+      "SELECT source_contradiction_count FROM memories WHERE memory_id = ?",
+      { 10LL });
+  REQUIRE (stale_rows.size () == 1);
+  REQUIRE (AnyToLongLong (stale_rows[0].at ("source_contradiction_count"))
+           == 1LL);
 }
 
 TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",

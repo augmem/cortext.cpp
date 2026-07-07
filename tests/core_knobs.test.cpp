@@ -426,6 +426,18 @@ TEST_CASE ("Graph build thresholds derive from knobs", "[core][knobs]")
   REQUIRE (ContradictionThreshold (1.0, 0.5, 0.5)
            < ContradictionThreshold (0.0, 0.5, 0.5));
 
+  REQUIRE (SupersessionSimilarityThreshold (1.0, 0.5, 0.5)
+           > SupersessionSimilarityThreshold (0.0, 0.5, 0.5));
+  REQUIRE (SupersessionSimilarityThreshold (0.5, 1.0, 0.5)
+           < SupersessionSimilarityThreshold (0.5, 0.0, 0.5));
+  REQUIRE (SupersessionContradictionThreshold (0.5, 1.0, 0.5)
+           < SupersessionContradictionThreshold (0.5, 0.0, 0.5));
+  REQUIRE (SupersessionContradictionThreshold (1.0, 0.5, 0.5)
+           > SupersessionContradictionThreshold (0.0, 0.5, 0.5));
+  REQUIRE (SupersessionCandidateLimit (0.5, 0.5, 0.5) > 0);
+  REQUIRE (RetrievalSupersededMemoryPenalty (0.5, 1.0, 0.5)
+           > RetrievalSupersededMemoryPenalty (0.5, 0.0, 0.5));
+
   REQUIRE (LabelCooccurrenceEdgeWeight (0.5, 1.0, 0.5)
            > LabelCooccurrenceEdgeWeight (0.5, 0.0, 0.5));
   REQUIRE (RetrievalProceduralSeedMinScore (1.0, 0.5, 0.5)

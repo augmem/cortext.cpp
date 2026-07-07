@@ -247,6 +247,53 @@ TEST_CASE ("Graph retrieval expands through sequential episode edges",
            != out.candidate_memory_ids.end ());
 }
 
+TEST_CASE ("Graph retrieval demotes superseded stale memories",
+           "[operations][graph][retrieval][supersession][eval]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar disable_source_expansion (
+      "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION", "1");
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+  SeedMemory (*store, 20, 200, VectorWithCosineToDim0 (0.92f), 2000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, "
+      "weight, last_reinforced) VALUES(?, ?, 'supersedes', ?, ?)",
+      { 20LL, 10LL, 1.0, 2000LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.5;
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  const auto out = processor.Process (MakeSignal (UnitVec (0), 3000));
+  const auto ranked = operations::retrieval_trace::GetLastRankedCandidates ();
+  REQUIRE_FALSE (out.candidate_memory_ids.empty ());
+  REQUIRE_FALSE (ranked.empty ());
+  REQUIRE (ranked.front ().memory_id == 20LL);
+
+  auto stale_it = std::find_if (
+      ranked.begin (), ranked.end (),
+      [] (const auto &candidate) { return candidate.memory_id == 10LL; });
+  auto correction_it = std::find_if (
+      ranked.begin (), ranked.end (),
+      [] (const auto &candidate) { return candidate.memory_id == 20LL; });
+  REQUIRE (stale_it != ranked.end ());
+  REQUIRE (correction_it != ranked.end ());
+  REQUIRE (stale_it->score < correction_it->score);
+  REQUIRE (stale_it->activation.partial_match_penalty > 0.0);
+}
+
 TEST_CASE ("Graph retrieval scores older exact matches beyond old recency cap",
            "[operations][graph][retrieval]")
 {
