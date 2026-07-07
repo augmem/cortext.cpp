@@ -200,6 +200,47 @@ claim: mean sufficiency was lower for Cortext (4.41) than traditional chat+RAG
 is
 `docs/paper/artifacts/msc_frontier_late_200dlg_gpt55_20260630T053427Z/judge_openai_gpt55_four_system_clean.json`.
 
+### TencentDB Agent Memory MSC Comparator
+
+The MSC judge harness now accepts externally materialized recall packets so
+Cortext can be compared directly against TencentDB Agent Memory
+(`https://github.com/TencentCloud/TencentDB-Agent-Memory`) under the same blind
+packet protocol. The comparator is configured through `judge_systems.json`
+using an `external_packet_systems` entry named `tencentdb_agent_memory`. Its
+packet file is JSONL keyed by `event_index` or `probe_event_index`; each row
+provides either `text`, `content`, or an `items` array of recalled memory text.
+The harness converts those rows into synthetic prior text evidence, applies the
+configured token budget, blinds packet identities, and records TencentDB's
+scores, wins, and context-token counts alongside Cortext and the RAG baselines.
+
+For the local rerun protocol, `scripts/run_msc_frontier_judge.sh` defaults to
+the OpenAI-compatible vLLM judge at `http://127.0.0.1:8000/v1`, model
+`qwen-omni-judge` (`Qwen/Qwen2.5-Omni-7B-AWQ`), with an 8,192-token prompt
+budget. Set `TENCENTDB_PACKET_JSONL=/path/to/tencentdb_packets.jsonl` to include
+TencentDB Agent Memory in the MSC comparison.
+
+On 2026-07-06, a bounded local smoke comparison used 20 MSC validation dialogs
+(970 turns), nine 100-event probes, one Qwen-Omni judge repetition per probe,
+and only two judged systems: Cortext native and the externally materialized
+TencentDB Agent Memory packet. The wider five-system comparison did not fit the
+local 8,192-token judge context window, so the reported result is a direct
+Cortext-versus-TencentDB screen rather than a full RAG-ablation sweep.
+TencentDB Agent Memory produced eight recalled items across the nine probes,
+with empty recall packets at probe events 100, 200, 300, 400, and 800.
+
+| Outcome | Raw wins | Raw win rate | Probe-bootstrap 95% CI | Mean relevance | Mean sufficiency | Mean noise | Mean context tokens |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Cortext native | 7/9 | 0.778 | [0.444, 1.000] | 3.22 | 3.56 | 1.00 | 714 |
+| TencentDB Agent Memory | 1/9 | 0.111 | [0.000, 0.333] | 0.89 | 0.78 | 1.89 | 12 |
+| Tie / unclear | 1/9 | n/a | n/a | n/a | n/a | n/a | n/a |
+
+This small local run favors Cortext on quality while showing much smaller
+TencentDB packets in this configuration. The result should not be read as a
+production TencentDB benchmark: the TencentDB run used the local Qwen model for
+both memory extraction and judging, ran without a TencentDB embedding service,
+and logged several extraction/LLM parse failures. The aggregate artifact is
+`eval_runs/msc_tencentdb_qwen_20260706T213907Z/judge_vllm_qwen_omni.json`.
+
 ### 128k RAG-Ablation Probe
 
 A follow-up ablation used the same 9 MSC probes, three hosted `gpt-5.5`
@@ -395,6 +436,49 @@ earns a hard cut from this screen. Effect scales is not worth more short-horizon
 spend, and the emotion/mood cascade remains deferred because its slow mood
 integrator has a plausible long-horizon role.
 
+### Long-Horizon Deferred-Mechanism Sweep
+
+The deferred-family mechanism sweep then reused the 18,000-message
+context-blowout protocol, capacity 21, 31 probes at stride 600 including the
+initial probe, and three blind Qwen-Omni 32k judge repetitions per probe. Each
+arm compared Cortext native against the same RAG, full-history, and compacting
+session packet baselines as the stress run, but the table below reports only
+the Cortext-native rows because the question was per-mechanism removal value.
+All seven arms completed 93/93 judgments, the four local 32k judge servers
+reported `max_model_len=32768`, and `--require-judge-prompt-fit` produced no
+prompt-fit or context-window failures. Malformed judge outputs were retried and
+recovered. The aggregate artifact is
+`docs/paper/artifacts/long_horizon_mechanism_sweep_20260707T022225Z/mechanism_sweep_summary.json`.
+
+| arm | wins | sufficiency | rep sufficiency | noise | tokens | mean delta | paired deltas | delta rep SD | reading |
+|---|---:|---:|---|---:|---:|---:|---|---:|---|
+| control | 27/93 | 3.10 | 3.40 / 3.05 / 2.84 | 1.42 | 223 | 0.00 | 0.00 / 0.00 / 0.00 | 0.00 | measured control |
+| emotion_mood_threshold_cascade removed | 26/93 | 2.67 | 2.67 / 2.78 / 2.55 | 1.58 | 224 | -0.43 | -0.73 / -0.27 / -0.29 | 0.26 | measured harm; retained |
+| neuromodulator_effect_scales removed | 29/93 | 2.94 | 2.89 / 3.06 / 2.87 | 1.36 | 222 | -0.16 | -0.52 / +0.01 / +0.03 | 0.31 | retained by default; no cut |
+| daily_consolidation removed | 25/93 | 2.95 | 2.97 / 3.08 / 2.80 | 1.39 | 222 | -0.15 | -0.44 / +0.02 / -0.04 | 0.25 | retained by default; no cut |
+| graph_expansion removed | 19/93 | 2.84 | 2.74 / 2.98 / 2.81 | 1.66 | 221 | -0.26 | -0.66 / -0.08 / -0.03 | 0.35 | retained by default; unresolved negative |
+| stm_ltm_graph_label_handoff removed | 19/93 | 2.81 | 3.06 / 2.79 / 2.57 | 1.53 | 223 | -0.29 | -0.35 / -0.26 / -0.26 | 0.05 | measured harm; retained |
+| synaptic_tag_ttl removed | 22/93 | 2.86 | 2.94 / 2.61 / 3.04 | 1.66 | 220 | -0.24 | -0.47 / -0.44 / +0.20 | 0.38 | retained by default; no cut |
+
+The long-horizon run closes the deferred cut question for v1: no removal
+improves the stack, so no additional mechanism earns a hard cut. The table
+therefore uses two verdict tiers rather than treating all negative mean deltas
+as equally resolved. The emotion/mood threshold cascade and STM/LTM graph-label
+handoff are retained on measured harm. Emotion/mood loses on all three paired
+repetitions, and handoff has the most stable long-horizon loss (rep SD 0.05).
+
+The remaining four arms stay by default: their removals do not help, but their
+harm is not resolved by this screen once the paired repetitions are visible.
+The control's first repetition was high (3.40 versus 3.05 and 2.84), which makes
+mean-vs-mean losses more negative than the later paired repetitions for effect
+scales, daily consolidation, and graph expansion. Effect scales and daily
+consolidation are null or positive in the later paired repetitions. Tag TTL is
+mixed. Graph expansion has the clearest negative lean among the default-retain
+group, but the arc is still null at short horizon and unresolved-leaning-negative
+at long horizon, not a confirmed positive-value result. The TTL arm disables tag
+expiry while leaving tag assignment enabled, so it is distinct from the July
+short-horizon synaptic-tagging removal.
+
 ### ACT-R Gate Promotion Arms
 
 Six arms inverted the logic. Each enabled one opt-in ACT-R-derived scoring
@@ -422,7 +506,7 @@ the ledger is observability, not a scoring gate.
 
 ### Negative Results Summary
 
-The removal record separates three outcomes. The ACT-R gate-promotion branch
+The removal record separates four outcomes. The ACT-R gate-promotion branch
 still rejects the activation-gating direction for the current v1 runtime: all
 six gate-promotion arms failed to beat the default stack, and the `all_gates`
 arm was harmful because sufficiency fell from 3.95 to 3.72 while noise rose from
@@ -431,14 +515,17 @@ positive at this horizon and it had no deferred long-horizon case. The July
 neuromodulator confirmation does not support a hard cut to the tested
 neuromodulator mechanisms: oscillator and synaptic-tagging removals are harmful,
 while neuromodulator effect scales and the emotion/mood threshold cascade remain
-below the short-horizon signal floor. These verdicts do not remove the
-ACT-R-inspired activation ledger retained in retrieval traces; that ledger
-records ranking evidence for observability and audits, not an additional scoring
-gate. The remaining per-mechanism milestone is one long-horizon context-blowout
-removal sweep over the deferred family: emotion/mood cascade, neuromodulator
-effect scales, daily consolidation, graph expansion, STM/LTM graph-label
-handoff, and the TTL value of synaptic tagging at horizons where tags actually
-expire.
+below the short-horizon signal floor. The long-horizon deferred-family sweep
+then resolves the remaining cut candidates by the hard-cut rule: none of the
+six removals improves the stack, so no additional cut ships. The retained rows
+split into two evidentiary tiers. Emotion/mood cascade and STM/LTM graph-label
+handoff are retained on measured harm; neuromodulator effect scales, daily
+consolidation, graph expansion, and synaptic-tag TTL are retained by default
+because removal shows no benefit and the apparent harm is below this screen's
+paired-repetition resolution. These verdicts do not remove the ACT-R-inspired
+activation ledger retained in retrieval traces; that ledger records ranking
+evidence for observability and audits, not an additional
+scoring gate.
 
 ### Working-Memory Partition Failure
 

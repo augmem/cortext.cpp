@@ -8,6 +8,7 @@
 #include "../experimental_env.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace cortext::operations
 {
@@ -44,10 +45,15 @@ ApplySynapticTagging::Execute (OperationContext &context, Transaction &tx) const
       return;
     }
 
+  const bool tag_ttl_disabled = internal::experimental_env::Flag (
+      "CORTEXT_DISABLE_SYNAPTIC_TAG_TTL");
   const long long tag_expires_at
-      = static_cast<long long> (
-          now_ts
-          + static_cast<uint64_t> (tag_policy.tag_decay_seconds) * 1000ULL);
+      = tag_ttl_disabled
+            ? std::numeric_limits<long long>::max ()
+            : static_cast<long long> (
+                now_ts
+                + static_cast<uint64_t> (tag_policy.tag_decay_seconds)
+                      * 1000ULL);
   const long long stored_memory_id
       = context.GetStoredMemoryId ().value_or (0);
   const long long neighbor_limit

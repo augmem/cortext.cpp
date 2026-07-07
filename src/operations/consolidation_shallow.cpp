@@ -7,6 +7,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "../experimental_env.hpp"
 #include <algorithm>
 #include <any>
 #include <sstream>
@@ -299,7 +300,10 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
         }
 
       // Attach labels by embedding similarity (if label nodes exist).
-      if (!label_nodes.empty () && centroid_memory_id > 0 && has_centroid_vec)
+      const bool label_handoff_disabled = internal::experimental_env::Flag (
+          "CORTEXT_DISABLE_STM_LTM_GRAPH_LABEL_HANDOFF");
+      if (!label_handoff_disabled && !label_nodes.empty ()
+          && centroid_memory_id > 0 && has_centroid_vec)
         {
           std::vector<std::pair<double, long long>> candidates;
           candidates.reserve (label_nodes.size ());
