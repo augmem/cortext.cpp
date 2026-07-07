@@ -315,10 +315,14 @@ against measured July controls.
 
 The June win column saturates from recency coverage at 1,200 messages, so
 mechanism value in that group shows in sufficiency, noise, and tokens rather
-than wins. Single-repetition sufficiency deltas under about 0.15 are not signal
-in either group. The June consolidation-family arms are expected-null at this
-length, because consolidation exists to keep month-old content reachable and a
-short replay serves most probes from recent memory.
+than wins. The July confirmation calibrates the local-Qwen screen: matched
+per-repetition sufficiency-delta SD reaches 0.32, so single-repetition July
+deltas under roughly 0.3 are unstable evidence. The June single-repetition arms
+carry the same caution qualitatively, but that older judge/protocol needs its
+own repetition-variance measurement before relitigating verdicts. The June
+consolidation-family arms are expected-null at this length, because
+consolidation exists to keep month-old content reachable and a short replay
+serves most probes from recent memory.
 
 Before the July 6 follow-up, synaptic-tag targeting was fixed to tag the stored
 spike memory and same-source temporal neighbors rather than the newest memories
@@ -371,22 +375,24 @@ missing rows; malformed judge outputs were retried and recovered. The aggregate
 artifact is
 `docs/paper/artifacts/neuromodulator_mechanism_confirm_20260707T002126Z/mechanism_sweep_summary.json`.
 
-| arm | wins | sufficiency | noise | tokens | delta vs July 7 control | reading |
-|---|---:|---:|---:|---:|---:|---|
-| control | 50/117 | 3.57 | 1.27 | 755 | 0.00 | measured control |
-| neuromodulator_effect_scales removed | 42/117 | 3.44 | 1.12 | 755 | -0.13 | below signal floor; no cut |
-| synaptic_tagging removed | 44/117 | 3.38 | 1.09 | 759 | -0.20 | removal hurts; retained |
-| encode_retrieve_oscillator removed | 39/117 | 3.08 | 1.21 | 755 | -0.49 | removal hurts; retained |
-| emotion_mood_threshold_cascade removed | 45/117 | 3.44 | 1.16 | 751 | -0.14 | null/deferred; no cut |
+| arm | wins | sufficiency | noise | tokens | delta vs July 7 control | delta rep SD | reading |
+|---|---:|---:|---:|---:|---:|---:|---|
+| control | 50/117 | 3.57 | 1.27 | 755 | 0.00 | 0.00 | measured control |
+| neuromodulator_effect_scales removed | 42/117 | 3.44 | 1.12 | 755 | -0.13 | 0.16 | below signal floor; no cut |
+| synaptic_tagging removed | 44/117 | 3.38 | 1.09 | 759 | -0.20 | 0.03 | removal hurts; retained |
+| encode_retrieve_oscillator removed | 39/117 | 3.08 | 1.21 | 755 | -0.49 | 0.28 | removal hurts; retained |
+| emotion_mood_threshold_cascade removed | 45/117 | 3.44 | 1.16 | 751 | -0.14 | 0.32 | null/deferred; no cut |
 
 The confirmation reverses the preliminary oscillator-null read. Removing the
 encode/retrieve oscillator costs 0.49 sufficiency, the largest July
-neuromodulator loss, so that per-signal fast dynamic stays. Synaptic tagging
-also clears the 0.15 signal floor after the targeting fix and is retained on
-both correctness and short-horizon quality grounds. Neuromodulator effect scales
-and the emotion/mood threshold cascade remain directionally negative but below
-the signal floor in this confirmation; neither earns a hard cut from this
-screen, and the emotion/mood cascade remains deferred because its slow mood
+neuromodulator loss, and all three matched repetition deltas are negative, so
+that per-signal fast dynamic stays. Synaptic tagging also clears the 0.15 signal
+floor after the targeting fix with the most stable July delta (rep SD 0.03), and
+is retained on both correctness and short-horizon quality grounds.
+Neuromodulator effect scales and the emotion/mood threshold cascade remain
+directionally negative but below the signal floor in this confirmation; neither
+earns a hard cut from this screen. Effect scales is not worth more short-horizon
+spend, and the emotion/mood cascade remains deferred because its slow mood
 integrator has a plausible long-horizon role.
 
 ### ACT-R Gate Promotion Arms
@@ -428,7 +434,11 @@ while neuromodulator effect scales and the emotion/mood threshold cascade remain
 below the short-horizon signal floor. These verdicts do not remove the
 ACT-R-inspired activation ledger retained in retrieval traces; that ledger
 records ranking evidence for observability and audits, not an additional scoring
-gate.
+gate. The remaining per-mechanism milestone is one long-horizon context-blowout
+removal sweep over the deferred family: emotion/mood cascade, neuromodulator
+effect scales, daily consolidation, graph expansion, STM/LTM graph-label
+handoff, and the TTL value of synaptic tagging at horizons where tags actually
+expire.
 
 ### Working-Memory Partition Failure
 

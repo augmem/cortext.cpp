@@ -3799,11 +3799,15 @@ July controls.
 
 The June win column saturates from recency coverage at 1,200 messages,
 so mechanism value in that group shows in sufficiency, noise, and tokens
-rather than wins. Single-repetition sufficiency deltas under about 0.15
-are not signal in either group. The June consolidation-family arms are
-expected-null at this length, because consolidation exists to keep
-month-old content reachable and a short replay serves most probes from
-recent memory.
+rather than wins. The July confirmation calibrates the local-Qwen
+screen: matched per-repetition sufficiency-delta SD reaches 0.32, so
+single-repetition July deltas under roughly 0.3 are unstable evidence.
+The June single-repetition arms carry the same caution qualitatively,
+but that older judge/protocol needs its own repetition-variance
+measurement before relitigating verdicts. The June consolidation-family
+arms are expected-null at this length, because consolidation exists to
+keep month-old content reachable and a short replay serves most probes
+from recent memory.
 
 Before the July 6 follow-up, synaptic-tag targeting was fixed to tag the
 stored spike memory and same-source temporal neighbors rather than the
@@ -4024,15 +4028,16 @@ with no missing rows; malformed judge outputs were retried and
 recovered. The aggregate artifact is
 `docs/paper/artifacts/neuromodulator_mechanism_confirm_20260707T002126Z/mechanism_sweep_summary.json`.
 
-<table>
+<table style="width:100%;">
 <colgroup>
-<col style="width: 11%" />
-<col style="width: 15%" />
-<col style="width: 15%" />
-<col style="width: 15%" />
-<col style="width: 15%" />
-<col style="width: 15%" />
-<col style="width: 11%" />
+<col style="width: 10%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 10%" />
 </colgroup>
 <thead>
 <tr>
@@ -4042,6 +4047,7 @@ recovered. The aggregate artifact is
 <th style="text-align: right;">noise</th>
 <th style="text-align: right;">tokens</th>
 <th style="text-align: right;">delta vs July 7 control</th>
+<th style="text-align: right;">delta rep SD</th>
 <th>reading</th>
 </tr>
 </thead>
@@ -4053,6 +4059,7 @@ recovered. The aggregate artifact is
 <td style="text-align: right;">1.27</td>
 <td style="text-align: right;">755</td>
 <td style="text-align: right;">0.00</td>
+<td style="text-align: right;">0.00</td>
 <td>measured control</td>
 </tr>
 <tr>
@@ -4062,6 +4069,7 @@ recovered. The aggregate artifact is
 <td style="text-align: right;">1.12</td>
 <td style="text-align: right;">755</td>
 <td style="text-align: right;">-0.13</td>
+<td style="text-align: right;">0.16</td>
 <td>below signal floor; no cut</td>
 </tr>
 <tr>
@@ -4071,6 +4079,7 @@ recovered. The aggregate artifact is
 <td style="text-align: right;">1.09</td>
 <td style="text-align: right;">759</td>
 <td style="text-align: right;">-0.20</td>
+<td style="text-align: right;">0.03</td>
 <td>removal hurts; retained</td>
 </tr>
 <tr>
@@ -4080,6 +4089,7 @@ recovered. The aggregate artifact is
 <td style="text-align: right;">1.21</td>
 <td style="text-align: right;">755</td>
 <td style="text-align: right;">-0.49</td>
+<td style="text-align: right;">0.28</td>
 <td>removal hurts; retained</td>
 </tr>
 <tr>
@@ -4089,6 +4099,7 @@ recovered. The aggregate artifact is
 <td style="text-align: right;">1.16</td>
 <td style="text-align: right;">751</td>
 <td style="text-align: right;">-0.14</td>
+<td style="text-align: right;">0.32</td>
 <td>null/deferred; no cut</td>
 </tr>
 </tbody>
@@ -4096,14 +4107,16 @@ recovered. The aggregate artifact is
 
 The confirmation reverses the preliminary oscillator-null read. Removing
 the encode/retrieve oscillator costs 0.49 sufficiency, the largest July
-neuromodulator loss, so that per-signal fast dynamic stays. Synaptic
-tagging also clears the 0.15 signal floor after the targeting fix and is
-retained on both correctness and short-horizon quality grounds.
-Neuromodulator effect scales and the emotion/mood threshold cascade
-remain directionally negative but below the signal floor in this
-confirmation; neither earns a hard cut from this screen, and the
-emotion/mood cascade remains deferred because its slow mood integrator
-has a plausible long-horizon role.
+neuromodulator loss, and all three matched repetition deltas are
+negative, so that per-signal fast dynamic stays. Synaptic tagging also
+clears the 0.15 signal floor after the targeting fix with the most
+stable July delta (rep SD 0.03), and is retained on both correctness and
+short-horizon quality grounds. Neuromodulator effect scales and the
+emotion/mood threshold cascade remain directionally negative but below
+the signal floor in this confirmation; neither earns a hard cut from
+this screen. Effect scales is not worth more short-horizon spend, and
+the emotion/mood cascade remains deferred because its slow mood
+integrator has a plausible long-horizon role.
 
 ### ACT-R Gate Promotion Arms
 
@@ -4208,7 +4221,12 @@ neuromodulator effect scales and the emotion/mood threshold cascade
 remain below the short-horizon signal floor. These verdicts do not
 remove the ACT-R-inspired activation ledger retained in retrieval
 traces; that ledger records ranking evidence for observability and
-audits, not an additional scoring gate.
+audits, not an additional scoring gate. The remaining per-mechanism
+milestone is one long-horizon context-blowout removal sweep over the
+deferred family: emotion/mood cascade, neuromodulator effect scales,
+daily consolidation, graph expansion, STM/LTM graph-label handoff, and
+the TTL value of synaptic tagging at horizons where tags actually
+expire.
 
 ### Working-Memory Partition Failure
 
