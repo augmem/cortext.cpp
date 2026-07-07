@@ -29,17 +29,6 @@ Links: [Releases](https://github.com/augmem/cortext/releases) /
 - Command-line tools are built with `CORTEXT_BUILD_TOOLS=ON`; examples remain
   behind `CORTEXT_BUILD_EXAMPLES=ON`.
 
-## Hot Topics
-
-- **Query without polluting memory:** use `Retention::Ephemeral` from C++ or
-  `cortext_cli recall`; durable writes remain explicit.
-- **Belief revision:** corrections are represented as graph-native
-  `supersedes` relationships so stale facts are demoted rather than deleted.
-- **Runtime assets:** C++ builds fetch the AIST GGUF model by default; PyPI and
-  npm packages keep registries small and cache the verified model at runtime.
-- **Context packet shape:** `retrieved_memory` and `working_memory` contain
-  memory objects with content blobs and scores, not bare strings.
-
 ## Quick Start
 
 Choose the surface you need.
