@@ -209,6 +209,47 @@ from pathlib import Path
 root = Path(sys.argv[1])
 arms = [item for item in sys.argv[2].split(",") if item]
 judge_repetitions = int(os.environ.get("JUDGE_REPETITIONS", "1"))
+
+def mean(values):
+    return sum(values) / len(values) if values else None
+
+def sample_stdev(values):
+    if len(values) < 2:
+        return 0.0 if len(values) == 1 else None
+    center = mean(values)
+    variance = sum((value - center) ** 2 for value in values) / (len(values) - 1)
+    return variance ** 0.5
+
+def judge_rows_path(judge_path):
+    return judge_path.with_name(judge_path.name + ".rows.jsonl")
+
+def sufficiency_by_repetition(judge_path):
+    rows_path = judge_rows_path(judge_path)
+    if not rows_path.exists():
+        return []
+    by_rep = {}
+    for line in rows_path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        rep = row.get("repetition")
+        sufficiency = (
+            row.get("systems", {})
+            .get("cortext_native", {})
+            .get("sufficiency")
+        )
+        if rep is None or sufficiency is None:
+            continue
+        by_rep.setdefault(int(rep), []).append(float(sufficiency))
+    return [mean(by_rep[rep]) for rep in sorted(by_rep)]
+
+def matched_deltas_by_repetition(arm_values, control_values):
+    count = min(len(arm_values), len(control_values))
+    if count == 0:
+        return []
+    return [
+        arm_values[index] - control_values[index]
+        for index in range(count)
+    ]
+
 legacy_control = {
     "wins": 22,
     "judged": 39,
@@ -218,6 +259,7 @@ legacy_control = {
 }
 control = dict(legacy_control)
 control_path = root / "control" / "judge.json"
+control_suff_by_repetition = sufficiency_by_repetition(control_path)
 if control_path.exists():
     control_data = json.loads(control_path.read_text(encoding="utf-8"))
     control_quality = control_data.get("quality", {}).get("cortext_native", {})
@@ -235,8 +277,11 @@ if control_path.exists():
             control_data.get("tokens", {}).get("mean_cortext_context_tokens"),
         ),
     }
+    if control_suff_by_repetition:
+        control["mean_sufficiency_by_repetition"] = control_suff_by_repetition
+        control["mean_sufficiency_rep_sd"] = sample_stdev(control_suff_by_repetition)
 summary = {
-    "schema": "cortext_neuromodulator_mechanism_sweep_summary_v1",
+    "schema": "cortext_neuromodulator_mechanism_sweep_summary_v2",
     "root": str(root),
     "protocol": {
         "screen": "capacity-21 MSC 39-probe single-mechanism removal",
@@ -268,6 +313,11 @@ for arm in arms:
     suff = quality.get("mean_sufficiency")
     control_suff = control.get("mean_sufficiency")
     delta = None if suff is None or control_suff is None else suff - control_suff
+    suff_by_repetition = sufficiency_by_repetition(judge_path)
+    delta_by_repetition = matched_deltas_by_repetition(
+        suff_by_repetition,
+        control_suff_by_repetition,
+    )
     if arm == "control" and delta == 0:
         reading = "measured_control"
     elif delta is None:
@@ -287,6 +337,12 @@ for arm in arms:
         "mean_noise": quality.get("mean_noise"),
         "mean_context_tokens": mean_tokens,
         "delta_sufficiency_vs_control": delta,
+        "mean_sufficiency_by_repetition": suff_by_repetition or None,
+        "mean_sufficiency_rep_sd": sample_stdev(suff_by_repetition),
+        "delta_sufficiency_vs_control_by_repetition": (
+            delta_by_repetition or None
+        ),
+        "delta_sufficiency_vs_control_rep_sd": sample_stdev(delta_by_repetition),
         "reading_by_sufficiency_rule": reading,
         "judgment_complete": data.get("judgment_complete"),
         "missing_judgments": data.get("missing_judgments"),
