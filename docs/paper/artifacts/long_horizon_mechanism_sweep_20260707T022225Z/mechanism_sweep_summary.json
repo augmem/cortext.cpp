@@ -1,0 +1,441 @@
+{
+  "arms": {
+    "control": {
+      "artifact": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z/control/judge.json",
+      "delta_sufficiency_vs_control": 0.0,
+      "delta_sufficiency_vs_control_by_repetition": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "delta_sufficiency_vs_control_rep_sd": 0.0,
+      "fairness_checks": {
+        "attached_audio_judged_when_present": true,
+        "attached_images_judged_when_present": true,
+        "blind_prompt_hidden_labels_absent": true,
+        "cortext_audio_image_transcript_shortcuts": false,
+        "counters": {
+          "cortext_native_non_prior_memory_rows_excluded": 31,
+          "cortext_native_non_prior_retrieved_rows_excluded": 0,
+          "cortext_native_non_prior_working_rows_excluded": 31,
+          "full_history_oldest_messages_dropped": 245717,
+          "probe_event_index_remapped": 26,
+          "traditional_chat_rag_compaction_events": 22,
+          "traditional_chat_rag_contentful_compaction": 22
+        },
+        "full_history_prompt_fits_judge_context": true,
+        "full_history_text_only": true,
+        "judge_prompt_fits_context_window": true,
+        "judge_supports_attached_audio": false,
+        "judge_supports_attached_images": false,
+        "media_memory_map_complete": true,
+        "no_current_turn_context_inclusions": true,
+        "no_future_context_violations": true,
+        "traditional_chat_rag_contentful_compaction": true,
+        "traditional_chat_rag_text_only": true
+      },
+      "judged": 93,
+      "judgment_complete": true,
+      "mean_context_tokens": 223.2258064516129,
+      "mean_noise": 1.4150537634408602,
+      "mean_sufficiency": 3.0978494623655917,
+      "mean_sufficiency_by_repetition": [
+        3.403225806451613,
+        3.0548387096774197,
+        2.835483870967742
+      ],
+      "mean_sufficiency_rep_sd": 0.2863043310218085,
+      "missing_judgments": 0,
+      "paired_delta_after_rep1_nonnegative_count": 2,
+      "paired_delta_after_rep1_signal_count": 0,
+      "paired_delta_interpretation": "measured_control",
+      "probe_count": 31,
+      "reading_by_sufficiency_rule": "measured_control",
+      "wins": 27
+    },
+    "daily_consolidation": {
+      "artifact": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z/daily_consolidation/judge.json",
+      "delta_sufficiency_vs_control": -0.15053763440860202,
+      "delta_sufficiency_vs_control_by_repetition": [
+        -0.435483870967742,
+        0.022580645161290214,
+        -0.038709677419354716
+      ],
+      "delta_sufficiency_vs_control_rep_sd": 0.24866623053286274,
+      "fairness_checks": {
+        "attached_audio_judged_when_present": true,
+        "attached_images_judged_when_present": true,
+        "blind_prompt_hidden_labels_absent": true,
+        "cortext_audio_image_transcript_shortcuts": false,
+        "counters": {
+          "cortext_native_non_prior_memory_rows_excluded": 31,
+          "cortext_native_non_prior_retrieved_rows_excluded": 0,
+          "cortext_native_non_prior_working_rows_excluded": 31,
+          "full_history_oldest_messages_dropped": 245717,
+          "probe_event_index_remapped": 26,
+          "traditional_chat_rag_compaction_events": 22,
+          "traditional_chat_rag_contentful_compaction": 22
+        },
+        "full_history_prompt_fits_judge_context": true,
+        "full_history_text_only": true,
+        "judge_prompt_fits_context_window": true,
+        "judge_supports_attached_audio": false,
+        "judge_supports_attached_images": false,
+        "media_memory_map_complete": true,
+        "no_current_turn_context_inclusions": true,
+        "no_future_context_violations": true,
+        "traditional_chat_rag_contentful_compaction": true,
+        "traditional_chat_rag_text_only": true
+      },
+      "judged": 93,
+      "judgment_complete": true,
+      "mean_context_tokens": 221.70967741935485,
+      "mean_noise": 1.3935483870967744,
+      "mean_sufficiency": 2.9473118279569896,
+      "mean_sufficiency_by_repetition": [
+        2.967741935483871,
+        3.07741935483871,
+        2.796774193548387
+      ],
+      "mean_sufficiency_rep_sd": 0.14143361909068072,
+      "missing_judgments": 0,
+      "paired_delta_after_rep1_nonnegative_count": 1,
+      "paired_delta_after_rep1_signal_count": 0,
+      "paired_delta_interpretation": "mean_loss_control_rep1_sensitive",
+      "probe_count": 31,
+      "reading_by_sufficiency_rule": "removal_hurts",
+      "wins": 25
+    },
+    "emotion_mood_threshold_cascade": {
+      "artifact": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z/emotion_mood_threshold_cascade/judge.json",
+      "delta_sufficiency_vs_control": -0.4311827956989247,
+      "delta_sufficiency_vs_control_by_repetition": [
+        -0.7322580645161292,
+        -0.27096774193548434,
+        -0.29032258064516103
+      ],
+      "delta_sufficiency_vs_control_rep_sd": 0.2609183599622366,
+      "fairness_checks": {
+        "attached_audio_judged_when_present": true,
+        "attached_images_judged_when_present": true,
+        "blind_prompt_hidden_labels_absent": true,
+        "cortext_audio_image_transcript_shortcuts": false,
+        "counters": {
+          "cortext_native_non_prior_memory_rows_excluded": 31,
+          "cortext_native_non_prior_retrieved_rows_excluded": 0,
+          "cortext_native_non_prior_working_rows_excluded": 31,
+          "full_history_oldest_messages_dropped": 245717,
+          "probe_event_index_remapped": 26,
+          "traditional_chat_rag_compaction_events": 22,
+          "traditional_chat_rag_contentful_compaction": 22
+        },
+        "full_history_prompt_fits_judge_context": true,
+        "full_history_text_only": true,
+        "judge_prompt_fits_context_window": true,
+        "judge_supports_attached_audio": false,
+        "judge_supports_attached_images": false,
+        "media_memory_map_complete": true,
+        "no_current_turn_context_inclusions": true,
+        "no_future_context_violations": true,
+        "traditional_chat_rag_contentful_compaction": true,
+        "traditional_chat_rag_text_only": true
+      },
+      "judged": 93,
+      "judgment_complete": true,
+      "mean_context_tokens": 224.2258064516129,
+      "mean_noise": 1.5849462365591398,
+      "mean_sufficiency": 2.666666666666667,
+      "mean_sufficiency_by_repetition": [
+        2.670967741935484,
+        2.7838709677419353,
+        2.545161290322581
+      ],
+      "mean_sufficiency_rep_sd": 0.11941294720324128,
+      "missing_judgments": 0,
+      "paired_delta_after_rep1_nonnegative_count": 0,
+      "paired_delta_after_rep1_signal_count": 2,
+      "paired_delta_interpretation": "stable_removal_harm",
+      "probe_count": 31,
+      "reading_by_sufficiency_rule": "removal_hurts",
+      "wins": 26
+    },
+    "graph_expansion": {
+      "artifact": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z/graph_expansion/judge.json",
+      "delta_sufficiency_vs_control": -0.2559139784946245,
+      "delta_sufficiency_vs_control_by_repetition": [
+        -0.6612903225806455,
+        -0.07741935483870988,
+        -0.029032258064515926
+      ],
+      "delta_sufficiency_vs_control_rep_sd": 0.3518988676338279,
+      "fairness_checks": {
+        "attached_audio_judged_when_present": true,
+        "attached_images_judged_when_present": true,
+        "blind_prompt_hidden_labels_absent": true,
+        "cortext_audio_image_transcript_shortcuts": false,
+        "counters": {
+          "cortext_native_non_prior_memory_rows_excluded": 31,
+          "cortext_native_non_prior_retrieved_rows_excluded": 0,
+          "cortext_native_non_prior_working_rows_excluded": 31,
+          "full_history_oldest_messages_dropped": 245717,
+          "probe_event_index_remapped": 26,
+          "traditional_chat_rag_compaction_events": 22,
+          "traditional_chat_rag_contentful_compaction": 22
+        },
+        "full_history_prompt_fits_judge_context": true,
+        "full_history_text_only": true,
+        "judge_prompt_fits_context_window": true,
+        "judge_supports_attached_audio": false,
+        "judge_supports_attached_images": false,
+        "media_memory_map_complete": true,
+        "no_current_turn_context_inclusions": true,
+        "no_future_context_violations": true,
+        "traditional_chat_rag_contentful_compaction": true,
+        "traditional_chat_rag_text_only": true
+      },
+      "judged": 93,
+      "judgment_complete": true,
+      "mean_context_tokens": 221.2258064516129,
+      "mean_noise": 1.6591397849462366,
+      "mean_sufficiency": 2.841935483870967,
+      "mean_sufficiency_by_repetition": [
+        2.7419354838709675,
+        2.97741935483871,
+        2.806451612903226
+      ],
+      "mean_sufficiency_rep_sd": 0.12168603944425828,
+      "missing_judgments": 0,
+      "paired_delta_after_rep1_nonnegative_count": 0,
+      "paired_delta_after_rep1_signal_count": 0,
+      "paired_delta_interpretation": "mean_loss_control_rep1_sensitive",
+      "probe_count": 31,
+      "reading_by_sufficiency_rule": "removal_hurts",
+      "wins": 19
+    },
+    "neuromodulator_effect_scales": {
+      "artifact": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z/neuromodulator_effect_scales/judge.json",
+      "delta_sufficiency_vs_control": -0.15806451612903283,
+      "delta_sufficiency_vs_control_by_repetition": [
+        -0.5161290322580645,
+        0.009677419354838346,
+        0.03225806451612945
+      ],
+      "delta_sufficiency_vs_control_rep_sd": 0.3102984364559601,
+      "fairness_checks": {
+        "attached_audio_judged_when_present": true,
+        "attached_images_judged_when_present": true,
+        "blind_prompt_hidden_labels_absent": true,
+        "cortext_audio_image_transcript_shortcuts": false,
+        "counters": {
+          "cortext_native_non_prior_memory_rows_excluded": 31,
+          "cortext_native_non_prior_retrieved_rows_excluded": 0,
+          "cortext_native_non_prior_working_rows_excluded": 31,
+          "full_history_oldest_messages_dropped": 245717,
+          "probe_event_index_remapped": 26,
+          "traditional_chat_rag_compaction_events": 22,
+          "traditional_chat_rag_contentful_compaction": 22
+        },
+        "full_history_prompt_fits_judge_context": true,
+        "full_history_text_only": true,
+        "judge_prompt_fits_context_window": true,
+        "judge_supports_attached_audio": false,
+        "judge_supports_attached_images": false,
+        "media_memory_map_complete": true,
+        "no_current_turn_context_inclusions": true,
+        "no_future_context_violations": true,
+        "traditional_chat_rag_contentful_compaction": true,
+        "traditional_chat_rag_text_only": true
+      },
+      "judged": 93,
+      "judgment_complete": true,
+      "mean_context_tokens": 222.06451612903226,
+      "mean_noise": 1.356989247311828,
+      "mean_sufficiency": 2.939784946236559,
+      "mean_sufficiency_by_repetition": [
+        2.8870967741935485,
+        3.064516129032258,
+        2.8677419354838714
+      ],
+      "mean_sufficiency_rep_sd": 0.108453000957004,
+      "missing_judgments": 0,
+      "paired_delta_after_rep1_nonnegative_count": 2,
+      "paired_delta_after_rep1_signal_count": 0,
+      "paired_delta_interpretation": "mean_loss_control_rep1_sensitive",
+      "probe_count": 31,
+      "reading_by_sufficiency_rule": "removal_hurts",
+      "wins": 29
+    },
+    "stm_ltm_graph_label_handoff": {
+      "artifact": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z/stm_ltm_graph_label_handoff/judge.json",
+      "delta_sufficiency_vs_control": -0.2903225806451615,
+      "delta_sufficiency_vs_control_by_repetition": [
+        -0.3451612903225807,
+        -0.26129032258064555,
+        -0.26451612903225774
+      ],
+      "delta_sufficiency_vs_control_rep_sd": 0.04751909633114915,
+      "fairness_checks": {
+        "attached_audio_judged_when_present": true,
+        "attached_images_judged_when_present": true,
+        "blind_prompt_hidden_labels_absent": true,
+        "cortext_audio_image_transcript_shortcuts": false,
+        "counters": {
+          "cortext_native_non_prior_memory_rows_excluded": 31,
+          "cortext_native_non_prior_retrieved_rows_excluded": 0,
+          "cortext_native_non_prior_working_rows_excluded": 31,
+          "full_history_oldest_messages_dropped": 245717,
+          "probe_event_index_remapped": 26,
+          "traditional_chat_rag_compaction_events": 22,
+          "traditional_chat_rag_contentful_compaction": 22
+        },
+        "full_history_prompt_fits_judge_context": true,
+        "full_history_text_only": true,
+        "judge_prompt_fits_context_window": true,
+        "judge_supports_attached_audio": false,
+        "judge_supports_attached_images": false,
+        "media_memory_map_complete": true,
+        "no_current_turn_context_inclusions": true,
+        "no_future_context_violations": true,
+        "traditional_chat_rag_contentful_compaction": true,
+        "traditional_chat_rag_text_only": true
+      },
+      "judged": 93,
+      "judgment_complete": true,
+      "mean_context_tokens": 223.2258064516129,
+      "mean_noise": 1.5279569892473117,
+      "mean_sufficiency": 2.80752688172043,
+      "mean_sufficiency_by_repetition": [
+        3.0580645161290323,
+        2.793548387096774,
+        2.570967741935484
+      ],
+      "mean_sufficiency_rep_sd": 0.24384906313414,
+      "missing_judgments": 0,
+      "paired_delta_after_rep1_nonnegative_count": 0,
+      "paired_delta_after_rep1_signal_count": 2,
+      "paired_delta_interpretation": "stable_removal_harm",
+      "probe_count": 31,
+      "reading_by_sufficiency_rule": "removal_hurts",
+      "wins": 19
+    },
+    "synaptic_tag_ttl": {
+      "artifact": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z/synaptic_tag_ttl/judge.json",
+      "delta_sufficiency_vs_control": -0.23548387096774182,
+      "delta_sufficiency_vs_control_by_repetition": [
+        -0.467741935483871,
+        -0.44193548387096815,
+        0.2032258064516128
+      ],
+      "delta_sufficiency_vs_control_rep_sd": 0.3801527706491933,
+      "fairness_checks": {
+        "attached_audio_judged_when_present": true,
+        "attached_images_judged_when_present": true,
+        "blind_prompt_hidden_labels_absent": true,
+        "cortext_audio_image_transcript_shortcuts": false,
+        "counters": {
+          "cortext_native_non_prior_memory_rows_excluded": 31,
+          "cortext_native_non_prior_retrieved_rows_excluded": 0,
+          "cortext_native_non_prior_working_rows_excluded": 31,
+          "full_history_oldest_messages_dropped": 245717,
+          "probe_event_index_remapped": 26,
+          "traditional_chat_rag_compaction_events": 22,
+          "traditional_chat_rag_contentful_compaction": 22
+        },
+        "full_history_prompt_fits_judge_context": true,
+        "full_history_text_only": true,
+        "judge_prompt_fits_context_window": true,
+        "judge_supports_attached_audio": false,
+        "judge_supports_attached_images": false,
+        "media_memory_map_complete": true,
+        "no_current_turn_context_inclusions": true,
+        "no_future_context_violations": true,
+        "traditional_chat_rag_contentful_compaction": true,
+        "traditional_chat_rag_text_only": true
+      },
+      "judged": 93,
+      "judgment_complete": true,
+      "mean_context_tokens": 220.29032258064515,
+      "mean_noise": 1.6580645161290322,
+      "mean_sufficiency": 2.86236559139785,
+      "mean_sufficiency_by_repetition": [
+        2.935483870967742,
+        2.6129032258064515,
+        3.0387096774193547
+      ],
+      "mean_sufficiency_rep_sd": 0.22212045305247927,
+      "missing_judgments": 0,
+      "paired_delta_after_rep1_nonnegative_count": 1,
+      "paired_delta_after_rep1_signal_count": 2,
+      "paired_delta_interpretation": "mixed_paired_deltas_control_sensitive",
+      "probe_count": 31,
+      "reading_by_sufficiency_rule": "removal_hurts",
+      "wins": 22
+    }
+  },
+  "protocol": {
+    "active_history_token_budget": 49152,
+    "control_reference": {
+      "artifact": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z/control/judge.json",
+      "judged": 93,
+      "mean_context_tokens": 223.2258064516129,
+      "mean_noise": 1.4150537634408602,
+      "mean_sufficiency": 3.0978494623655917,
+      "mean_sufficiency_by_repetition": [
+        3.403225806451613,
+        3.0548387096774197,
+        2.835483870967742
+      ],
+      "mean_sufficiency_rep_sd": 0.2863043310218085,
+      "wins": 27
+    },
+    "control_rep1_sensitivity": {
+      "arms_with_no_signal_sized_loss_after_rep1": [
+        "neuromodulator_effect_scales",
+        "daily_consolidation",
+        "graph_expansion"
+      ],
+      "arms_with_nonnegative_paired_delta_after_rep1": [
+        "neuromodulator_effect_scales",
+        "daily_consolidation",
+        "synaptic_tag_ttl"
+      ],
+      "control_mean_sufficiency_by_repetition": [
+        3.403225806451613,
+        3.0548387096774197,
+        2.835483870967742
+      ],
+      "interpretation": "Control repetition 1 was higher than later control repetitions; mean-vs-mean negative deltas should be read next to paired per-repetition deltas before being treated as stable harm.",
+      "rep1_minus_rep2": 0.34838709677419333,
+      "rep1_minus_rep3": 0.5677419354838711
+    },
+    "input_dir": "/shared/Memory/Julie",
+    "judge_context_window_tokens": 32768,
+    "judge_model": "qwen-omni-judge-32k",
+    "judge_repetitions": 3,
+    "max_messages": 18000,
+    "media_limit": 128,
+    "probe_stride": 600,
+    "screen": "18k-message context-blowout deferred-family removal",
+    "stability_evidence_fields": [
+      "protocol.control_reference.mean_sufficiency_by_repetition",
+      "arms.*.mean_sufficiency_by_repetition",
+      "arms.*.delta_sufficiency_vs_control_by_repetition",
+      "arms.*.delta_sufficiency_vs_control_rep_sd",
+      "arms.*.paired_delta_interpretation"
+    ],
+    "verdict_rules": {
+      "long_horizon_deferred_family": [
+        "emotion_mood_threshold_cascade",
+        "neuromodulator_effect_scales",
+        "daily_consolidation",
+        "graph_expansion",
+        "stm_ltm_graph_label_handoff",
+        "synaptic_tag_ttl"
+      ],
+      "sufficiency_delta_signal_floor": 0.15
+    },
+    "warmup_events": 0
+  },
+  "root": "eval_runs/long_horizon_mechanism_sweep_20260707T022225Z",
+  "schema": "cortext_long_horizon_mechanism_sweep_summary_v2"
+}

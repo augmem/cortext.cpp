@@ -1256,6 +1256,39 @@ def configured_rag_ablation_specs(config: dict) -> list[dict]:
     return specs
 
 
+def configured_external_packet_specs(config: dict) -> list[dict]:
+    raw = config.get("external_packet_systems") or []
+    if not isinstance(raw, list):
+        raise RuntimeError("judge_systems.json external_packet_systems must be a list")
+    specs: list[dict] = []
+    seen: set[str] = set(BASE_SYSTEMS_ALLOWED) | {"compacting_session"}
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RuntimeError("Each external_packet_systems entry must be an object")
+        if not bool(item.get("enabled", True)):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+            raise RuntimeError(f"Invalid external packet system name: {name!r}")
+        if name in seen:
+            raise RuntimeError(
+                f"Duplicate or reserved external packet system name: {name!r}"
+            )
+        path = str(item.get("path", "")).strip()
+        if not path:
+            raise RuntimeError(f"External packet system {name!r} requires path")
+        spec = dict(item)
+        spec["name"] = name
+        spec["path"] = path
+        if "budget_tokens" in spec and spec["budget_tokens"] is not None:
+            spec["budget_tokens"] = int(spec["budget_tokens"])
+        else:
+            spec["budget_tokens"] = -1
+        specs.append(spec)
+        seen.add(name)
+    return specs
+
+
 def rag_ablation_description(spec: dict) -> str:
     kind = str(spec.get("type", ""))
     top_k = int(spec.get("top_k", 5))
@@ -1270,6 +1303,100 @@ def rag_ablation_description(spec: dict) -> str:
         "full_history_capped": f"prior text history capped for the judge prompt, {budget_text}",
     }
     return labels.get(kind, kind)
+
+
+def external_packet_description(spec: dict) -> str:
+    description = str(spec.get("description", "")).strip()
+    if description:
+        return description
+    budget = int(spec.get("budget_tokens", -1))
+    budget_text = "uncapped" if budget < 0 else f"capped at {budget} estimated tokens"
+    return f"externally materialized recall packet, {budget_text}"
+
+
+def normalize_external_packet_text(row: dict) -> str:
+    if "text" in row:
+        return str(row.get("text") or "").strip()
+    if "content" in row:
+        return str(row.get("content") or "").strip()
+    items = row.get("items")
+    if isinstance(items, list):
+        lines: list[str] = []
+        for item in items:
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, dict):
+                text = str(
+                    item.get("text")
+                    or item.get("content")
+                    or item.get("memory")
+                    or ""
+                ).strip()
+            else:
+                text = ""
+            if text:
+                lines.append(text)
+        return "\n".join(lines).strip()
+    return ""
+
+
+def load_external_packet_docs(
+    spec: dict,
+    run_dir: pathlib.Path,
+) -> dict[int, list[TimelineDoc]]:
+    path = pathlib.Path(str(spec["path"])).expanduser()
+    if not path.is_absolute():
+        path = run_dir / path
+    if not path.exists():
+        raise RuntimeError(
+            f"External packet system {spec['name']!r} missing packet file: {path}"
+        )
+    by_event: dict[int, list[TimelineDoc]] = defaultdict(list)
+    with path.open("r", encoding="utf-8") as handle:
+        for line_no, raw in enumerate(handle, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"Malformed JSON in {path}:{line_no}: {exc}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise RuntimeError(f"External packet row must be an object: {path}:{line_no}")
+            event_raw = (
+                row.get("event_index")
+                if row.get("event_index") is not None
+                else row.get("probe_event_index")
+            )
+            if event_raw is None:
+                raise RuntimeError(
+                    f"External packet row missing event_index/probe_event_index: "
+                    f"{path}:{line_no}"
+                )
+            text = normalize_external_packet_text(row)
+            if not text:
+                continue
+            try:
+                event_index = int(event_raw)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Invalid external packet event index at {path}:{line_no}: "
+                    f"{event_raw!r}"
+                ) from exc
+            timestamp = int(row.get("timestamp", 0) or 0)
+            source_id = str(row.get("source_id") or spec["name"])
+            by_event[event_index].append(
+                TimelineDoc(
+                    index=-1,
+                    timestamp=timestamp,
+                    source_id=source_id,
+                    modality="text",
+                    text=text,
+                )
+            )
+    return by_event
 
 
 def summarize_text_chunks(
@@ -2705,6 +2832,7 @@ def main() -> int:
     judge_systems_config = load_judge_systems_config(args.out)
     base_systems = configured_base_systems(judge_systems_config)
     rag_ablation_specs = configured_rag_ablation_specs(judge_systems_config)
+    external_packet_specs = configured_external_packet_specs(judge_systems_config)
     compacting_config = judge_systems_config.get("compacting_session") or {}
     compacting_enabled = bool(compacting_config.get("enabled"))
     if compacting_enabled and str(compacting_config.get("provider", "")).lower() == "openai":
@@ -2739,6 +2867,10 @@ def main() -> int:
             f"{len(compacting_snapshots)}",
             flush=True,
         )
+    external_packets = {
+        spec["name"]: load_external_packet_docs(spec, args.out.parent)
+        for spec in external_packet_specs
+    }
 
     expected_keys = expected_judgment_keys(
         summary,
@@ -2754,7 +2886,13 @@ def main() -> int:
     conn = connect_db(db_path)
     media_memory_map, media_memory_map_audit = build_media_memory_map(conn, timeline)
 
-    systems = list(base_systems) + [spec["name"] for spec in rag_ablation_specs]
+    systems = (
+        list(base_systems)
+        + [spec["name"] for spec in rag_ablation_specs]
+        + [spec["name"] for spec in external_packet_specs]
+    )
+    if len(set(systems)) != len(systems):
+        raise RuntimeError(f"Duplicate judge system names configured: {systems}")
     if compacting_enabled and "compacting_session" not in systems:
         systems.append("compacting_session")
     if len(systems) > len(PACKET_ALIASES) and args.blind_packets:
@@ -3045,6 +3183,14 @@ def main() -> int:
                 token_totals["compacting_session_tokens"] += sum(
                     estimate_tokens(doc.text or "")
                     for doc in packet_docs_by_system["compacting_session"]
+                )
+            for spec in external_packet_specs:
+                name = spec["name"]
+                docs = list(external_packets.get(name, {}).get(event_index, []))
+                budget_tokens = int(spec.get("budget_tokens", -1))
+                packet_docs_by_system[name] = cap_docs_by_token_budget(
+                    docs,
+                    budget_tokens if budget_tokens >= 0 else None,
                 )
             packet_docs_by_system = {
                 system: packet_docs_by_system[system] for system in systems
@@ -3599,6 +3745,13 @@ def main() -> int:
                 }
                 for spec in rag_ablation_specs
             ],
+            "external_packet_systems": [
+                {
+                    **spec,
+                    "description": external_packet_description(spec),
+                }
+                for spec in external_packet_specs
+            ],
             "score_fields": fields,
             "quality_composite_definition": QUALITY_COMPOSITE_DEFINITION,
             "quality_composite_weights": QUALITY_COMPOSITE_WEIGHTS,
@@ -3633,6 +3786,10 @@ def main() -> int:
                 **{
                     spec["name"]: rag_ablation_description(spec)
                     for spec in rag_ablation_specs
+                },
+                **{
+                    spec["name"]: external_packet_description(spec)
+                    for spec in external_packet_specs
                 },
             },
             "daily_consolidation_required_for_release": True,

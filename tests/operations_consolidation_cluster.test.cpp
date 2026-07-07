@@ -436,6 +436,52 @@ TEST_CASE ("ConsolidationShallow uses first non-empty cluster centroid dimension
   processor.Flush ();
 }
 
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
+TEST_CASE ("ConsolidationShallow can disable STM/LTM graph label handoff",
+           "[operations][consolidation_shallow][experiment_hooks]")
+{
+  auto disable_label_handoff = cortext::testing::ScopedEnvVar (
+      "CORTEXT_DISABLE_STM_LTM_GRAPH_LABEL_HANDOFF", "1");
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<float> centroid = Make256Embedding (0);
+  cortext::testing::SeedEmbeddingV2 (*store, 100LL, centroid, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 100LL, 100LL, "test", "LONG_TERM",
+                                  1.0, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 200LL, centroid, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 200LL, 200LL, "label", "LABEL",
+                                  1.0, 1000);
+
+  ClusterInfo cluster;
+  cluster.cluster_id = 1;
+  cluster.embedding_ids = { 100LL };
+  cluster.centroid = centroid;
+  cluster.avg_score = 0.1;
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto enable = std::make_unique<EnableConsolidationOp> ();
+  auto set_clusters = std::make_unique<SetClustersOp> (
+      std::vector<ClusterInfo>{ cluster });
+  auto shallow = std::make_unique<ConsolidationShallow> ();
+  auto assert_edges = std::make_unique<AssertLabelEdgesOp> (0LL);
+
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::move (enable), std::move (set_clusters), std::move (shallow),
+      std::move (assert_edges));
+
+  SignalProcessor processor (cfg, store, std::move (ops));
+  processor.Process (MakeSignal (5000));
+  processor.Flush ();
+}
+#endif
+
 TEST_CASE ("ConsolidationShallow advances completion state only after persistence",
            "[operations][consolidation_shallow]")
 {

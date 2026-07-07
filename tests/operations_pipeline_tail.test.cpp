@@ -15,6 +15,7 @@
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
+#include <limits>
 
 using namespace cortext;
 using namespace cortext::operations;
@@ -146,6 +147,45 @@ TEST_CASE ("ApplySynapticTagging targets spike-source temporal neighbors",
   REQUIRE (strength (3) == Catch::Approx (0.0));
   REQUIRE (strength (5) == Catch::Approx (0.0));
 }
+
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
+TEST_CASE ("ApplySynapticTagging can remove tag TTL for long-horizon ablation",
+           "[operations][synaptic_tagging][experiment_hooks]")
+{
+  auto disable_ttl = cortext::testing::ScopedEnvVar (
+      "CORTEXT_DISABLE_SYNAPTIC_TAG_TTL", "1");
+  auto store = MakeStore ();
+  const long long now_ts = 5000LL;
+  cortext::testing::SeedEmbeddingV2 (*store, 1, UnitVec (1), now_ts);
+  cortext::testing::SeedMemoryV2 (*store, 1, 1, "spike-source",
+                                  "LONG_TERM", 1.0, now_ts);
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.5;
+  const auto signal = MakeSignal ("spike-source", now_ts);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetMetric (Metric::embedding_surprisal, 1.0);
+  ctx.SetStoredMemoryId (1LL);
+
+  ApplySynapticTagging op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT tag_strength, tag_expires_at FROM memories WHERE memory_id = 1",
+      {});
+  REQUIRE (rows.size () == 1);
+  REQUIRE (cortext::testing::GetDouble (rows[0], "tag_strength")
+           == Catch::Approx (1.0));
+  REQUIRE (cortext::testing::GetInt64 (rows[0], "tag_expires_at")
+           == std::numeric_limits<long long>::max ());
+}
+#endif
 
 TEST_CASE ("UpdateNeuromodulators derives bounded control state",
            "[operations][neuromodulators]")
