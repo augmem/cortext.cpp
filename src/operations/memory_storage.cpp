@@ -95,21 +95,26 @@ bool
 DecodeEmbeddingAny (const std::any &value, int expected_dim,
                     Eigen::VectorXf &out)
 {
+  if (expected_dim <= 0)
+    {
+      return false;
+    }
   if (value.type () == typeid (std::vector<float>))
     {
       const auto &vec = std::any_cast<const std::vector<float> &> (value);
-      if (expected_dim > 0 && static_cast<int> (vec.size ()) != expected_dim)
+      if (vec.size () != static_cast<std::size_t> (expected_dim))
         {
           return false;
         }
-      out.resize (static_cast<Eigen::Index> (vec.size ()));
-      for (std::size_t i = 0; i < vec.size (); ++i)
+      out.resize (static_cast<Eigen::Index> (expected_dim));
+      for (int i = 0; i < expected_dim; ++i)
         {
-          out[static_cast<Eigen::Index> (i)] = vec[i];
+          out[static_cast<Eigen::Index> (i)]
+              = vec[static_cast<std::size_t> (i)];
         }
-      return out.size () > 0;
+      return true;
     }
-  return expected_dim > 0 && core::DecodeFloatBlob (value, expected_dim, out);
+  return core::DecodeFloatBlob (value, expected_dim, out);
 }
 
 std::vector<float>

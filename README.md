@@ -183,7 +183,7 @@ engine and installs `cortext_cli` under `zig-out/bin` without requiring the
 CMake examples surface:
 
 ```bash
-zig build -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 ./zig-out/bin/cortext_cli --help
 ```
 
@@ -191,10 +191,10 @@ Build release artifacts by selecting a target triple. The runtime model assets
 still ship separately under `models/`.
 
 ```bash
-zig build -Dtarget=x86_64-linux-gnu -Dshared=false -Dcli=true -Dfetch-aist-model=false
-zig build -Dtarget=x86_64-windows-gnu -Dshared=false -Dcli=true -Dfetch-aist-model=false
-zig build -Dtarget=x86_64-macos -Dshared=false -Dcli=true -Dfetch-aist-model=false
-zig build -Dtarget=aarch64-macos -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-macos -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=aarch64-macos -Doptimize=ReleaseFast -Dshared=false -Dcli=true -Dfetch-aist-model=false
 ```
 
 ## C++ Quickstart
