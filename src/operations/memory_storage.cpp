@@ -1,6 +1,8 @@
 #include "cortext/operations/memory_storage.hpp"
 #include "constructive_recall_internal.hpp"
+#include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
+#include "cortext/core/utils.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
@@ -86,6 +88,128 @@ double
 SourcePriorReliability (double F, double S, double T)
 {
   return core::SourceReliabilityPrior (F, S, T);
+}
+
+bool
+DecodeEmbeddingAny (const std::any &value, int expected_dim,
+                    Eigen::VectorXf &out)
+{
+  if (value.type () == typeid (std::vector<float>))
+    {
+      const auto &vec = std::any_cast<const std::vector<float> &> (value);
+      if (expected_dim > 0 && static_cast<int> (vec.size ()) != expected_dim)
+        {
+          return false;
+        }
+      out.resize (static_cast<Eigen::Index> (vec.size ()));
+      for (std::size_t i = 0; i < vec.size (); ++i)
+        {
+          out[static_cast<Eigen::Index> (i)] = vec[i];
+        }
+      return out.size () > 0;
+    }
+  return expected_dim > 0 && core::DecodeFloatBlob (value, expected_dim, out);
+}
+
+void
+WriteSupersessionEdges (OperationContext &context, Transaction &tx,
+                        long long memory_id,
+                        const Eigen::VectorXf &embedding_to_store,
+                        long long end_ts)
+{
+  if (memory_id <= 0 || embedding_to_store.size () <= 0)
+    {
+      return;
+    }
+
+  const auto &cfg = context.GetConfig ();
+  const double contradiction
+      = context.GetMetric (Metric::contradiction).value_or (0.0);
+  const double contradiction_threshold
+      = core::SupersessionContradictionThreshold (cfg.focus, cfg.sensitivity,
+                                                  cfg.stability);
+  if (contradiction < contradiction_threshold)
+    {
+      return;
+    }
+
+  const int embedding_dim = static_cast<int> (embedding_to_store.size ());
+  const int candidate_limit = std::max (
+      1, core::SupersessionCandidateLimit (cfg.focus, cfg.sensitivity,
+                                           cfg.stability));
+  const auto rows = tx.Execute (
+      "SELECT m.memory_id, "
+      "       CASE WHEN cme.memory_id IS NOT NULL "
+      "            THEN cme.embedding ELSE e.embedding END AS embedding "
+      "FROM memories m "
+      "LEFT JOIN current_memory_embeddings cme "
+      "  ON cme.memory_id = m.memory_id "
+      "JOIN embeddings e "
+      "  ON e.embedding_id = COALESCE(cme.embedding_id, m.embedding_id) "
+      "WHERE m.memory_id != ? "
+      "  AND m.embedding_id IS NOT NULL "
+      "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+      "  AND COALESCE(m.start_ts, 0) < ? "
+      "ORDER BY m.memory_id DESC "
+      "LIMIT ?",
+      { memory_id, end_ts, static_cast<long long> (candidate_limit) });
+
+  const double similarity_threshold = core::SupersessionSimilarityThreshold (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  int edge_count = 0;
+  for (const auto &row : rows)
+    {
+      auto memory_it = row.find ("memory_id");
+      auto embedding_it = row.find ("embedding");
+      if (memory_it == row.end () || embedding_it == row.end ())
+        {
+          continue;
+        }
+      const auto target_id_opt = store::AnyToLongLong (memory_it->second);
+      if (!target_id_opt || *target_id_opt <= 0)
+        {
+          continue;
+        }
+      Eigen::VectorXf target_embedding;
+      if (!DecodeEmbeddingAny (embedding_it->second, embedding_dim,
+                               target_embedding))
+        {
+          continue;
+        }
+      const double similarity = core::CosineSimilarity (embedding_to_store,
+                                                        target_embedding);
+      if (similarity < similarity_threshold)
+        {
+          continue;
+        }
+      const double weight = core::SupersessionEdgeWeight (
+          similarity, cfg.focus, cfg.sensitivity, cfg.stability);
+      tx.Execute (
+          "INSERT OR REPLACE INTO associations "
+          "(source_memory_id, target_memory_id, edge_type, weight, "
+          "last_reinforced) "
+          "VALUES (?, ?, 'supersedes', ?, ?)",
+          { memory_id, *target_id_opt, weight, end_ts });
+      tx.Execute (
+          "UPDATE memories "
+          "SET source_contradiction_count = source_contradiction_count + 1 "
+          "WHERE memory_id = ?",
+          { *target_id_opt });
+      ++edge_count;
+    }
+
+  if (edge_count > 0)
+    {
+      telemetry::LogDebug (
+          "cortext.memory_storage.supersedes",
+          { telemetry::Attribute::Int64 ("source_memory_id", memory_id),
+            telemetry::Attribute::Int64 ("edge_count", edge_count),
+            telemetry::Attribute::Double ("contradiction", contradiction),
+            telemetry::Attribute::Double ("contradiction_threshold",
+                                          contradiction_threshold),
+            telemetry::Attribute::Double ("similarity_threshold",
+                                          similarity_threshold) });
+    }
 }
 
 } // namespace
@@ -471,6 +595,13 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                   signal_id_select_ms);
 
       // 10. Leave signal tracking until accumulator resets (used by WM gating)
+      const auto supersession_start = SteadyClock::now ();
+      WriteSupersessionEdges (context, *savepoint, memory_id,
+                              embedding_to_store,
+                              static_cast<long long> (end_ts));
+      context.AddOperationTiming ("MemoryStorage.supersession_edges",
+                                  ElapsedMillis (supersession_start));
+
       if (!constructive_recall::Disabled () && memory_id > 0)
         {
           const auto reconstruction_start = SteadyClock::now ();

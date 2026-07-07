@@ -3429,6 +3429,65 @@ SimilarToThreshold (double F)
 }
 
 inline double
+SupersessionSimilarityThreshold (double F, double S, double T)
+{
+  // Supersession requires near-neighbor evidence but is not duplicate merging:
+  // a replacement observation can stay close to the older observation while
+  // still carrying enough contradiction pressure to supersede it.
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double f0 = FocusBias (0.5);
+  const double s0 = SensitivityBias (0.5);
+  const double raw = 0.88 + 0.05 * (f - f0) - 0.04 * (s - s0)
+                     + 0.03 * (t - 0.5);
+  return Clamp (raw, 0.82, 0.95);
+}
+
+inline double
+SupersessionEdgeWeight (double similarity, double F, double S, double T)
+{
+  const double threshold = SupersessionSimilarityThreshold (F, S, T);
+  const double denom = std::max (1e-6, 1.0 - threshold);
+  return Clamp ((similarity - threshold) / denom, 0.0, 1.0);
+}
+
+inline double
+SupersessionContradictionThreshold (double F, double S, double T)
+{
+  // Higher Sensitivity accepts weaker contradiction evidence; higher Focus and
+  // Stability require a clearer correction signal before writing graph truth.
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double f0 = FocusBias (0.5);
+  const double s0 = SensitivityBias (0.5);
+  const double raw = 0.58 + 0.10 * (f - f0) - 0.18 * (s - s0)
+                     + 0.08 * (t - 0.5);
+  return Clamp (raw, 0.35, 0.80);
+}
+
+inline int
+SupersessionCandidateLimit (double F, double S, double T)
+{
+  return RetrievalSeedSearchK (F, S, T, RetrievalMaxResults (F));
+}
+
+inline double
+RetrievalSupersededMemoryPenalty (double F, double S, double T)
+{
+  const double f = RetrievalFocusBias (F);
+  const double s = RetrievalSensitivityBias (S);
+  const double t = RetrievalStabilityBias (T);
+  const double f0 = RetrievalFocusBias (0.5);
+  const double s0 = RetrievalSensitivityBias (0.5);
+  const double t0 = RetrievalStabilityBias (0.5);
+  const double scale = 1.0 + 0.08 * (f - f0) + 0.12 * (s - s0)
+                       + 0.10 * (t - t0);
+  return Clamp (0.72 * scale, 0.50, 0.86);
+}
+
+inline double
 MinEdgeWeight (double F)
 {
   // min_edge_weight(F) for graph traversal
