@@ -3110,9 +3110,12 @@ already present in the system (no new constants).
 ## Streaming Pacing
 
 Streaming retrieval is gated by cumulative drift rate within the
-accumulation unit. Retrieval checks trigger when drift exceeds threshold
-or at boundaries. Retrieval uses q_retrieval (the accumulator centroid)
-captured before any accumulator reset for this step. Retrieval returns a
+accumulation unit. Retrieval checks trigger when drift exceeds
+threshold, at boundaries, or for explicit ephemeral query ingress.
+Ephemeral query ingress runs retrieval without granting write
+permission, preserving the public “query without polluting memory”
+contract. Retrieval uses q_retrieval (the accumulator centroid) captured
+before any accumulator reset for this step. Retrieval returns a
 candidate pool already filtered by write‑exclusion and WM‑overlap rules
 and diversified (MMR‑style); the interrupt gate then applies
 novelty/utility thresholds and redundancy penalties.
@@ -3132,18 +3135,24 @@ where cosine_dist(u, v) = 1 − cos(u, v).
     min_gap_s ← adjacent_window(F) × dt_ema
     adjacent_ok ← (since_last_s ≥ min_gap_s)
     force_check ← (drift_acc_pacing > max_wait_drift(F))
+    ephemeral_query ← (retention == Ephemeral)
 
-    # Retrieval triggered when drift exceeds threshold, at memory boundary, or when drift exceeds max_wait_drift.
-    # Adjacent-window throttling is bypassed on boundaries and force_check.
-    if (drift_acc_pacing > pacing_thresh(S) OR should_flush OR force_check) AND
-       (adjacent_ok OR should_flush OR force_check):
+    # Retrieval triggered when drift exceeds threshold, at memory boundary,
+    # ephemeral query ingress, or when drift exceeds max_wait_drift.
+    # Adjacent-window throttling is bypassed on boundaries, force_check,
+    # and ephemeral_query.
+    if ephemeral_query OR (
+       (drift_acc_pacing > pacing_thresh(S) OR should_flush OR force_check) AND
+       (adjacent_ok OR should_flush OR force_check)):
         trigger_check(); x_last_check ← μ_acc; drift_acc_pacing ← 0; last_retrieval_ts ← now_ms()
 
 High Sensitivity produces frequent checks triggered by small content
 shifts; high Focus enforces strict drift limits. Memory boundaries
 (<a href="#sec-boundary" class="quarto-xref">Section 6.4.3</a>) also
 trigger retrieval checks to ensure context updates align with natural
-thought transitions.
+thought transitions. Ephemeral query ingress bypasses pacing throttles
+for the current signal only; storage remains controlled by the
+retention-aware write gate.
 
 # Experimental Results
 

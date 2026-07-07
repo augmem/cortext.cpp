@@ -2,6 +2,7 @@
 #include <any>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -174,6 +175,97 @@ TEST_CASE ("Cortext embed-only API returns vectors without storing signals",
   const auto rows = store->Execute ("SELECT COUNT(*) AS n FROM signals");
   REQUIRE (rows.size () == 1);
   REQUIRE (AnyToLongLong (rows[0].at ("n")) == 0);
+}
+
+TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
+           "[cortext][retention][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+  const std::string models_dir = RepoModelsDir ();
+
+  auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  const std::string query = "garage door code";
+  std::vector<float> query_embedding;
+  {
+    std::unique_ptr<cortext::Cortext> embedder;
+    REQUIRE_NOTHROW (
+        embedder = cortext::Cortext::Create (cfg, store, models_dir));
+    REQUIRE (embedder != nullptr);
+    REQUIRE_NOTHROW (query_embedding = embedder->EmbedText (query));
+  }
+  REQUIRE (query_embedding.size () >= 256);
+  std::vector<float> retrieval_embedding (query_embedding.begin (),
+                                          query_embedding.begin () + 256);
+  double norm_sq = 0.0;
+  for (const float value : retrieval_embedding)
+    {
+      norm_sq += static_cast<double> (value) * value;
+    }
+  const double norm = std::sqrt (norm_sq);
+  REQUIRE (norm > 0.0);
+  for (float &value : retrieval_embedding)
+    {
+      value = static_cast<float> (static_cast<double> (value) / norm);
+    }
+
+  constexpr long long kMemoryId = 9001LL;
+  cortext::testing::SeedEmbeddingV2 (*store, kMemoryId, retrieval_embedding,
+                                     1000LL);
+  cortext::testing::SeedMemoryV2 (*store, kMemoryId, kMemoryId,
+                                  "seed/manual", "LONG_TERM", 1.0, 1000LL);
+  const std::string source_text = "The garage door code is 8841.";
+  const std::vector<unsigned char> payload (source_text.begin (),
+                                           source_text.end ());
+  auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
+                                   { payload });
+  REQUIRE (blob_rows.size () == 1);
+  const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
+  REQUIRE_FALSE (blob_id.empty ());
+  store->Execute (
+      "UPDATE memories SET blob_id = ?, modality = 'text' WHERE memory_id = ?",
+      { blob_id, kMemoryId });
+  store->Execute (
+      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'seed/manual', 1000, 'text', 'text/plain', ?, 0, 1000)",
+      { kMemoryId, kMemoryId, blob_id });
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store, models_dir));
+  REQUIRE (ctx != nullptr);
+
+  const auto before_memories
+      = store->Execute ("SELECT COUNT(*) AS n FROM memories");
+  const auto before_signals
+      = store->Execute ("SELECT COUNT(*) AS n FROM signals");
+  REQUIRE (before_memories.size () == 1);
+  REQUIRE (before_signals.size () == 1);
+
+  auto recalled = ctx->ProcessTextAt (
+      query, "query/public", 2000ULL, cortext::Retention::Ephemeral);
+
+  REQUIRE_FALSE (recalled.retrieved_memory.empty ());
+  bool found_seeded_memory = false;
+  for (const auto &memory : recalled.retrieved_memory)
+    {
+      found_seeded_memory = found_seeded_memory || memory.id == kMemoryId;
+    }
+  REQUIRE (found_seeded_memory);
+  REQUIRE_FALSE (recalled.output.stored_memory_id.has_value ());
+  REQUIRE_FALSE (recalled.output.stored_signal_id.has_value ());
+
+  const auto after_memories
+      = store->Execute ("SELECT COUNT(*) AS n FROM memories");
+  const auto after_signals
+      = store->Execute ("SELECT COUNT(*) AS n FROM signals");
+  REQUIRE (AnyToLongLong (after_memories[0].at ("n"))
+           == AnyToLongLong (before_memories[0].at ("n")));
+  REQUIRE (AnyToLongLong (after_signals[0].at ("n"))
+           == AnyToLongLong (before_signals[0].at ("n")));
 }
 
 TEST_CASE ("internal replay ingress preserves media event timestamps",

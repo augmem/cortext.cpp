@@ -226,6 +226,37 @@ TEST_CASE ("CheckStreamingPacing derives retrieval bias gate from knobs",
   REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing == 0.0);
 }
 
+TEST_CASE ("CheckStreamingPacing always retrieves for ephemeral queries",
+           "[operations][streaming_pacing]")
+{
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  const double bias_threshold
+      = cortext::core::StreamingRetrievalBiasThreshold (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = 0.0;
+  acc.x_last_check = Eigen::VectorXf::Ones (4);
+  pctx.retrieval_bias = std::max (0.0, bias_threshold - 0.01);
+
+  Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
+  s.retention = Retention::Ephemeral;
+  OperationContext ctx (s, pctx, cfg);
+
+  CheckStreamingPacing op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (ctx.GetShouldCheckRetrieval ());
+  REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing == 0.0);
+  REQUIRE (pctx.last_retrieval_ts == s.timestamp);
+}
+
 TEST_CASE ("CheckStreamingPacing force check on max_wait_drift",
            "[operations][streaming_pacing]")
 {
