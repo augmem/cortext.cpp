@@ -33,4 +33,6 @@ Stability (T).
 
 {{< include sections/10_implementation.qmd >}}
 
+{{< include sections/11_optimization.qmd >}}
+
 {{< include sections/appendices.qmd >}}

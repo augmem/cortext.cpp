@@ -1,5 +1,5 @@
 # Cortext: A Three-Knob Adaptive Memory Architecture
-Gabriel Willen, Cortext Team
+Gabriel Willen
 2026-07-01
 
 # Abstract
@@ -16,7 +16,10 @@ Nader’s reconsolidation dynamics—into a unified computational framework.
 We derive most system parameters from the three primary knobs through
 principled mathematical transformations, while explicitly labeling the
 small set of fixed invariants (e.g., controller gains), reducing
-reliance on hard-coded constants. The system demonstrates
+reliance on hard-coded constants. The production system is an
+embedding-first graph memory engine: it does not ship an internal
+decoder path, adapter registry, fact table, static taxonomy loader, or
+processor-local shadow STM graph. The system demonstrates
 self-calibrating priors that blend with evidence using
 uncertainty-weighted Bayesian averaging, homeostatic threshold control
 with effective sample size estimation, and graph-augmented retrieval
@@ -78,17 +81,17 @@ Stability adaptation. Section 5 describes structural metrics and
 composite scoring. Section 6 covers dynamic thresholding and homeostatic
 control. Section 7 presents the reinforcement and decay dynamics.
 Section 8 describes advanced cognitive processes including working
-memory, Soft Anchor formation, procedural sparse keys, and emotional
-consolidation. Section 9 details the consolidation and graph integration
-system. Section 10 presents the interrupt gate for streaming
-integration. Section 11 reports experimental results. Section 12
-discusses implementation considerations and computational complexity.
-Section 13 documents the performance profiling and optimization of the
-reference implementation. Section 14 concludes with limitations and
-future directions. In the source tree these correspond to
-`sections/1_...` through `sections/11_...`; the rendered manuscript
-section numbering includes the introduction and related-work sections
-before those files.
+memory, Soft Anchor formation, pattern-separation/procedural sparse
+keys, synaptic tagging, and emotional consolidation. Section 9 details
+the consolidation and graph integration system. Section 10 presents the
+interrupt gate for streaming integration. Section 11 reports
+experimental results. Section 12 discusses implementation considerations
+and computational complexity. Section 13 documents the performance
+profiling and optimization of the reference implementation. Section 14
+concludes with limitations and future directions. In the source tree
+these correspond to `sections/1_...` through `sections/11_...`; the
+rendered manuscript section numbering includes the introduction and
+related-work sections before those files.
 
 # Related Work
 
@@ -1909,10 +1912,10 @@ long-term retention for used memories.
 Co-retrieved memories also form *reinforces* edges in the ASSOCIATIONS
 graph. These edges are strengthened during retrieval/use and **only
 decayed during explicit consolidation cycles** (triggered externally via
-`cortext.consolidate()`), matching the system’s “idle-time
-consolidation” policy. This prevents per-turn decay from erasing fresh
-reinforcement and keeps runtime retrieval updates stable while still
-allowing long-term pruning during consolidation.
+`Consolidate()` or `cortext_consolidate`), matching the system’s
+“idle-time consolidation” policy. This prevents per-turn decay from
+erasing fresh reinforcement and keeps runtime retrieval updates stable
+while still allowing long-term pruning during consolidation.
 
 The online edge update is intentionally slower than per-memory trace
 reinforcement because it changes the durable graph topology. The current
@@ -2243,6 +2246,14 @@ For an ES-AIST-style signal model these are the corrected slices:
     entity_key   = z[768:1536]
     full_key     = z[0:1536]
 
+Production note: the shipped runtime first uses a dedicated
+`soft_anchor_embedding` when the encoder exposes at least 1536
+dimensions. When only the 256-dimensional retrieval embedding is
+available, it uses a single-view fallback: semantic, entity, and full
+centroids all reference the normalized available embedding, and entity
+quality is lowered by an F/S/T-derived prior. ES-AIST slices are
+therefore supported, but they are not required for the production path.
+
 Each active soft anchor state stores separate centroids and support
 statistics:
 
@@ -2404,7 +2415,7 @@ a policy state, not a truth claim:
     rejected   contradiction, generic suppression, or correction invalidates link
 
 Ambiguous links may be surfaced as possible continuity, not as a fact.
-Durable facts must not be formed from ambiguous links.
+Durable assertions must not be formed from ambiguous links.
 
 ### Durable Promotion and Decay
 
@@ -2466,7 +2477,7 @@ context snapshots. The next open question is consumption: formed anchors
 may become useful uncertain context only after replay and manual-review
 experiments show that possible-continuity hints help more often than
 they harm, without converting tentative or ambiguous evidence into
-durable facts.
+durable assertions.
 
 ## Retrieval Uncertainty
 
@@ -2772,6 +2783,14 @@ with `Signal::force_consolidation=true`. This keeps production
 scheduling under the application’s control while still letting the
 engine derive recommendation flags from the three knobs.
 
+The consolidation operations still live in the full operation chain. On
+ordinary signals `EvaluateConsolidation` returns because
+`force_consolidation` is false, and the downstream gate, cluster,
+shallow replay, and graph-build stages no-op. The
+`consolidation_recommended` and `consolidation_required` outputs are
+hints for the caller; they do not schedule maintenance work by
+themselves.
+
 A caller can use the following external scheduling rule:
 
 ``` text
@@ -2903,8 +2922,9 @@ using centroids (μ_acc) rather than individual signal embeddings for
 novelty and relevance computation. The interrupt thresholds, candidate
 weights, maturity scaling, boundary multiplier, and refractory dynamics
 in this section are named policies derived from the three knobs (F, S,
-T). The runtime also contains environment-controlled diagnostics outside
-this core gate.
+T). Eval-only ablation diagnostics exist only in builds compiled with
+`CORTEXT_EXPERIMENT_HOOKS=ON`; default production builds ignore those
+environment controls.
 
 **Note:** As defined in Section 1, all knob symbols here use the
 midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we
@@ -3144,17 +3164,18 @@ contains:
   eviction;
 - explicit shallow consolidation over stored embeddings and graph edges;
   and
-- C, C++, Python, Go, Dart, and JavaScript entry points that expose only
-  the retained processing, retrieval, consolidation, reset, and
-  embedding APIs.
+- C, C++, Python, Go, Dart, JavaScript, and WebAssembly entry points
+  that expose only the retained processing, retrieval, consolidation,
+  reset, and embedding APIs.
 
 The evaluated system does not contain internal text-generation backends,
 adapter registries, decoder-backed semantic batch operations, static
 taxonomy loading, bitemporal fact tables, shadow STM graph promotion, or
-persistent confidence-monitoring state. Local blind-judge and
-release-protocol tools used for earlier research runs were removed with
-the same hard-cut rule; future quality studies should live outside the
-production repository or be added as a new explicit experiment surface.
+persistent confidence-monitoring state. Blind-judge and release-protocol
+tools that remain under `scripts/` and `tools/` are explicit experiment
+harnesses, not linked runtime paths. Future quality studies should stay
+in those harnesses or outside the repository; they must not become
+hidden production options.
 
 ## Hard-Cutover Verification
 
@@ -3178,12 +3199,11 @@ used the following gates.
 <tr>
 <td>runtime code removal</td>
 <td>repository scans over <code>include/</code>, <code>src/</code>,
-<code>tests/</code>, <code>examples/</code>, <code>scripts/</code>,
-<code>tools/</code>, <code>bindings/</code>,
-<code>CMakeLists.txt</code>, and <code>.gitmodules</code> find no
-retained internal decoder, adapter-registry, semantic batch, static
-taxonomy, fact-layer, STM-shadow, or temporal-neighbor implementation
-symbols</td>
+<code>bindings/</code>, <code>CMakeLists.txt</code>, and runtime
+examples find no retained internal decoder, adapter-registry, semantic
+batch, static taxonomy, fact-layer, or processor-local STM-shadow
+production path; experiment harnesses under <code>scripts/</code> and
+<code>tools/</code> are explicit non-runtime tooling</td>
 </tr>
 <tr>
 <td>dependency removal</td>
@@ -3413,7 +3433,7 @@ protocol used three blind repetitions per probe, `judge_seed=42`, 2,000
 probe-bootstrap samples, `--max-media-per-system 0`, a 1,000,000-token
 judge-context setting, and four text-only systems:
 
-- Cortext native working memory plus STM/LTM graph retrieval;
+- Cortext native working memory plus long-term graph retrieval;
 - traditional chat+RAG, using rolling text history until compaction plus
   text RAG hits from the same prior event stream;
 - full-history upper bound over all prior text history; and
@@ -4618,9 +4638,9 @@ suite, no longer depends on deleted decoder paths, structurally matches
 the preserved replay binary, and recovers the historical roughly-15/31
 blind-judge level on frozen one-year sparse probes while using
 substantially fewer context tokens. Broader quality claims still require
-replicated external harnesses against frozen probes, with the evaluator
-outside this repository and with the repository treated as the
-production engine under test.
+replicated harnesses against frozen probes, with evaluator state
+isolated from the production library and with the repository treated as
+the production engine under test.
 
 ## Reproducibility Notes
 
@@ -4758,6 +4778,13 @@ a hard referent resolver and it is not a retrieval-time reranker. The
 operation runs after memory storage, consumes the stored memory id and
 current representative embedding, and compares the current signal only
 against prior soft-anchor state.
+
+When a model exposes a 1536-dimensional soft-anchor embedding, the
+runtime uses the semantic/entity/full slices described in
+<a href="#sec-soft-anchor" class="quarto-xref">Section 8.4</a>. When
+only the standard 256-dimensional retrieval embedding is available, it
+falls back to a single normalized view for all three centroids and
+lowers entity quality with a knob-derived prior.
 
 Schema migration 6 adds:
 
@@ -5036,11 +5063,15 @@ spaces, the integration of uncertainty-weighted Bayesian adaptation, and
 the implementation of bio-inspired mechanisms like homeostatic rate
 control and emotional consolidation.
 
-Future work will focus on: 1. **Large-scale evaluation:** Validating the
-architecture on long-horizon datasets (~1M+ steps). 2. **Multi-agent
-dynamics:** Exploring how Cortext instances interact in collaborative
-settings. 3. **Hardware acceleration:** Optimizing the kNN and graph
-traversal kernels for edge devices.
+Future work will focus on:
+
+1.  **Replicated long-horizon evaluation:** Validating the architecture
+    on frozen public corpora and larger stress runs.
+2.  **Soft Anchor consumption:** Testing whether uncertain continuity
+    hints improve downstream context without turning tentative evidence
+    into hard assertions.
+3.  **Hardware acceleration:** Optimizing vector search, graph
+    traversal, and SQLite access paths for edge devices.
 
 Cortext represents a step toward more organic, life-long learning
 systems that adapt continuously to their experiences, moving beyond
@@ -5286,117 +5317,101 @@ causality and avoid undefined metrics.
 # Appendix D. Main Loop Execution Order and Normative Invariants
 
 This ordering is canonical and supersedes any other sequence described
-elsewhere in the document.
+elsewhere in the document. It mirrors the production
+`BuildRootOperationSet` stage order: `CoreStage`, `StorageStage`,
+`RetrievalStage`, then `FeedbackStage`. Probe mode runs only `CoreStage`
+plus `RetrievalStage`.
 
 Canonical single-step pseudocode (timestep t):
 
     # Main loop (single timestep t)
     now_s, now_ms, x_t ← read_inputs()
-    update_accumulator_embedding(x_t)  # updates μ_acc for current unit
-    recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores prior μ_acc
 
-    # Structural metrics + uncertainty
-    coherence_struct_t, focus_spread_t, drift_mag_t, surprisal_t ← compute_structural_metrics(μ_acc)
-    x_pred_ema ← update_prediction_ema(x_pred_ema, μ_acc, T)  # after surprisal_t
+    # CoreStage
+    initialize_embedded_centroids_and_priors()
+    coherence_t ← compute_coherence()
+    μ_acc ← update_accumulator_embedding(x_t)
+    drift_accum ← update_cumulative_drift(x_t)
+    focus_spread_t ← compute_focus_spread()
+    prediction_error_t ← update_embedding_prediction_error()
     u_t ← update_uncertainty(...)
-
-    # Adaptation + scoring
-    update_control_parameters(...)
-    score_t ← compute_composite_score(...)
-    score_stream.append(score_t)
+    update_focus_sensitivity_mood_and_effective_focus()
+    metrics_t ← compute_structural_and_affective_metrics()
+    update_neuromodulators_and_metric_weights()
+    score_t ← compute_composite_score(metrics_t)
     update_accumulator_scores(score_t, μ_acc)
-    signal_stream.append(μ_acc)
-
-    # Threshold updates
-    θ_target ← prior_evidence_blend(...)
-    Δθ_* ← compute_threshold_deltas(...)
-    θ_dynamic ← update_theta_dynamic(...)
-    hysteresis ← update_hysteresis(...)
-
-    # Accumulator + boundary
-    update_accumulator(...)
-    boundary_score ← compute_boundary_score(...)
+    update_precision_delta_and_threshold()
+    recent_context ← append_recent_context(μ_acc)
+    boundary_score, should_flush ← detect_boundary(capacity_pressure, inactivity_boost)
     spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
-    should_flush ← boundary_decision(boundary_score, time_caps, spike_bypass)
-    θ_memory ← θ_dynamic × M_write_refrac
-    write_memory ← force_write OR (should_flush AND (S_window > θ_memory))
-    Δwrites ← 1 if write_memory else 0  # computed immediately after write decision
+    write_memory ← compute_write_gate(force_write, should_flush, spike_bypass)
+    Δwrites ← 1 if write_memory else 0
 
-    # Post-write and retrieval (q_retrieval captured before any reset)
-    if write_memory: commit_memory_unit(); last_write_ts ← now_ms()
-    q_retrieval ← l2_normalize(μ_acc)  # cache current-unit query
+    # StorageStage
+    stored_memory_id ← maybe_commit_memory_unit(write_memory)
+    update_soft_anchor(stored_memory_id)
+    apply_synaptic_tagging(stored_memory_id)
+    persist_signal_metrics(stored_memory_id)
+
+    # RetrievalStage (q_retrieval is captured before any accumulator reset)
+    q_retrieval ← l2_normalize(μ_acc)
     streaming_pacing_check()
     graph_retrieval(q_retrieval)
     update_rate_state(Δwrites)
-    if should_flush: reset_accumulator()  # regardless of write outcome
+    compute_mni_gate_decision()
+    detect_memory_usage_and_update_reinforcement()
 
-    # Interrupt gate (consumes retrieved candidates)
-    interrupt_gate_check()
-    if allow_interrupt and not should_flush and not spike_bypass:
-        pending_abort ← true
-        pending_mem ← selected_candidate_embedding
-
-    # Next signal: accept if closer to selected memory, else resume.
-    if pending_abort:
-        if cos(x_t, pending_mem) > cos(x_t, μ_acc):
-            reset_accumulator()
-        pending_abort ← false
+    # FeedbackStage
+    update_retrieval_competition()
+    apply_predictive_preactivation()
+    apply_reconsolidation()
+    apply_focus_sensitivity_stability_feedback()
+    apply_influence_feedback()
+    apply_serial_position_and_strength_effects()
+    run_emotional_consolidation()
+    update_working_memory()
+    reset_accumulator_after_flush_or_interrupt()
+    if signal.force_consolidation:
+        evaluate_consolidation()
+        gate_cluster_and_shallow_replay()
+        build_memory_graph()
+    update_emotional_cascade()
+    update_meta_learning()
 
 The normative execution order for a single timestep t:
 
 1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
-2.  **Update Accumulator (Embedding):** Update `μ_acc` with `x_t` (no
-    score aggregation yet).
-3.  **Prepare Context:** Retrieve
-    `recent_context ← tail(signal_stream, n_ctx(T))` (prior μ_acc values
-    only).
-4.  **Compute Structural Metrics:** `coherence_struct`, `focus_spread`,
-    `drift`, `surprisal` using `μ_acc`, then update `x_pred_ema` for the
-    next step.
-5.  **Update Uncertainty:** `u(t)`.
-6.  **Compute Adaptation Dynamics:**
-    - Update `α_F(t)`, `α_T(t)`.
-    - Update `weight_relevance`, `half_life`.
-    - Update `emotion` and `mood` state.
-7.  **Compute Composite Score:**
-    - Compute all 12 metrics.
-    - Update RLS weights `W_blend`.
-    - Compute `score_t`. Append to `score_stream`.
-    - Update accumulator score aggregates (`s_sum`, `s_max`, `e_peak`)
-      using `score_t`.
-    - Append `μ_acc` to `signal_stream`.
-8.  **Update Thresholds:**
-    - Compute `θ_target` (prior/evidence).
-    - Compute `Δθ` terms (homeo, sens, prec, emo, mood).
-    - Update `θ_dynamic`. Update `hysteresis`.
-9.  **Execute Memory Accumulation:**
-    - Accumulator now holds `μ_acc`, `drift_acc`, `s_max`, etc.
-    - Compute `boundary_score` and `should_flush`.
-    - Check `spike_bypass` using the effective spike margin scaled by
-      `mem_maturity` and `coherence_t`.
-    - Compute `S_window` and `θ_memory`.
-    - Decide `write_memory`.
-10. **Post-Write Updates and Retrieval:**
-    - If `write_memory`: Write to `memory_stream`. Update
-      `last_write_ts`.
-    - Cache `q_retrieval ← μ_acc` before any accumulator reset.
-    - Run streaming pacing and retrieval using `q_retrieval`.
-    - Update `rate_state` (homeostatic controller).
-    - If `should_flush` (regardless of write): Call
-      `reset_accumulator()`.
-11. **Run Interrupt Gate:** Check for streaming interrupt using
-    retrieved candidates (already filtered by write‑exclusion and WM
-    overlap during retrieval).
-12. **Interrupt Abort (if allowed):** Mark a pending abort when an
-    interrupt is permitted outside a flush/spike event. On the next
-    signal, compare similarity to the selected memory vs current μ_acc;
-    if the new signal aligns more with the selected memory, reset to
-    drop partial utterances, otherwise resume.
+2.  **Run CoreStage:** initialize priors, update accumulator/drift,
+    compute uncertainty, adaptation, metrics, neuromodulators, composite
+    score, threshold, boundary, spike bypass, and write gate.
+3.  **Run StorageStage:** write the memory unit when the write gate
+    opens, then update Soft Anchor, synaptic tagging, and signal metric
+    persistence from the stored memory id.
+4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any
+    reset, run streaming pacing and graph retrieval, update rate state
+    from the current write decision, compute the MNI gate, and record
+    memory usage/reinforcement.
+5.  **Run FeedbackStage:** apply retrieval competition, predictive
+    pre-activation, reconsolidation, F/S/T feedback, serial-position and
+    strength updates, emotional consolidation, working memory,
+    accumulator reset, optional forced consolidation, graph build,
+    emotional cascade, and meta-learning.
+6.  **Interrupt Abort:** If the MNI gate marked a pending abort, the
+    next signal compares similarity to the selected memory against the
+    current unit and resets only when the new signal aligns more with
+    the selected memory.
 
-Timing notes: \* `now_s()` is captured at step 1 and reused for all Δt
-computations in this timestep. \* Threshold updates in step 7 use the
-score computed in step 6. \* Rate updates in step 9 use Δwrites from the
-current step’s `write_memory` decision.
+Timing notes:
+
+- `now_s()` is captured at step 1 and reused for all Δt computations in
+  this timestep.
+- Threshold updates in `CoreStage` use the score computed earlier in the
+  same stage.
+- Rate updates in `RetrievalStage` use Δwrites from the current step’s
+  `write_memory` decision.
+- Accumulator resets happen in `FeedbackStage`, after storage,
+  retrieval, MNI, memory-usage detection, and working-memory updates
+  have consumed the current-unit query.
 
 **Normative Invariants:** \* **Causality:** Step `k` uses only values
 computed in steps `1` through `k` or retained from `t-1`. \* **Write

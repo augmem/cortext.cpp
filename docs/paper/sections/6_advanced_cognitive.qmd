@@ -173,6 +173,14 @@ entity_key   = z[768:1536]
 full_key     = z[0:1536]
 ```
 
+Production note: the shipped runtime first uses a dedicated
+`soft_anchor_embedding` when the encoder exposes at least 1536 dimensions.
+When only the 256-dimensional retrieval embedding is available, it uses a
+single-view fallback: semantic, entity, and full centroids all reference the
+normalized available embedding, and entity quality is lowered by an F/S/T-derived
+prior. ES-AIST slices are therefore supported, but they are not required for the
+production path.
+
 Each active soft anchor state stores separate centroids and support statistics:
 
 ```
@@ -357,7 +365,7 @@ rejected   contradiction, generic suppression, or correction invalidates link
 ```
 
 Ambiguous links may be surfaced as possible continuity, not as a fact. Durable
-facts must not be formed from ambiguous links.
+assertions must not be formed from ambiguous links.
 
 ### Durable Promotion and Decay
 
@@ -420,7 +428,7 @@ application surfacing is limited to optional continuity hints in chat and
 benchmark context snapshots. The next open question is consumption: formed
 anchors may become useful uncertain context only after replay and manual-review
 experiments show that possible-continuity hints help more often than they harm,
-without converting tentative or ambiguous evidence into durable facts.
+without converting tentative or ambiguous evidence into durable assertions.
 
 ## Retrieval Uncertainty
 

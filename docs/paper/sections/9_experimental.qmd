@@ -13,16 +13,16 @@ The evaluated system is the embedding-first runtime described in
 * online memory storage, boundary detection, graph construction, retrieval,
   reconsolidation, working memory, soft anchors, and eviction;
 * explicit shallow consolidation over stored embeddings and graph edges; and
-* C, C++, Python, Go, Dart, and JavaScript entry points that expose only the
+* C, C++, Python, Go, Dart, JavaScript, and WebAssembly entry points that expose only the
   retained processing, retrieval, consolidation, reset, and embedding APIs.
 
 The evaluated system does not contain internal text-generation backends,
 adapter registries, decoder-backed semantic batch operations, static taxonomy
 loading, bitemporal fact tables, shadow STM graph promotion, or persistent
-confidence-monitoring state. Local blind-judge and release-protocol tools
-used for earlier research runs were removed with the same hard-cut rule; future
-quality studies should live outside the production repository or be added as a
-new explicit experiment surface.
+confidence-monitoring state. Blind-judge and release-protocol tools that remain
+under `scripts/` and `tools/` are explicit experiment harnesses, not linked
+runtime paths. Future quality studies should stay in those harnesses or outside
+the repository; they must not become hidden production options.
 
 ## Hard-Cutover Verification
 
@@ -32,7 +32,7 @@ only the intended surfaces. The verification pass used the following gates.
 
 | Gate | Evidence |
 |---|---|
-| runtime code removal | repository scans over `include/`, `src/`, `tests/`, `examples/`, `scripts/`, `tools/`, `bindings/`, `CMakeLists.txt`, and `.gitmodules` find no retained internal decoder, adapter-registry, semantic batch, static taxonomy, fact-layer, STM-shadow, or temporal-neighbor implementation symbols |
+| runtime code removal | repository scans over `include/`, `src/`, `bindings/`, `CMakeLists.txt`, and runtime examples find no retained internal decoder, adapter-registry, semantic batch, static taxonomy, fact-layer, or processor-local STM-shadow production path; experiment harnesses under `scripts/` and `tools/` are explicit non-runtime tooling |
 | dependency removal | `.gitmodules` and the worktree no longer contain the removed decoder/runtime submodules; the remaining third-party tree is limited to SQLite/vector/object storage, opt-out OpenTelemetry, planum, and build/test dependencies |
 | API removal | public consolidation mode enums and mode-specific C API calls are gone; bindings no longer expose the removed mode fields |
 | current behavior | `Cortext::Consolidate()` and `Signal::force_consolidation` drive the one retained consolidation path; graph retrieval returns source-backed memory context from vector and graph evidence |
@@ -169,7 +169,7 @@ used three blind repetitions per probe, `judge_seed=42`, 2,000 probe-bootstrap
 samples, `--max-media-per-system 0`, a 1,000,000-token judge-context setting,
 and four text-only systems:
 
-* Cortext native working memory plus STM/LTM graph retrieval;
+* Cortext native working memory plus long-term graph retrieval;
 * traditional chat+RAG, using rolling text history until compaction plus text
   RAG hits from the same prior event stream;
 * full-history upper bound over all prior text history; and
@@ -611,8 +611,8 @@ the v1 runtime compiles, passes its retained behavioral suite, no longer depends
 on deleted decoder paths, structurally matches the preserved replay binary, and
 recovers the historical roughly-15/31 blind-judge level on frozen one-year
 sparse probes while using substantially fewer context tokens. Broader quality
-claims still require replicated external harnesses against frozen probes, with
-the evaluator outside this repository and with the repository treated as the
+claims still require replicated harnesses against frozen probes, with evaluator
+state isolated from the production library and with the repository treated as the
 production engine under test.
 
 ## Reproducibility Notes
