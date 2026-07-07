@@ -71,27 +71,37 @@ MakeAccumulator (const Signal &signal)
 
 } // namespace
 
-TEST_CASE ("ApplySynapticTagging tags recent memories on high surprisal",
+TEST_CASE ("ApplySynapticTagging targets spike-source temporal neighbors",
            "[operations][synaptic_tagging]")
 {
   auto store = MakeStore ();
   const long long now_ts = 5000LL;
-  for (long long id = 1; id <= 3; ++id)
-    {
-      cortext::testing::SeedEmbeddingV2 (*store, id, UnitVec (id), id);
-      cortext::testing::SeedMemoryV2 (*store, id, id, "tag-source",
-                                      "LONG_TERM", 1.0, id * 1000LL);
-    }
+  cortext::testing::SeedEmbeddingV2 (*store, 1, UnitVec (1), 1000);
+  cortext::testing::SeedMemoryV2 (*store, 1, 1, "spike-source",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 2, UnitVec (2), now_ts);
+  cortext::testing::SeedMemoryV2 (*store, 2, 2, "spike-source",
+                                  "LONG_TERM", 1.0, now_ts);
+  cortext::testing::SeedEmbeddingV2 (*store, 3, UnitVec (3), 6000);
+  cortext::testing::SeedMemoryV2 (*store, 3, 3, "other-source",
+                                  "LONG_TERM", 1.0, 6000);
+  cortext::testing::SeedEmbeddingV2 (*store, 4, UnitVec (4), 4990);
+  cortext::testing::SeedMemoryV2 (*store, 4, 4, "spike-source",
+                                  "LONG_TERM", 1.0, 4990);
+  cortext::testing::SeedEmbeddingV2 (*store, 5, UnitVec (5), 100);
+  cortext::testing::SeedMemoryV2 (*store, 5, 5, "spike-source",
+                                  "LONG_TERM", 1.0, 100);
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
-  cfg.sensitivity = 1.0;
+  cfg.sensitivity = 0.0;
   cfg.stability = 0.5;
-  const auto signal = MakeSignal ("src", now_ts);
+  const auto signal = MakeSignal ("spike-source", now_ts);
   OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetMetric (Metric::embedding_surprisal, 1.0);
+  ctx.SetStoredMemoryId (2LL);
 
   ApplySynapticTagging op;
   auto tx = store->Begin ();
@@ -101,15 +111,40 @@ TEST_CASE ("ApplySynapticTagging tags recent memories on high surprisal",
   const auto policy = core::SynapticTaggingPolicyForKnobs (
       cfg.focus, cfg.sensitivity, cfg.stability);
   auto rows = store->Execute (
-      "SELECT COUNT(*) AS cnt, MIN(tag_strength) AS min_strength, "
-      "MIN(tag_expires_at) AS min_expires "
-      "FROM memories WHERE tag_strength > 0.0");
-  REQUIRE (cortext::testing::GetInt64 (rows[0], "cnt") == 3);
-  REQUIRE (cortext::testing::GetDouble (rows[0], "min_strength")
-           == Catch::Approx (1.0));
-  REQUIRE (cortext::testing::GetInt64 (rows[0], "min_expires")
-           == now_ts + static_cast<long long> (policy.tag_decay_seconds)
-                          * 1000LL);
+      "SELECT memory_id, tag_strength, tag_expires_at "
+      "FROM memories ORDER BY memory_id");
+  REQUIRE (policy.tag_window == 2);
+  REQUIRE (rows.size () == 5);
+  auto strength = [&rows] (long long memory_id) {
+    for (const auto &row : rows)
+      {
+        if (cortext::testing::GetInt64 (row, "memory_id") == memory_id)
+          {
+            return cortext::testing::GetDouble (row, "tag_strength");
+          }
+      }
+    return -1.0;
+  };
+  auto expires = [&rows] (long long memory_id) {
+    for (const auto &row : rows)
+      {
+        if (cortext::testing::GetInt64 (row, "memory_id") == memory_id)
+          {
+            return cortext::testing::GetInt64 (row, "tag_expires_at");
+          }
+      }
+    return -1LL;
+  };
+  const long long expected_expires
+      = now_ts
+        + static_cast<long long> (policy.tag_decay_seconds) * 1000LL;
+  REQUIRE (strength (2) == Catch::Approx (1.0));
+  REQUIRE (expires (2) == expected_expires);
+  REQUIRE (strength (4) == Catch::Approx (1.0));
+  REQUIRE (expires (4) == expected_expires);
+  REQUIRE (strength (1) == Catch::Approx (0.0));
+  REQUIRE (strength (3) == Catch::Approx (0.0));
+  REQUIRE (strength (5) == Catch::Approx (0.0));
 }
 
 TEST_CASE ("UpdateNeuromodulators derives bounded control state",
