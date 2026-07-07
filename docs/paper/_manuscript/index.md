@@ -2536,15 +2536,15 @@ active context:
         downrank_or_hold(m)
 
 Belief revision is graph-native and modality-agnostic. On a durable
-memory write, the stored embedding is compared with a knob-bounded set
-of prior memory embeddings. If the current step’s contradiction pressure
-clears `SupersessionContradictionThreshold(F,S,T)` and pairwise
-similarity clears `SupersessionSimilarityThreshold(F,S,T)`, the runtime
-writes a directed `supersedes` edge from the new memory to the older
-memory:
+memory write, the stored embedding is compared with a knob-bounded
+nearest-neighbor set of prior memory embeddings. If pairwise similarity
+lands in the supersession band, the runtime writes a directed
+`supersedes` edge from the new memory to the older memory:
 
-    if contradiction_t ≥ θ_supersede_contra(F,S,T)
-       and cos(e_new, e_old) ≥ θ_supersede_sim(F,S,T):
+    θ_topic ← SupersessionSimilarityThreshold(F,S,T)
+    θ_dup   ← SupersessionDuplicateThreshold(F,S,T)
+
+    if θ_topic ≤ cos(e_new, e_old) < θ_dup:
         associations.add(e_new → e_old, type = "supersedes",
                          weight = SupersessionEdgeWeight(cos,F,S,T))
         contradiction_count(e_old) += 1
@@ -2552,7 +2552,8 @@ memory:
 Retrieval traverses `supersedes` edges so a replacement can surface when
 a query first hits the stale assertion. The superseded target is demoted
 by `RetrievalSupersededMemoryPenalty(F,S,T) × edge_weight`, but remains
-retrievable as historical evidence.
+retrievable as historical evidence. The number of written supersession
+edges is capped by `SupersessionMaxEdges(F,S,T)`.
 
 ## Constructive Recall and Controlled Distortion
 
@@ -3296,19 +3297,26 @@ test case** and **2 assertions**.
 An examples-enabled build also completed after configuring with
 `CORTEXT_BUILD_EXAMPLES=ON`.
 
-On 2026-07-07, the belief-revision supersession patch added a focused
-modality-agnostic regression/eval. The storage probe uses an
-image-modality signal and explicit contradiction metric pressure; it
-verifies that the new memory writes a directed `supersedes` edge to a
-high-similarity older memory without inspecting payload text. The
-retrieval probe presents an older exact embedding match and a newer
-less-exact replacement connected by `supersedes`; graph retrieval ranks
-the replacement first, keeps the older memory in the packet, and records
-a nonzero supersession penalty in the activation ledger.
+On 2026-07-07, the belief-revision supersession patch added focused
+modality-agnostic regression/evals. The storage probe uses an
+image-modality signal and verifies that the new memory writes a directed
+`supersedes` edge to an older memory whose embedding sits in the
+knob-derived supersession band, without inspecting payload text. The
+public API probe runs durable stale facts, durable corrections, and
+ephemeral recall queries through `ProcessTextAt` at default knobs; it
+verifies that `supersedes` edges are written and corrected vet/pill
+facts outrank the stale facts. The retrieval probe presents an older
+exact embedding match and a newer less-exact replacement connected by
+`supersedes`; graph retrieval ranks the replacement first, keeps the
+older memory in the packet, and records a nonzero supersession penalty
+in the activation ledger.
 
 ``` bash
 ./build/tests/cortext_tests \
   "MemoryStorage writes modality-agnostic supersedes edges"
+
+./build/tests/cortext_tests \
+  "Cortext durable corrections supersede stale facts at default knobs"
 
 ./build/tests/cortext_tests \
   "Graph retrieval demotes superseded stale memories"
@@ -3316,6 +3324,23 @@ a nonzero supersession penalty in the activation ledger.
 
 Both focused probes passed locally. This is a correctness eval for the
 stale fact failure mode, not a broad retrieval-quality claim.
+
+The patch was also re-screened with the local synthetic mechanism eval
+at default knobs:
+
+``` bash
+scripts/run_mechanism_eval.sh logs/mechanism_eval_supersession_20260707T151403Z
+```
+
+Both `source_conf_on` and `source_conf_off` arms completed with return
+code 0 over 19 turns and 19 writes. Their retrieval metrics were
+unchanged between arms: retrieval turn rate 0.947368, average retrieved
+candidates 7.94444, retrieval overlap mean 0.0555556, and retrieval
+context-overlap mean 0.341005. The resulting databases each contained
+115 `reinforces` edges and 34 `supersedes` edges, confirming that the
+supersession write path is active in a normal harness run. This is a
+local no-regression smoke screen for retrieval mechanics, not a
+blind-judge quality result.
 
 ## Retrieval Behavior After Removal
 

@@ -3431,40 +3431,51 @@ SimilarToThreshold (double F)
 inline double
 SupersessionSimilarityThreshold (double F, double S, double T)
 {
-  // Supersession requires near-neighbor evidence but is not duplicate merging:
-  // a replacement observation can stay close to the older observation while
-  // still carrying enough contradiction pressure to supersede it.
+  // Lower edge of the replacement band. This is intentionally below the
+  // duplicate/merge threshold so real corrections phrased as deltas can still
+  // supersede the older observation.
   const double f = FocusBias (F);
   const double s = SensitivityBias (S);
   const double t = Clamp (T, 0.0, 1.0);
   const double f0 = FocusBias (0.5);
   const double s0 = SensitivityBias (0.5);
-  const double raw = 0.88 + 0.05 * (f - f0) - 0.04 * (s - s0)
+  const double raw = 0.78 + 0.08 * (f - f0) - 0.06 * (s - s0)
                      + 0.03 * (t - 0.5);
-  return Clamp (raw, 0.82, 0.95);
+  return Clamp (raw, 0.70, 0.92);
+}
+
+inline double
+SupersessionDuplicateThreshold (double F, double S, double T)
+{
+  // Upper edge of the replacement band. Above this, treat the pair as a
+  // near-duplicate rather than a replacement relation.
+  const double f = FocusBias (F);
+  const double s = SensitivityBias (S);
+  const double t = Clamp (T, 0.0, 1.0);
+  const double raw = 0.985 + 0.008 * f - 0.006 * s + 0.006 * t;
+  return Clamp (raw, 0.965, 0.997);
 }
 
 inline double
 SupersessionEdgeWeight (double similarity, double F, double S, double T)
 {
-  const double threshold = SupersessionSimilarityThreshold (F, S, T);
-  const double denom = std::max (1e-6, 1.0 - threshold);
-  return Clamp ((similarity - threshold) / denom, 0.0, 1.0);
+  const double topic_threshold = SupersessionSimilarityThreshold (F, S, T);
+  const double duplicate_threshold
+      = SupersessionDuplicateThreshold (F, S, T);
+  const double denom = std::max (1e-6,
+                                 duplicate_threshold - topic_threshold);
+  return Clamp ((similarity - topic_threshold) / denom, 0.0, 1.0);
 }
 
-inline double
-SupersessionContradictionThreshold (double F, double S, double T)
+inline int
+SupersessionMaxEdges (double F, double S, double T)
 {
-  // Higher Sensitivity accepts weaker contradiction evidence; higher Focus and
-  // Stability require a clearer correction signal before writing graph truth.
   const double f = FocusBias (F);
   const double s = SensitivityBias (S);
   const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double raw = 0.58 + 0.10 * (f - f0) - 0.18 * (s - s0)
-                     + 0.08 * (t - 0.5);
-  return Clamp (raw, 0.35, 0.80);
+  const double raw = Lerp (1.0, 3.0, s) * Lerp (1.10, 0.75, f)
+                     * Lerp (0.85, 1.05, t);
+  return std::max (1, static_cast<int> (std::round (Clamp (raw, 1.0, 4.0))));
 }
 
 inline int

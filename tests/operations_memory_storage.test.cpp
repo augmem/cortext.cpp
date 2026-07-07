@@ -460,9 +460,6 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
   ProcessorContext pctx;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 1.0;
-  cfg.stability = 0.5;
 
   AccumulatorState acc;
   acc.mu_acc = s.embedding;
@@ -485,7 +482,6 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
   OperationContext ctx (s, pctx, cfg, store);
   ctx.SetAccumulatorWriteDecision (true);
   ctx.SetRepresentativeEmbedding (s.embedding);
-  ctx.SetMetric (operations::Metric::contradiction, 1.0);
 
   MemoryStorage op;
   auto tx = store->Begin ();

@@ -45,7 +45,7 @@ Full protocols, caveats, and artifacts are in
 
 ## Status
 
-Cortext v1.1.3 is the hard-cut production line: the embedding and graph memory
+Cortext v1.1.4 is the hard-cut production line: the embedding and graph memory
 engine, release-hardening fixes, and the current bindings. Older research
 components are preserved in git history but not shipped in the runtime surface.
 

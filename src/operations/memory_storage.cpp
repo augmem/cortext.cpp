@@ -24,6 +24,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace cortext::operations
@@ -111,6 +112,133 @@ DecodeEmbeddingAny (const std::any &value, int expected_dim,
   return expected_dim > 0 && core::DecodeFloatBlob (value, expected_dim, out);
 }
 
+std::vector<float>
+ToFloatVector (const Eigen::VectorXf &v)
+{
+  std::vector<float> out;
+  out.resize (static_cast<std::size_t> (v.size ()));
+  for (int i = 0; i < v.size (); ++i)
+    {
+      out[static_cast<std::size_t> (i)] = v[i];
+    }
+  return out;
+}
+
+void
+AppendUniqueSupersessionRows (
+    std::vector<std::map<std::string, std::any>> &rows,
+    std::vector<std::map<std::string, std::any>> extra_rows,
+    std::unordered_set<long long> &seen_memory_ids)
+{
+  for (auto &row : extra_rows)
+    {
+      auto memory_it = row.find ("memory_id");
+      if (memory_it == row.end ())
+        {
+          continue;
+        }
+      const auto memory_id = store::AnyToLongLong (memory_it->second);
+      if (!memory_id || *memory_id <= 0
+          || !seen_memory_ids.insert (*memory_id).second)
+        {
+          continue;
+        }
+      rows.push_back (std::move (row));
+    }
+}
+
+std::vector<std::map<std::string, std::any>>
+LoadSupersessionCandidateRows (Transaction &tx,
+                               const Eigen::VectorXf &embedding_to_store,
+                               long long memory_id, long long end_ts,
+                               int candidate_limit)
+{
+  std::vector<std::map<std::string, std::any>> rows;
+  std::unordered_set<long long> seen_memory_ids;
+  const std::vector<float> query_embedding = ToFloatVector (
+      embedding_to_store);
+  try
+    {
+      auto current_rows = tx.Execute (
+          "SELECT m.memory_id, cme.embedding "
+          "FROM ("
+          "  SELECT memory_id, embedding "
+          "  FROM current_memory_embeddings "
+          "  WHERE embedding MATCH ? "
+          "    AND k = ?"
+          ") cme "
+          "JOIN memories m ON m.memory_id = cme.memory_id "
+          "WHERE m.memory_id != ? "
+          "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+          "  AND COALESCE(m.start_ts, 0) < ?",
+          { query_embedding, static_cast<long long> (candidate_limit),
+            memory_id, end_ts });
+      AppendUniqueSupersessionRows (rows, std::move (current_rows),
+                                    seen_memory_ids);
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogDebug (
+          "cortext.memory_storage.supersession_current_knn_unavailable",
+          { telemetry::Attribute::String ("error", e.what ()) });
+    }
+
+  try
+    {
+      auto historical_rows = tx.Execute (
+          "SELECT m.memory_id, e.embedding "
+          "FROM embeddings e "
+          "JOIN memories m ON m.embedding_id = e.embedding_id "
+          "WHERE e.embedding MATCH ? "
+          "  AND k = ? "
+          "  AND m.memory_id != ? "
+          "  AND m.embedding_id IS NOT NULL "
+          "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+          "  AND COALESCE(m.start_ts, 0) < ?",
+          { query_embedding, static_cast<long long> (candidate_limit),
+            memory_id, end_ts });
+      AppendUniqueSupersessionRows (rows, std::move (historical_rows),
+                                    seen_memory_ids);
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogDebug (
+          "cortext.memory_storage.supersession_historical_knn_unavailable",
+          { telemetry::Attribute::String ("error", e.what ()) });
+    }
+
+  if (rows.empty ())
+    {
+      auto recent_rows = tx.Execute (
+          "SELECT m.memory_id, "
+          "       CASE WHEN cme.memory_id IS NOT NULL "
+          "            THEN cme.embedding ELSE e.embedding END AS embedding "
+          "FROM memories m "
+          "LEFT JOIN current_memory_embeddings cme "
+          "  ON cme.memory_id = m.memory_id "
+          "JOIN embeddings e "
+          "  ON e.embedding_id = COALESCE(cme.embedding_id, m.embedding_id) "
+          "WHERE m.memory_id != ? "
+          "  AND m.embedding_id IS NOT NULL "
+          "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+          "  AND COALESCE(m.start_ts, 0) < ? "
+          "ORDER BY m.memory_id DESC "
+          "LIMIT ?",
+          { memory_id, end_ts, static_cast<long long> (candidate_limit) });
+      AppendUniqueSupersessionRows (rows, std::move (recent_rows),
+                                    seen_memory_ids);
+    }
+
+  return rows;
+}
+
+struct SupersessionEdge
+{
+  long long target_memory_id = 0;
+  double similarity = 0.0;
+  double weight = 0.0;
+};
+
 void
 WriteSupersessionEdges (OperationContext &context, Transaction &tx,
                         long long memory_id,
@@ -123,42 +251,30 @@ WriteSupersessionEdges (OperationContext &context, Transaction &tx,
     }
 
   const auto &cfg = context.GetConfig ();
-  const double contradiction
-      = context.GetMetric (Metric::contradiction).value_or (0.0);
-  const double contradiction_threshold
-      = core::SupersessionContradictionThreshold (cfg.focus, cfg.sensitivity,
-                                                  cfg.stability);
-  if (contradiction < contradiction_threshold)
-    {
-      return;
-    }
-
   const int embedding_dim = static_cast<int> (embedding_to_store.size ());
   const int candidate_limit = std::max (
       1, core::SupersessionCandidateLimit (cfg.focus, cfg.sensitivity,
                                            cfg.stability));
-  const auto rows = tx.Execute (
-      "SELECT m.memory_id, "
-      "       CASE WHEN cme.memory_id IS NOT NULL "
-      "            THEN cme.embedding ELSE e.embedding END AS embedding "
-      "FROM memories m "
-      "LEFT JOIN current_memory_embeddings cme "
-      "  ON cme.memory_id = m.memory_id "
-      "JOIN embeddings e "
-      "  ON e.embedding_id = COALESCE(cme.embedding_id, m.embedding_id) "
-      "WHERE m.memory_id != ? "
-      "  AND m.embedding_id IS NOT NULL "
-      "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-      "  AND COALESCE(m.start_ts, 0) < ? "
-      "ORDER BY m.memory_id DESC "
-      "LIMIT ?",
-      { memory_id, end_ts, static_cast<long long> (candidate_limit) });
+  const int max_edges = core::SupersessionMaxEdges (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const auto rows = LoadSupersessionCandidateRows (
+      tx, embedding_to_store, memory_id, end_ts, candidate_limit);
 
   const double similarity_threshold = core::SupersessionSimilarityThreshold (
       cfg.focus, cfg.sensitivity, cfg.stability);
+  const double duplicate_threshold = core::SupersessionDuplicateThreshold (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  int scanned_count = 0;
+  int decoded_count = 0;
+  int below_topic_count = 0;
+  int duplicate_count = 0;
+  double best_similarity = -1.0;
+  std::vector<SupersessionEdge> edges;
+  edges.reserve (static_cast<std::size_t> (max_edges));
   int edge_count = 0;
   for (const auto &row : rows)
     {
+      ++scanned_count;
       auto memory_it = row.find ("memory_id");
       auto embedding_it = row.find ("embedding");
       if (memory_it == row.end () || embedding_it == row.end ())
@@ -176,40 +292,68 @@ WriteSupersessionEdges (OperationContext &context, Transaction &tx,
         {
           continue;
         }
+      ++decoded_count;
       const double similarity = core::CosineSimilarity (embedding_to_store,
                                                         target_embedding);
+      best_similarity = std::max (best_similarity, similarity);
       if (similarity < similarity_threshold)
         {
+          ++below_topic_count;
+          continue;
+        }
+      if (similarity >= duplicate_threshold)
+        {
+          ++duplicate_count;
           continue;
         }
       const double weight = core::SupersessionEdgeWeight (
           similarity, cfg.focus, cfg.sensitivity, cfg.stability);
+      edges.push_back ({ *target_id_opt, similarity, weight });
+    }
+
+  std::sort (edges.begin (), edges.end (),
+             [] (const SupersessionEdge &a, const SupersessionEdge &b) {
+               if (a.similarity != b.similarity)
+                 {
+                   return a.similarity > b.similarity;
+                 }
+               return a.target_memory_id > b.target_memory_id;
+             });
+  if (static_cast<int> (edges.size ()) > max_edges)
+    {
+      edges.resize (static_cast<std::size_t> (max_edges));
+    }
+
+  for (const auto &edge : edges)
+    {
       tx.Execute (
           "INSERT OR REPLACE INTO associations "
           "(source_memory_id, target_memory_id, edge_type, weight, "
           "last_reinforced) "
           "VALUES (?, ?, 'supersedes', ?, ?)",
-          { memory_id, *target_id_opt, weight, end_ts });
+          { memory_id, edge.target_memory_id, edge.weight, end_ts });
       tx.Execute (
           "UPDATE memories "
           "SET source_contradiction_count = source_contradiction_count + 1 "
           "WHERE memory_id = ?",
-          { *target_id_opt });
+          { edge.target_memory_id });
       ++edge_count;
     }
 
-  if (edge_count > 0)
-    {
-      telemetry::LogDebug (
-          "cortext.memory_storage.supersedes",
-          { telemetry::Attribute::Int64 ("source_memory_id", memory_id),
-            telemetry::Attribute::Int64 ("edge_count", edge_count),
-            telemetry::Attribute::Double ("contradiction", contradiction),
-            telemetry::Attribute::Double ("contradiction_threshold",
-                                          contradiction_threshold),
-            telemetry::Attribute::Double ("similarity_threshold",
-                                          similarity_threshold) });
-    }
+  telemetry::LogDebug (
+      "cortext.memory_storage.supersession_scan",
+      { telemetry::Attribute::Int64 ("source_memory_id", memory_id),
+        telemetry::Attribute::Int64 ("candidate_count", scanned_count),
+        telemetry::Attribute::Int64 ("decoded_count", decoded_count),
+        telemetry::Attribute::Int64 ("below_topic_count", below_topic_count),
+        telemetry::Attribute::Int64 ("duplicate_count", duplicate_count),
+        telemetry::Attribute::Int64 ("edge_count", edge_count),
+        telemetry::Attribute::Int64 ("max_edges", max_edges),
+        telemetry::Attribute::Double ("best_similarity", best_similarity),
+        telemetry::Attribute::Double ("similarity_threshold",
+                                      similarity_threshold),
+        telemetry::Attribute::Double ("duplicate_threshold",
+                                      duplicate_threshold) });
 }
 
 } // namespace
