@@ -268,7 +268,8 @@ Top-level fields include:
 - `output`: scores, write decisions, operation timings, and storage ids.
 - `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
 
-Memory entries are objects, not strings. In JSON they look like:
+Each memory entry includes provenance, modality, stored content, retrieval
+scores, usage counts, and optional soft-anchor metadata:
 
 ```json
 {
