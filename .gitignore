@@ -98,6 +98,11 @@ imgui.ini
 examples/chat/logs.txt
 tmp/
 Testing/Temporary/
+bindings/python/*.egg-info/
+bindings/python/augmem.cortext.egg-info/
+bindings/python/augmem_cortext.egg-info/
+bindings/python/augmem/cortext/native/*
+!bindings/python/augmem/cortext/native/.gitkeep
 
 # Coverage reports
 *.gcda
