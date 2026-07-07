@@ -15,6 +15,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_ROOT = REPO_ROOT / "bindings" / "python"
 PACKAGE_NATIVE = PYTHON_ROOT / "augmem" / "cortext" / "native"
+PACKAGE_MODELS = PYTHON_ROOT / "augmem" / "cortext" / "models"
+SOURCE_MODELS = REPO_ROOT / "models"
 BUILD_ROOT = PYTHON_ROOT / "build" / "native"
 DIST_ROOT = PYTHON_ROOT / "dist"
 GLOBAL_CACHE = PYTHON_ROOT / "build" / "zig-global-cache"
@@ -95,6 +97,49 @@ def clean_package_native() -> None:
         shutil.rmtree(PACKAGE_NATIVE)
     PACKAGE_NATIVE.mkdir(parents=True, exist_ok=True)
     (PACKAGE_NATIVE / ".gitkeep").touch()
+
+
+def clean_package_models() -> None:
+    if PACKAGE_MODELS.exists():
+        shutil.rmtree(PACKAGE_MODELS)
+    PACKAGE_MODELS.mkdir(parents=True, exist_ok=True)
+    (PACKAGE_MODELS / ".gitkeep").touch()
+
+
+def ensure_source_models(quant: str) -> None:
+    run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "download_aist_model.py"),
+            "--output-dir",
+            str(SOURCE_MODELS),
+            "--quant",
+            quant,
+        ]
+    )
+
+
+def copy_package_models(quant: str) -> None:
+    ensure_source_models(quant)
+    clean_package_models()
+
+    model_src = SOURCE_MODELS / "AIST-87M-GGUF" / f"AIST-87M_{quant}.gguf"
+    vocab_src = SOURCE_MODELS / "mdbr-leaf-ir" / "vocab.txt"
+    if not model_src.is_file():
+        raise FileNotFoundError(f"missing AIST model: {model_src}")
+    if not vocab_src.is_file():
+        raise FileNotFoundError(f"missing tokenizer vocab: {vocab_src}")
+
+    model_dest = PACKAGE_MODELS / "AIST-87M-GGUF" / model_src.name
+    vocab_dest = PACKAGE_MODELS / "mdbr-leaf-ir" / "vocab.txt"
+    model_dest.parent.mkdir(parents=True, exist_ok=True)
+    vocab_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(model_src, model_dest)
+    shutil.copy2(vocab_src, vocab_dest)
+    print(
+        f"bundled model assets: {model_dest} ({model_dest.stat().st_size / (1024 * 1024):.2f} MiB)",
+        flush=True,
+    )
 
 
 def find_artifact(prefix: Path, target: Target) -> Path:
@@ -218,6 +263,8 @@ def parse_args() -> argparse.Namespace:
         help="Zig optimization mode for bundled libraries. Default: ReleaseSmall.",
     )
     parser.add_argument("--skip-zig-build", action="store_true", help="Reuse existing native prefixes under bindings/python/build/native.")
+    parser.add_argument("--skip-models", action="store_true", help="Do not bundle model assets into the package.")
+    parser.add_argument("--model-quant", default="q8_0", choices=("q8_0", "q5_1"), help="AIST model quantization to bundle. Default: q8_0.")
     parser.add_argument("--skip-dist", action="store_true", help="Build native libraries only; do not build a Python distribution.")
     parser.add_argument("--sdist", action="store_true", help="Build both wheel and source distribution. Default: wheel only.")
     parser.add_argument("--skip-twine-check", action="store_true", help="Do not run `twine check` after building distributions.")
@@ -230,6 +277,10 @@ def main() -> int:
     clean_package_native()
     entries = [build_native(target, args.zig, args.optimize, args.skip_zig_build) for target in targets]
     write_manifest(entries, args.optimize)
+    if args.skip_models:
+        clean_package_models()
+    else:
+        copy_package_models(args.model_quant)
     if not args.skip_dist:
         build_wheel(args.sdist, not args.skip_twine_check)
     return 0

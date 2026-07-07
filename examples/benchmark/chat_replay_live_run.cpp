@@ -55,7 +55,6 @@ struct Config
   fs::path transcript;
   fs::path db_path = "build/chat_replay_live_run.sqlite";
   fs::path output_path = "build/chat_replay_live_run_summary.json";
-  std::string models_dir = "models";
   int skip_messages = 0;
   int max_messages = 1000;
   int media_limit = 0;
@@ -1454,8 +1453,6 @@ ParseArgs (int argc, char **argv)
         cfg.db_path = require_value ();
       else if (arg == "--out")
         cfg.output_path = require_value ();
-      else if (arg == "--models")
-        cfg.models_dir = require_value ();
       else if (arg == "--max-messages")
         cfg.max_messages = std::stoi (require_value ());
       else if (arg == "--skip-messages")
@@ -1630,9 +1627,9 @@ main (int argc, char **argv)
         }
 
       auto engine = cortext::Cortext::Create (cortext_cfg, cfg.db_path.string (),
-                                              cfg.models_dir, clock);
+                                              clock);
       auto rag_encoder_selection
-          = cortext::internal::CreatePreferredTextEncoder (cfg.models_dir);
+          = cortext::internal::CreatePreferredTextEncoder ();
       auto vector_rag_store
           = cortext::SQLiteStore::Create (cfg.db_path.string ());
 
@@ -2014,7 +2011,6 @@ main (int argc, char **argv)
           out["input_dir"] = cfg.input_dir.string ();
           out["db_path"] = cfg.db_path.string ();
           out["sqlite_profile"] = sqlite_profile;
-          out["models_dir"] = cfg.models_dir;
           out["append"] = cfg.append;
           out["checkpoint_eval_only"] = true;
           out["checkpoint_after_timestamp"]
@@ -2315,7 +2311,6 @@ main (int argc, char **argv)
           out["input_dir"] = cfg.input_dir.string ();
           out["db_path"] = cfg.db_path.string ();
           out["sqlite_profile"] = sqlite_profile;
-          out["models_dir"] = cfg.models_dir;
           out["profile_probes_only"] = true;
           out["append"] = cfg.append;
           out["warmup_events"] = cfg.warmup_events;
@@ -2887,7 +2882,6 @@ main (int argc, char **argv)
       out["input_dir"] = cfg.input_dir.string ();
       out["db_path"] = cfg.db_path.string ();
       out["sqlite_profile"] = sqlite_profile;
-      out["models_dir"] = cfg.models_dir;
       out["append"] = cfg.append;
       out["resume_from_existing"] = resume.enabled;
       out["resume"] = {

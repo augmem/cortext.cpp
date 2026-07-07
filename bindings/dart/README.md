@@ -30,7 +30,7 @@ import 'dart:typed_data';
 import 'package:cortext/cortext.dart';
 
 void main() {
-  final engine = Cortext(dbPath: ':memory:', modelsDir: 'models');
+  final engine = Cortext(dbPath: ':memory:');
 
   final ctx = engine.processText('Bailey likes tennis balls.', 'chat/main');
   print(ctx['should_interrupt']);

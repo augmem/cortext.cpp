@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const cortext_version = "1.1.6";
+const cortext_version = "1.1.7";
 
 const sqlite_header_template = @embedFile("third_party/sqlite/src/sqlite.h.in");
 
@@ -56,6 +56,7 @@ const cortext_cpp_sources = &.{
     "src/operations/graph_build.cpp",
     "src/operations/graph_retrieval.cpp",
     "src/operations/eviction_policy_override.cpp",
+    "src/operations/storage_pressure.cpp",
     "src/operations/retrieval_trace_state.cpp",
     "src/operations/neuromodulators.cpp",
     "src/operations/emotion_cascade.cpp",
@@ -291,7 +292,7 @@ pub fn build(b: *std.Build) void {
     const enable_ggml = b.option(bool, "ggml", "Enable GGML audio/image kernel support") orelse !unsupported_text_only;
     const fetch_aist_model = b.option(bool, "fetch-aist-model", "Download the required AIST GGUF model during the default build") orelse true;
     const aist_model_quant = b.option([]const u8, "aist-model-quant", "AIST quantization to download: q8_0, q5_1, or all") orelse "q8_0";
-    const models_dir = b.option([]const u8, "models-dir", "Directory where Cortext runtime model assets are stored") orelse "models";
+    const model_assets_dir = b.option([]const u8, "model-assets-dir", "Directory where Cortext build-time model assets are stored") orelse "models";
     const ggml_include = b.option([]const u8, "ggml_include", "Directory containing ggml.h and ggml-backend.h");
     const ggml_lib = b.option([]const u8, "ggml_lib", "Path to libggml");
     const ggml_base_lib = b.option([]const u8, "ggml_base_lib", "Path to libggml-base");
@@ -312,7 +313,7 @@ pub fn build(b: *std.Build) void {
         .name = "cortext",
         .linkage = if (shared) .dynamic else .static,
         .root_module = mod,
-        .version = .{ .major = 1, .minor = 1, .patch = 6 },
+        .version = .{ .major = 1, .minor = 1, .patch = 7 },
     });
 
     if (fetch_aist_model) {
@@ -325,8 +326,8 @@ pub fn build(b: *std.Build) void {
         const aist_model = b.addSystemCommand(&.{
             "python3",
             "scripts/download_aist_model.py",
-            "--models-dir",
-            models_dir,
+            "--output-dir",
+            model_assets_dir,
             "--quant",
             aist_model_quant,
         });
@@ -465,6 +466,7 @@ pub fn build(b: *std.Build) void {
             mod.addIncludePath(ggml.path("src"));
             mod.addIncludePath(ggml.path("src/ggml-cpu"));
             mod.addCMacro("CORTEXT_GGML_BACKEND_HEADER_PATH", "\"ggml-backend.h\"");
+            mod.addCMacro("GGML_USE_CPU", "1");
             mod.addCMacro("GGML_VERSION", "\"0.9.5\"");
             mod.addCMacro("GGML_COMMIT", "\"ebc3a0f4\"");
             mod.addCMacro("GGML_SCHED_MAX_COPIES", "4");
@@ -507,9 +509,6 @@ pub fn build(b: *std.Build) void {
         "-Wpedantic",
     };
     mod.addCSourceFiles(.{ .files = cortext_cpp_sources, .flags = cxx_flags });
-    if (pathExists("src/operations/storage_pressure.cpp")) {
-        mod.addCSourceFiles(.{ .files = &.{"src/operations/storage_pressure.cpp"}, .flags = cxx_flags });
-    }
     mod.addCSourceFiles(.{ .files = sqlite_c_sources, .flags = &.{"-w"} });
     mod.addCSourceFile(.{ .file = parse_c, .flags = &.{"-w"} });
     mod.addCSourceFile(.{ .file = ctime_c, .flags = &.{"-w"} });

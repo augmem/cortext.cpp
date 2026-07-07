@@ -22,7 +22,6 @@ namespace
 struct Options
 {
   std::string encoder = "aist";
-  std::filesystem::path models_dir = "models";
   int iterations = 50;
   int warmup = 5;
   int parallelism = 1;
@@ -38,7 +37,6 @@ PrintUsage ()
   std::cout
       << "Usage: cortext_text_encoder_bench [options]\n"
       << "  --encoder aist\n"
-      << "  --models-dir <path>\n"
       << "  --iterations <n>\n"
       << "  --warmup <n>\n"
       << "  --parallelism <n>\n"
@@ -57,10 +55,6 @@ ParseArgs (int argc, char *argv[])
       if (arg == "--encoder" && i + 1 < argc)
         {
           opts.encoder = argv[++i];
-        }
-      else if (arg == "--models-dir" && i + 1 < argc)
-        {
-          opts.models_dir = argv[++i];
         }
       else if (arg == "--iterations" && i + 1 < argc)
         {
@@ -205,12 +199,22 @@ CompareVectors (const std::vector<float> &a, const std::vector<float> &b)
 std::unique_ptr<cortext::AistGgufEncoder>
 MakeAistEncoder (const Options &opts, std::string &resolved_model)
 {
-  const auto resolved = cortext::ResolveAistGgufModelPath (
-      opts.models_dir);
+  (void)opts;
+  std::optional<std::filesystem::path> resolved;
+  for (const auto &root : { std::filesystem::path ("models"),
+                           std::filesystem::path ("../models"),
+                           std::filesystem::path ("../../models") })
+    {
+      resolved = cortext::ResolveAistGgufModelPath (root);
+      if (resolved.has_value ())
+        {
+          break;
+        }
+    }
   if (!resolved.has_value ())
     {
-      throw std::runtime_error ("AIST GGUF assets not found under "
-                                + opts.models_dir.string ());
+      throw std::runtime_error (
+          "AIST GGUF assets not found; set CORTEXT_AIST_MODEL_PATH");
     }
   cortext::AistGgufConfig cfg;
   cfg.model_path = resolved->string ();

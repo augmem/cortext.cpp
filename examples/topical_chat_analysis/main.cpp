@@ -231,7 +231,6 @@ void InstallOtelLogger(const std::string &log_path,
 
 struct AnalysisConfig {
   std::string dataset_path;
-  std::string models_dir = "models";
   std::string db_path = ":memory:";
   std::string otel_log_path;
   std::vector<std::string> otel_filters = {
@@ -876,8 +875,6 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
     };
     if (auto v = take("--data=")) {
       cfg.dataset_path = *v;
-    } else if (auto v = take("--models=")) {
-      cfg.models_dir = *v;
     } else if (auto v = take("--db=")) {
       cfg.db_path = *v;
     } else if (auto v = take("--max-conversations=")) {
@@ -1057,8 +1054,7 @@ int main(int argc, char **argv) {
       return true;
     }
     try {
-      auto resolved
-          = cortext::internal::CreatePreferredTextEncoder(cfg.models_dir);
+      auto resolved = cortext::internal::CreatePreferredTextEncoder();
       text_encoder_backend = resolved.backend_name;
       text_encoder_path = resolved.resolved_path.string();
       eval_encoder = std::move(resolved.encoder);
@@ -1177,7 +1173,7 @@ int main(int argc, char **argv) {
       c.reinforcement_enabled = cfg.reinforcement_enabled;
       c.procedural_enabled = cfg.procedural_enabled;
       c.sequential_edges_enabled = cfg.sequential_edges_enabled;
-      cortext = cortext::Cortext::Create(c, cfg.db_path, cfg.models_dir);
+      cortext = cortext::Cortext::Create(c, cfg.db_path);
       embedding_cache.clear();
       memory_kind_cache.clear();
       memory_emotion_cache.clear();

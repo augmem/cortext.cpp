@@ -289,9 +289,9 @@ inline void
 StampEmbeddingModelPin (Store &store)
 {
   namespace fs = std::filesystem;
-  const fs::path models_dir
+  const fs::path asset_root
       = fs::path (__FILE__).parent_path ().parent_path () / "models";
-  const auto aist = cortext::ResolveAistGgufModelPath (models_dir);
+  const auto aist = cortext::ResolveAistGgufModelPath (asset_root);
   if (!aist)
     {
       return; // No model on this machine; engine creation fails earlier.

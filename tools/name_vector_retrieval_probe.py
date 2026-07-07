@@ -170,7 +170,7 @@ def write_embed_input(path: Path, names: list[str], cases: list[QueryCase]) -> d
     return manifest
 
 
-def run_embedder(embedder: Path, input_path: Path, output_path: Path, models: Path, force: bool) -> None:
+def run_embedder(embedder: Path, input_path: Path, output_path: Path, force: bool) -> None:
     if output_path.exists() and not force:
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,7 +178,6 @@ def run_embedder(embedder: Path, input_path: Path, output_path: Path, models: Pa
         str(embedder),
         f"--input={input_path}",
         f"--out={output_path}",
-        f"--models={models}",
     ]
     subprocess.run(cmd, check=True)
 
@@ -419,7 +418,6 @@ def write_ablation_results(output_dir: Path, results: dict[str, dict[str, object
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--names", type=Path, default=Path("data/surnames/forenames.csv"))
-    parser.add_argument("--models", type=Path, default=Path("models"))
     parser.add_argument("--embedder", type=Path, default=Path("build/tools/text_embedder/cortext_text_embedder"))
     parser.add_argument("--output-dir", type=Path, default=Path("build/name_vector_retrieval_probe"))
     parser.add_argument("--top-names", type=int, default=5000)
@@ -432,7 +430,7 @@ def main() -> int:
     input_path = args.output_dir / "name_vector_retrieval_embed_input.txt"
     embedding_path = args.output_dir / "embeddings.jsonl"
     manifest = write_embed_input(input_path, names, cases)
-    run_embedder(args.embedder, input_path, embedding_path, args.models, args.force)
+    run_embedder(args.embedder, input_path, embedding_path, args.force)
 
     texts, matrix = load_embeddings(embedding_path)
     name_row_count = len(manifest["name_rows"])  # type: ignore[arg-type]

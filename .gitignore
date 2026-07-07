@@ -103,9 +103,13 @@ bindings/python/augmem.cortext.egg-info/
 bindings/python/augmem_cortext.egg-info/
 bindings/python/augmem/cortext/native/*
 !bindings/python/augmem/cortext/native/.gitkeep
+bindings/python/augmem/cortext/models/*
+!bindings/python/augmem/cortext/models/.gitkeep
 bindings/javascript/prebuilds/*
 !bindings/javascript/prebuilds/.gitkeep
 bindings/javascript/*.tgz
+bindings/javascript/models/*
+!bindings/javascript/models/.gitkeep
 
 # Coverage reports
 *.gcda
@@ -135,6 +139,10 @@ models/
 !include/cortext/models/**
 !src/models/
 !src/models/**
+!bindings/python/augmem/cortext/models/
+!bindings/python/augmem/cortext/models/.gitkeep
+!bindings/javascript/models/
+!bindings/javascript/models/.gitkeep
 *.dat
 *.npy
 

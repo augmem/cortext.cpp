@@ -174,62 +174,53 @@ public:
   /// @brief Factory to create a Cortext instance.
   /// @param cfg Three-knob configuration.
   /// @param db_path SQLite database path (e.g. ":memory:" or a file path).
-  /// @param models_dir Models directory root (e.g. "models").
   /// @return A unique_ptr to a Cortext instance.
   static std::unique_ptr<Cortext> Create (const Config &cfg,
-                                          const std::string &db_path,
-                                          const std::string &models_dir);
+                                          const std::string &db_path);
 
   /// @brief Factory to create a Cortext instance with a caller-supplied clock.
   static std::unique_ptr<Cortext> Create (const Config &cfg,
                                           const std::string &db_path,
-                                          const std::string &models_dir,
                                           std::shared_ptr<Clock> clock);
 
   /// @brief Factory using SQLite for metadata and caller-supplied object store.
   static std::unique_ptr<Cortext> Create (
       const Config &cfg, const std::string &db_path,
-      std::shared_ptr<ObjectStore> object_store, const std::string &models_dir);
+      std::shared_ptr<ObjectStore> object_store);
 
   /// @brief Factory using SQLite metadata, caller-supplied object store, and
   /// caller-supplied clock.
   static std::unique_ptr<Cortext> Create (
       const Config &cfg, const std::string &db_path,
-      std::shared_ptr<ObjectStore> object_store, const std::string &models_dir,
-      std::shared_ptr<Clock> clock);
+      std::shared_ptr<ObjectStore> object_store, std::shared_ptr<Clock> clock);
 
   /// @brief Factory to create a Cortext instance using a caller-supplied store.
   /// @param cfg Three-knob configuration.
   /// @param store Caller-owned database store. Cortext keeps a shared reference
   /// and does not close externally supplied stores.
-  /// @param models_dir Models directory root (e.g. "models").
   /// @return A unique_ptr to a Cortext instance.
   static std::unique_ptr<Cortext> Create (const Config &cfg,
-                                          std::shared_ptr<Store> store,
-                                          const std::string &models_dir);
+                                          std::shared_ptr<Store> store);
 
   /// @brief Factory with caller-supplied database store and clock.
   static std::unique_ptr<Cortext> Create (const Config &cfg,
                                           std::shared_ptr<Store> store,
-                                          const std::string &models_dir,
                                           std::shared_ptr<Clock> clock);
 
   /// @brief Factory with caller-supplied database and object stores.
   /// @param cfg Three-knob configuration.
   /// @param store Caller-owned database store.
   /// @param object_store Caller-owned content-addressed object store.
-  /// @param models_dir Models directory root (e.g. "models").
   /// @return A unique_ptr to a Cortext instance.
   static std::unique_ptr<Cortext> Create (
       const Config &cfg, std::shared_ptr<Store> store,
-      std::shared_ptr<ObjectStore> object_store, const std::string &models_dir);
+      std::shared_ptr<ObjectStore> object_store);
 
   /// @brief Factory with caller-supplied database store, object store, and
   /// clock.
   static std::unique_ptr<Cortext> Create (
       const Config &cfg, std::shared_ptr<Store> store,
-      std::shared_ptr<ObjectStore> object_store, const std::string &models_dir,
-      std::shared_ptr<Clock> clock);
+      std::shared_ptr<ObjectStore> object_store, std::shared_ptr<Clock> clock);
 
   /// @brief Process text input.
   /// @param text The text content to process.
@@ -367,28 +358,18 @@ private:
   friend class internal::StreamingTextProbeSession;
   struct Impl;
   explicit Cortext (const Config &cfg, const std::string &db_path,
-                    const std::string &models_dir);
-  explicit Cortext (const Config &cfg, const std::string &db_path,
-                    const std::string &models_dir,
                     std::shared_ptr<Clock> clock);
   explicit Cortext (const Config &cfg, const std::string &db_path,
-                    std::shared_ptr<ObjectStore> object_store,
-                    const std::string &models_dir);
+                    std::shared_ptr<ObjectStore> object_store);
   explicit Cortext (const Config &cfg, const std::string &db_path,
                     std::shared_ptr<ObjectStore> object_store,
-                    const std::string &models_dir,
                     std::shared_ptr<Clock> clock);
   explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
-                    const std::string &models_dir);
-  explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
-                    const std::string &models_dir,
                     std::shared_ptr<Clock> clock);
   explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
-                    std::shared_ptr<ObjectStore> object_store,
-                    const std::string &models_dir);
+                    std::shared_ptr<ObjectStore> object_store);
   explicit Cortext (const Config &cfg, std::shared_ptr<Store> store,
                     std::shared_ptr<ObjectStore> object_store,
-                    const std::string &models_dir,
                     std::shared_ptr<Clock> clock);
   std::unique_ptr<Impl> impl_;
 };

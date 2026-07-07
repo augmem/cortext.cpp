@@ -148,7 +148,7 @@ cmake --build build -j --target cortext_topical_chat_analysis
 Memories persist in the SQLite file across invocations:
 
 ```bash
-alias cortext='./build/tools/cli/cortext_cli --db bailey.db --models models'
+alias cortext='./build/tools/cli/cortext_cli --db bailey.db'
 
 cortext remember "Bailey is allergic to bee stings and needs Benadryl within 10 minutes."
 cortext remember "The vet appointment for Bailey is on July 12 at 9am with Dr. Okafor."
@@ -211,7 +211,7 @@ int main()
   cfg.sensitivity = 0.5;  // S: reactivity to surprise
   cfg.stability = 0.8;    // T: plasticity vs. retention
 
-  auto engine = cortext::Cortext::Create (cfg, "memory.db", "models");
+  auto engine = cortext::Cortext::Create (cfg, "memory.db");
 
   auto context = engine->ProcessText ("Bailey likes tennis balls.", "chat/main");
   for (const auto &memory : context.retrieved_memory)
@@ -360,7 +360,7 @@ The wrapper lives in `bindings/wasm/cortext.js`; the browser demo lives in
 preload it:
 
 ```bash
-./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODELS_DIR="$PWD/models"
+./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR="$PWD/models"
 python3 -m http.server 8000
 ```
 

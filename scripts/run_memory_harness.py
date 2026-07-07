@@ -86,7 +86,6 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
     cmd = [
         args.binary,
         f"--data={args.data}",
-        f"--models={args.models}",
         f"--db={db_path}",
         f"--focus={case['focus']}",
         f"--sensitivity={case['sensitivity']}",
@@ -259,7 +258,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Cortext memory harness")
     parser.add_argument("--binary", default="build/examples/topical_chat_analysis/cortext_topical_chat_analysis")
     parser.add_argument("--data", default="data/topical_chat/valid_freq.jsonl")
-    parser.add_argument("--models", default="models")
     parser.add_argument("--extra-args", default="")
     parser.add_argument("--out", default="")
     parser.add_argument("--max-conversations", type=int, default=4)

@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT="${ROOT:-eval_runs/neuromodulator_mechanism_sweep_$(date -u +%Y%m%dT%H%M%SZ)}"
 BUILD_DIR="${BUILD_DIR:-build-mechanism-hooks}"
-MODELS_DIR="${MODELS_DIR:-models}"
 SPLIT="${SPLIT:-validation}"
 MAX_DIALOGS="${MAX_DIALOGS:-25}"
 MAX_SESSIONS="${MAX_SESSIONS:-0}"
@@ -103,7 +102,6 @@ run_arm() {
         --input-dir "${ROOT}/input" \
         --db "${db}" \
         --out "${summary}" \
-        --models "${MODELS_DIR}" \
         --max-messages -1 \
         --warmup-events "${WARMUP_EVENTS}" \
         --probe-stride "${PROBE_STRIDE}" \
@@ -123,7 +121,6 @@ run_arm() {
         --input-dir "${ROOT}/input" \
         --db "${db}" \
         --out "${summary}" \
-        --models "${MODELS_DIR}" \
         --max-messages -1 \
         --warmup-events "${WARMUP_EVENTS}" \
         --probe-stride "${PROBE_STRIDE}" \

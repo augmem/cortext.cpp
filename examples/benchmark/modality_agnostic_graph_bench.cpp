@@ -35,7 +35,6 @@ struct Options
   std::filesystem::path video_dir = "build/video_media_perf";
   std::filesystem::path output_dir
       = "build/modality_agnostic_graph_bench";
-  std::string models_dir = "models";
 };
 
 struct Event
@@ -185,8 +184,7 @@ PrintUsage ()
 {
   std::cout << "Usage: cortext_modality_agnostic_graph_bench"
             << " [--assets-dir <path>] [--output-dir <path>]"
-            << " [--video-dir <path>]"
-            << " [--models <path>]\n";
+            << " [--video-dir <path>]\n";
 }
 
 Options
@@ -212,10 +210,6 @@ ParseArgs (int argc, char **argv)
       else if (arg == "--video-dir" && i + 1 < argc)
         {
           opts.video_dir = argv[++i];
-        }
-      else if (arg == "--models" && i + 1 < argc)
-        {
-          opts.models_dir = argv[++i];
         }
       else
         {
@@ -818,8 +812,7 @@ ProcessScenario (const Scenario &scenario, const Options &opts,
   cfg.signal_filter_image_enabled = false;
   cfg.signal_filter_text_enabled = false;
 
-  auto engine = cortext::Cortext::Create (cfg, db_path.string (),
-                                          opts.models_dir);
+  auto engine = cortext::Cortext::Create (cfg, db_path.string ());
   for (const auto &event : scenario.events)
     {
       if (event.modality == "image")
@@ -1909,7 +1902,6 @@ main (int argc, char **argv)
                   { "assets_dir", opts.assets_dir.string () },
                   { "video_dir", opts.video_dir.string () },
                   { "output_dir", opts.output_dir.string () },
-                  { "models_dir", opts.models_dir },
                   { "benchmark_only", true },
                   { "labeling_disabled", true },
                   { "real_media_only", true },

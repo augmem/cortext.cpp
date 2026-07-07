@@ -44,17 +44,14 @@ export class CortextWasm {
     sensitivity = 0.5,
     stability = 0.5,
     dbPath = ":memory:",
-    modelsDir = "/models",
   } = {}) {
     const dbPathPtr = this.#writeString(dbPath);
-    const modelsDirPtr = this.#writeString(modelsDir);
     try {
-      const handle = this.module._cortext_create_with_models(
+      const handle = this.module._cortext_create(
         focus,
         sensitivity,
         stability,
         dbPathPtr,
-        modelsDirPtr,
       );
       if (!handle) {
         throw new Error(this.lastError() || "Failed to create Cortext context");
@@ -62,7 +59,6 @@ export class CortextWasm {
       return handle;
     } finally {
       this.module._free(dbPathPtr);
-      this.module._free(modelsDirPtr);
     }
   }
 

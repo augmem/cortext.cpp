@@ -342,6 +342,28 @@ def _repo_root() -> Path | None:
     return None
 
 
+def _aist_model_path(root: Path) -> Path | None:
+    candidates = (
+        root / "AIST-87M-GGUF" / "AIST-87M_q8_0.gguf",
+        root / "AIST-87M-GGUF" / "AIST-87M_q5_1.gguf",
+    )
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def _default_aist_model_path() -> str | None:
+    package_models = _package_dir() / "models"
+    if model_path := _aist_model_path(package_models):
+        return os.fspath(model_path)
+
+    root = _repo_root()
+    if root is not None:
+        repo_models = root / "models"
+        if model_path := _aist_model_path(repo_models):
+            return os.fspath(model_path)
+
+    return None
+
+
 def _candidate_library_paths() -> list[Path]:
     names = ("libcortext.dylib", "libcortext.so", "cortext.dll", "libcortext.dll")
     candidates: list[Path] = []
@@ -387,7 +409,6 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.cortext_create_with_config.argtypes = [
         ctypes.POINTER(_NativeConfig),
         ctypes.c_char_p,
-        ctypes.c_char_p,
     ]
     lib.cortext_create_with_config.restype = ctypes.c_void_p
 
@@ -395,7 +416,6 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.POINTER(_NativeConfig),
         ctypes.POINTER(_DBCallbacks),
         ctypes.c_void_p,
-        ctypes.c_char_p,
     ]
     lib.cortext_create_with_store_callbacks.restype = ctypes.c_void_p
 
@@ -405,7 +425,6 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.c_void_p,
         ctypes.POINTER(_ObjectCallbacks),
         ctypes.c_void_p,
-        ctypes.c_char_p,
     ]
     lib.cortext_create_with_store_and_object_callbacks.restype = ctypes.c_void_p
 
@@ -414,7 +433,6 @@ def _configure_library(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.c_char_p,
         ctypes.POINTER(_ObjectCallbacks),
         ctypes.c_void_p,
-        ctypes.c_char_p,
     ]
     lib.cortext_create_with_config_and_object_callbacks.restype = ctypes.c_void_p
 
@@ -981,7 +999,6 @@ class Cortext:
         *,
         store: DBProvider | None = None,
         object_store: ObjectStoreProvider | None = None,
-        models_dir: str | None = None,
         config: Config | None = None,
         library_path: str | os.PathLike[str] | None = None,
     ) -> None:
@@ -1010,43 +1027,49 @@ class Cortext:
                 config.signal_filter_text_enabled
             )
 
-        models_dir_raw = models_dir.encode("utf-8") if models_dir is not None else None
         self._provider_bridge = _ProviderBridge(store) if store is not None else None
         self._object_provider_bridge = (
             _ObjectProviderBridge(object_store) if object_store is not None else None
         )
-        if self._provider_bridge is not None and self._object_provider_bridge is not None:
-            self._handle = self._lib.cortext_create_with_store_and_object_callbacks(
-                ctypes.byref(native_cfg),
-                ctypes.byref(self._provider_bridge.callbacks),
-                None,
-                ctypes.byref(self._object_provider_bridge.callbacks),
-                None,
-                models_dir_raw,
-            )
-        elif self._provider_bridge is not None:
-            self._handle = self._lib.cortext_create_with_store_callbacks(
-                ctypes.byref(native_cfg),
-                ctypes.byref(self._provider_bridge.callbacks),
-                None,
-                models_dir_raw,
-            )
-        elif self._object_provider_bridge is not None:
-            db_path_raw = db_path.encode("utf-8")
-            self._handle = self._lib.cortext_create_with_config_and_object_callbacks(
-                ctypes.byref(native_cfg),
-                db_path_raw,
-                ctypes.byref(self._object_provider_bridge.callbacks),
-                None,
-                models_dir_raw,
-            )
-        else:
-            db_path_raw = db_path.encode("utf-8")
-            self._handle = self._lib.cortext_create_with_config(
-                ctypes.byref(native_cfg),
-                db_path_raw,
-                models_dir_raw,
-            )
+        default_model_path = _default_aist_model_path()
+        had_model_env = "CORTEXT_AIST_MODEL_PATH" in os.environ
+        previous_model_env = os.environ.get("CORTEXT_AIST_MODEL_PATH")
+        if not had_model_env and default_model_path is not None:
+            os.environ["CORTEXT_AIST_MODEL_PATH"] = default_model_path
+        try:
+            if self._provider_bridge is not None and self._object_provider_bridge is not None:
+                self._handle = self._lib.cortext_create_with_store_and_object_callbacks(
+                    ctypes.byref(native_cfg),
+                    ctypes.byref(self._provider_bridge.callbacks),
+                    None,
+                    ctypes.byref(self._object_provider_bridge.callbacks),
+                    None,
+                )
+            elif self._provider_bridge is not None:
+                self._handle = self._lib.cortext_create_with_store_callbacks(
+                    ctypes.byref(native_cfg),
+                    ctypes.byref(self._provider_bridge.callbacks),
+                    None,
+                )
+            elif self._object_provider_bridge is not None:
+                db_path_raw = db_path.encode("utf-8")
+                self._handle = self._lib.cortext_create_with_config_and_object_callbacks(
+                    ctypes.byref(native_cfg),
+                    db_path_raw,
+                    ctypes.byref(self._object_provider_bridge.callbacks),
+                    None,
+                )
+            else:
+                db_path_raw = db_path.encode("utf-8")
+                self._handle = self._lib.cortext_create_with_config(
+                    ctypes.byref(native_cfg),
+                    db_path_raw,
+                )
+        finally:
+            if not had_model_env:
+                os.environ.pop("CORTEXT_AIST_MODEL_PATH", None)
+            elif previous_model_env is not None:
+                os.environ["CORTEXT_AIST_MODEL_PATH"] = previous_model_env
         if not self._handle:
             _raise_last_error("cortext create failed")
 

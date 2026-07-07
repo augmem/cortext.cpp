@@ -774,10 +774,9 @@ PrintDelta (const std::string &label, double baseline, double variant)
 } // namespace
 
 int
-main (int argc, char **argv)
+main ()
 {
-  BenchEncoder encoder (
-      cortext::benchmark::ParseModelsDirArg (argc, argv));
+  BenchEncoder encoder;
   std::cout << "encoder_backend=" << encoder.backend_name () << "\n";
   std::cout << "encoder_model_path=" << encoder.resolved_model_path ().string ()
             << "\n";

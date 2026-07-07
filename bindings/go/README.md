@@ -33,7 +33,7 @@ import (
 )
 
 func main() {
-	engine, err := cortext.New(":memory:", "models", nil)
+	engine, err := cortext.New(":memory:", nil)
 	if err != nil {
 		panic(err)
 	}

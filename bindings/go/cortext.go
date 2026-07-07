@@ -56,15 +56,9 @@ func LastError() string {
 	return C.GoString(C.cortext_last_error())
 }
 
-func New(dbPath string, modelsDir string, cfg *Config) (*Handle, error) {
+func New(dbPath string, cfg *Config) (*Handle, error) {
 	cDBPath := C.CString(dbPath)
 	defer C.free(unsafe.Pointer(cDBPath))
-
-	var cModelsDir *C.char
-	if modelsDir != "" {
-		cModelsDir = C.CString(modelsDir)
-		defer C.free(unsafe.Pointer(cModelsDir))
-	}
 
 	var nativeCfg C.cortext_config
 	C.cortext_config_init(&nativeCfg)
@@ -83,7 +77,7 @@ func New(dbPath string, modelsDir string, cfg *Config) (*Handle, error) {
 		nativeCfg.signal_filter_text_enabled = boolToCInt(cfg.SignalFilterText)
 	}
 
-	handle := C.cortext_create_with_config(&nativeCfg, cDBPath, cModelsDir)
+	handle := C.cortext_create_with_config(&nativeCfg, cDBPath)
 	if handle == nil {
 		return nil, lastError()
 	}

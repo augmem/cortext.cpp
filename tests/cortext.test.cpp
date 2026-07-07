@@ -132,10 +132,9 @@ TEST_CASE ("Cortext C++ stub can be created and used",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   REQUIRE_NOTHROW ([&] {
@@ -160,10 +159,9 @@ TEST_CASE ("Cortext embed-only API returns vectors without storing signals",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   std::vector<float> embedding;
@@ -183,7 +181,6 @@ TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
@@ -193,7 +190,7 @@ TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
   {
     std::unique_ptr<cortext::Cortext> embedder;
     REQUIRE_NOTHROW (
-        embedder = cortext::Cortext::Create (cfg, store, models_dir));
+        embedder = cortext::Cortext::Create (cfg, store));
     REQUIRE (embedder != nullptr);
     REQUIRE_NOTHROW (query_embedding = embedder->EmbedText (query));
   }
@@ -235,7 +232,7 @@ TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
       { kMemoryId, kMemoryId, blob_id });
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store));
   REQUIRE (ctx != nullptr);
 
   const auto before_memories
@@ -274,13 +271,12 @@ TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store));
   REQUIRE (ctx != nullptr);
 
   const std::string stale_vet
@@ -352,10 +348,9 @@ TEST_CASE ("internal replay ingress preserves media event timestamps",
   cortext::Cortext::Config cfg;
   cfg.signal_filter_audio_enabled = false;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   const std::uint64_t replay_ts = 1573184762000ULL;
@@ -386,10 +381,9 @@ TEST_CASE ("Cortext media overloads validate source media before encoding",
   cortext::Cortext::Config cfg;
   cfg.signal_filter_audio_enabled = false;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   std::vector<float> pcm (16000, 0.01f);
@@ -416,10 +410,9 @@ TEST_CASE ("Cortext media ingress validates processing inputs before use",
   cortext::Cortext::Config cfg;
   cfg.signal_filter_audio_enabled = false;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   cortext::Cortext::Media empty_media{};
@@ -496,10 +489,9 @@ TEST_CASE ("timestamped replay persists working memory source timestamps",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   const std::uint64_t replay_ts = 1573184762000ULL;
@@ -529,10 +521,9 @@ TEST_CASE ("internal replay text ingress can skip context hydration",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   const std::uint64_t replay_ts = 1573184762000ULL;
@@ -579,10 +570,9 @@ TEST_CASE ("working memory persistence does not rewrite clean slot embeddings",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   const std::uint64_t replay_ts = 1573184762000ULL;
@@ -621,12 +611,11 @@ TEST_CASE ("replay clock override preserves working memory on reopen",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
   const std::uint64_t replay_ts = 1573184762000ULL;
 
   {
     auto clock = std::make_shared<cortext::FixedClock> (replay_ts);
-    auto ctx = cortext::Cortext::Create (cfg, db_path, models_dir, clock);
+    auto ctx = cortext::Cortext::Create (cfg, db_path, clock);
     REQUIRE (ctx != nullptr);
     REQUIRE_NOTHROW (ctx->ProcessTextAt (
         "timestamped working memory replay survives reopen", "stream/main",
@@ -636,8 +625,7 @@ TEST_CASE ("replay clock override preserves working memory on reopen",
 
   {
     auto clock = std::make_shared<cortext::FixedClock> (replay_ts + 1000ULL);
-    auto reopened = cortext::Cortext::Create (cfg, db_path, models_dir,
-                                              clock);
+    auto reopened = cortext::Cortext::Create (cfg, db_path, clock);
     REQUIRE (reopened != nullptr);
     auto probe = reopened->ProcessTextAt (
         "follow up for the replay working memory", "stream/main",
@@ -652,10 +640,9 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   const std::string &db_path = temp_db.path ();
-  const std::string models_dir = RepoModelsDir ();
 
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path, models_dir));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, db_path));
   REQUIRE (ctx != nullptr);
 
   const std::uint64_t source_ts = 1573184762000ULL;
@@ -687,7 +674,7 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
            == "ASSOCIATION");
 }
 
-TEST_CASE ("Cortext::Create can resolve AIST from env when models dir is missing",
+TEST_CASE ("Cortext::Create can resolve AIST from env",
            "[cortext][models][aist]")
 {
   const auto model_path = std::filesystem::path (RepoModelsDir ())
@@ -696,17 +683,14 @@ TEST_CASE ("Cortext::Create can resolve AIST from env when models dir is missing
       "CORTEXT_AIST_MODEL_PATH", model_path.string ());
   cortext::Cortext::Config cfg;
   std::unique_ptr<cortext::Cortext> ctx;
-  REQUIRE_NOTHROW (
-      ctx = cortext::Cortext::Create (cfg, ":memory:", "models/does-not-exist"));
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, ":memory:"));
   REQUIRE (ctx != nullptr);
 }
 
 TEST_CASE ("Cortext C ABI stubs return success",
            "[cortext][capi][stub][aist]")
 {
-  const std::string models_dir = RepoModelsDir ();
-  cortext_handle h = cortext_create_with_models (
-      0.5, 0.5, 0.5, ":memory:", models_dir.c_str ());
+  cortext_handle h = cortext_create (0.5, 0.5, 0.5, ":memory:");
   REQUIRE (h != nullptr);
 
   const int text_rc = cortext_process_text (h, "hello", "test");
@@ -740,13 +724,13 @@ TEST_CASE ("Cortext C ABI rejects invalid store callbacks",
   cortext_config cfg{};
   cortext_config_init (&cfg);
   REQUIRE (cortext_create_with_store_callbacks (
-               &cfg, nullptr, nullptr, "models/does-not-exist")
+               &cfg, nullptr, nullptr)
            == nullptr);
 
   cortext_db_callbacks callbacks{};
   callbacks.struct_size = sizeof (callbacks);
   REQUIRE (cortext_create_with_store_callbacks (
-               &cfg, &callbacks, nullptr, "models/does-not-exist")
+               &cfg, &callbacks, nullptr)
            == nullptr);
 }
 
@@ -824,7 +808,7 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
     }
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   std::vector<long long> candidate_ids;
@@ -921,7 +905,7 @@ TEST_CASE ("Cortext filters mixed signal blobs to the memory surface",
       { image_blob_id });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   auto hydrated = ctx->DebugHydrateForTest ({ 701LL }, {});
@@ -988,7 +972,7 @@ TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
       " 1, 1, 1, 4, 1000)");
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   auto hydrated = ctx->DebugHydrateForTest ({ 501LL }, {});
@@ -1059,7 +1043,7 @@ TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
       { 200LL, 100LL, 100LL, 300LL });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
@@ -1126,7 +1110,7 @@ TEST_CASE ("Cortext expands durable association retrieval nodes even when the cu
       { 200LL, 100LL });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
@@ -1186,7 +1170,7 @@ TEST_CASE ("Cortext expands durable label retrieval nodes through association so
       { 200LL, 100LL, 200LL, 300LL });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {});
@@ -1261,7 +1245,7 @@ TEST_CASE ("Cortext orders durable label source hydration by query similarity",
       { 200LL, 100LL, 200LL, 101LL, 200LL, 300LL });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
@@ -1357,7 +1341,7 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
       { kAssociationId, kLabelId });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   const int expected_limit = std::max (
@@ -1447,7 +1431,7 @@ TEST_CASE ("Cortext expands maintenance source hydration without used-memory ski
       linked_ids.push_back (memory_id);
     }
 
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   auto hydrated
@@ -1491,7 +1475,7 @@ TEST_CASE ("Cortext hides unresolved internal retrieval nodes",
       { 200LL, 300LL });
 
   cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path, RepoModelsDir ());
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
   auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
@@ -1583,9 +1567,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_process_text returns 1 for NULL text")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     CHECK (cortext_process_text (h, nullptr, "src") == 1);
     REQUIRE (std::string (cortext_last_error ())
@@ -1596,9 +1578,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_process_text returns 1 for NULL source_id")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     CHECK (cortext_process_text (h, "text", nullptr) == 1);
     REQUIRE (std::string (cortext_last_error ())
@@ -1609,9 +1589,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_process_audio returns 1 for NULL pcm")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     CHECK (cortext_process_audio (h, nullptr, 100, "src") == 1);
     REQUIRE (std::string (cortext_last_error ())
@@ -1622,9 +1600,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_process_audio_with_media rejects invalid media")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     const float pcm[2] = { 0.0f, 0.0f };
     cortext_media media{};
@@ -1639,9 +1615,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_process_image returns 1 for NULL data")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     CHECK (cortext_process_image (h, nullptr, 10, 10, 3, "src") == 1);
     REQUIRE (std::string (cortext_last_error ())
@@ -1652,9 +1626,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_process_image_with_media rejects invalid media")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     const std::uint8_t px[3] = { 0, 0, 0 };
     const std::uint8_t media_bytes[4] = { 'R', 'I', 'F', 'F' };
@@ -1680,9 +1652,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_embed_audio_json reports NULL arguments")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     char *json_ptr = cortext_embed_audio_json (h, nullptr, 100);
     REQUIRE (json_ptr == nullptr);
@@ -1694,9 +1664,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_embed_image_json reports NULL arguments")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     char *json_ptr = cortext_embed_image_json (h, nullptr, 10, 10, 3);
     REQUIRE (json_ptr == nullptr);
@@ -1726,9 +1694,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("cortext_reset keeps handle usable")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
 
     REQUIRE (cortext_process_text (h, "before reset", "reset/source") == 0);
@@ -1764,9 +1730,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
     cfg.sensitivity = 0.4;
     cfg.stability = 0.9;
 
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_config (&cfg, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create_with_config (&cfg, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
     cortext_free (h);
   }
@@ -1774,9 +1738,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("JSON C API returns parseable context")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
 
     char *json_ptr
@@ -1826,9 +1788,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
   SECTION ("Embed JSON C API returns parseable embedding")
   {
     ScopedTempDb temp_db;
-    const auto models_dir = RepoModelsDir ();
-    auto h = cortext_create_with_models (0.5, 0.5, 0.5, temp_db.path ().c_str (),
-                                         models_dir.c_str ());
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
 
     char *json_ptr = cortext_embed_text_json (h, "json api embeds text");

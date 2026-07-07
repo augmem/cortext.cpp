@@ -334,8 +334,8 @@ FinalizeHandle (napi_env env, void *data, void *hint)
 napi_value
 CortextCtor (napi_env env, napi_callback_info info)
 {
-  size_t argc = 3;
-  napi_value args[3];
+  size_t argc = 2;
+  napi_value args[2];
   napi_value jsthis;
   NAPI_RETURN_IF_FAILED (
       env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
@@ -344,7 +344,6 @@ CortextCtor (napi_env env, napi_callback_info info)
   cortext_config_init (&cfg);
 
   std::string db_path = ":memory:";
-  std::string models_dir;
   bool first_arg_is_db_path = false;
 
   if (argc > 0)
@@ -375,31 +374,15 @@ CortextCtor (napi_env env, napi_callback_info info)
       NAPI_RETURN_IF_FAILED (env, napi_typeof (env, args[1], &type));
       if (type != napi_undefined && type != napi_null)
         {
-          if (!GetString (env, args[1], first_arg_is_db_path ? models_dir : db_path))
+          if (first_arg_is_db_path || !GetString (env, args[1], db_path))
             {
-              return ThrowTypeError (
-                  env, first_arg_is_db_path ? "modelsDir must be a string"
-                                            : "dbPath must be a string");
-            }
-        }
-    }
-
-  if (!first_arg_is_db_path && argc > 2)
-    {
-      napi_valuetype type = napi_undefined;
-      NAPI_RETURN_IF_FAILED (env, napi_typeof (env, args[2], &type));
-      if (type != napi_undefined && type != napi_null)
-        {
-          if (!GetString (env, args[2], models_dir))
-            {
-              return ThrowTypeError (env, "modelsDir must be a string");
+              return ThrowTypeError (env, "dbPath must be a string");
             }
         }
     }
 
   auto *wrapped = new BindingHandle ();
-  wrapped->handle = cortext_create_with_config (
-      &cfg, db_path.c_str (), models_dir.empty () ? nullptr : models_dir.c_str ());
+  wrapped->handle = cortext_create_with_config (&cfg, db_path.c_str ());
   if (wrapped->handle == nullptr)
     {
       delete wrapped;

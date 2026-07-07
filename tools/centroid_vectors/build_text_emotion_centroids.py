@@ -224,12 +224,11 @@ def write_lines(path: Path, lines: list[str]) -> None:
                 f.write(clean + "\n")
 
 
-def run_embedder(embedder: Path, models_dir: Path, input_path: Path, out_path: Path) -> None:
+def run_embedder(embedder: Path, input_path: Path, out_path: Path) -> None:
     cmd = [
         str(embedder),
         f"--input={input_path}",
         f"--out={out_path}",
-        f"--models={models_dir}",
     ]
     subprocess.check_call(cmd)
 
@@ -347,11 +346,6 @@ def main() -> int:
         help="HF datasets cache directory.",
     )
     parser.add_argument(
-        "--models",
-        default="models",
-        help="Models directory.",
-    )
-    parser.add_argument(
         "--out-dir",
         default="data/emotion",
         help="Output directory for *_256.npy centroids.",
@@ -408,7 +402,6 @@ def main() -> int:
         print(f"Missing embedder: {embedder}", file=sys.stderr)
         return 1
 
-    models_dir = Path(args.models)
     out_dir = Path(args.out_dir)
     tmp_dir = out_dir / "_tmp_text_emotion"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -469,7 +462,7 @@ def main() -> int:
                 cached = False
         if not cached:
             write_lines(input_path, texts)
-            run_embedder(embedder, models_dir, input_path, out_path)
+            run_embedder(embedder, input_path, out_path)
             cache_meta_path.write_text(json.dumps(cache_meta, indent=2), encoding="utf-8")
             embeddings = load_embeddings(out_path)
         if embeddings.size == 0:

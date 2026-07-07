@@ -52,7 +52,6 @@ int
 main (int argc, char **argv)
 {
   fs::path input_path;
-  fs::path models_dir = "models";
   fs::path out_path;
 
   for (int i = 1; i < argc; ++i)
@@ -70,10 +69,6 @@ main (int argc, char **argv)
         {
           input_path = *v;
         }
-      else if (auto v = take ("--models="))
-        {
-          models_dir = *v;
-        }
       else if (auto v = take ("--out="))
         {
           out_path = *v;
@@ -83,7 +78,7 @@ main (int argc, char **argv)
   if (input_path.empty () || out_path.empty ())
     {
       std::cerr << "Usage: cortext_text_embedder --input=FILE --out=FILE "
-                   "[--models=DIR]\n";
+                   "\n";
       return 1;
     }
   if (!fs::exists (input_path))
@@ -92,8 +87,7 @@ main (int argc, char **argv)
       return 1;
     }
 
-  auto selection = cortext::internal::CreatePreferredTextEncoder (
-      models_dir.string ());
+  auto selection = cortext::internal::CreatePreferredTextEncoder ();
   auto &encoder = *selection.encoder;
 
   std::ifstream in (input_path);

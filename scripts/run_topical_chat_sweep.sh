@@ -3,7 +3,6 @@ set -euo pipefail
 
 BIN="${BIN:-build/examples/topical_chat_analysis/cortext_topical_chat_analysis}"
 DATA="${DATA:-data/topical_chat/valid_freq.jsonl}"
-MODELS="${MODELS:-models}"
 MAX_TURNS="${MAX_TURNS:-120}"
 MAX_TOTAL="${MAX_TOTAL:-120}"
 OUT_DIR="${OUT_DIR:-logs/topical_chat_runs/$(date +%Y%m%d_%H%M%S)}"
@@ -68,7 +67,7 @@ for cfg in "${configs[@]}"; do
   "sensitivity": ${S},
   "stability": ${T},
   "data": "${DATA}",
-  "models": "${MODELS}",
+  "model_assets": "${MODELS}",
   "db": "${db_path}",
   "binary": "${BIN}",
   "max_turns": ${MAX_TURNS},
@@ -104,7 +103,6 @@ EOF
 
   "$BIN" \
     --data="$DATA" \
-    --models="$MODELS" \
     --db="$db_path" \
     --max-conversations=1 \
     --max-turns="$MAX_TURNS" \

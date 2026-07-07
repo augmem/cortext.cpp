@@ -24,13 +24,13 @@ either load it at runtime into Emscripten's filesystem:
 
 ```js
 await runtime.writeModelFile(file);
-const handle = runtime.createContext({ dbPath: ":memory:", modelsDir: "/models" });
+const handle = runtime.createContext({ dbPath: ":memory:" });
 ```
 
 or embed a model directory into the bundle at build time:
 
 ```bash
-./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODELS_DIR="$PWD/models"
+./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR="$PWD/models"
 ```
 
 Build-time preloading writes the directory to `/models` inside the virtual

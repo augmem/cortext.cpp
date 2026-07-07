@@ -1,6 +1,6 @@
 {
   "name": "@augmem/cortext",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "JavaScript and TypeScript bindings for the Cortext memory engine",
   "main": "index.js",
   "types": "index.d.ts",
@@ -30,6 +30,7 @@
     "index.js",
     "index.d.ts",
     "README.md",
+    "models/**/*",
     "prebuilds/**/*"
   ],
   "publishConfig": {

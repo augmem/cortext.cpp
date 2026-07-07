@@ -1,2 +1,3 @@
 include README.md
 recursive-include augmem/cortext/native *
+recursive-include augmem/cortext/models *

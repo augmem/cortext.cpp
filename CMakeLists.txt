@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cortext VERSION 1.1.6 LANGUAGES C CXX)
+project(cortext VERSION 1.1.7 LANGUAGES C CXX)
 
 set(CORTEXT_TARGET_IOS OFF)
 if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_OSX_SYSROOT MATCHES "iphone")
@@ -59,10 +59,10 @@ if(BUILD_SHARED_LIBS)
 endif()
 option(CORTEXT_GGML_OPENMP
        "Enable OpenMP in the bundled ggml backend" ${CORTEXT_GGML_OPENMP_DEFAULT})
-set(CORTEXT_WASM_PRELOAD_MODELS_DIR "" CACHE PATH
-    "Optional model directory to embed into the browser WASM bundle at /models")
-set(CORTEXT_MODELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models" CACHE PATH
-    "Directory where Cortext runtime model assets are stored")
+set(CORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR "" CACHE PATH
+    "Optional model asset root to embed into the browser WASM bundle at /models")
+set(CORTEXT_MODEL_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models" CACHE PATH
+    "Directory where Cortext build-time model assets are stored")
 set(CORTEXT_AIST_MODEL_QUANT "q8_0" CACHE STRING
     "AIST GGUF quantization to download by default: q8_0, q5_1, or all")
 set_property(CACHE CORTEXT_AIST_MODEL_QUANT PROPERTY STRINGS q8_0 q5_1 all)
@@ -121,7 +121,7 @@ if(CORTEXT_FETCH_AIST_MODEL)
   add_custom_target(cortext_aist_model ALL
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/scripts/download_aist_model.py"
-            --models-dir "${CORTEXT_MODELS_DIR}"
+            --output-dir "${CORTEXT_MODEL_ASSETS_DIR}"
             --quant "${CORTEXT_AIST_MODEL_QUANT}"
     COMMENT "Ensuring Cortext AIST GGUF model is present"
     VERBATIM
@@ -696,7 +696,6 @@ if(EMSCRIPTEN AND BUILD_WASM)
     "_cortext_create_with_store_callbacks"
     "_cortext_create_with_store_and_object_callbacks"
     "_cortext_create_with_config_and_object_callbacks"
-    "_cortext_create_with_models"
     "_cortext_free"
     "_cortext_process_text"
     "_cortext_process_audio"
@@ -756,9 +755,9 @@ if(EMSCRIPTEN AND BUILD_WASM)
   if(CORTEXT_WASM_EXPORT_ALL)
     target_link_options(cortext_wasm PRIVATE -sEXPORT_ALL=1)
   endif()
-  if(CORTEXT_WASM_PRELOAD_MODELS_DIR)
+  if(CORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR)
     target_link_options(cortext_wasm PRIVATE
-      --preload-file "${CORTEXT_WASM_PRELOAD_MODELS_DIR}@/models"
+      --preload-file "${CORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR}@/models"
     )
   endif()
 endif()
