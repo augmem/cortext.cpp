@@ -1,10 +1,42 @@
 {
-  "name": "cortext-js",
+  "name": "@augmem/cortext",
   "version": "1.1.6",
-  "description": "JavaScript and TypeScript bindings for the Cortext native library",
+  "description": "JavaScript and TypeScript bindings for the Cortext memory engine",
   "main": "index.js",
   "types": "index.d.ts",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/augmem/cortext.git",
+    "directory": "bindings/javascript"
+  },
+  "bugs": {
+    "url": "https://github.com/augmem/cortext/issues"
+  },
+  "homepage": "https://github.com/augmem/cortext#readme",
+  "keywords": [
+    "memory",
+    "retrieval",
+    "embeddings",
+    "llm",
+    "agents",
+    "napi",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "prebuilds/**/*"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "cd ../.. && cmake --preset ffi-release-node && cmake --build --preset ffi-release-node --target cortext cortext_node"
+    "build": "cd ../.. && cmake --preset ffi-release-node && cmake --build --preset ffi-release-node --target cortext cortext_node",
+    "build:package": "cd ../.. && python3 scripts/build_javascript_package.py"
   }
 }

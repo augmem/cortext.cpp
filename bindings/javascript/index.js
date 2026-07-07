@@ -2,8 +2,24 @@
 
 const path = require("path");
 
+const supportedNativeTargets = new Set([
+  "darwin-arm64",
+  "darwin-x64",
+  "linux-arm64",
+  "linux-x64",
+  "win32-arm64",
+  "win32-x64",
+]);
+
+function platformTag() {
+  return `${process.platform}-${process.arch}`;
+}
+
 const candidates = [
   process.env.CORTEXT_NODE_ADDON_PATH,
+  supportedNativeTargets.has(platformTag())
+    ? path.join(__dirname, "prebuilds", platformTag(), "cortext.node")
+    : null,
   path.join(__dirname, "cortext.node"),
   path.join(__dirname, "build", "ffi-release", "bindings", "javascript", "cortext.node"),
   path.join(__dirname, "..", "..", "build", "ffi-release", "bindings", "javascript", "cortext.node"),
@@ -22,9 +38,13 @@ for (const candidate of candidates) {
 }
 
 if (!native) {
-const tried = candidates.map((candidate) => `  - ${candidate}`).join("\n");
-const detail = lastError && lastError.message ? `\nLast error: ${lastError.message}` : "";
-throw new Error(`Could not load cortext Node addon. Tried:\n${tried}${detail}`);
+  const tried = candidates.map((candidate) => `  - ${candidate}`).join("\n");
+  const supported = [...supportedNativeTargets].sort().join(", ");
+  const detail = lastError && lastError.message ? `\nLast error: ${lastError.message}` : "";
+  throw new Error(
+    `Could not load cortext Node addon for ${platformTag()}. ` +
+      `Bundled packages support: ${supported}.\nTried:\n${tried}${detail}`
+  );
 }
 
 function normalizeMedia(media, mediaMimeType, options) {

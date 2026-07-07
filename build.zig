@@ -284,6 +284,9 @@ pub fn build(b: *std.Build) void {
 
     const shared = b.option(bool, "shared", "Build libcortext as a shared library") orelse true;
     const build_cli = b.option(bool, "cli", "Build and install the cortext_cli executable") orelse true;
+    const build_node_addon = b.option(bool, "node-addon", "Build and install the Node-API addon") orelse false;
+    const node_include = b.option([]const u8, "node-include", "Directory containing node_api.h for Node-API addon builds");
+    const node_lib = b.option([]const u8, "node-lib", "Windows node.exe import library for Node-API addon builds");
     const unsupported_text_only = b.option(bool, "unsupported-text-only", "Allow unsupported builds without audio/image GGML kernel support") orelse false;
     const enable_ggml = b.option(bool, "ggml", "Enable GGML audio/image kernel support") orelse !unsupported_text_only;
     const fetch_aist_model = b.option(bool, "fetch-aist-model", "Download the required AIST GGUF model during the default build") orelse true;
@@ -555,6 +558,38 @@ pub fn build(b: *std.Build) void {
         cli.linkLibrary(lib);
         b.installArtifact(cli);
         check_step.dependOn(&cli.step);
+    }
+
+    if (build_node_addon) {
+        const node_include_dir = node_include orelse fail(b, "-Dnode-addon=true requires -Dnode-include=/path/to/node/include");
+        const addon_mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        });
+        addon_mod.addIncludePath(b.path("include"));
+        addon_mod.addIncludePath(.{ .cwd_relative = node_include_dir });
+        addon_mod.addCMacro("NAPI_VERSION", "8");
+        addon_mod.addCSourceFile(.{
+            .file = b.path("bindings/javascript/src/addon.cpp"),
+            .flags = cxx_flags,
+        });
+        if (target.result.os.tag == .windows) {
+            const node_import_lib = node_lib orelse fail(b, "Windows -Dnode-addon=true requires -Dnode-lib=/path/to/node.lib");
+            addon_mod.addObjectFile(.{ .cwd_relative = node_import_lib });
+        }
+        const addon = b.addLibrary(.{
+            .name = "cortext_node",
+            .linkage = .dynamic,
+            .root_module = addon_mod,
+        });
+        addon.linkLibrary(lib);
+        if (target.result.os.tag != .windows) {
+            addon.linker_allow_shlib_undefined = true;
+        }
+        b.installArtifact(addon);
+        check_step.dependOn(&addon.step);
     }
 }
 
