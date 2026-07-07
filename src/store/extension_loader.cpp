@@ -11,6 +11,8 @@
 
 #if !defined(_WIN32)
 #include <unistd.h>
+#else
+#include <process.h>
 #endif
 
 #if defined(CORTEXT_EMBED_OBJSTORE)
@@ -24,6 +26,16 @@ namespace
 {
 
 #if defined(CORTEXT_EMBED_OBJSTORE)
+long long
+CurrentProcessIdForPath ()
+{
+#if defined(_WIN32)
+  return static_cast<long long> (_getpid ());
+#else
+  return static_cast<long long> (getpid ());
+#endif
+}
+
 std::string
 LowerEnv (const char *name)
 {
@@ -252,7 +264,7 @@ RegisterBuiltInExtensionsOnDb (sqlite3 *db)
       const char *tmpdir = std::getenv ("TMPDIR");
       objects_root = std::string (tmpdir != nullptr ? tmpdir : "/tmp")
                      + "/cortext-objstore-"
-                     + std::to_string (static_cast<long long> (getpid ()))
+                     + std::to_string (CurrentProcessIdForPath ())
                      + "-"
                      + std::to_string (objstore_root_counter.fetch_add (1));
     }

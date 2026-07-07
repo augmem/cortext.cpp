@@ -15,3 +15,7 @@ if(MSVC)
 else()
   target_compile_options(cortext_cli PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+install(TARGETS cortext_cli
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT cortext
+)

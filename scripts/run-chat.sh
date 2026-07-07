@@ -57,7 +57,7 @@ if [[ "${fresh_db}" == "1" ]]; then
   rm -f "${CORTEXT_CHAT_DB}" "${CORTEXT_CHAT_DB}-wal" "${CORTEXT_CHAT_DB}-shm"
 fi
 
-cmake -S "${repo_root}" -B "${build_dir}" -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_EXAMPLES=ON
+cmake -S "${repo_root}" -B "${build_dir}" -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_BUILD_TOOLS=ON
 cmake --build "${build_dir}" -j8 --target cortext_cli
 
 echo "Launching cortext_cli repl with:"

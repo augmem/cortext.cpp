@@ -1,15 +1,15 @@
-# Cortext v1.1.0 Release Artifact
+# Cortext v1.1.6 Release Artifact
 
-This file is the tracked release artifact for the v1.1.0 line. The `v1.1.0`
+This file is the tracked release artifact for the v1.1.6 line. The `v1.1.6`
 tag should point at the commit that contains this artifact.
 
 ## Release State
 
-- Version: `1.1.0`
+- Version: `1.1.6`
 - Runtime: hard-cut production engine, limited to embedding-backed memory,
   durable graph associations, bounded retrieval, and shallow consolidation.
-- Product surface: unchanged from v1.0. v1.1.0 is a hardening release, not a
-  feature expansion.
+- Product surface: adds the public `cortext_cli` command-line tool, built as a
+  normal tool surface through CMake and as an installable Zig artifact.
 - Removed research stack: decoder, provider registry, semantic extractor,
   summarizer, static label bank, fact layer, label-bucket graph, and
   mode-selected deep consolidation remain preserved in git but not shipped.
@@ -18,7 +18,7 @@ tag should point at the commit that contains this artifact.
 
 ## Version Surfaces
 
-The tracked package surfaces report `1.1.0`:
+The tracked package surfaces report `1.1.6`:
 
 - `CMakeLists.txt`
 - `bindings/python/pyproject.toml`
@@ -31,7 +31,8 @@ The tracked package surfaces report `1.1.0`:
 
 ## Fix Train
 
-v1.1.0 ships the release-hardening fixes completed after v1.0:
+v1.1.6 ships the release-hardening fixes completed after v1.0 plus the patch
+train through the public CLI release:
 
 - Fixed graph-retrieval temporal decay overflow/stale-recency behavior and
   recorded the frozen replay A/B result.
@@ -58,17 +59,25 @@ v1.1.0 ships the release-hardening fixes completed after v1.0:
 - Documented store/transaction single-owner semantics and one-writer-per-DB
   runtime ownership; schema migrations now take `BEGIN IMMEDIATE` before
   reading applied migration IDs.
+- Fixed ephemeral public `ProcessText` retrieval so no-storage queries still
+  run retrieval and hydrate returned context.
+- Added embedding-band belief revision: durable corrections write
+  knob-derived, modality-agnostic `supersedes` edges and retrieval demotes
+  superseded stale memories without deleting history.
+- Added `cortext_cli` with durable `remember`, ephemeral `recall`,
+  consolidation, and REPL commands; CMake builds it under
+  `CORTEXT_BUILD_TOOLS=ON`, and Zig installs it to `zig-out/bin`.
 
 ## Current Evidence
 
-The v1.1.0 public evidence inherits the v1.0 hosted Meta Multi-Session Chat
+The v1.1.6 public evidence inherits the v1.0 hosted Meta Multi-Session Chat
 eval, the 128k RAG ablation, and the post-optimization full replay verification.
 The cited aggregate artifacts are tracked under `docs/paper/artifacts/`; full
 protocol details are recorded in `docs/paper/sections/9_experimental.qmd`,
 `docs/paper/sections/11_optimization.qmd`, and the generated manuscript at
 `docs/paper/_manuscript/index.md`.
 
-Additional v1.1.0 local verification recorded during the fix train:
+Additional v1.1.6 local verification recorded during the fix train:
 
 - Full `ctest --test-dir build-test -R cortext_tests --output-on-failure`
   passed after the test-integrity work.
@@ -83,8 +92,10 @@ Additional v1.1.0 local verification recorded during the fix train:
 ```bash
 cmake -S . -B build/release \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+  -DCORTEXT_DISABLE_OPENTELEMETRY=ON \
+  -DCORTEXT_BUILD_TOOLS=ON
 cmake --build build/release -j
+./build/release/tools/cli/cortext_cli --help
 ./build/release/tests/cortext_tests '~[aist]' --reporter compact
 ```
 
@@ -103,7 +114,18 @@ cmake --build --preset ffi-release-node --target cortext cortext_node -j
 (cd bindings/dart && dart pub get && dart analyze && dart test)
 python3 -m py_compile bindings/python/cortext/__init__.py
 node --check bindings/javascript/index.js bindings/wasm/cortext.js examples/web/main.js
-node -e "const c=require('./bindings/javascript'); if (c.version() !== '1.1.0') process.exit(1)"
+node -e "const c=require('./bindings/javascript'); if (c.version() !== '1.1.6') process.exit(1)"
+```
+
+## Zig CLI Gate
+
+```bash
+zig build -Dshared=false -Dcli=true -Dfetch-aist-model=false
+test -x zig-out/bin/cortext_cli || test -s zig-out/bin/cortext_cli.exe
+zig build -Dtarget=x86_64-linux-gnu -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-windows-gnu -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=x86_64-macos -Dshared=false -Dcli=true -Dfetch-aist-model=false
+zig build -Dtarget=aarch64-macos -Dshared=false -Dcli=true -Dfetch-aist-model=false
 ```
 
 ## Browser WebAssembly Gate
@@ -125,6 +147,7 @@ deterministic model-free CI where applicable:
 - Debug ASan+UBSan non-AIST job.
 - Browser WebAssembly bundle build.
 - Zig host and Linux cross-build smoke checks.
+- Zig-installed `cortext_cli` checked on Ubuntu, macOS, and Windows runners.
 
 ## Documentation Gate
 

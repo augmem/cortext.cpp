@@ -1,6 +1,6 @@
 .{
     .name = .cortext,
-    .version = "1.1.0",
+    .version = "1.1.6",
     .fingerprint = 0x474dfffd9e64ddfb, // Changing this has security and trust implications.
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
@@ -23,6 +23,7 @@
         "include",
         "scripts",
         "src",
+        "tools/cli",
         "third_party/sqlite",
         "third_party/sqlite-objstore",
         "third_party/sqlite-vec",
