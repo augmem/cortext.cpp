@@ -2,7 +2,7 @@
   "arms": {
     "control": {
       "artifact": "eval_runs/neuromodulator_mechanism_sweep_20260706T232135Z/control/judge.json",
-      "delta_sufficiency_vs_measured_control": 0.0,
+      "delta_sufficiency_vs_control": 0.0,
       "judged": 39,
       "judgment_complete": true,
       "mean_context_tokens": 754.7692307692307,
@@ -15,7 +15,7 @@
     },
     "emotion_mood_threshold_cascade": {
       "artifact": "eval_runs/neuromodulator_mechanism_sweep_20260706T232135Z/emotion_mood_threshold_cascade/judge.json",
-      "delta_sufficiency_vs_measured_control": -0.02692307692307594,
+      "delta_sufficiency_vs_control": -0.02692307692307594,
       "judged": 39,
       "judgment_complete": true,
       "mean_context_tokens": 751.025641025641,
@@ -28,7 +28,7 @@
     },
     "encode_retrieve_oscillator": {
       "artifact": "eval_runs/neuromodulator_mechanism_sweep_20260706T232135Z/encode_retrieve_oscillator/judge.json",
-      "delta_sufficiency_vs_measured_control": -0.026923076923076827,
+      "delta_sufficiency_vs_control": -0.026923076923076827,
       "judged": 39,
       "judgment_complete": true,
       "mean_context_tokens": 754.7692307692307,
@@ -41,7 +41,7 @@
     },
     "neuromodulator_effect_scales": {
       "artifact": "eval_runs/neuromodulator_mechanism_sweep_20260706T232135Z/neuromodulator_effect_scales/judge.json",
-      "delta_sufficiency_vs_measured_control": -0.219230769230768,
+      "delta_sufficiency_vs_control": -0.219230769230768,
       "judged": 39,
       "judgment_complete": true,
       "mean_context_tokens": 754.5641025641025,
@@ -54,7 +54,7 @@
     },
     "synaptic_tagging": {
       "artifact": "eval_runs/neuromodulator_mechanism_sweep_20260706T232135Z/synaptic_tagging/judge.json",
-      "delta_sufficiency_vs_measured_control": 0.10128205128205181,
+      "delta_sufficiency_vs_control": 0.10128205128205181,
       "judged": 39,
       "judgment_complete": true,
       "mean_context_tokens": 758.5641025641025,
