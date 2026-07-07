@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortext"
-version = "1.1.0"
+version = "1.1.1"
 description = "Python bindings for the Cortext native library"
 readme = "README.md"
 requires-python = ">=3.10"
