@@ -202,11 +202,13 @@ done
 
 python3 - "${ROOT}" "${ARMS}" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
 arms = [item for item in sys.argv[2].split(",") if item]
+judge_repetitions = int(os.environ.get("JUDGE_REPETITIONS", "1"))
 legacy_control = {
     "wins": 22,
     "judged": 39,
@@ -241,7 +243,7 @@ summary = {
         "max_dialogs": 25,
         "warmup_events": 20,
         "probe_stride": 30,
-        "judge_repetitions": 1,
+        "judge_repetitions": judge_repetitions,
         "control_reference": control,
         "legacy_june_control_reference": legacy_control,
         "verdict_rules": {
@@ -266,7 +268,9 @@ for arm in arms:
     suff = quality.get("mean_sufficiency")
     control_suff = control.get("mean_sufficiency")
     delta = None if suff is None or control_suff is None else suff - control_suff
-    if delta is None:
+    if arm == "control" and delta == 0:
+        reading = "measured_control"
+    elif delta is None:
         reading = "missing"
     elif abs(delta) < 0.15:
         reading = "null"
