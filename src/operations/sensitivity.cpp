@@ -4,6 +4,7 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "../experimental_env.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -102,6 +103,13 @@ Entropy (const std::vector<double> &p)
         }
     }
   return h;
+}
+
+inline bool
+AffectThresholdCascadeDisabled ()
+{
+  return internal::experimental_env::Flag (
+      "CORTEXT_DISABLE_EMOTION_MOOD_THRESHOLD_CASCADE");
 }
 } // namespace
 
@@ -220,8 +228,10 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
   // ΔT_emo = − κ_emo × emotion_intensity × (0.5 + 0.5 × arousal)
   const double kappa_emo = core::AffectThresholdGain (cfg.sensitivity);
   const double delta_T_emo
-      = -kappa_emo * emotion_intensity
-        * (constants::kOneHalf + constants::kOneHalf * arousal);
+      = AffectThresholdCascadeDisabled ()
+            ? 0.0
+            : -kappa_emo * emotion_intensity
+                  * (constants::kOneHalf + constants::kOneHalf * arousal);
   context.SetDeltaThresholdEmotion (delta_T_emo);
 
   // Sensitivity-based threshold adjustment (knob-derived)
@@ -341,7 +351,8 @@ UpdateMood::Execute (OperationContext &context, Transaction &tx) const
 
   // Compute threshold delta: ΔT_mood = −κ_mood × clamp(m_norm, 0, 1)
   const double kappa_mood = core::AffectThresholdGain (cfg.sensitivity);
-  const double delta_T_mood = -kappa_mood * m_norm;
+  const double delta_T_mood
+      = AffectThresholdCascadeDisabled () ? 0.0 : -kappa_mood * m_norm;
   context.SetDeltaThresholdMood (delta_T_mood);
 
   telemetry::LogDebug("cortext.update_mood", {

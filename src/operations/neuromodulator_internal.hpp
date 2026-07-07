@@ -6,10 +6,18 @@
 namespace cortext::operations::neuromodulation
 {
 
+inline bool
+EffectScalesDisabled ()
+{
+  return internal::experimental_env::Flag (
+      "CORTEXT_DISABLE_NEUROMODULATOR_EFFECT_SCALES");
+}
+
 inline double
 WriteThresholdScale (double neuromod_ne)
 {
-  if (internal::experimental_env::Flag (
+  if (EffectScalesDisabled ()
+      || internal::experimental_env::Flag (
           "CORTEXT_DISABLE_NEUROMOD_WRITE_SCALE"))
     {
       return 1.0;
@@ -21,7 +29,8 @@ WriteThresholdScale (double neuromod_ne)
 inline double
 ReconsolidationScale (double neuromod_ach)
 {
-  if (internal::experimental_env::Flag (
+  if (EffectScalesDisabled ()
+      || internal::experimental_env::Flag (
           "CORTEXT_DISABLE_NEUROMOD_RECONSOLIDATION_SCALE"))
     {
       return 1.0;
@@ -32,7 +41,8 @@ ReconsolidationScale (double neuromod_ach)
 inline double
 RetrievalCompetitionScale (double neuromod_ne)
 {
-  if (internal::experimental_env::Flag (
+  if (EffectScalesDisabled ()
+      || internal::experimental_env::Flag (
           "CORTEXT_DISABLE_NEUROMOD_COMPETITION_SCALE"))
     {
       return 1.0;
@@ -43,7 +53,8 @@ RetrievalCompetitionScale (double neuromod_ne)
 inline double
 ValueUpdateGain (double neuromod_da)
 {
-  if (internal::experimental_env::Flag (
+  if (EffectScalesDisabled ()
+      || internal::experimental_env::Flag (
           "CORTEXT_DISABLE_NEUROMOD_VALUE_GAIN"))
     {
       return 1.0;
