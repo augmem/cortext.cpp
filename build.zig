@@ -424,6 +424,11 @@ pub fn build(b: *std.Build) void {
         mod.addCMacro("_DARWIN_C_SOURCE", "1");
         mod.addCMacro("EIGEN_ALLOCA", "__builtin_alloca");
     }
+    if (target.result.os.tag == .windows and
+        (target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .x86))
+    {
+        mod.addCMacro("EIGEN_DONT_VECTORIZE", "1");
+    }
 
     if (!enable_ggml and !unsupported_text_only) {
         fail(b, "-Dggml=false requires -Dunsupported-text-only=true");
