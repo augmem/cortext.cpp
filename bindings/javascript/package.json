@@ -1,6 +1,6 @@
 {
   "name": "cortext-js",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "JavaScript and TypeScript bindings for the Cortext native library",
   "main": "index.js",
   "types": "index.d.ts",
