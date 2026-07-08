@@ -113,6 +113,36 @@ The resulting databases each contained 115 `reinforces` edges and 34
 normal harness run. This is a local no-regression smoke screen for retrieval
 mechanics, not a blind-judge quality result.
 
+On 2026-07-08, the public retention path was re-screened after fixing
+`Retention::Ephemeral` to force a processing boundary without granting durable
+write permission. The focused regression suite verified that public ephemeral
+queries retrieve durable API memories, expose a boundary packet, and leave
+memory and signal counts unchanged. A CLI smoke test stored "The garage door
+code is 8841.", ran an ephemeral `recall "garage door code"`, retrieved the
+stored memory, and confirmed the SQLite memory/signal counts were unchanged
+before and after recall.
+
+The same patch was run through the normalized memory-eval smoke slice with all
+configured benchmark adapters, using durable history ingestion and ephemeral
+queries through the public API:
+
+```bash
+scripts/run_memory_evals.py --profile smoke --benchmarks all --no-prepare \
+  --out logs/memory_evals/release_1_1_10_smoke_20260708T043734Z \
+  --max-episodes 1 --max-queries 1 --answer-mode none
+
+scripts/run_memory_eval_judges.py \
+  --run logs/memory_evals/release_1_1_10_smoke_20260708T043734Z \
+  --judges packet,codex,grok,agy --include-unavailable --timeout-s 180
+```
+
+The smoke slice returned nonempty retrieval packets for every query
+(`queries=6`, aggregate `retrieved_count=66`, `retrieval_empty=0`).
+Packet-answer accuracy stayed at 0.0 over the scored slice, while the Codex,
+Grok, and Antigravity adapters each scored 0.2 over five scored queries. This
+is a regression check for public ephemeral retrieval and harness wiring, not a
+state-of-the-art quality claim.
+
 ## Retrieval Behavior After Removal
 
 The highest-risk behavioral regression was graph retrieval. Removing semantic

@@ -346,7 +346,13 @@ ApplyRetrievalScore (Cortext::Context::Memory &memory,
 }
 
 inline bool
-ShouldPreserveDurableInput (Retention retention)
+ShouldForceInputBoundary (Retention retention)
+{
+  return retention == Retention::Durable || retention == Retention::Ephemeral;
+}
+
+inline bool
+ShouldForceDurableWrite (Retention retention)
 {
   return retention == Retention::Durable;
 }
@@ -1411,8 +1417,8 @@ struct Cortext::Impl
     s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp != 0 ? timestamp : NowMillis ();
     s.source_id = source_id;
-    s.force_boundary = ShouldPreserveDurableInput (retention);
-    s.force_write = ShouldPreserveDurableInput (retention);
+    s.force_boundary = ShouldForceInputBoundary (retention);
+    s.force_write = ShouldForceDurableWrite (retention);
     s.retention = retention;
     s.payload = std::vector<unsigned char> (text.begin (), text.end ());
     s.modality = "text";
@@ -1885,8 +1891,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -1941,8 +1947,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp;
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -2010,8 +2016,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   // Store raw PCM bytes (f32le) as payload
   const std::size_t byte_len = num_samples * sizeof (float);
@@ -2087,8 +2093,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.modality = "audio";
   ApplyStoredMedia (s, media);
@@ -2157,8 +2163,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   // Store raw image bytes as payload
   const std::size_t byte_len
@@ -2235,8 +2241,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.modality = "image";
   ApplyStoredMedia (s, media);
@@ -2362,8 +2368,8 @@ internal::ReplayIngress::ProcessTextAt (Cortext &cortext,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -2435,8 +2441,8 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   const std::size_t byte_len = num_samples * sizeof (float);
   s.payload = std::vector<unsigned char> (byte_len);
@@ -2512,8 +2518,8 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldPreserveDurableInput (retention);
-  s.force_write = ShouldPreserveDurableInput (retention);
+  s.force_boundary = ShouldForceInputBoundary (retention);
+  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   const std::size_t byte_len
       = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)

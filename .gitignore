@@ -133,6 +133,7 @@ objects/
 data/
 !data/
 data/raw/
+data/memory_evals/
 data/emotion/
 data/ravdess/
 models/

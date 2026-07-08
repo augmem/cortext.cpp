@@ -21,6 +21,8 @@ Links: [Releases](https://github.com/augmem/cortext/releases) /
 
 ## Recent Changes
 
+- `v1.1.10`: public `Retention::Ephemeral` calls force a retrieval boundary
+  without writing the query, so CLI/package recall works as documented.
 - `v1.1.9`: package examples use real OpenAI Chat Completions message arrays.
 - `v1.1.8`: PyPI and npm packages ship cross-platform native libraries/addons
   and download the verified AIST q8_0 model into a user cache on first use.
