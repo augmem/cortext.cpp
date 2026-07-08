@@ -245,6 +245,9 @@ TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
   auto recalled = ctx->ProcessTextAt (
       query, "query/public", 2000ULL, cortext::Retention::Ephemeral);
 
+  REQUIRE (recalled.at_boundary);
+  REQUIRE (recalled.boundary_score.has_value ());
+  REQUIRE (*recalled.boundary_score == 1.0);
   REQUIRE_FALSE (recalled.retrieved_memory.empty ());
   bool found_seeded_memory = false;
   for (const auto &memory : recalled.retrieved_memory)
@@ -252,6 +255,59 @@ TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
       found_seeded_memory = found_seeded_memory || memory.id == kMemoryId;
     }
   REQUIRE (found_seeded_memory);
+  REQUIRE_FALSE (recalled.output.stored_memory_id.has_value ());
+  REQUIRE_FALSE (recalled.output.stored_signal_id.has_value ());
+
+  const auto after_memories
+      = store->Execute ("SELECT COUNT(*) AS n FROM memories");
+  const auto after_signals
+      = store->Execute ("SELECT COUNT(*) AS n FROM signals");
+  REQUIRE (AnyToLongLong (after_memories[0].at ("n"))
+           == AnyToLongLong (before_memories[0].at ("n")));
+  REQUIRE (AnyToLongLong (after_signals[0].at ("n"))
+           == AnyToLongLong (before_signals[0].at ("n")));
+}
+
+TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
+           "[cortext][retention][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+
+  auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store));
+  REQUIRE (ctx != nullptr);
+
+  auto ingest = ctx->ProcessTextAt ("The garage door code is 8841.",
+                                    "notes/main", 1000ULL,
+                                    cortext::Retention::Durable);
+  REQUIRE (ingest.output.stored_memory_id.has_value ());
+  REQUIRE (ingest.output.stored_signal_id.has_value ());
+
+  const auto before_memories
+      = store->Execute ("SELECT COUNT(*) AS n FROM memories");
+  const auto before_signals
+      = store->Execute ("SELECT COUNT(*) AS n FROM signals");
+
+  auto recalled = ctx->ProcessTextAt (
+      "garage door code", "query/public", 2000ULL,
+      cortext::Retention::Ephemeral);
+
+  REQUIRE (recalled.at_boundary);
+  REQUIRE (recalled.boundary_score.has_value ());
+  REQUIRE (*recalled.boundary_score == 1.0);
+  REQUIRE_FALSE (recalled.retrieved_memory.empty ());
+  bool found_code = false;
+  for (const auto &memory : recalled.retrieved_memory)
+    {
+      found_code = found_code || TextFromMemory (memory).find ("8841")
+                                      != std::string::npos;
+    }
+  REQUIRE (found_code);
   REQUIRE_FALSE (recalled.output.stored_memory_id.has_value ());
   REQUIRE_FALSE (recalled.output.stored_signal_id.has_value ());
 
