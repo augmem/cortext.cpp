@@ -18,9 +18,10 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from augmem.hermes.media import (
   MediaSignal,
@@ -136,6 +137,8 @@ def _default_config() -> dict[str, Any]:
     "auto_consolidate": True,
     "ingest_tool_results": True,
     "ingest_media": True,  # screenshots, images, audio across all seams
+    # Remote http(s) media fetch is off by default (SSRF / untrusted URLs).
+    "fetch_remote_media": False,
   }
 
 
@@ -214,6 +217,11 @@ class CortextMemoryProvider(MemoryProvider):
     self._agent_id = DEFAULT_AGENT_ID
     self._engine: Any | None = None
     self._db_path: Path | None = None
+    # Single worker + queue so hooks never block joining a prior ingest thread.
+    self._ingest_queue: queue.Queue[Callable[[], None] | None] = queue.Queue()
+    self._ingest_worker: threading.Thread | None = None
+    self._ingest_worker_lock = threading.Lock()
+    # Kept for tests/live harness that wait on background completion.
     self._bg_thread: threading.Thread | None = None
     self._prefetch_lock = threading.Lock()
     self._cached_prefetch = ""
@@ -278,6 +286,7 @@ class CortextMemoryProvider(MemoryProvider):
       "seam_post_llm",
       "ingest_tool_results",
       "ingest_media",
+      "fetch_remote_media",
     }
     for key, value in values.items():
       if key in {"focus", "sensitivity", "stability"}:
@@ -416,11 +425,13 @@ class CortextMemoryProvider(MemoryProvider):
     signals: list[MediaSignal] = []
     task_text = (task or "").strip()
     result_text = (result or "").strip()
+    allow_remote = self._fetch_remote_media()
     if task_text:
       signals.extend(
         extract_from_content_parts(
           task_text[:_MAX_TOOL_RESULT_CHARS],
           source_id_base=self._source_id("agent", "delegation", "task"),
+          allow_remote_url=allow_remote,
         )
       )
     if result_text:
@@ -428,6 +439,7 @@ class CortextMemoryProvider(MemoryProvider):
         extract_from_content_parts(
           result_text[:_MAX_TOOL_RESULT_CHARS],
           source_id_base=self._source_id("agent", "delegation", "result"),
+          allow_remote_url=allow_remote,
         )
       )
     if signals:
@@ -522,9 +534,12 @@ class CortextMemoryProvider(MemoryProvider):
     agent_base = self._source_id("agent", "turn", turn, session_id=sid)
 
     signals: list[MediaSignal] = []
+    allow_remote = self._fetch_remote_media()
 
     user_signals = extract_from_content_parts(
-      user_content, source_id_base=user_base
+      user_content,
+      source_id_base=user_base,
+      allow_remote_url=allow_remote,
     )
     user_text = next(
       (s.text for s in user_signals if s.modality == "text" and s.text),
@@ -537,7 +552,11 @@ class CortextMemoryProvider(MemoryProvider):
       signals.extend(user_signals)
 
     signals.extend(
-      extract_from_content_parts(assistant_content, source_id_base=agent_base)
+      extract_from_content_parts(
+        assistant_content,
+        source_id_base=agent_base,
+        allow_remote_url=allow_remote,
+      )
     )
 
     if messages and _as_bool(self._config.get("ingest_tool_results"), True):
@@ -546,6 +565,7 @@ class CortextMemoryProvider(MemoryProvider):
           messages,
           user_source=user_base,
           agent_source=agent_base,
+          allow_remote_url=allow_remote,
         )
       )
 
@@ -595,9 +615,15 @@ class CortextMemoryProvider(MemoryProvider):
       m for m in messages if isinstance(m, dict) and m.get("role") == "user"
     ][-3:]
     signals: list[MediaSignal] = []
+    allow_remote = self._fetch_remote_media()
     for msg in user_msgs:
       signals.extend(
-        extract_from_message(msg, role="user", source_id_base=base)
+        extract_from_message(
+          msg,
+          role="user",
+          source_id_base=base,
+          allow_remote_url=allow_remote,
+        )
       )
     if not signals:
       return ""
@@ -627,6 +653,15 @@ class CortextMemoryProvider(MemoryProvider):
 
   def shutdown(self) -> None:
     self._join_background(timeout=5.0)
+    # Stop the ingest worker after draining pending jobs.
+    try:
+      self._ingest_queue.put_nowait(None)
+    except Exception:
+      pass
+    worker = self._ingest_worker
+    if worker is not None and worker.is_alive():
+      worker.join(timeout=2.0)
+    self._bg_thread = None
     engine = self._engine
     self._engine = None
     if engine is None:
@@ -714,27 +749,75 @@ class CortextMemoryProvider(MemoryProvider):
       return DEFAULT_TOP_K
 
   def _join_background(self, *, timeout: float) -> None:
-    if self._bg_thread and self._bg_thread.is_alive():
-      self._bg_thread.join(timeout=timeout)
-    self._bg_thread = None
+    """Wait until queued ingest work that is ahead of this call drains."""
+    if self._ingest_worker is None and self._ingest_queue.empty():
+      return
+    done = threading.Event()
+
+    def _mark_done() -> None:
+      done.set()
+
+    self._ensure_ingest_worker()
+    self._ingest_queue.put(_mark_done)
+    done.wait(timeout=max(0.0, timeout))
+    self._bg_thread = self._ingest_worker
 
   def _media_enabled(self) -> bool:
     return _as_bool(self._config.get("ingest_media"), True)
+
+  def _fetch_remote_media(self) -> bool:
+    return _as_bool(self._config.get("fetch_remote_media"), False)
+
+  def _ensure_ingest_worker(self) -> None:
+    with self._ingest_worker_lock:
+      if self._ingest_worker is not None and self._ingest_worker.is_alive():
+        self._bg_thread = self._ingest_worker
+        return
+
+      def _worker() -> None:
+        while True:
+          job = self._ingest_queue.get()
+          if job is None:
+            self._ingest_queue.task_done()
+            with self._ingest_worker_lock:
+              self._ingest_worker = None
+              self._bg_thread = None
+            return
+          try:
+            job()
+          except Exception as exc:
+            logger.warning("Cortext ingest worker job failed: %s", exc)
+          finally:
+            self._ingest_queue.task_done()
+
+      self._ingest_worker = threading.Thread(
+        target=_worker, name="cortext-ingest", daemon=True
+      )
+      self._ingest_worker.start()
+      self._bg_thread = self._ingest_worker
 
   def _signals_from_user_payload(
     self, message: Any, *, source_id_base: str, **kwargs: Any
   ) -> list[MediaSignal]:
     """Build multimodal signals from on_turn_start message + kwargs."""
+    allow_remote = self._fetch_remote_media()
     signals: list[MediaSignal] = []
     if isinstance(message, dict):
       signals.extend(
         extract_from_message(
-          message, role="user", source_id_base=source_id_base
+          message,
+          role="user",
+          source_id_base=source_id_base,
+          allow_remote_url=allow_remote,
         )
       )
     else:
       signals.extend(
-        extract_from_content_parts(message, source_id_base=source_id_base)
+        extract_from_content_parts(
+          message,
+          source_id_base=source_id_base,
+          allow_remote_url=allow_remote,
+        )
       )
 
     if not self._media_enabled():
@@ -756,13 +839,17 @@ class CortextMemoryProvider(MemoryProvider):
             )
           if ref:
             sig = media_signal_from_ref(
-              ref, source_id=f"{source_id_base}/{key}/{i}"
+              ref,
+              source_id=f"{source_id_base}/{key}/{i}",
+              allow_remote_url=allow_remote,
             )
             if sig:
               signals.append(sig)
       elif isinstance(blob, str) and blob.strip():
         sig = media_signal_from_ref(
-          blob, source_id=f"{source_id_base}/{key}"
+          blob,
+          source_id=f"{source_id_base}/{key}",
+          allow_remote_url=allow_remote,
         )
         if sig:
           signals.append(sig)
@@ -776,7 +863,11 @@ class CortextMemoryProvider(MemoryProvider):
     mark_user_key: str | None = None,
     also_warm_prefetch: str | None = None,
   ) -> None:
-    """Non-blocking multimodal write path (text / image / audio)."""
+    """Non-blocking multimodal write path (text / image / audio).
+
+    Enqueues work on a single background worker so callers never join a
+    previous ingest thread (tight tool-loops must stay unblocked).
+    """
     if not items or not self._engine:
       return
     if not self._should_write():
@@ -828,10 +919,8 @@ class CortextMemoryProvider(MemoryProvider):
       except Exception as exc:
         logger.warning("Cortext ingest failed: %s", exc)
 
-    if self._bg_thread and self._bg_thread.is_alive():
-      self._bg_thread.join(timeout=5.0)
-    self._bg_thread = threading.Thread(target=_work, daemon=True)
-    self._bg_thread.start()
+    self._ensure_ingest_worker()
+    self._ingest_queue.put(_work)
 
   def _process(
     self,

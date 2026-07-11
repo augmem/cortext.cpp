@@ -70,7 +70,8 @@ UpdateAccumulator::Execute (OperationContext &context,
             ? static_cast<int64_t> (p_ctx.episode_start_ts)
             : 0;
   // Ephemeral queries must not grow storable accumulator units.
-  const bool track_durable_signal = signal.retention != Retention::Ephemeral;
+  // True for Natural/Boundary/Durable (everything that may persist signals).
+  const bool track_storable_signal = signal.retention != Retention::Ephemeral;
   context.SetInterruptAborted (false);
 
   // Use drift step for accumulation (Section 4.4.2)
@@ -106,14 +107,14 @@ UpdateAccumulator::Execute (OperationContext &context,
       state.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      if (track_durable_signal)
+      if (track_storable_signal)
         {
           state.signals.push_back (
               CreateSignalRecord (signal, 0.0, 0, context, tx));
         }
 
       // Track primary modality (v2: first modality wins)
-      if (track_durable_signal)
+      if (track_storable_signal)
         {
           state.primary_modality = signal.modality;
         }
@@ -208,14 +209,14 @@ UpdateAccumulator::Execute (OperationContext &context,
       acc.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      if (track_durable_signal)
+      if (track_storable_signal)
         {
           acc.signals.push_back (
               CreateSignalRecord (signal, 0.0, 0, context, tx));
         }
 
       // Track primary modality (v2: first modality wins)
-      if (track_durable_signal)
+      if (track_storable_signal)
         {
           acc.primary_modality = signal.modality;
         }
@@ -267,7 +268,7 @@ UpdateAccumulator::Execute (OperationContext &context,
 
   // Track signal for SIGNALS table (Section 4.4)
   // Serial position is the current signal count before accumulation
-  if (track_durable_signal)
+  if (track_storable_signal)
     {
       const int serial_pos = static_cast<int> (acc.signals.size ());
       acc.signals.push_back (
@@ -275,7 +276,7 @@ UpdateAccumulator::Execute (OperationContext &context,
     }
 
   // Track primary modality (v2: first modality wins)
-  if (track_durable_signal && acc.primary_modality.empty ())
+  if (track_storable_signal && acc.primary_modality.empty ())
     {
       acc.primary_modality = signal.modality;
     }

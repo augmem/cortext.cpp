@@ -334,12 +334,14 @@ TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
   REQUIRE (ctx != nullptr);
 
   // Omitted retention defaults to Natural: does not force explicit_turn.
+  // boundary_score can legitimately hit 1.0 under natural algorithms, so
+  // assert on boundary_type rather than score as the force diagnostic.
   auto natural = ctx->ProcessTextAt (
       "Streaming token about weather.", "stream/main", 1000ULL);
-  const bool natural_forced
-      = natural.at_boundary && natural.boundary_score.has_value ()
-        && *natural.boundary_score == 1.0;
-  REQUIRE_FALSE (natural_forced);
+  if (natural.boundary_type.has_value ())
+    {
+      REQUIRE (*natural.boundary_type != "explicit_turn");
+    }
 
   auto durable = ctx->ProcessTextAt (
       "The garage door code is 8841.", "chat/main", 2000ULL,
@@ -347,6 +349,8 @@ TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
   REQUIRE (durable.at_boundary);
   REQUIRE (durable.boundary_score.has_value ());
   REQUIRE (*durable.boundary_score == 1.0);
+  REQUIRE (durable.boundary_type.has_value ());
+  REQUIRE (*durable.boundary_type == "explicit_turn");
   REQUIRE (durable.output.stored_memory_id.has_value ());
 
   auto boundary = ctx->ProcessTextAt (
@@ -355,11 +359,15 @@ TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
   REQUIRE (boundary.at_boundary);
   REQUIRE (boundary.boundary_score.has_value ());
   REQUIRE (*boundary.boundary_score == 1.0);
+  REQUIRE (boundary.boundary_type.has_value ());
+  REQUIRE (*boundary.boundary_type == "explicit_turn");
 
   auto ephemeral = ctx->ProcessTextAt (
       "garage door code", "query/main", 4000ULL,
       cortext::Retention::Ephemeral);
   REQUIRE (ephemeral.at_boundary);
+  REQUIRE (ephemeral.boundary_type.has_value ());
+  REQUIRE (*ephemeral.boundary_type == "explicit_turn");
   REQUIRE_FALSE (ephemeral.output.stored_memory_id.has_value ());
 }
 

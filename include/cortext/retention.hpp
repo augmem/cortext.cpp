@@ -19,10 +19,10 @@ namespace cortext
 ///   Live context and retrieval still run; the write path must not persist.
 enum class Retention
 {
-  Natural,
-  Durable,
-  Boundary,
-  Ephemeral,
+  Natural = 0,
+  Durable = 1,
+  Boundary = 2,
+  Ephemeral = 3,
 };
 
 } // namespace cortext

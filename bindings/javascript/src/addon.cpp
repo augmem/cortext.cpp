@@ -1,5 +1,7 @@
 #include <node_api.h>
 
+#include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -179,6 +181,11 @@ ParseRetentionProperty (napi_env env, napi_value value, int &out)
         {
           return false;
         }
+      // Reject NaN/Inf and non-integers (e.g. 1.9 must not truncate to 1).
+      if (!std::isfinite (number) || std::floor (number) != number)
+        {
+          return false;
+        }
       const int code = static_cast<int> (number);
       if (code < CORTEXT_RETENTION_NATURAL
           || code > CORTEXT_RETENTION_EPHEMERAL)
@@ -204,22 +211,28 @@ ParseRetentionProperty (napi_env env, napi_value value, int &out)
           return false;
         }
       text.resize (length);
-      if (text == "natural")
+      std::string lower;
+      lower.reserve (text.size ());
+      for (unsigned char ch : text)
+        {
+          lower.push_back (static_cast<char> (std::tolower (ch)));
+        }
+      if (lower == "natural")
         {
           out = CORTEXT_RETENTION_NATURAL;
           return true;
         }
-      if (text == "durable")
+      if (lower == "durable")
         {
           out = CORTEXT_RETENTION_DURABLE;
           return true;
         }
-      if (text == "boundary")
+      if (lower == "boundary")
         {
           out = CORTEXT_RETENTION_BOUNDARY;
           return true;
         }
-      if (text == "ephemeral")
+      if (lower == "ephemeral")
         {
           out = CORTEXT_RETENTION_EPHEMERAL;
           return true;

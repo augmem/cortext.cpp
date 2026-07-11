@@ -153,6 +153,8 @@ Cortext embeds **text, images (screenshots), and audio** in one space:
 
 Image decode uses Pillow (declared dependency). Long image edges are capped at
 2048px for low latency. Media can be disabled with `"ingest_media": false`.
+Remote `http(s)` media URLs are **not** fetched by default (SSRF safety); set
+`"fetch_remote_media": true` only when you trust conversation content.
 
 User text ingested at `on_turn_start` is **not** written again in `sync_turn`
 (deduped by content hash). Non-primary contexts (`cron`, `subagent`, `flush`)

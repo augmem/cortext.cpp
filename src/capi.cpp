@@ -1088,6 +1088,9 @@ context_to_json (const cortext::Cortext::Context &ctx,
     { "boundary_score",
       ctx.boundary_score.has_value () ? nlohmann::json (*ctx.boundary_score)
                                       : nlohmann::json (nullptr) },
+    { "boundary_type",
+      ctx.boundary_type.has_value () ? nlohmann::json (*ctx.boundary_type)
+                                     : nlohmann::json (nullptr) },
     { "output", std::move (output) },
     { "encode_ms", ctx.encode_ms },
     { "process_ms", ctx.process_ms },

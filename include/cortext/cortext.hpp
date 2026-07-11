@@ -135,6 +135,9 @@ public:
     double interrupt_gate_boundary_mult_eff = 0.0;
     double interrupt_gate_affect_drive = 0.0;
     std::optional<double> boundary_score;
+    /// @brief Boundary trigger label when at_boundary (e.g. explicit_turn,
+    /// timeout, drift). Empty when no boundary was taken.
+    std::optional<std::string> boundary_type;
     ProcessorOutput output;
     double encode_ms = 0.0;
     double process_ms = 0.0;

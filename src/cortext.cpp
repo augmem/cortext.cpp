@@ -1549,7 +1549,8 @@ struct Cortext::Impl
         out.interrupt_gate_boundary_mult_eff;
     result.interrupt_gate_affect_drive = out.interrupt_gate_affect_drive;
     result.boundary_score = out.boundary_score;
-    
+    result.boundary_type = out.boundary_type;
+
     // Populate output metrics
     result.output.composite_score = out.composite_score;
     result.output.threshold = out.threshold_T_dynamic;
