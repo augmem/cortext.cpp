@@ -206,17 +206,17 @@ extern "C"
 
   /// @brief Retention policy for process ingress (matches cortext::Retention).
   ///
-  /// CORTEXT_RETENTION_DURABLE (0): force turn boundary + force write.
-  /// CORTEXT_RETENTION_EPHEMERAL (1): never store; force retrieval boundary.
-  /// CORTEXT_RETENTION_NATURAL (2): default when omitted; episode algorithms
+  /// CORTEXT_RETENTION_NATURAL (0): default when omitted; episode algorithms
   /// decide boundary and write acceptance.
-  /// CORTEXT_RETENTION_BOUNDARY (3): force turn boundary only.
+  /// CORTEXT_RETENTION_DURABLE (1): force turn boundary + force write.
+  /// CORTEXT_RETENTION_BOUNDARY (2): force turn boundary only.
+  /// CORTEXT_RETENTION_EPHEMERAL (3): never store; force retrieval boundary.
   typedef enum cortext_retention
   {
-    CORTEXT_RETENTION_DURABLE = 0,
-    CORTEXT_RETENTION_EPHEMERAL = 1,
-    CORTEXT_RETENTION_NATURAL = 2,
-    CORTEXT_RETENTION_BOUNDARY = 3
+    CORTEXT_RETENTION_NATURAL = 0,
+    CORTEXT_RETENTION_DURABLE = 1,
+    CORTEXT_RETENTION_BOUNDARY = 2,
+    CORTEXT_RETENTION_EPHEMERAL = 3
   } cortext_retention;
 
   /// @brief Options for JSON process result payloads.

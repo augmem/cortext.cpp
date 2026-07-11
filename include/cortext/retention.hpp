@@ -19,11 +19,11 @@ namespace cortext
 ///   Live context and retrieval still run; the write path must not persist.
 enum class Retention
 {
-  // Keep the v1.1.10 values stable for already-compiled C++ callers.
-  Durable = 0,
-  Ephemeral = 1,
-  Natural = 2,
-  Boundary = 3,
+  // Zero-initialized signals must take the gated, non-forcing path.
+  Natural = 0,
+  Durable = 1,
+  Boundary = 2,
+  Ephemeral = 3,
 };
 
 /// @brief Whether retention creates an explicit turn boundary.
