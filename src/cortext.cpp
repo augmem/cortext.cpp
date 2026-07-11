@@ -2730,13 +2730,16 @@ struct StreamingTextProbeSession::Impl
     if (text.empty () || !has_cached_embedding
         || aggregate_embedding_sum.size () == 0)
       {
-        return timestamp != 0 ? cortext->ProcessTextAt (text, source_id, timestamp)
-                              : cortext->ProcessText (text, source_id);
+        return timestamp != 0
+                   ? cortext->ProcessTextAt (text, source_id, timestamp,
+                                              Retention::Durable)
+                   : cortext->ProcessText (text, source_id,
+                                           Retention::Durable);
       }
     const Eigen::VectorXf final_embedding
         = NormalizeProbeEmbedding (aggregate_embedding_sum);
     return cortext->impl_->ProcessTextEmbeddingAt (
-        final_embedding, timestamp, source_id, text);
+        final_embedding, timestamp, source_id, text, Retention::Durable);
   }
 
   void

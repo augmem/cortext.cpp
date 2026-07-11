@@ -186,8 +186,8 @@ ParseRetentionProperty (napi_env env, napi_value value, int &out)
         {
           return false;
         }
-      if (number < CORTEXT_RETENTION_DURABLE
-          || number > CORTEXT_RETENTION_BOUNDARY)
+      if (number < CORTEXT_RETENTION_NATURAL
+          || number > CORTEXT_RETENTION_EPHEMERAL)
         {
           return false;
         }
@@ -203,7 +203,7 @@ ParseRetentionProperty (napi_env env, napi_value value, int &out)
         {
           return false;
         }
-      std::string text (length, '\0');
+      std::string text (length + 1, '\0');
       if (napi_get_value_string_utf8 (env, value, text.data (), length + 1,
                                      &length)
           != napi_ok)

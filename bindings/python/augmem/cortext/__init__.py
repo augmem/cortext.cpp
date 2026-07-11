@@ -99,6 +99,7 @@ class _NativeProcessJsonOptions(ctypes.Structure):
         ("struct_size", ctypes.c_size_t),
         ("include_embedding", ctypes.c_int),
         ("retention", ctypes.c_int),
+        ("reserved", ctypes.c_int),
     ]
 
 
@@ -825,6 +826,7 @@ def _native_process_json_options(
         ctypes.sizeof(_NativeProcessJsonOptions),
         1 if include_embedding else 0,
         _coerce_retention(retention),
+        0,
     )
 
 

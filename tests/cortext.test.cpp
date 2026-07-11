@@ -1942,7 +1942,8 @@ TEST_CASE ("C API handles NULL inputs correctly",
     cortext_process_json_options_init (
         reinterpret_cast<cortext_process_json_options *> (&legacy.options));
 
-    REQUIRE (legacy.options.struct_size == sizeof (legacy.options));
+    REQUIRE (legacy.options.struct_size
+             == offsetof (cortext_process_json_options, retention));
     REQUIRE (legacy.options.include_embedding == 1);
     REQUIRE (legacy.guard == 0x1234);
   }
