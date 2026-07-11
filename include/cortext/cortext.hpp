@@ -227,11 +227,12 @@ public:
   /// @param source_id Opaque source stream identifier used for provenance and
   /// exact same-source grouping, not for semantic behavior (e.g.,
   /// "conversation/main").
-  /// @param retention Durable by default; pass Ephemeral for no-storage
-  /// processing that still updates live context and retrieval.
+  /// @param retention Natural by default (no force_boundary/force_write;
+  /// episode algorithms decide). Pass Durable for force turn + force write,
+  /// Boundary for force turn edge only, or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessText (const std::string &text, const std::string &source_id,
-                       Retention retention = Retention::Durable);
+                       Retention retention = Retention::Natural);
 
   /// @brief Process text input with an explicit timestamp (ms since epoch).
   /// @param text The text content to process.
@@ -239,12 +240,13 @@ public:
   /// exact same-source grouping, not for semantic behavior (e.g.,
   /// "conversation/main").
   /// @param timestamp Milliseconds since Unix epoch (must be monotonic).
-  /// @param retention Durable by default; pass Ephemeral for no-storage
-  /// processing that still updates live context and retrieval.
+  /// @param retention Natural by default (no force_boundary/force_write;
+  /// episode algorithms decide). Pass Durable for force turn + force write,
+  /// Boundary for force turn edge only, or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessTextAt (const std::string &text, const std::string &source_id,
                          std::uint64_t timestamp,
-                         Retention retention = Retention::Durable);
+                         Retention retention = Retention::Natural);
 
 
   /// @brief Process audio PCM input.
@@ -252,12 +254,13 @@ public:
   /// @param num_samples Number of samples.
   /// @param source_id Opaque source stream identifier used for provenance and
   /// exact same-source grouping, not for semantic behavior.
-  /// @param retention Durable by default; pass Ephemeral for no-storage
-  /// processing that still updates live context and retrieval.
+  /// @param retention Natural by default (no force_boundary/force_write;
+  /// episode algorithms decide). Pass Durable for force turn + force write,
+  /// Boundary for force turn edge only, or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id,
-                        Retention retention = Retention::Durable);
+                        Retention retention = Retention::Natural);
 
   /// @brief Process audio PCM while storing caller-provided source media.
   ///
@@ -266,7 +269,7 @@ public:
   /// media.mimetype. If media is empty, no audio payload is persisted.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id, const Media &media,
-                        Retention retention = Retention::Durable);
+                        Retention retention = Retention::Natural);
 
   /// @brief Process image input.
   /// @param data Raw pixel data (RGB/RGBA).
@@ -275,12 +278,13 @@ public:
   /// @param channels Number of channels (3 for RGB, 4 for RGBA).
   /// @param source_id Opaque source stream identifier used for provenance and
   /// exact same-source grouping, not for semantic behavior.
-  /// @param retention Durable by default; pass Ephemeral for no-storage
-  /// processing that still updates live context and retrieval.
+  /// @param retention Natural by default (no force_boundary/force_write;
+  /// episode algorithms decide). Pass Durable for force turn + force write,
+  /// Boundary for force turn edge only, or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
-                        Retention retention = Retention::Durable);
+                        Retention retention = Retention::Natural);
 
   /// @brief Process image pixels while storing caller-provided source media.
   ///
@@ -290,7 +294,7 @@ public:
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
                         const Media &media,
-                        Retention retention = Retention::Durable);
+                        Retention retention = Retention::Natural);
 
   /// @brief Encode text and return the configured encoder's raw embedding.
   ///

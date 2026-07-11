@@ -348,12 +348,17 @@ ApplyRetrievalScore (Cortext::Context::Memory &memory,
 inline bool
 ShouldForceInputBoundary (Retention retention)
 {
-  return retention == Retention::Durable || retention == Retention::Ephemeral;
+  // Natural: leave detect_boundary in charge (false/false).
+  // Durable/Boundary/Ephemeral: explicit processing/retrieval turn edge.
+  return retention == Retention::Durable || retention == Retention::Boundary
+         || retention == Retention::Ephemeral;
 }
 
 inline bool
 ShouldForceDurableWrite (Retention retention)
 {
+  // Only Durable force-commits. Boundary closes the unit without force_write.
+  // Natural never forces write. Ephemeral never stores.
   return retention == Retention::Durable;
 }
 
@@ -1405,7 +1410,7 @@ struct Cortext::Impl
                           std::uint64_t timestamp,
                           const std::string &source_id,
                           const std::string &text,
-                          Retention retention = Retention::Durable)
+                          Retention retention = Retention::Natural)
   {
     telemetry::ScopedSpan span ("cortext.api.process_text_cached");
     const auto total_start = std::chrono::steady_clock::now ();

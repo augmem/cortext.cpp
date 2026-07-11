@@ -143,6 +143,34 @@ include_embedding_from_options (const cortext_process_json_options *options)
   return options->include_embedding != 0;
 }
 
+cortext::Retention
+retention_from_options (const cortext_process_json_options *options)
+{
+  // Omitted / undersized options => Natural (false/false forces).
+  if (!options)
+    {
+      return cortext::Retention::Natural;
+    }
+  if (options->struct_size
+      < offsetof (cortext_process_json_options, retention)
+            + sizeof (options->retention))
+    {
+      return cortext::Retention::Natural;
+    }
+  switch (options->retention)
+    {
+    case CORTEXT_RETENTION_DURABLE:
+      return cortext::Retention::Durable;
+    case CORTEXT_RETENTION_BOUNDARY:
+      return cortext::Retention::Boundary;
+    case CORTEXT_RETENTION_EPHEMERAL:
+      return cortext::Retention::Ephemeral;
+    case CORTEXT_RETENTION_NATURAL:
+    default:
+      return cortext::Retention::Natural;
+    }
+}
+
 std::any
 value_to_any (const cortext_db_value &value)
 {
@@ -1244,6 +1272,7 @@ extern "C"
       }
     options->struct_size = sizeof (*options);
     options->include_embedding = 1;
+    options->retention = CORTEXT_RETENTION_NATURAL;
   }
 
   cortext_handle
@@ -1630,8 +1659,12 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json (
-        [&] { return p->ProcessText (std::string (text), std::string (source_id)); },
+        [&] {
+          return p->ProcessText (std::string (text), std::string (source_id),
+                                 retention);
+        },
         include_embedding_from_options (options));
   }
 
@@ -1655,8 +1688,12 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json (
-        [&] { return p->ProcessAudio (pcm, num_samples, std::string (source_id)); },
+        [&] {
+          return p->ProcessAudio (pcm, num_samples, std::string (source_id),
+                                  retention);
+        },
         include_embedding_from_options (options));
   }
 
@@ -1687,9 +1724,10 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json ([&] {
       return p->ProcessAudio (pcm, num_samples, std::string (source_id),
-                              media_from_c (media));
+                              media_from_c (media), retention);
     },
                         include_embedding_from_options (options));
   }
@@ -1716,9 +1754,10 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json ([&] {
       return p->ProcessImage (data, width, height, channels,
-                              std::string (source_id));
+                              std::string (source_id), retention);
     },
                         include_embedding_from_options (options));
   }
@@ -1751,9 +1790,11 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json ([&] {
       return p->ProcessImage (data, width, height, channels,
-                              std::string (source_id), media_from_c (media));
+                              std::string (source_id), media_from_c (media),
+                              retention);
     },
                         include_embedding_from_options (options));
   }

@@ -321,6 +321,48 @@ TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
            == AnyToLongLong (before_signals[0].at ("n")));
 }
 
+TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
+           "[cortext][retention][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store));
+  REQUIRE (ctx != nullptr);
+
+  // Omitted retention defaults to Natural: does not force explicit_turn.
+  auto natural = ctx->ProcessTextAt (
+      "Streaming token about weather.", "stream/main", 1000ULL);
+  const bool natural_forced
+      = natural.at_boundary && natural.boundary_score.has_value ()
+        && *natural.boundary_score == 1.0;
+  REQUIRE_FALSE (natural_forced);
+
+  auto durable = ctx->ProcessTextAt (
+      "The garage door code is 8841.", "chat/main", 2000ULL,
+      cortext::Retention::Durable);
+  REQUIRE (durable.at_boundary);
+  REQUIRE (durable.boundary_score.has_value ());
+  REQUIRE (*durable.boundary_score == 1.0);
+  REQUIRE (durable.output.stored_memory_id.has_value ());
+
+  auto boundary = ctx->ProcessTextAt (
+      "Close the unit without force write.", "chat/main", 3000ULL,
+      cortext::Retention::Boundary);
+  REQUIRE (boundary.at_boundary);
+  REQUIRE (boundary.boundary_score.has_value ());
+  REQUIRE (*boundary.boundary_score == 1.0);
+
+  auto ephemeral = ctx->ProcessTextAt (
+      "garage door code", "query/main", 4000ULL,
+      cortext::Retention::Ephemeral);
+  REQUIRE (ephemeral.at_boundary);
+  REQUIRE_FALSE (ephemeral.output.stored_memory_id.has_value ());
+}
+
 TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
            "[cortext][belief_revision][eval][aist]")
 {

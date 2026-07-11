@@ -1,5 +1,12 @@
 #if !defined(_WIN32)
+/* Apple: _POSIX_C_SOURCE alone hides BSD flock() from <sys/file.h>. */
+#if defined(__APPLE__)
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
+#else
 #define _POSIX_C_SOURCE 200809L
+#endif
 #endif
 
 #include "objstore/backend.h"
