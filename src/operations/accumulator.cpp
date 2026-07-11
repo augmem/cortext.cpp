@@ -69,7 +69,8 @@ UpdateAccumulator::Execute (OperationContext &context,
       = (p_ctx.episode_start_ts > 0)
             ? static_cast<int64_t> (p_ctx.episode_start_ts)
             : 0;
-  const bool track_durable_signal = signal.retention == Retention::Durable;
+  // Ephemeral queries must not grow storable accumulator units.
+  const bool track_durable_signal = signal.retention != Retention::Ephemeral;
   context.SetInterruptAborted (false);
 
   // Use drift step for accumulation (Section 4.4.2)

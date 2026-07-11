@@ -55,9 +55,22 @@ export interface Media {
   mimetype: string;
 }
 
+/** Matches cortext::Retention / C API cortext_retention. */
+export type Retention =
+  | "natural"
+  | "durable"
+  | "boundary"
+  | "ephemeral"
+  | 0
+  | 1
+  | 2
+  | 3;
+
 export interface ProcessOptions {
   includeEmbedding?: boolean;
   omitEmbedding?: boolean;
+  /** Natural when omitted: force_boundary=false, force_write=false. */
+  retention?: Retention;
 }
 
 export declare class Cortext {

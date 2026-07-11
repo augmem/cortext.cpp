@@ -160,6 +160,76 @@ GetOptionalBoolProperty (napi_env env, napi_value obj, const char *name,
 }
 
 bool
+ParseRetentionProperty (napi_env env, napi_value value, int &out)
+{
+  if (IsNullOrUndefined (env, value))
+    {
+      out = CORTEXT_RETENTION_NATURAL;
+      return true;
+    }
+  napi_valuetype type = napi_undefined;
+  if (napi_typeof (env, value, &type) != napi_ok)
+    {
+      return false;
+    }
+  if (type == napi_number)
+    {
+      double number = 0.0;
+      if (napi_get_value_double (env, value, &number) != napi_ok)
+        {
+          return false;
+        }
+      const int code = static_cast<int> (number);
+      if (code < CORTEXT_RETENTION_NATURAL
+          || code > CORTEXT_RETENTION_EPHEMERAL)
+        {
+          return false;
+        }
+      out = code;
+      return true;
+    }
+  if (type == napi_string)
+    {
+      size_t length = 0;
+      if (napi_get_value_string_utf8 (env, value, nullptr, 0, &length)
+          != napi_ok)
+        {
+          return false;
+        }
+      std::string text (length, '\0');
+      if (napi_get_value_string_utf8 (env, value, text.data (), length + 1,
+                                     &length)
+          != napi_ok)
+        {
+          return false;
+        }
+      text.resize (length);
+      if (text == "natural")
+        {
+          out = CORTEXT_RETENTION_NATURAL;
+          return true;
+        }
+      if (text == "durable")
+        {
+          out = CORTEXT_RETENTION_DURABLE;
+          return true;
+        }
+      if (text == "boundary")
+        {
+          out = CORTEXT_RETENTION_BOUNDARY;
+          return true;
+        }
+      if (text == "ephemeral")
+        {
+          out = CORTEXT_RETENTION_EPHEMERAL;
+          return true;
+        }
+      return false;
+    }
+  return false;
+}
+
+bool
 GetProcessJSONOptions (napi_env env, napi_value value,
                        cortext_process_json_options &out)
 {
@@ -188,6 +258,28 @@ GetProcessJSONOptions (napi_env env, napi_value value,
       return false;
     }
   out.include_embedding = omit_embedding ? 0 : include_embedding;
+
+  napi_value retention_value = nullptr;
+  bool has_retention = false;
+  if (napi_has_named_property (env, value, "retention", &has_retention)
+      != napi_ok)
+    {
+      return false;
+    }
+  if (has_retention)
+    {
+      if (napi_get_named_property (env, value, "retention", &retention_value)
+          != napi_ok)
+        {
+          return false;
+        }
+      int retention = CORTEXT_RETENTION_NATURAL;
+      if (!ParseRetentionProperty (env, retention_value, retention))
+        {
+          return false;
+        }
+      out.retention = retention;
+    }
   return true;
 }
 

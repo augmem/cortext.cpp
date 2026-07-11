@@ -204,15 +204,34 @@ extern "C"
     const char *mimetype;
   } cortext_media;
 
+  /// @brief Retention policy for process ingress (matches cortext::Retention).
+  ///
+  /// CORTEXT_RETENTION_NATURAL (0): default when omitted; no force_boundary /
+  /// force_write — episode algorithms decide.
+  /// CORTEXT_RETENTION_DURABLE (1): force turn boundary + force write.
+  /// CORTEXT_RETENTION_BOUNDARY (2): force turn boundary only.
+  /// CORTEXT_RETENTION_EPHEMERAL (3): never store; force retrieval boundary.
+  typedef enum cortext_retention
+  {
+    CORTEXT_RETENTION_NATURAL = 0,
+    CORTEXT_RETENTION_DURABLE = 1,
+    CORTEXT_RETENTION_BOUNDARY = 2,
+    CORTEXT_RETENTION_EPHEMERAL = 3
+  } cortext_retention;
+
   /// @brief Options for JSON process result payloads.
   ///
   /// Existing JSON process calls include the processed signal embedding by
   /// default. Pass include_embedding = 0 through the _with_options variants to
   /// omit that vector from the returned JSON payload.
+  ///
+  /// retention defaults to CORTEXT_RETENTION_NATURAL. Older clients that only
+  /// set struct_size + include_embedding keep Natural (false/false forces).
   typedef struct cortext_process_json_options
   {
     size_t struct_size;
     int include_embedding;
+    int retention; ///< cortext_retention; Natural when field absent/unknown
   } cortext_process_json_options;
 
   /// @brief Initializes process JSON options to current defaults.

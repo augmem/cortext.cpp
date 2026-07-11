@@ -36,9 +36,10 @@ struct Signal
   // Internal maintenance hint. When set, the signal drives consolidation
   // without giving behavioral meaning to the opaque source_id string.
   bool force_consolidation = false;
-  // Durable by default. Ephemeral signals update live processing state and
-  // retrieval context, but the write path must not persist them as memories.
-  Retention retention = Retention::Durable;
+  // Natural by default: may store; force_boundary/force_write stay false so
+  // episode algorithms run. Durable forces both; Boundary forces edge only;
+  // Ephemeral never stores.
+  Retention retention = Retention::Natural;
 
   // Payload for storage (persisted to objstore when write gate passes).
   std::optional<std::vector<unsigned char>> payload;

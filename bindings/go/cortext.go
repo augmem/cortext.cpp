@@ -44,8 +44,20 @@ type Media struct {
 	MimeType string
 }
 
+// Retention matches cortext_retention / cortext::Retention.
+type Retention int
+
+const (
+	RetentionNatural   Retention = C.CORTEXT_RETENTION_NATURAL
+	RetentionDurable   Retention = C.CORTEXT_RETENTION_DURABLE
+	RetentionBoundary  Retention = C.CORTEXT_RETENTION_BOUNDARY
+	RetentionEphemeral Retention = C.CORTEXT_RETENTION_EPHEMERAL
+)
+
 type ProcessOptions struct {
 	OmitEmbedding bool
+	// Retention is Natural when zero-value / omitted (false/false forces).
+	Retention Retention
 }
 
 func Version() string {
@@ -373,8 +385,13 @@ func makeNativeMedia(media *Media) (C.cortext_media, unsafe.Pointer, *C.char) {
 func makeNativeProcessOptions(options *ProcessOptions) C.cortext_process_json_options {
 	native := C.cortext_process_json_options{}
 	C.cortext_process_json_options_init(&native)
-	if options != nil && options.OmitEmbedding {
-		native.include_embedding = 0
+	if options != nil {
+		if options.OmitEmbedding {
+			native.include_embedding = 0
+		}
+		if options.Retention != 0 {
+			native.retention = C.int(options.Retention)
+		}
 	}
 	return native
 }
