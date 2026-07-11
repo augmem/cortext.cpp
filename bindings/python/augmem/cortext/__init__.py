@@ -42,10 +42,10 @@ class Retention(IntEnum):
     Ephemeral: never store; explicit retrieval turn edge.
     """
 
-    DURABLE = 0
-    EPHEMERAL = 1
-    NATURAL = 2
-    BOUNDARY = 3
+    NATURAL = 0
+    DURABLE = 1
+    BOUNDARY = 2
+    EPHEMERAL = 3
 
 
 @dataclass(slots=True)

@@ -324,10 +324,10 @@ TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
 TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
            "[cortext][retention][aist]")
 {
-  REQUIRE (static_cast<int> (cortext::Retention::Durable) == 0);
-  REQUIRE (static_cast<int> (cortext::Retention::Ephemeral) == 1);
-  REQUIRE (static_cast<int> (cortext::Retention::Natural) == 2);
-  REQUIRE (static_cast<int> (cortext::Retention::Boundary) == 3);
+  REQUIRE (static_cast<int> (cortext::Retention::Natural) == 0);
+  REQUIRE (static_cast<int> (cortext::Retention::Durable) == 1);
+  REQUIRE (static_cast<int> (cortext::Retention::Boundary) == 2);
+  REQUIRE (static_cast<int> (cortext::Retention::Ephemeral) == 3);
 
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
