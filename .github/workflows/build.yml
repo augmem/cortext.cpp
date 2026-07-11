@@ -63,7 +63,7 @@ jobs:
         key: aist-q8_0-bf4c49954eccc65183f1a97e44606e86c7ee5a4fea500457124b687a3ec97898-bert-vocab-07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3
 
     - name: Ensure AIST q8_0 model
-      run: python3 scripts/download_aist_model.py --models-dir models --quant q8_0
+      run: python3 scripts/download_aist_model.py --output-dir models --quant q8_0
 
     - name: Configure CMake
       run: cmake -S . -B build-aist -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON
