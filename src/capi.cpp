@@ -1273,9 +1273,21 @@ extern "C"
       {
         return;
       }
-    options->struct_size = sizeof (*options);
+    // A caller compiled against the previous struct only allocated the
+    // prefix through include_embedding. It must set struct_size to opt into
+    // initialization of later fields; a zero size stays ABI-safe by using
+    // that legacy prefix.
+    constexpr std::size_t kLegacyOptionsSize
+        = offsetof (cortext_process_json_options, retention);
+    const std::size_t available
+        = options->struct_size == sizeof (*options) ? sizeof (*options)
+                                                  : kLegacyOptionsSize;
+    options->struct_size = available;
     options->include_embedding = 1;
-    options->retention = CORTEXT_RETENTION_NATURAL;
+    if (available == sizeof (*options))
+      {
+        options->retention = CORTEXT_RETENTION_NATURAL;
+      }
   }
 
   cortext_handle

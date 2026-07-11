@@ -382,13 +382,8 @@ def extract_from_content_parts(
       url = ""
       audio_url = part.get("audio_url") or part.get("input_audio") or part
       if isinstance(audio_url, dict):
-        url = str(
-          audio_url.get("url")
-          or audio_url.get("data")
-          or ""
-        )
         # OpenAI input_audio: {data: b64, format: wav}
-        if not url and audio_url.get("data"):
+        if audio_url.get("data"):
           fmt = str(audio_url.get("format") or "wav")
           b64 = str(audio_url.get("data"))
           try:
@@ -405,6 +400,7 @@ def extract_from_content_parts(
             if sig:
               signals.append(sig)
             continue
+        url = str(audio_url.get("url") or "")
       else:
         url = str(audio_url or "")
       if url:
@@ -632,8 +628,9 @@ def extract_from_messages(
   agent_source: str,
   max_messages: int = 24,
   allow_remote_url: bool = False,
+  tool_events_only: bool = False,
 ) -> list[MediaSignal]:
-  """Scan a transcript tail for multimodal + tool signals."""
+  """Scan a transcript tail for signals, optionally limited to tool events."""
   msgs = [m for m in messages if isinstance(m, dict)]
   if len(msgs) > max_messages:
     msgs = msgs[-max_messages:]
@@ -641,6 +638,8 @@ def extract_from_messages(
   for msg in msgs:
     role_raw = str(msg.get("role") or "")
     if role_raw == "user":
+      if tool_events_only:
+        continue
       out.extend(
         extract_from_message(
           msg,
@@ -650,14 +649,23 @@ def extract_from_messages(
         )
       )
     elif role_raw == "assistant":
-      out.extend(
-        extract_from_message(
-          msg,
-          role="agent",
-          source_id_base=agent_source,
-          allow_remote_url=allow_remote_url,
+      if tool_events_only:
+        out.extend(
+          extract_tool_calls(
+            msg,
+            source_id_base=agent_source,
+            allow_remote_url=allow_remote_url,
+          )
         )
-      )
+      else:
+        out.extend(
+          extract_from_message(
+            msg,
+            role="agent",
+            source_id_base=agent_source,
+            allow_remote_url=allow_remote_url,
+          )
+        )
     elif role_raw == "tool":
       name = str(msg.get("name") or msg.get("tool_name") or "tool")
       out.extend(

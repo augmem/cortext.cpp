@@ -230,9 +230,9 @@ public:
   /// @param source_id Opaque source stream identifier used for provenance and
   /// exact same-source grouping, not for semantic behavior (e.g.,
   /// "conversation/main").
-  /// @param retention Natural by default (no force_boundary/force_write;
-  /// episode algorithms decide). Pass Durable for force turn + force write,
-  /// Boundary for force turn edge only, or Ephemeral for no-storage query.
+  /// @param retention Natural by default; episode algorithms decide. Pass
+  /// Durable for explicit turn commit, Boundary for explicit turn edge only,
+  /// or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessText (const std::string &text, const std::string &source_id,
                        Retention retention = Retention::Natural);
@@ -243,9 +243,9 @@ public:
   /// exact same-source grouping, not for semantic behavior (e.g.,
   /// "conversation/main").
   /// @param timestamp Milliseconds since Unix epoch (must be monotonic).
-  /// @param retention Natural by default (no force_boundary/force_write;
-  /// episode algorithms decide). Pass Durable for force turn + force write,
-  /// Boundary for force turn edge only, or Ephemeral for no-storage query.
+  /// @param retention Natural by default; episode algorithms decide. Pass
+  /// Durable for explicit turn commit, Boundary for explicit turn edge only,
+  /// or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessTextAt (const std::string &text, const std::string &source_id,
                          std::uint64_t timestamp,
@@ -257,9 +257,9 @@ public:
   /// @param num_samples Number of samples.
   /// @param source_id Opaque source stream identifier used for provenance and
   /// exact same-source grouping, not for semantic behavior.
-  /// @param retention Natural by default (no force_boundary/force_write;
-  /// episode algorithms decide). Pass Durable for force turn + force write,
-  /// Boundary for force turn edge only, or Ephemeral for no-storage query.
+  /// @param retention Natural by default; episode algorithms decide. Pass
+  /// Durable for explicit turn commit, Boundary for explicit turn edge only,
+  /// or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id,
@@ -281,9 +281,9 @@ public:
   /// @param channels Number of channels (3 for RGB, 4 for RGBA).
   /// @param source_id Opaque source stream identifier used for provenance and
   /// exact same-source grouping, not for semantic behavior.
-  /// @param retention Natural by default (no force_boundary/force_write;
-  /// episode algorithms decide). Pass Durable for force turn + force write,
-  /// Boundary for force turn edge only, or Ephemeral for no-storage query.
+  /// @param retention Natural by default; episode algorithms decide. Pass
+  /// Durable for explicit turn commit, Boundary for explicit turn edge only,
+  /// or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,

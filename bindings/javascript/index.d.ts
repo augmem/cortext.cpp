@@ -69,7 +69,7 @@ export type Retention =
 export interface ProcessOptions {
   includeEmbedding?: boolean;
   omitEmbedding?: boolean;
-  /** Natural when omitted: force_boundary=false, force_write=false. */
+  /** Natural when omitted: boundary and write algorithms decide. */
   retention?: Retention;
 }
 

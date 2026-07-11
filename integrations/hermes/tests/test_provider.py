@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+import wave
 
 import pytest
 
@@ -308,6 +311,35 @@ def test_sync_turn_ingests_tool_calls_and_results() -> None:
   assert any("tool_call" in source or "tool/" in source for _, source in engine.calls)
 
 
+def test_sync_turn_does_not_reingest_regular_transcript_messages() -> None:
+  provider = CortextMemoryProvider()
+  engine = _FakeEngine()
+  provider._engine = engine
+  provider._agent_context = "primary"
+  provider._session_id = "s1"
+  provider._user_id = "alice"
+  provider._agent_id = "hermes"
+  provider._turn_number = 4
+
+  provider.sync_turn(
+    "current user message",
+    "current assistant response",
+    messages=[
+      {"role": "user", "content": "older transcript question"},
+      {"role": "assistant", "content": "older transcript response"},
+      {"role": "user", "content": "current user message"},
+      {"role": "assistant", "content": "current assistant response"},
+    ],
+  )
+  _wait_bg(provider)
+
+  ingested = [text for text, _ in engine.calls]
+  assert ingested.count("current user message") == 1
+  assert ingested.count("current assistant response") == 1
+  assert "older transcript question" not in ingested
+  assert "older transcript response" not in ingested
+
+
 def test_multimodal_user_content_parts() -> None:
   from augmem.hermes.media import extract_from_content_parts
 
@@ -332,3 +364,31 @@ def test_multimodal_user_content_parts() -> None:
     assert "image" in modalities
   except ImportError:
     pass
+
+
+def test_openai_input_audio_content_part_is_decoded() -> None:
+  from augmem.hermes.media import extract_from_content_parts
+
+  wav = BytesIO()
+  with wave.open(wav, "wb") as output:
+    output.setnchannels(1)
+    output.setsampwidth(2)
+    output.setframerate(16000)
+    output.writeframes(b"\x00\x00" * 160)
+
+  signals = extract_from_content_parts(
+    [
+      {
+        "type": "input_audio",
+        "input_audio": {
+          "data": base64.b64encode(wav.getvalue()).decode("ascii"),
+          "format": "wav",
+        },
+      }
+    ],
+    source_id_base="hermes/user/u/s/turn/1",
+  )
+
+  assert len(signals) == 1
+  assert signals[0].modality == "audio"
+  assert signals[0].pcm

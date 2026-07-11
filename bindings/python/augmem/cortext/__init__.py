@@ -36,16 +36,16 @@ class CortextError(RuntimeError):
 class Retention(IntEnum):
     """Ingress retention policy (matches cortext::Retention / C API).
 
-    Natural (default when omitted): force_boundary=false, force_write=false.
-    Durable: force_boundary=true, force_write=true (explicit turn commit).
-    Boundary: force_boundary=true, force_write=false.
-    Ephemeral: never store; force_boundary for retrieval.
+    Natural (default when omitted): boundary and write algorithms decide.
+    Durable: explicit turn commit.
+    Boundary: explicit turn edge only.
+    Ephemeral: never store; explicit retrieval turn edge.
     """
 
-    NATURAL = 0
-    DURABLE = 1
-    BOUNDARY = 2
-    EPHEMERAL = 3
+    DURABLE = 0
+    EPHEMERAL = 1
+    NATURAL = 2
+    BOUNDARY = 3
 
 
 @dataclass(slots=True)

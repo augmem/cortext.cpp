@@ -92,7 +92,7 @@ ComputeWriteGate::Execute (OperationContext &context,
   const double theta_accumulator = T_dynamic * M_write_refrac * write_scale;
 
   // Final write decision
-  const bool force_write = spike_bypass || signal.force_write;
+  const bool force_write = spike_bypass || RetentionForcesWrite (signal.retention);
   const bool write_accumulator
       = force_write || (flush && (S_window > theta_accumulator));
 

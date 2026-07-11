@@ -3,13 +3,11 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/object_store.hpp"
 #include "cortext/signal.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "../experimental_env.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <string>
 
 namespace cortext::operations
@@ -17,19 +15,9 @@ namespace cortext::operations
 
 namespace
 {
-using SteadyClock = std::chrono::steady_clock;
-
-double
-ElapsedMillis (SteadyClock::time_point start)
-{
-  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
-      .count ();
-}
-
 /// @brief Create a SignalRecord from the current signal and context
 SignalRecord
-CreateSignalRecord (const Signal &signal, double score, int serial_position,
-                    OperationContext &context, Transaction &tx)
+CreateSignalRecord (const Signal &signal, double score, int serial_position)
 {
   SignalRecord rec;
   rec.embedding = signal.embedding;
@@ -47,11 +35,10 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position,
     }
   if (signal.payload && !signal.payload->empty ())
     {
-      const auto put_start = SteadyClock::now ();
-      rec.blob_id
-          = PutObject (context.GetObjectTransaction (), tx, *signal.payload);
-      context.AddOperationTiming ("UpdateAccumulator.signal_payload_put",
-                                  ElapsedMillis (put_start));
+      // Object storage happens in MemoryStorage only after the write gate
+      // accepts the accumulator. Natural signals rejected by that gate must
+      // leave no raw payload behind in objstore.
+      rec.payload = *signal.payload;
     }
   return rec;
 }
@@ -59,7 +46,7 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position,
 
 void
 UpdateAccumulator::Execute (OperationContext &context,
-                            Transaction &tx) const
+                            Transaction & /*tx*/) const
 {
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
@@ -110,7 +97,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       if (track_storable_signal)
         {
           state.signals.push_back (
-              CreateSignalRecord (signal, 0.0, 0, context, tx));
+              CreateSignalRecord (signal, 0.0, 0));
         }
 
       // Track primary modality (v2: first modality wins)
@@ -212,7 +199,7 @@ UpdateAccumulator::Execute (OperationContext &context,
       if (track_storable_signal)
         {
           acc.signals.push_back (
-              CreateSignalRecord (signal, 0.0, 0, context, tx));
+              CreateSignalRecord (signal, 0.0, 0));
         }
 
       // Track primary modality (v2: first modality wins)
@@ -272,7 +259,7 @@ UpdateAccumulator::Execute (OperationContext &context,
     {
       const int serial_pos = static_cast<int> (acc.signals.size ());
       acc.signals.push_back (
-          CreateSignalRecord (signal, 0.0, serial_pos, context, tx));
+          CreateSignalRecord (signal, 0.0, serial_pos));
     }
 
   // Track primary modality (v2: first modality wins)

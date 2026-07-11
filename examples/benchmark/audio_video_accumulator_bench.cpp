@@ -217,8 +217,8 @@ MakeAudioSignal (long long timestamp, int chunk_ms, bool flush, int axis)
   signal.embedding = UnitEmbedding (axis);
   signal.timestamp = static_cast<uint64_t> (timestamp);
   signal.source_id = "bench/source";
-  signal.force_boundary = flush;
-  signal.force_write = flush;
+  signal.retention = flush ? cortext::Retention::Durable
+                           : cortext::Retention::Natural;
   signal.modality = "audio";
   signal.mimetype = "audio/pcm;format=f32";
   signal.sample_rate = kSampleRate;
@@ -235,8 +235,8 @@ MakeImageSignal (long long timestamp, bool flush, int axis)
   signal.embedding = UnitEmbedding (axis);
   signal.timestamp = static_cast<uint64_t> (timestamp);
   signal.source_id = "bench/source";
-  signal.force_boundary = flush;
-  signal.force_write = flush;
+  signal.retention = flush ? cortext::Retention::Durable
+                           : cortext::Retention::Natural;
   signal.modality = "image";
   signal.width = 32;
   signal.height = 32;
