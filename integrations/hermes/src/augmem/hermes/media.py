@@ -9,6 +9,7 @@ signals without blocking the agent loop.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -731,12 +732,18 @@ def extract_from_messages(
 
 
 def _dedupe_signals(signals: list[MediaSignal]) -> list[MediaSignal]:
-  seen: set[tuple[str, str, int]] = set()
+  seen: set[tuple[str, str, bytes]] = set()
   out: list[MediaSignal] = []
   for s in signals:
     if s.is_empty():
       continue
-    key = (s.modality, s.source_id, len(s.text) + len(s.image_rgb) + len(s.pcm))
+    digest = hashlib.sha256()
+    digest.update(s.text.encode("utf-8"))
+    digest.update(s.image_rgb)
+    digest.update(s.media_bytes)
+    if s.pcm:
+      digest.update(array("f", s.pcm).tobytes())
+    key = (s.modality, s.source_id, digest.digest())
     if key in seen:
       continue
     seen.add(key)

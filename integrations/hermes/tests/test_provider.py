@@ -206,6 +206,31 @@ def test_post_llm_skips_user_ingest_queued_by_turn_start() -> None:
   assert durable_turn_calls.count("acknowledged") == 1
 
 
+def test_post_llm_keeps_repeated_user_text_from_later_turns() -> None:
+  provider = CortextMemoryProvider()
+  engine = _FakeEngine()
+  provider._engine = engine
+  provider._agent_context = "primary"
+  provider._session_id = "s1"
+  provider._user_id = "alice"
+  provider._agent_id = "hermes"
+
+  provider._turn_number = 2
+  provider.sync_turn("repeat this instruction", "first acknowledgement")
+  _wait_bg(provider)
+  provider._turn_number = 3
+  provider.sync_turn("repeat this instruction", "second acknowledgement")
+  _wait_bg(provider)
+
+  user_calls = [
+    source for text, source in engine.calls if text == "repeat this instruction"
+  ]
+  assert user_calls == [
+    "hermes/user/alice/s1/turn/2",
+    "hermes/user/alice/s1/turn/3",
+  ]
+
+
 def test_source_id_user_vs_agent_provenance() -> None:
   provider = CortextMemoryProvider()
   provider._session_id = "sess-9"
@@ -230,6 +255,24 @@ def test_prefetch_is_unbranded_prior_context() -> None:
   assert "vet July 14" in block
   assert "cortext" not in block.lower()
   assert "##" not in block  # no product/section branding
+
+
+def test_ingest_invalidates_same_query_prefetch_cache() -> None:
+  provider = CortextMemoryProvider()
+  engine = _FakeEngine()
+  provider._engine = engine
+  engine.push({"retrieved_memory": [{"text": "old appointment", "rel": 0.9}]})
+  assert "old appointment" in provider.prefetch("when is the vet?")
+
+  provider._ingest_async([
+    provider._signals_from_user_payload(
+      "the vet is now tomorrow", source_id_base="hermes/user/u/s/turn/1"
+    )[-1]
+  ])
+  _wait_bg(provider)
+
+  engine.push({"retrieved_memory": [{"text": "new appointment", "rel": 0.9}]})
+  assert "new appointment" in provider.prefetch("when is the vet?")
 
 
 def test_memory_text_decodes_base64_content_blobs() -> None:
@@ -442,6 +485,17 @@ def test_text_tool_result_scans_embedded_media_path(tmp_path: Path) -> None:
     source_id_base="hermes/agent/a/s/turn/1/tool/audio",
   )
   assert {signal.modality for signal in signals} == {"text", "audio"}
+
+
+def test_signal_dedupe_keeps_distinct_same_length_payloads() -> None:
+  from augmem.hermes.media import MediaSignal, _dedupe_signals
+
+  signals = _dedupe_signals([
+    MediaSignal(modality="text", source_id="tool/result", text="same"),
+    MediaSignal(modality="text", source_id="tool/result", text="size"),
+  ])
+
+  assert [signal.text for signal in signals] == ["same", "size"]
 
 
 def test_media_disabled_skips_content_media_decode(monkeypatch: pytest.MonkeyPatch) -> None:
