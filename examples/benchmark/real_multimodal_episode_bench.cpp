@@ -444,16 +444,19 @@ ProcessScenario (const Scenario &scenario, const Options &opts)
             const auto pixels = ReadBytes (event.path);
             ctx = engine->ProcessImage (pixels.data (), event.width,
                                         event.height, event.channels,
-                                        "chat/user");
+                                        "chat/user",
+                                        cortext::Retention::Durable);
           }
         else if (event.modality == "audio")
           {
             const auto pcm = ReadFloat32 (event.path);
-            ctx = engine->ProcessAudio (pcm.data (), pcm.size (), "chat/user");
+            ctx = engine->ProcessAudio (pcm.data (), pcm.size (), "chat/user",
+                                        cortext::Retention::Durable);
           }
         else
           {
-            ctx = engine->ProcessText (event.text, "chat/user");
+            ctx = engine->ProcessText (event.text, "chat/user",
+                                       cortext::Retention::Durable);
           }
         steps.push_back ({
           { "event_id", event.id },
