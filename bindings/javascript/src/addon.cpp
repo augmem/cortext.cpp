@@ -186,12 +186,12 @@ ParseRetentionProperty (napi_env env, napi_value value, int &out)
         {
           return false;
         }
-      const int code = static_cast<int> (number);
-      if (code < CORTEXT_RETENTION_NATURAL
-          || code > CORTEXT_RETENTION_EPHEMERAL)
+      if (number < CORTEXT_RETENTION_DURABLE
+          || number > CORTEXT_RETENTION_BOUNDARY)
         {
           return false;
         }
+      const int code = static_cast<int> (number);
       out = code;
       return true;
     }
@@ -243,10 +243,18 @@ ParseRetentionProperty (napi_env env, napi_value value, int &out)
 }
 
 bool
+InitializeProcessJSONOptions (cortext_process_json_options &out)
+{
+  out.struct_size = sizeof (out);
+  cortext_process_json_options_init (&out);
+  return true;
+}
+
+bool
 GetProcessJSONOptions (napi_env env, napi_value value,
                        cortext_process_json_options &out)
 {
-  cortext_process_json_options_init (&out);
+  InitializeProcessJSONOptions (out);
   if (IsNullOrUndefined (env, value))
     {
       return true;
@@ -527,7 +535,7 @@ ProcessTextJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 3)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (
@@ -591,7 +599,7 @@ ProcessAudioJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 3)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (
@@ -655,7 +663,7 @@ ProcessAudioWithMediaJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 5)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (
@@ -744,7 +752,7 @@ ProcessImageJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 6)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (
@@ -828,7 +836,7 @@ ProcessImageWithMediaJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 8)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (

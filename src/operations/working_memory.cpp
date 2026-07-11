@@ -85,7 +85,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const auto &signal = context.GetSignal ();
-  const bool preserve_input_trace = signal.force_write;
+  const bool preserve_input_trace = RetentionForcesWrite (signal.retention);
   const double wm_strength_max = core::WMStrengthMax (
       cfg.focus, cfg.sensitivity, cfg.stability);
 

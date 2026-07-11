@@ -566,6 +566,7 @@ class CortextMemoryProvider(MemoryProvider):
           user_source=user_base,
           agent_source=agent_base,
           allow_remote_url=allow_remote,
+          tool_events_only=True,
         )
       )
 

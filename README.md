@@ -196,6 +196,8 @@ Important CMake options:
 
 ## C++ API
 
+<!-- C++ quickstart matching the ProcessText retention contract in include/cortext/cortext.hpp -->
+
 ```cpp
 #include <cortext/cortext.hpp>
 
@@ -225,7 +227,8 @@ int main ()
 
   auto engine = cortext::Cortext::Create (cfg, "memory.db");
 
-  engine->ProcessText ("The garage door code is 8841.", "chat/main");
+  engine->ProcessText ("The garage door code is 8841.", "chat/main",
+                       cortext::Retention::Durable);
 
   auto ctx = engine->ProcessText (
       "garage door code",

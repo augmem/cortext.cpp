@@ -494,7 +494,24 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           return;
         }
 
-      // 5. Store memory-level content blob by concatenating signal blobs.
+      // 5. Persist deferred per-signal payloads only after the write gate has
+      // accepted this accumulator. This keeps rejected Natural signals out of
+      // objstore while preserving one object per persisted signal.
+      double signal_payload_put_ms = 0.0;
+      for (auto &rec : acc.signals)
+        {
+          if (rec.blob_id.empty () && !rec.payload.empty ())
+            {
+              const auto object_put_start = SteadyClock::now ();
+              rec.blob_id = PutObject (object_savepoint.get (), *savepoint,
+                                       rec.payload);
+              signal_payload_put_ms += ElapsedMillis (object_put_start);
+            }
+        }
+      context.AddOperationTiming ("MemoryStorage.signal_payload_put",
+                                  signal_payload_put_ms);
+
+      // 6. Store memory-level content blob by concatenating signal blobs.
       const auto content_start = SteadyClock::now ();
       double content_get_ms = 0.0;
       double content_put_ms = 0.0;
@@ -574,7 +591,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                   content_put_ms);
       context.AddOperationTiming ("MemoryStorage.content_blob",
                                   ElapsedMillis (content_start));
-      // 6. Insert memory embedding (v2: minimal sqlite-vec table)
+      // 7. Insert memory embedding (v2: minimal sqlite-vec table)
       const std::string insert_sql = std::string ("INSERT INTO embeddings (")
                                      + store::kEmbeddingsInsertColumns
                                      + ") VALUES ("
@@ -606,7 +623,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
         }
       const long long embedding_id = *id_opt;
 
-      // 7. Insert MEMORIES row with aggregated metadata (v2 schema)
+      // 8. Insert MEMORIES row with aggregated metadata (v2 schema)
       std::any episode_id_any;
       if (p_ctx.episode_start_ts > 0)
         {
@@ -661,7 +678,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                 ? 0
                 : AnyToLongLong (mem_id_rows[0].at ("id")).value_or (0);
 
-      // 9. Insert SIGNALS rows (one per tracked signal)
+      // 10. Insert SIGNALS rows (one per tracked signal)
       std::optional<long long> stored_signal_id;
       std::optional<long long> current_signal_id;
       double signal_embedding_insert_ms = 0.0;

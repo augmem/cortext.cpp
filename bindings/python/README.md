@@ -122,9 +122,8 @@ def answer(conversation_id: str, user_message: str) -> str:
 ```
 
 Retention (default `Retention.NATURAL`): episode algorithms decide boundary and
-write (`force_boundary=false`, `force_write=false`). Pass
-`retention=Retention.DURABLE` for explicit turn commit (force both),
-`Retention.BOUNDARY` for force edge only, or `Retention.EPHEMERAL` for
+write. Pass `retention=Retention.DURABLE` for explicit turn commit,
+`Retention.BOUNDARY` for an explicit edge only, or `Retention.EPHEMERAL` for
 retrieve-without-store queries. Use `embed_*` for embedding-only work.
 
 ## Returned Context

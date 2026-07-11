@@ -206,17 +206,17 @@ extern "C"
 
   /// @brief Retention policy for process ingress (matches cortext::Retention).
   ///
-  /// CORTEXT_RETENTION_NATURAL (0): default when omitted; no force_boundary /
-  /// force_write — episode algorithms decide.
-  /// CORTEXT_RETENTION_DURABLE (1): force turn boundary + force write.
-  /// CORTEXT_RETENTION_BOUNDARY (2): force turn boundary only.
-  /// CORTEXT_RETENTION_EPHEMERAL (3): never store; force retrieval boundary.
+  /// CORTEXT_RETENTION_DURABLE (0): force turn boundary + force write.
+  /// CORTEXT_RETENTION_EPHEMERAL (1): never store; force retrieval boundary.
+  /// CORTEXT_RETENTION_NATURAL (2): default when omitted; episode algorithms
+  /// decide boundary and write acceptance.
+  /// CORTEXT_RETENTION_BOUNDARY (3): force turn boundary only.
   typedef enum cortext_retention
   {
-    CORTEXT_RETENTION_NATURAL = 0,
-    CORTEXT_RETENTION_DURABLE = 1,
-    CORTEXT_RETENTION_BOUNDARY = 2,
-    CORTEXT_RETENTION_EPHEMERAL = 3
+    CORTEXT_RETENTION_DURABLE = 0,
+    CORTEXT_RETENTION_EPHEMERAL = 1,
+    CORTEXT_RETENTION_NATURAL = 2,
+    CORTEXT_RETENTION_BOUNDARY = 3
   } cortext_retention;
 
   /// @brief Options for JSON process result payloads.
@@ -235,6 +235,10 @@ extern "C"
   } cortext_process_json_options;
 
   /// @brief Initializes process JSON options to current defaults.
+  ///
+  /// Set struct_size to sizeof(cortext_process_json_options) before calling
+  /// this function to initialize the retention field. A zero struct_size uses
+  /// the legacy prefix for ABI-safe initialization.
   CORTEXT_EXPORT void cortext_process_json_options_init (
       cortext_process_json_options *options);
 

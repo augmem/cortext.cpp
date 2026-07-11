@@ -324,6 +324,11 @@ TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
 TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
            "[cortext][retention][aist]")
 {
+  REQUIRE (static_cast<int> (cortext::Retention::Durable) == 0);
+  REQUIRE (static_cast<int> (cortext::Retention::Ephemeral) == 1);
+  REQUIRE (static_cast<int> (cortext::Retention::Natural) == 2);
+  REQUIRE (static_cast<int> (cortext::Retention::Boundary) == 3);
+
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
@@ -336,12 +341,18 @@ TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
   // Omitted retention defaults to Natural: does not force explicit_turn.
   // boundary_score can legitimately hit 1.0 under natural algorithms, so
   // assert on boundary_type rather than score as the force diagnostic.
+  const auto before_objects
+      = store->Execute ("SELECT COUNT(*) AS n FROM objstore_data");
   auto natural = ctx->ProcessTextAt (
       "Streaming token about weather.", "stream/main", 1000ULL);
   if (natural.boundary_type.has_value ())
     {
       REQUIRE (*natural.boundary_type != "explicit_turn");
     }
+  const auto after_objects
+      = store->Execute ("SELECT COUNT(*) AS n FROM objstore_data");
+  REQUIRE (AnyToLongLong (after_objects[0].at ("n"))
+           == AnyToLongLong (before_objects[0].at ("n")));
 
   auto durable = ctx->ProcessTextAt (
       "The garage door code is 8841.", "chat/main", 2000ULL,
@@ -1810,6 +1821,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
     REQUIRE (h != nullptr);
 
     cortext_process_json_options durable_opts{};
+    durable_opts.struct_size = sizeof (durable_opts);
     cortext_process_json_options_init (&durable_opts);
     durable_opts.retention = CORTEXT_RETENTION_DURABLE;
 
@@ -1862,6 +1874,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
     REQUIRE (h != nullptr);
 
     cortext_process_json_options durable_opts{};
+    durable_opts.struct_size = sizeof (durable_opts);
     cortext_process_json_options_init (&durable_opts);
     durable_opts.retention = CORTEXT_RETENTION_DURABLE;
 
@@ -1884,6 +1897,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
     cortext_string_free (json_ptr);
 
     cortext_process_json_options options{};
+    options.struct_size = sizeof (options);
     cortext_process_json_options_init (&options);
     REQUIRE (options.include_embedding == 1);
     REQUIRE (options.retention == CORTEXT_RETENTION_NATURAL);
@@ -1909,6 +1923,28 @@ TEST_CASE ("C API handles NULL inputs correctly",
 
     cortext_string_free (json_ptr);
     cortext_free (h);
+  }
+
+  SECTION ("JSON options initializer preserves the legacy struct prefix")
+  {
+    struct LegacyProcessJsonOptions
+    {
+      std::size_t struct_size;
+      int include_embedding;
+    };
+    struct LegacyOptionsWithGuard
+    {
+      LegacyProcessJsonOptions options;
+      int guard = 0x1234;
+    } legacy;
+
+    legacy.options.struct_size = sizeof (legacy.options);
+    cortext_process_json_options_init (
+        reinterpret_cast<cortext_process_json_options *> (&legacy.options));
+
+    REQUIRE (legacy.options.struct_size == sizeof (legacy.options));
+    REQUIRE (legacy.options.include_embedding == 1);
+    REQUIRE (legacy.guard == 0x1234);
   }
 
   SECTION ("Embed JSON C API returns parseable embedding")
