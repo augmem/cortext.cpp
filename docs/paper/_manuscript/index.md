@@ -44,7 +44,7 @@ representations may fail to capture novel patterns (McCloskey and Cohen
 1989). Biological memory systems resolve this tension through
 sophisticated regulatory mechanisms that modulate learning rates, decay
 dynamics, and retrieval thresholds in response to environmental demands
-and internal state (McClelland et al. 1995).
+and internal state (McClelland, McNaughton, and O’Reilly 1995).
 
 This paper introduces Cortext, a cognitive memory architecture that
 addresses this stability-plasticity dilemma through three continuous
@@ -54,8 +54,9 @@ Cortext achieves developmental progression through the continuous
 interaction of parameter settings with accumulated experience. The
 architecture draws on established findings from cognitive psychology and
 neuroscience, including working memory capacity limits (Cowan 2001),
-memory reconsolidation (Nader et al. 2000), serial position effects
-(Murdock Jr 1962), and emotional modulation of memory (McGaugh 2004).
+memory reconsolidation (Nader, Schafe, and Le Doux 2000), serial
+position effects (Murdock Jr 1962), and emotional modulation of memory
+(McGaugh 2004).
 
 The core contribution of this work is a formally specified memory
 architecture in which:
@@ -115,10 +116,10 @@ across modalities through shared vector spaces.
 ## Memory Consolidation
 
 The consolidation mechanisms in Cortext reflect findings from the memory
-reconsolidation literature (Nader et al. 2000; Nader 2003).
-Reconsolidation theory posits that retrieved memories enter a labile
-state during which they can be modified before restabilization. Our
-architecture implements this through time-bounded lability windows
+reconsolidation literature (Nader, Schafe, and Le Doux 2000; Nader
+2003). Reconsolidation theory posits that retrieved memories enter a
+labile state during which they can be modified before restabilization.
+Our architecture implements this through time-bounded lability windows
 governed by the Stability parameter, with reconsolidation gain modulated
 by both Sensitivity and contextual relevance.
 
@@ -215,17 +216,17 @@ epoch.
 consistently throughout this document. Units: stored timestamps are
 integers in milliseconds (commonly suffixed \*\_ts, and also appearing
 as timestamp/created_at/last_rate_timestamp); derived time intervals in
-seconds use the s suffix. Accumulator variables: t_start,
+seconds use the **s suffix. Accumulator variables: t_start,
 last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev,
 emo_max, arousal_sum, drift_accum, drift_at_last_interrupt,
 drift_acc_pacing, x_last_check. Global variables: signals_processed,
 u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target,
 hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability,
 last_rate_timestamp, last_retrieval_ts, retention_ema, last_embedding,
-x_pred_ema. Weight naming rule: weight and weight variables (e.g.,
+x_pred_ema. Weight naming rule: weight** and **weight variables (e.g.,
 weight_relevance, mismatch_weight, weight_surprise) are control
-parameters; w variables (e.g., w_relevance, w_mismatch, … w_arousal) are
-composite-score blender weights.
+parameters; w** variables (e.g., w_relevance, w_mismatch, … w_arousal)
+are composite-score blender weights.
 
 **Drift naming note:** `drift_step_t` (also called *drift_increment*) is
 the instantaneous cosine distance between consecutive accumulator
@@ -708,9 +709,9 @@ statistics.
 
 We define three modulators:
 
-- **ACh-like (acetylcholine):** encode vs retrieve bias.
-- **NE-like (norepinephrine):** arousal + interrupt urgency.
-- **DA-like (dopamine):** reward prediction error + value learning.
+-   **ACh-like (acetylcholine):** encode vs retrieve bias.
+-   **NE-like (norepinephrine):** arousal + interrupt urgency.
+-   **DA-like (dopamine):** reward prediction error + value learning.
 
 Baseline levels come from knobs; phasic bursts come from current
 signals:
@@ -741,16 +742,16 @@ In the current implementation, these latent scales are applied at four
 concrete downstream sites rather than introduced as separate runtime
 controls:
 
-- `write_threshold_scale` multiplies the accumulator write-gate
-  threshold, so high `NE_t` lowers the barrier for committing a boundary
-  candidate.
-- `reconsolidation_scale` multiplies reconsolidation drift magnitude, so
-  high `ACh_t` strengthens context-driven reconstruction updates.
-- `retrieval_competition_scale` multiplies lateral inhibition during
-  retrieval competition, so high `NE_t` sharpens suppression among
-  near-duplicate candidates.
-- `value_update_gain` scales procedural-store reward updates, so high
-  `DA_t` increases reinforcement of recently used routines.
+-   `write_threshold_scale` multiplies the accumulator write-gate
+    threshold, so high `NE_t` lowers the barrier for committing a
+    boundary candidate.
+-   `reconsolidation_scale` multiplies reconsolidation drift magnitude,
+    so high `ACh_t` strengthens context-driven reconstruction updates.
+-   `retrieval_competition_scale` multiplies lateral inhibition during
+    retrieval competition, so high `NE_t` sharpens suppression among
+    near-duplicate candidates.
+-   `value_update_gain` scales procedural-store reward updates, so high
+    `DA_t` increases reinforcement of recently used routines.
 
 ## Oscillatory Gating (No Discrete Modes)
 
@@ -787,9 +788,9 @@ system to adapt its parameterization over time.
 In the current branch, this generic learner is instantiated for three
 live priors that already shape runtime behavior:
 
-- `attention_width_prior` (Focus family)
-- `rate_target_prior` / `base_rate_prior` (Sensitivity family)
-- `hysteresis_band_prior` (Stability family)
+-   `attention_width_prior` (Focus family)
+-   `rate_target_prior` / `base_rate_prior` (Sensitivity family)
+-   `hysteresis_band_prior` (Stability family)
 
 The implementation keeps the historical closed-form priors as the exact
 cold-start species priors. When no learned row exists, Cortext uses the
@@ -808,9 +809,9 @@ reward error) trigger updates. The learner then nudges
 `{α_F, α_S, α_T, β, a, b}` toward or away from the currently successful
 dynamic state:
 
-- Focus observes the current `attention_width_t`
-- Sensitivity observes the realized write-rate estimate `ρ̂_t`
-- Stability observes the current hysteresis band
+-   Focus observes the current `attention_width_t`
+-   Sensitivity observes the realized write-rate estimate `ρ̂_t`
+-   Stability observes the current hysteresis band
 
 This makes the meta-learning claim operational without adding any new
 public controls or changing the public API surface.
@@ -2496,8 +2497,8 @@ without the engine carrying a separate persistent confidence machine.
 
 ## Memory Reconsolidation
 
-Following Nader et al. (2000), retrieved memories enter a labile state
-permitting modification:
+Following Nader, Schafe, and Le Doux (2000), retrieved memories enter a
+labile state permitting modification:
 
     τ_labile = lerp(30, 300, T)  # seconds
     reconsolidation_gain = lerp(0.2, 0.02, T)
@@ -2559,10 +2560,10 @@ edges is capped by `SupersessionMaxEdges(F,S,T)`.
 
 Constructive recall is now implemented as a two-layer memory view:
 
-- **Evidence packets** remain the immutable ordered `signals` rows
-  attached to a memory.
-- **Reconstructions** are versioned rows in `memory_reconstructions`,
-  each carrying `{embedding_id, blob_id, ts, uncertainty, trigger}`.
+-   **Evidence packets** remain the immutable ordered `signals` rows
+    attached to a memory.
+-   **Reconstructions** are versioned rows in `memory_reconstructions`,
+    each carrying `{embedding_id, blob_id, ts, uncertainty, trigger}`.
 
 <!-- -->
 
@@ -2598,7 +2599,7 @@ and replay.
 ## Retrieval Competition
 
 Retrieved memories compete through lateral inhibition, modeling
-retrieval-induced forgetting (Anderson et al. 1994):
+retrieval-induced forgetting (Anderson, Bjork, and Bjork 1994):
 
     inhibition_radius = lerp(0.5, 0.85, F)
     winners_k = round(lerp(7, 3, F))
@@ -2784,13 +2785,13 @@ shallow graph consolidation.
 Cortext keeps the Complementary Learning Systems split at the level that
 matters for the product:
 
-- **Fast episodic write path:** coherent memories are written
-  immediately with source payloads, embeddings, timestamps, and graph
-  metadata.
-- **Bounded live state:** working memory and soft-anchor state support
-  immediate continuity without scanning the whole store.
-- **Slow durable graph:** explicit consolidation periodically clusters
-  older long-term memories and writes stable graph structure.
+-   **Fast episodic write path:** coherent memories are written
+    immediately with source payloads, embeddings, timestamps, and graph
+    metadata.
+-   **Bounded live state:** working memory and soft-anchor state support
+    immediate continuity without scanning the whole store.
+-   **Slow durable graph:** explicit consolidation periodically clusters
+    older long-term memories and writes stable graph structure.
 
 The split is functional rather than model-based. No decoder is required
 to transfer state from the fast path to the durable graph.
@@ -2909,15 +2910,15 @@ happened to share the same vector row.
 
 The following systems are no longer part of the runtime:
 
-- mode-selected semantic batch replay and public mode enums,
-- internal decoder-backed semantic operations,
-- vendored decoder runtime integration,
-- remote/local decoder adapter registry,
-- static taxonomy loading,
-- STM shadow graph promotion,
-- persistent confidence-monitoring state,
-- bitemporal fact assertion/cache/evidence tables,
-- fact-aware retrieval and eviction policies.
+-   mode-selected semantic batch replay and public mode enums,
+-   internal decoder-backed semantic operations,
+-   vendored decoder runtime integration,
+-   remote/local decoder adapter registry,
+-   static taxonomy loading,
+-   STM shadow graph promotion,
+-   persistent confidence-monitoring state,
+-   bitemporal fact assertion/cache/evidence tables,
+-   fact-aware retrieval and eviction policies.
 
 The removal is a hard cut, not a compatibility shim. New databases no
 longer create the removed tables, public bindings no longer expose the
@@ -3156,6 +3157,9 @@ where cosine_dist(u, v) = 1 − cos(u, v).
     adjacent_ok ← (since_last_s ≥ min_gap_s)
     force_check ← (drift_acc_pacing > max_wait_drift(F))
     ephemeral_query ← (retention == Ephemeral)
+    # Natural (default): force_boundary=false, force_write=false — episode algorithms.
+    # Durable: force_boundary=true, force_write=true — explicit chat-turn commit.
+    # Boundary: force_boundary=true, force_write=false — close unit; write gate still applies.
 
     # Retrieval triggered when drift exceeds threshold, at memory boundary,
     # ephemeral query ingress, or when drift exceeds max_wait_drift.
@@ -3188,14 +3192,14 @@ The evaluated system is the embedding-first runtime described in
 <a href="#sec-consolidation" class="quarto-xref">Section 9</a>. It
 contains:
 
-- online memory storage, boundary detection, graph construction,
-  retrieval, reconsolidation, working memory, soft anchors, and
-  eviction;
-- explicit shallow consolidation over stored embeddings and graph edges;
-  and
-- C, C++, Python, Go, Dart, JavaScript, and WebAssembly entry points
-  that expose only the retained processing, retrieval, consolidation,
-  reset, and embedding APIs.
+-   online memory storage, boundary detection, graph construction,
+    retrieval, reconsolidation, working memory, soft anchors, and
+    eviction;
+-   explicit shallow consolidation over stored embeddings and graph
+    edges; and
+-   C, C++, Python, Go, Dart, JavaScript, and WebAssembly entry points
+    that expose only the retained processing, retrieval, consolidation,
+    reset, and embedding APIs.
 
 The evaluated system does not contain internal text-generation backends,
 adapter registries, decoder-backed semantic batch operations, static
@@ -3342,6 +3346,44 @@ supersession write path is active in a normal harness run. This is a
 local no-regression smoke screen for retrieval mechanics, not a
 blind-judge quality result.
 
+On 2026-07-08, the public retention path was re-screened after fixing
+`Retention::Ephemeral` to force a processing boundary without granting
+durable write permission. The focused regression suite verified that
+public ephemeral queries retrieve durable API memories, expose a
+boundary packet, and leave memory and signal counts unchanged. A CLI
+smoke test stored “The garage door code is 8841.”, ran an ephemeral
+`recall "garage door code"`, retrieved the stored memory, and confirmed
+the SQLite memory/signal counts were unchanged before and after recall.
+
+On 2026-07-11, retention was expanded to four policies: `Natural`
+(default when omitted: `force_boundary=false`, `force_write=false` so
+accumulator boundary/write-gate algorithms decide), `Durable`
+(historical chat convenience: force both flags), `Boundary` (force turn
+edge only), and `Ephemeral` (no-store query). Binding surfaces expose
+retention through process options; CLI remember continues to use
+`Durable` and recall uses `Ephemeral`.
+
+The same patch was run through the normalized memory-eval smoke slice
+with all configured benchmark adapters, using durable history ingestion
+and ephemeral queries through the public API:
+
+``` bash
+scripts/run_memory_evals.py --profile smoke --benchmarks all --no-prepare \
+  --out logs/memory_evals/release_1_1_10_smoke_20260708T043734Z \
+  --max-episodes 1 --max-queries 1 --answer-mode none
+
+scripts/run_memory_eval_judges.py \
+  --run logs/memory_evals/release_1_1_10_smoke_20260708T043734Z \
+  --judges packet,codex,grok,agy --include-unavailable --timeout-s 180
+```
+
+The smoke slice returned nonempty retrieval packets for every query
+(`queries=6`, aggregate `retrieved_count=66`, `retrieval_empty=0`).
+Packet-answer accuracy stayed at 0.0 over the scored slice, while the
+Codex, Grok, and Antigravity adapters each scored 0.2 over five scored
+queries. This is a regression check for public ephemeral retrieval and
+harness wiring, not a state-of-the-art quality claim.
+
 ## Retrieval Behavior After Removal
 
 The highest-risk behavioral regression was graph retrieval. Removing
@@ -3352,13 +3394,14 @@ edges, and constructive reconstruction state.
 
 The retained retrieval path now:
 
-- seeds from current durable `LONG_TERM` and `ASSOCIATION` embeddings;
-- excludes current writes by timestamp before ranking;
-- expands through retained graph edges only;
-- uses source-backed memory hydration for association products;
-- reads the latest constructive reconstruction surface when enabled; and
-- skips reconstruction writes entirely when constructive recall is
-  disabled.
+-   seeds from current durable `LONG_TERM` and `ASSOCIATION` embeddings;
+-   excludes current writes by timestamp before ranking;
+-   expands through retained graph edges only;
+-   uses source-backed memory hydration for association products;
+-   reads the latest constructive reconstruction surface when enabled;
+    and
+-   skips reconstruction writes entirely when constructive recall is
+    disabled.
 
 The targeted tests cover source ordering, association expansion,
 current-write exclusion, reconstruction-aware ranking, and the
@@ -3507,11 +3550,11 @@ protocol used three blind repetitions per probe, `judge_seed=42`, 2,000
 probe-bootstrap samples, `--max-media-per-system 0`, a 1,000,000-token
 judge-context setting, and four text-only systems:
 
-- Cortext native working memory plus long-term graph retrieval;
-- traditional chat+RAG, using rolling text history until compaction plus
-  text RAG hits from the same prior event stream;
-- full-history upper bound over all prior text history; and
-- a hosted `gpt-5.5` compacting-session rollup baseline.
+-   Cortext native working memory plus long-term graph retrieval;
+-   traditional chat+RAG, using rolling text history until compaction
+    plus text RAG hits from the same prior event stream;
+-   full-history upper bound over all prior text history; and
+-   a hosted `gpt-5.5` compacting-session rollup baseline.
 
 The run completed 27/27 judgments. The strict gates passed:
 `judge_prompt_fits_context_window`,
@@ -3712,13 +3755,13 @@ blind repetitions per probe, `judge_seed=42`, and a 128,000-token
 judge-context cap. This run removed the full-history arm and compared
 Cortext against capped RAG-style packet variants:
 
-- semantic vector RAG only, top 5 prior hits;
-- deterministic lexical keyword RAG only, top 5 prior hits;
-- rolling-window chat context capped at 16k estimated packet tokens;
-- hybrid rolling-window plus vector RAG capped at 16k estimated packet
-  tokens;
-- the existing hosted compaction-session rollup, capped to 8k estimated
-  packet tokens for the judge prompt.
+-   semantic vector RAG only, top 5 prior hits;
+-   deterministic lexical keyword RAG only, top 5 prior hits;
+-   rolling-window chat context capped at 16k estimated packet tokens;
+-   hybrid rolling-window plus vector RAG capped at 16k estimated packet
+    tokens;
+-   the existing hosted compaction-session rollup, capped to 8k
+    estimated packet tokens for the judge prompt.
 
 The run completed 27/27 judgments. The max estimated judge prompt was
 116,425 tokens under the 128,000-token cap, and the strict
@@ -4755,13 +4798,13 @@ context instead of empty routing artifacts.
 The current v1 runtime uses two durable graph layers plus one bounded
 live layer:
 
-- **Working memory:** active coherent memories used for recent-turn
-  continuity, overlap suppression, and prompt reconstruction.
-- **Long-term graph memory:** persisted `memories`, `signals`,
-  `embeddings`, `associations`, reconstruction rows, eviction audit
-  rows, and optional soft-anchor state.
-- **Soft anchors:** uncertainty-preserving continuity links formed at
-  ingress and exposed as optional memory metadata.
+-   **Working memory:** active coherent memories used for recent-turn
+    continuity, overlap suppression, and prompt reconstruction.
+-   **Long-term graph memory:** persisted `memories`, `signals`,
+    `embeddings`, `associations`, reconstruction rows, eviction audit
+    rows, and optional soft-anchor state.
+-   **Soft anchors:** uncertainty-preserving continuity links formed at
+    ingress and exposed as optional memory metadata.
 
 Long-term graph memory is the durable substrate. `memories` stores
 working, long-term, label, and association nodes; `associations` stores
@@ -4935,14 +4978,15 @@ configuration choices.
 
 The engine is optimized around three constraints:
 
-- **Bounded online work:** F/S/T-derived limits cap retrieval fanout,
-  reconstruction history, consolidation breadth, working-memory size,
-  and graph updates.
-- **Current-state retrieval surfaces:** retrieval scores the current
-  durable representative for each memory instead of scanning every
-  historical embedding version.
-- **Hydration after selection:** payload reconstruction is performed
-  after the ranked packet is selected, not while discovering candidates.
+-   **Bounded online work:** F/S/T-derived limits cap retrieval fanout,
+    reconstruction history, consolidation breadth, working-memory size,
+    and graph updates.
+-   **Current-state retrieval surfaces:** retrieval scores the current
+    durable representative for each memory instead of scanning every
+    historical embedding version.
+-   **Hydration after selection:** payload reconstruction is performed
+    after the ranked packet is selected, not while discovering
+    candidates.
 
 This keeps latency tied to selected memories, bounded graph
 neighborhoods, and SQLite/vector-index costs rather than source text
@@ -5060,11 +5104,11 @@ tree validate.
 After the hard cutover, the expected bottlenecks are ordinary systems
 costs:
 
-- SQLite row materialization and transaction bookkeeping;
-- vector blob decoding and copies;
-- sqlite-vec index work over the retained embedding surface;
-- object-store writes during durable memory creation; and
-- hydration when applications request full memory payloads.
+-   SQLite row materialization and transaction bookkeeping;
+-   vector blob decoding and copies;
+-   sqlite-vec index work over the retained embedding surface;
+-   object-store writes during durable memory creation; and
+-   hydration when applications request full memory payloads.
 
 These are the right bottlenecks for the product target. They are local,
 profileable, and bounded by database size or selected context size. They
@@ -5168,9 +5212,9 @@ Cowan, Nelson. 2001. “The Magical Number 4 in Short-Term Memory: A
 Reconsideration of Mental Storage Capacity.” *Behavioral and Brain
 Sciences* 24 (1): 87–114.
 
-Cowan, Nelson. 2010. “The Magical Mystery Four: How Is Working Memory
-Capacity Limited, and Why?” *Current Directions in Psychological
-Science* 19 (1): 51–57.
+———. 2010. “The Magical Mystery Four: How Is Working Memory Capacity
+Limited, and Why?” *Current Directions in Psychological Science* 19 (1):
+51–57.
 
 Hunt, R Reed. 1995. “The Subtlety of Distinctiveness: What von Restorff
 Really Did.” *Psychonomic Bulletin & Review* 2 (1): 105–12.
@@ -5228,82 +5272,82 @@ when resolving cross-reference drift.
 On cold start (no persisted state), initialize retained state as follows
 (unless otherwise specified by knob priors):
 
-- **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`,
-  `mood_vector = 0_vector`, `last_mood_ts = now_ms()`,
-  `theta_dynamic = theta_target = θ_prior(F,S,T)`,
-  `hysteresis = lerp(0.02, 0.25, T)`, `half_life = base_half_life(T)`,
-  `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`,
-  `reliability = 1`, `retention_ema = 0`,
-  `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`,
-  `last_embedding = unset`, `x_pred_ema = unset`, `outcome_pred = 0`,
-  `φ_t = 0`.
+-   **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`,
+    `mood_vector = 0_vector`, `last_mood_ts = now_ms()`,
+    `theta_dynamic = theta_target = θ_prior(F,S,T)`,
+    `hysteresis = lerp(0.02, 0.25, T)`, `half_life = base_half_life(T)`,
+    `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`,
+    `reliability = 1`, `retention_ema = 0`,
+    `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`,
+    `last_embedding = unset`, `x_pred_ema = unset`, `outcome_pred = 0`,
+    `φ_t = 0`.
 
-- **Accumulator defaults (per stream):** `μ_acc = 0_vector`,
-  `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`,
-  `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`,
-  `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`,
-  `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`,
-  `drift_accum = 0`, `drift_at_last_interrupt = 0`,
-  `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc),
-  `prev_x = unset` (μ_acc).
+-   **Accumulator defaults (per stream):** `μ_acc = 0_vector`,
+    `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`,
+    `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`,
+    `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`,
+    `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`,
+    `drift_accum = 0`, `drift_at_last_interrupt = 0`,
+    `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc),
+    `prev_x = unset` (μ_acc).
 
-- **Per-memory defaults (on insert):**
-  `strength = memory_initial_strength(F,S,T)`,
-  `trace_* = memory_initial_trace_policy(F,S,T)`, `use_frequency = 0`,
-  `stability = memory_initial_stability(F,S,T)`, `connectivity = 0`,
-  `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`,
-  `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`,
-  `lability_state = 0`, `suppression_count = 0`, `suppression = 0`,
-  `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`,
-  `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`,
-  `context = 0_vector`,
-  `source_model = {origin: source_origin(signal), reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`.
-  SQLite defaults remain migration/backstop values for legacy rows.
-  Evidence packets live in ordered `signals` rows, and the
-  constructive-recall ledger starts empty until the initial
-  reconstruction row is appended in `memory_reconstructions`.
+-   **Per-memory defaults (on insert):**
+    `strength = memory_initial_strength(F,S,T)`,
+    `trace_* = memory_initial_trace_policy(F,S,T)`, `use_frequency = 0`,
+    `stability = memory_initial_stability(F,S,T)`, `connectivity = 0`,
+    `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`,
+    `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`,
+    `lability_state = 0`, `suppression_count = 0`, `suppression = 0`,
+    `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`,
+    `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`,
+    `context = 0_vector`,
+    `source_model = {origin: source_origin(signal), reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`.
+    SQLite defaults remain migration/backstop values for legacy rows.
+    Evidence packets live in ordered `signals` rows, and the
+    constructive-recall ledger starts empty until the initial
+    reconstruction row is appended in `memory_reconstructions`.
 
-- **RLS defaults:** `w_* = w_bootstrap`, `P = diag(1000)`,
-  `blender_ready = false`, `blender_update_count = 0`.
+-   **RLS defaults:** `w_* = w_bootstrap`, `P = diag(1000)`,
+    `blender_ready = false`, `blender_update_count = 0`.
 
-- **Knob-derived control parameters (initialized from priors):**
-  `weight_relevance`, `attention_width`, `coverage_gain_floor`,
-  `mismatch_weight`, `weight_novelty`, `weight_surprise`,
-  `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`,
-  `rate_target`, `rate_decay`, `periphery_half_life`,
-  `salience_half_life`, `drift_weight`.
+-   **Knob-derived control parameters (initialized from priors):**
+    `weight_relevance`, `attention_width`, `coverage_gain_floor`,
+    `mismatch_weight`, `weight_novelty`, `weight_surprise`,
+    `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`,
+    `rate_target`, `rate_decay`, `periphery_half_life`,
+    `salience_half_life`, `drift_weight`.
 
-- **Buffers:** `signal_stream` (μ_acc stream), `score_stream`,
-  `memory_stream`, `recent_memory_centroids`, `index_store`,
-  `procedural_store` start empty.
+-   **Buffers:** `signal_stream` (μ_acc stream), `score_stream`,
+    `memory_stream`, `recent_memory_centroids`, `index_store`,
+    `procedural_store` start empty.
 
-- **Retention history:** `retention_history` starts empty (populated
-  after the first signal step).
+-   **Retention history:** `retention_history` starts empty (populated
+    after the first signal step).
 
-- **Accumulator state (per stream; retained across timesteps):**
+-   **Accumulator state (per stream; retained across timesteps):**
 
-  - `{μ_acc, c_t, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
+    -   `{μ_acc, c_t, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
 
-- **Global state (retained across timesteps):**
+-   **Global state (retained across timesteps):**
 
-  - `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, outcome_pred, φ_t, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
+    -   `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, outcome_pred, φ_t, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
 
-- **Buffers (retained across timesteps; bounded by window rules):**
+-   **Buffers (retained across timesteps; bounded by window rules):**
 
-  - `{signal_stream, score_stream, memory_stream, recent_memory_centroids, index_store, procedural_store, retention_history}`
+    -   `{signal_stream, score_stream, memory_stream, recent_memory_centroids, index_store, procedural_store, retention_history}`
 
-- **Recorded signal fields (per signal):**
+-   **Recorded signal fields (per signal):**
 
-  - `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`
+    -   `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`
 
-- **Recorded global fields:**
+-   **Recorded global fields:**
 
-  - `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
+    -   `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
 
-- **Per-step derived scalars/vectors (ephemeral; recomputed each
-  step):**
+-   **Per-step derived scalars/vectors (ephemeral; recomputed each
+    step):**
 
-  - `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t, NE_t, DA_t}`
+    -   `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t, NE_t, DA_t}`
 
 # Appendix B. Derived Signals: Definitions and Bounds
 
@@ -5375,18 +5419,18 @@ contribution of adding candidate.
 These rules resolve empty-store and small-store cases to preserve
 causality and avoid undefined metrics.
 
-- **memory_stream empty:** kNN returns empty; retrieval returns no
-  candidates; graph traversal is skipped. Set `focus_spread_t = 0`.
-- **memory_stream small:** use
-  `k_eff = min(k_neighbors(T), |memory_stream|)`. If `k_eff < 2`, set
-  `focus_spread_t = 0`.
-- **graph absent or empty:** skip graph traversal; use vector search
-  only.
-- **recent_context empty:** apply fallbacks defined in Appendix B (e.g.,
-  `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`, `μ_ctx = 0_vector`
-  so `map01(cos)=0.5`).
-- **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold
-  updates.
+-   **memory_stream empty:** kNN returns empty; retrieval returns no
+    candidates; graph traversal is skipped. Set `focus_spread_t = 0`.
+-   **memory_stream small:** use
+    `k_eff = min(k_neighbors(T), |memory_stream|)`. If `k_eff < 2`, set
+    `focus_spread_t = 0`.
+-   **graph absent or empty:** skip graph traversal; use vector search
+    only.
+-   **recent_context empty:** apply fallbacks defined in Appendix B
+    (e.g., `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`,
+    `μ_ctx = 0_vector` so `map01(cos)=0.5`).
+-   **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold
+    updates.
 
 # Appendix D. Main Loop Execution Order and Normative Invariants
 
@@ -5477,15 +5521,15 @@ The normative execution order for a single timestep t:
 
 Timing notes:
 
-- `now_s()` is captured at step 1 and reused for all Δt computations in
-  this timestep.
-- Threshold updates in `CoreStage` use the score computed earlier in the
-  same stage.
-- Rate updates in `RetrievalStage` use Δwrites from the current step’s
-  `write_memory` decision.
-- Accumulator resets happen in `FeedbackStage`, after storage,
-  retrieval, MNI, memory-usage detection, and working-memory updates
-  have consumed the current-unit query.
+-   `now_s()` is captured at step 1 and reused for all Δt computations
+    in this timestep.
+-   Threshold updates in `CoreStage` use the score computed earlier in
+    the same stage.
+-   Rate updates in `RetrievalStage` use Δwrites from the current step’s
+    `write_memory` decision.
+-   Accumulator resets happen in `FeedbackStage`, after storage,
+    retrieval, MNI, memory-usage detection, and working-memory updates
+    have consumed the current-unit query.
 
 **Normative Invariants:** \* **Causality:** Step `k` uses only values
 computed in steps `1` through `k` or retained from `t-1`. \* **Write

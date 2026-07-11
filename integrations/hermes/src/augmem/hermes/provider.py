@@ -234,9 +234,11 @@ class CortextMemoryProvider(MemoryProvider):
     self._cached_prefetch = ""
     self._cached_prefetch_query = ""
     self._write_gate = threading.Lock()
-    # Deduplicate user ingest when both on_turn_start and sync_turn fire.
+    # Deduplicate user ingest when both on_turn_start and sync_turn fire for
+    # the same known turn. Content alone is not a turn identity: users may
+    # intentionally repeat an instruction in a later turn.
     self._user_key_lock = threading.Lock()
-    self._last_user_key = ""
+    self._last_user_turn_key = ""
     self._pending_user_keys: set[str] = set()
     self._turn_number = 0
 
@@ -335,10 +337,10 @@ class CortextMemoryProvider(MemoryProvider):
     self._session_id = session_id or "session"
     self._platform = str(kwargs.get("platform") or "")
     self._agent_context = str(kwargs.get("agent_context") or "primary")
+    self._config = load_config(hermes_home)
     self._user_id = self._resolve_user_id(kwargs)
     self._agent_id = self._resolve_agent_id(kwargs)
-    self._config = load_config(hermes_home)
-    self._last_user_key = ""
+    self._last_user_turn_key = ""
     self._turn_number = 0
 
     db_path = resolve_db_path(
@@ -388,7 +390,7 @@ class CortextMemoryProvider(MemoryProvider):
     mark = ""
     for sig in signals:
       if sig.modality == "text" and sig.text:
-        mark = _content_key(sig.text)
+        mark = self._user_turn_key(sid, self._turn_number, sig.text)
         break
     prefetch_q = next((s.text for s in signals if s.modality == "text" and s.text), "")
     self._ingest_async(
@@ -558,10 +560,14 @@ class CortextMemoryProvider(MemoryProvider):
       (s.text for s in user_signals if s.modality == "text" and s.text),
       "",
     )
-    user_key = _content_key(user_text) if user_text else ""
+    user_key = self._user_turn_key(sid, self._turn_number, user_text)
     with self._user_key_lock:
       user_already_queued = (
-        user_key == self._last_user_key or user_key in self._pending_user_keys
+        bool(user_key)
+        and (
+          user_key == self._last_user_turn_key
+          or user_key in self._pending_user_keys
+        )
       )
     if user_key and user_already_queued:
       # Keep media from the user payload even when text was already ingested.
@@ -668,7 +674,7 @@ class CortextMemoryProvider(MemoryProvider):
       self._user_id = self._resolve_user_id(kwargs)
     if kwargs.get("agent_identity") or kwargs.get("agent_id"):
       self._agent_id = self._resolve_agent_id(kwargs)
-    self._last_user_key = ""
+    self._last_user_turn_key = ""
     with self._prefetch_lock:
       self._cached_prefetch = ""
       self._cached_prefetch_query = ""
@@ -721,6 +727,13 @@ class CortextMemoryProvider(MemoryProvider):
       if leaf and leaf not in {".hermes", "hermes"}:
         return _sanitize_id(leaf, fallback=DEFAULT_AGENT_ID)
     return DEFAULT_AGENT_ID
+
+  @staticmethod
+  def _user_turn_key(session_id: str, turn_number: int, text: str) -> str:
+    """Return a dedupe key only when the lifecycle supplied a turn id."""
+    if turn_number <= 0 or not text:
+      return ""
+    return f"{session_id}:{turn_number}:{_content_key(text)}"
 
   def _source_id(
     self,
@@ -932,9 +945,14 @@ class CortextMemoryProvider(MemoryProvider):
                 exc,
               )
           self._engine.flush()
+          # A completed write can change the answer for an identical query.
+          # Drop the cache before a user-seam warmup optionally replaces it.
+          with self._prefetch_lock:
+            self._cached_prefetch = ""
+            self._cached_prefetch_query = ""
           if mark_user_key:
             with self._user_key_lock:
-              self._last_user_key = mark_user_key
+              self._last_user_turn_key = mark_user_key
         if also_warm_prefetch and self._seam_pre_llm_enabled():
           try:
             block = self._recall_block(

@@ -476,6 +476,10 @@ pub fn build(b: *std.Build) void {
             addGgmlSources(mod, ggml, ggml_base_sources, &.{
                 "-w",
                 "-D_GLIBCXX_ASSERTIONS",
+                // Zig's native x86 feature detection can define AVX-512 BF16
+                // without making the corresponding intrinsics available to
+                // its C frontend. Build the portable GGML path instead.
+                "-mno-avx512bf16",
             });
             addGgmlSources(mod, ggml, ggml_cpu_sources, &.{
                 "-w",

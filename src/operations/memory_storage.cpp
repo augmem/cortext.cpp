@@ -505,6 +505,11 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
               const auto object_put_start = SteadyClock::now ();
               rec.blob_id = PutObject (object_savepoint.get (), *savepoint,
                                        rec.payload);
+              // The object id is now the durable payload reference. Keeping
+              // the bytes would retain raw media in both the accumulator and
+              // downstream working-memory records after a successful write.
+              rec.payload.clear ();
+              rec.payload.shrink_to_fit ();
               signal_payload_put_ms += ElapsedMillis (object_put_start);
             }
         }
