@@ -26,12 +26,12 @@ public:
   static Cortext::Context ProcessAudioAt (
       Cortext &cortext, const float *pcm, std::size_t num_samples,
       const std::string &source_id, std::uint64_t timestamp,
-      Retention retention = Retention::Natural);
+      Retention retention = Retention::Durable);
 
   static Cortext::Context ProcessImageAt (
       Cortext &cortext, const std::uint8_t *data, int width, int height,
       int channels, const std::string &source_id, std::uint64_t timestamp,
-      Retention retention = Retention::Natural);
+      Retention retention = Retention::Durable);
 
   static Cortext::Context ConsolidateAt (Cortext &cortext,
                                          std::uint64_t timestamp);

@@ -151,9 +151,11 @@ retention_from_options (const cortext_process_json_options *options)
     {
       return cortext::Retention::Natural;
     }
-  if (options->struct_size
-      < offsetof (cortext_process_json_options, retention)
-            + sizeof (options->retention))
+  // The prior two-field struct has the same sizeof as the initial three-field
+  // layout on common 64-bit ABIs because retention occupied tail padding.
+  // Require the expanded layout before reading retention so old padding is
+  // always interpreted as the Natural default.
+  if (options->struct_size < sizeof (cortext_process_json_options))
     {
       return cortext::Retention::Natural;
     }
@@ -1287,6 +1289,7 @@ extern "C"
     if (available == sizeof (*options))
       {
         options->retention = CORTEXT_RETENTION_NATURAL;
+        options->reserved = 0;
       }
   }
 

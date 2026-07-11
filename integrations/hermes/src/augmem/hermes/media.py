@@ -34,6 +34,11 @@ _MAX_TEXT_CHARS = 4000
 _MAX_TOOL_JSON_CHARS = 2500
 _MAX_IMAGE_SIDE = 2048  # downscale long edge for speed; Cortext stays responsive
 _MAX_FILE_BYTES = 25 * 1024 * 1024
+_EMBEDDED_MEDIA_PATH_RE = re.compile(
+  r"(?:(?:file://)?(?:~?/|[A-Za-z]:[\\/]))[^\s'\"<>]+?"
+  r"\.(?:png|jpe?g|webp|gif|bmp|tiff?|wav|wave)",
+  re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -312,6 +317,7 @@ def extract_from_content_parts(
   *,
   source_id_base: str,
   allow_remote_url: bool = False,
+  include_media: bool = True,
 ) -> list[MediaSignal]:
   """Parse OpenAI/Hermes content (string or multimodal part list)."""
   signals: list[MediaSignal] = []
@@ -320,18 +326,27 @@ def extract_from_content_parts(
 
   if isinstance(content, str):
     # Prefer media if the whole string is a data URL or media path.
-    if content.startswith("data:") or _looks_like_media_path(content):
-      sig = media_signal_from_ref(
-        content,
-        source_id=f"{source_id_base}/media",
-        allow_remote_url=allow_remote_url,
-      )
-      if sig:
-        signals.append(sig)
-        return signals
+    if _is_whole_media_ref(content):
+      if include_media:
+        sig = media_signal_from_ref(
+          content,
+          source_id=f"{source_id_base}/media",
+          allow_remote_url=allow_remote_url,
+        )
+        if sig:
+          signals.append(sig)
+      return signals
     t = _text_signal(content, source_id_base)
     if t:
       signals.append(t)
+    if include_media:
+      signals.extend(
+        _scan_for_media_refs(
+          content,
+          source_id_base=source_id_base,
+          allow_remote_url=allow_remote_url,
+        )
+      )
     return signals
 
   if isinstance(content, dict):
@@ -339,6 +354,7 @@ def extract_from_content_parts(
       [content],
       source_id_base=source_id_base,
       allow_remote_url=allow_remote_url,
+      include_media=include_media,
     )
 
   if not isinstance(content, list):
@@ -361,6 +377,8 @@ def extract_from_content_parts(
       continue
 
     if ptype in {"image_url", "input_image", "image"}:
+      if not include_media:
+        continue
       url = ""
       image_url = part.get("image_url")
       if isinstance(image_url, dict):
@@ -379,6 +397,8 @@ def extract_from_content_parts(
       continue
 
     if ptype in {"input_audio", "audio", "audio_url"}:
+      if not include_media:
+        continue
       url = ""
       audio_url = part.get("audio_url") or part.get("input_audio") or part
       if isinstance(audio_url, dict):
@@ -416,6 +436,8 @@ def extract_from_content_parts(
       continue
 
     # Generic file / screenshot path fields Hermes sometimes uses
+    if not include_media:
+      continue
     for key in ("file_path", "path", "screenshot", "image_path", "url"):
       val = part.get(key)
       if isinstance(val, str) and _looks_like_media_path(val):
@@ -450,11 +472,33 @@ def _looks_like_media_path(value: str) -> bool:
   return p.is_file() and p.suffix.lower() in _IMAGE_EXTS | _AUDIO_EXTS
 
 
+def _is_whole_media_ref(value: str) -> bool:
+  v = (value or "").strip()
+  if not v or len(v) > 4096:
+    return False
+  if v.startswith("data:image") or v.startswith("data:audio"):
+    return True
+  if v.startswith("file://"):
+    return True
+  if v.startswith(("http://", "https://")):
+    return any(v.lower().endswith(ext) for ext in _IMAGE_EXTS | _AUDIO_EXTS)
+  p = Path(v).expanduser()
+  return p.is_file() and p.suffix.lower() in _IMAGE_EXTS | _AUDIO_EXTS
+
+
+def _media_refs_from_text(value: str) -> list[str]:
+  text = (value or "").strip()
+  if _is_whole_media_ref(text):
+    return [text]
+  return [match.group(0) for match in _EMBEDDED_MEDIA_PATH_RE.finditer(text)]
+
+
 def extract_tool_calls(
   message: dict[str, Any],
   *,
   source_id_base: str,
   allow_remote_url: bool = False,
+  include_media: bool = True,
 ) -> list[MediaSignal]:
   """Ingest assistant tool_calls as compact text signals (name + args)."""
   signals: list[MediaSignal] = []
@@ -479,13 +523,14 @@ def extract_tool_calls(
         if t:
           signals.append(t)
         # Tool args may embed image paths / data URLs
-        signals.extend(
-          _scan_for_media_refs(
-            args,
-            source_id_base=f"{source_id_base}/tool_call/{i}",
-            allow_remote_url=allow_remote_url,
+        if include_media:
+          signals.extend(
+            _scan_for_media_refs(
+              args,
+              source_id_base=f"{source_id_base}/tool_call/{i}",
+              allow_remote_url=allow_remote_url,
+            )
           )
-        )
     return signals
 
   for i, call in enumerate(tool_calls):
@@ -502,13 +547,14 @@ def extract_tool_calls(
     t = _text_signal(text, f"{source_id_base}/tool_call/{i}/{name}")
     if t:
       signals.append(t)
-    signals.extend(
-      _scan_for_media_refs(
-        args_obj,
-        source_id_base=f"{source_id_base}/tool_call/{i}",
-        allow_remote_url=allow_remote_url,
+    if include_media:
+      signals.extend(
+        _scan_for_media_refs(
+          args_obj,
+          source_id_base=f"{source_id_base}/tool_call/{i}",
+          allow_remote_url=allow_remote_url,
+        )
       )
-    )
   return signals
 
 
@@ -529,21 +575,18 @@ def _scan_for_media_refs(
     if depth > 6 or len(signals) >= 8:
       return
     if isinstance(node, str):
-      if node in seen:
-        return
-      if node.startswith("data:image") or node.startswith("data:audio"):
-        seen.add(node[:64])
+      refs = (
+        [node]
+        if node.startswith("data:image") or node.startswith("data:audio")
+        else _media_refs_from_text(node)
+      )
+      for ref in refs:
+        key = ref[:64] if ref.startswith("data:") else ref
+        if key in seen:
+          continue
+        seen.add(key)
         sig = media_signal_from_ref(
-          node,
-          source_id=f"{source_id_base}/media/{len(signals)+1}",
-          allow_remote_url=allow_remote_url,
-        )
-        if sig:
-          signals.append(sig)
-      elif _looks_like_media_path(node):
-        seen.add(node)
-        sig = media_signal_from_ref(
-          node,
+          ref,
           source_id=f"{source_id_base}/media/{len(signals)+1}",
           allow_remote_url=allow_remote_url,
         )
@@ -568,6 +611,7 @@ def extract_from_message(
   role: Literal["user", "agent"],
   source_id_base: str,
   allow_remote_url: bool = False,
+  include_media: bool = True,
 ) -> list[MediaSignal]:
   """Full message → multimodal signals (text, images, audio, tool calls)."""
   signals: list[MediaSignal] = []
@@ -577,11 +621,12 @@ def extract_from_message(
       content,
       source_id_base=source_id_base,
       allow_remote_url=allow_remote_url,
+      include_media=include_media,
     )
   )
 
   # Explicit attachments some Hermes gateway paths use
-  for key in ("images", "attachments", "files", "media"):
+  for key in ("images", "attachments", "files", "media") if include_media else ():
     blob = message.get(key)
     if isinstance(blob, list):
       for i, item in enumerate(blob):
@@ -616,6 +661,7 @@ def extract_from_message(
         message,
         source_id_base=source_id_base,
         allow_remote_url=allow_remote_url,
+        include_media=include_media,
       )
     )
   return _dedupe_signals(signals)
@@ -629,6 +675,7 @@ def extract_from_messages(
   max_messages: int = 24,
   allow_remote_url: bool = False,
   tool_events_only: bool = False,
+  include_media: bool = True,
 ) -> list[MediaSignal]:
   """Scan a transcript tail for signals, optionally limited to tool events."""
   msgs = [m for m in messages if isinstance(m, dict)]
@@ -646,6 +693,7 @@ def extract_from_messages(
           role="user",
           source_id_base=user_source,
           allow_remote_url=allow_remote_url,
+          include_media=include_media,
         )
       )
     elif role_raw == "assistant":
@@ -655,6 +703,7 @@ def extract_from_messages(
             msg,
             source_id_base=agent_source,
             allow_remote_url=allow_remote_url,
+            include_media=include_media,
           )
         )
       else:
@@ -664,6 +713,7 @@ def extract_from_messages(
             role="agent",
             source_id_base=agent_source,
             allow_remote_url=allow_remote_url,
+            include_media=include_media,
           )
         )
     elif role_raw == "tool":
@@ -674,6 +724,7 @@ def extract_from_messages(
           role="agent",
           source_id_base=f"{agent_source}/tool/{name}",
           allow_remote_url=allow_remote_url,
+          include_media=include_media,
         )
       )
   return _dedupe_signals(out)

@@ -232,6 +232,7 @@ extern "C"
     size_t struct_size;
     int include_embedding;
     int retention; ///< cortext_retention; Natural when field absent/unknown
+    int reserved;  ///< Must be zero; distinguishes this layout from v1.1.10.
   } cortext_process_json_options;
 
   /// @brief Initializes process JSON options to current defaults.

@@ -185,6 +185,27 @@ def test_post_llm_skips_duplicate_user() -> None:
   assert not any("/user/" in source and "/turn/" in source for _, source in new_calls)
 
 
+def test_post_llm_skips_user_ingest_queued_by_turn_start() -> None:
+  provider = CortextMemoryProvider()
+  engine = _FakeEngine()
+  provider._engine = engine
+  provider._agent_context = "primary"
+  provider._session_id = "s1"
+  provider._user_id = "alice"
+  provider._agent_id = "hermes"
+
+  user = "remember this once"
+  provider.on_turn_start(2, user)
+  provider.sync_turn(user, "acknowledged")
+  _wait_bg(provider)
+
+  durable_turn_calls = [
+    text for text, source in engine.calls if source.endswith("/turn/2")
+  ]
+  assert durable_turn_calls.count(user) == 1
+  assert durable_turn_calls.count("acknowledged") == 1
+
+
 def test_source_id_user_vs_agent_provenance() -> None:
   provider = CortextMemoryProvider()
   provider._session_id = "sess-9"
@@ -228,6 +249,18 @@ def test_memory_text_decodes_base64_content_blobs() -> None:
     "relevance": 0.9,
   }
   assert _memory_text(item) == payload
+
+
+def test_memory_text_skips_non_text_payloads() -> None:
+  import base64
+
+  from augmem.hermes.provider import _memory_text
+
+  item = {
+    "modality": "image",
+    "content": [{"base64": base64.b64encode(b"\x89PNG").decode("ascii")}],
+  }
+  assert _memory_text(item) == ""
 
 
 def test_skips_writes_for_non_primary_context() -> None:
@@ -392,3 +425,42 @@ def test_openai_input_audio_content_part_is_decoded() -> None:
   assert len(signals) == 1
   assert signals[0].modality == "audio"
   assert signals[0].pcm
+
+
+def test_text_tool_result_scans_embedded_media_path(tmp_path: Path) -> None:
+  from augmem.hermes.media import extract_from_content_parts
+
+  wav_path = tmp_path / "result.wav"
+  with wave.open(str(wav_path), "wb") as output:
+    output.setnchannels(1)
+    output.setsampwidth(2)
+    output.setframerate(16000)
+    output.writeframes(b"\x00\x00" * 160)
+
+  signals = extract_from_content_parts(
+    f"Saved audio to {wav_path}",
+    source_id_base="hermes/agent/a/s/turn/1/tool/audio",
+  )
+  assert {signal.modality for signal in signals} == {"text", "audio"}
+
+
+def test_media_disabled_skips_content_media_decode(monkeypatch: pytest.MonkeyPatch) -> None:
+  import augmem.hermes.media as media
+
+  called = False
+
+  def _unexpected_media_load(*args: Any, **kwargs: Any) -> Any:
+    nonlocal called
+    del args, kwargs
+    called = True
+    return None
+
+  monkeypatch.setattr(media, "media_signal_from_ref", _unexpected_media_load)
+  signals = media.extract_from_content_parts(
+    "data:image/png;base64,AAAA",
+    source_id_base="hermes/user/u/s/turn/1",
+    include_media=False,
+  )
+
+  assert signals == []
+  assert not called

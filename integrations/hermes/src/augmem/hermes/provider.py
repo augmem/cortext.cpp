@@ -72,6 +72,13 @@ def _memory_text(item: dict[str, Any]) -> str:
   """
   import base64
 
+  modality = str(item.get("modality") or "").lower()
+  mime = str(item.get("mime") or item.get("mimetype") or "").lower()
+  if modality and modality != "text":
+    return ""
+  if mime.startswith("image/") or mime.startswith("audio/"):
+    return ""
+
   text = item.get("text")
   if isinstance(text, str) and text.strip():
     return text.strip()
@@ -228,7 +235,9 @@ class CortextMemoryProvider(MemoryProvider):
     self._cached_prefetch_query = ""
     self._write_gate = threading.Lock()
     # Deduplicate user ingest when both on_turn_start and sync_turn fire.
+    self._user_key_lock = threading.Lock()
     self._last_user_key = ""
+    self._pending_user_keys: set[str] = set()
     self._turn_number = 0
 
   @property
@@ -432,6 +441,7 @@ class CortextMemoryProvider(MemoryProvider):
           task_text[:_MAX_TOOL_RESULT_CHARS],
           source_id_base=self._source_id("agent", "delegation", "task"),
           allow_remote_url=allow_remote,
+          include_media=self._media_enabled(),
         )
       )
     if result_text:
@@ -440,6 +450,7 @@ class CortextMemoryProvider(MemoryProvider):
           result_text[:_MAX_TOOL_RESULT_CHARS],
           source_id_base=self._source_id("agent", "delegation", "result"),
           allow_remote_url=allow_remote,
+          include_media=self._media_enabled(),
         )
       )
     if signals:
@@ -535,17 +546,24 @@ class CortextMemoryProvider(MemoryProvider):
 
     signals: list[MediaSignal] = []
     allow_remote = self._fetch_remote_media()
+    include_media = self._media_enabled()
 
     user_signals = extract_from_content_parts(
       user_content,
       source_id_base=user_base,
       allow_remote_url=allow_remote,
+      include_media=include_media,
     )
     user_text = next(
       (s.text for s in user_signals if s.modality == "text" and s.text),
       "",
     )
-    if user_text and _content_key(user_text) == self._last_user_key:
+    user_key = _content_key(user_text) if user_text else ""
+    with self._user_key_lock:
+      user_already_queued = (
+        user_key == self._last_user_key or user_key in self._pending_user_keys
+      )
+    if user_key and user_already_queued:
       # Keep media from the user payload even when text was already ingested.
       signals.extend(s for s in user_signals if s.modality != "text")
     else:
@@ -556,6 +574,7 @@ class CortextMemoryProvider(MemoryProvider):
         assistant_content,
         source_id_base=agent_base,
         allow_remote_url=allow_remote,
+        include_media=include_media,
       )
     )
 
@@ -567,14 +586,14 @@ class CortextMemoryProvider(MemoryProvider):
           agent_source=agent_base,
           allow_remote_url=allow_remote,
           tool_events_only=True,
+          include_media=include_media,
         )
       )
 
     if not signals:
       return
 
-    mark = _content_key(user_text) if user_text else ""
-    self._ingest_async(signals, mark_user_key=mark or None)
+    self._ingest_async(signals, mark_user_key=user_key or None)
 
   # =========================================================================
   # Tools + session lifecycle
@@ -617,6 +636,7 @@ class CortextMemoryProvider(MemoryProvider):
     ][-3:]
     signals: list[MediaSignal] = []
     allow_remote = self._fetch_remote_media()
+    include_media = self._media_enabled()
     for msg in user_msgs:
       signals.extend(
         extract_from_message(
@@ -624,6 +644,7 @@ class CortextMemoryProvider(MemoryProvider):
           role="user",
           source_id_base=base,
           allow_remote_url=allow_remote,
+          include_media=include_media,
         )
       )
     if not signals:
@@ -802,6 +823,7 @@ class CortextMemoryProvider(MemoryProvider):
   ) -> list[MediaSignal]:
     """Build multimodal signals from on_turn_start message + kwargs."""
     allow_remote = self._fetch_remote_media()
+    include_media = self._media_enabled()
     signals: list[MediaSignal] = []
     if isinstance(message, dict):
       signals.extend(
@@ -810,6 +832,7 @@ class CortextMemoryProvider(MemoryProvider):
           role="user",
           source_id_base=source_id_base,
           allow_remote_url=allow_remote,
+          include_media=include_media,
         )
       )
     else:
@@ -818,11 +841,12 @@ class CortextMemoryProvider(MemoryProvider):
           message,
           source_id_base=source_id_base,
           allow_remote_url=allow_remote,
+          include_media=include_media,
         )
       )
 
-    if not self._media_enabled():
-      return [s for s in signals if s.modality == "text"]
+    if not include_media:
+      return signals
 
     # Hermes may pass images/attachments out-of-band on kwargs.
     for key in ("images", "attachments", "files", "media", "screenshots"):
@@ -880,6 +904,10 @@ class CortextMemoryProvider(MemoryProvider):
     if not cleaned:
       return
 
+    if mark_user_key:
+      with self._user_key_lock:
+        self._pending_user_keys.add(mark_user_key)
+
     def _work() -> None:
       try:
         with self._write_gate:
@@ -905,7 +933,8 @@ class CortextMemoryProvider(MemoryProvider):
               )
           self._engine.flush()
           if mark_user_key:
-            self._last_user_key = mark_user_key
+            with self._user_key_lock:
+              self._last_user_key = mark_user_key
         if also_warm_prefetch and self._seam_pre_llm_enabled():
           try:
             block = self._recall_block(
@@ -919,6 +948,10 @@ class CortextMemoryProvider(MemoryProvider):
             logger.debug("Cortext user-seam prefetch warm failed: %s", exc)
       except Exception as exc:
         logger.warning("Cortext ingest failed: %s", exc)
+      finally:
+        if mark_user_key:
+          with self._user_key_lock:
+            self._pending_user_keys.discard(mark_user_key)
 
     self._ensure_ingest_worker()
     self._ingest_queue.put(_work)
