@@ -100,8 +100,7 @@ class _FakeEngine:
 
 
 def _wait_bg(provider: CortextMemoryProvider) -> None:
-  if provider._bg_thread and provider._bg_thread.is_alive():
-    provider._bg_thread.join(timeout=2.0)
+  provider._join_background(timeout=2.0)
 
 
 def test_invisible_to_agent_no_tools_no_system_prompt() -> None:

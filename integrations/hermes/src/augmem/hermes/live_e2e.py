@@ -180,11 +180,14 @@ def _memory_score(matched: list[str]) -> int:
 
 
 def _wait_bg(provider: CortextMemoryProvider, timeout: float = 120.0) -> None:
-  deadline = time.time() + timeout
-  while provider._bg_thread and provider._bg_thread.is_alive():
-    if time.time() > deadline:
-      raise TimeoutError("background Cortext ingest did not finish in time")
-    provider._bg_thread.join(timeout=0.5)
+  provider._join_background(timeout=timeout)
+  # If work is still marked unfinished after the join timeout, surface it.
+  try:
+    pending = int(getattr(provider._ingest_queue, "unfinished_tasks", 0))
+  except Exception:
+    pending = 0
+  if pending > 0:
+    raise TimeoutError("background Cortext ingest did not finish in time")
 
 
 def _system_with_optional_prior(prefetch: str) -> str:

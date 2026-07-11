@@ -84,7 +84,15 @@ def decode_data_url(url: str) -> tuple[bytes, str] | None:
   return raw, mime
 
 
-def _load_local_or_url_bytes(ref: str) -> tuple[bytes, str] | None:
+def _load_local_or_url_bytes(
+  ref: str, *, allow_remote_url: bool = False
+) -> tuple[bytes, str] | None:
+  """Load media bytes from a data URL, local path, or (opt-in) remote URL.
+
+  Remote http(s) fetches are disabled by default to avoid SSRF and unexpected
+  outbound requests when conversation content contains untrusted URLs.
+  Enable with ``allow_remote_url=True`` (provider config ``fetch_remote_media``).
+  """
   ref = (ref or "").strip()
   if not ref:
     return None
@@ -109,8 +117,14 @@ def _load_local_or_url_bytes(ref: str) -> tuple[bytes, str] | None:
     return raw, mime
 
   if ref.startswith("http://") or ref.startswith("https://"):
+    if not allow_remote_url:
+      logger.debug(
+        "Skipping remote media URL (fetch_remote_media disabled): %s",
+        ref[:120],
+      )
+      return None
     try:
-      with urlopen(ref, timeout=5.0) as resp:  # noqa: S310 - intentional fetch
+      with urlopen(ref, timeout=5.0) as resp:  # noqa: S310 - opt-in remote fetch
         raw = resp.read(_MAX_FILE_BYTES + 1)
         if len(raw) > _MAX_FILE_BYTES:
           return None
@@ -271,8 +285,10 @@ def audio_signal_from_bytes(
   )
 
 
-def media_signal_from_ref(ref: str, *, source_id: str) -> MediaSignal | None:
-  loaded = _load_local_or_url_bytes(ref)
+def media_signal_from_ref(
+  ref: str, *, source_id: str, allow_remote_url: bool = False
+) -> MediaSignal | None:
+  loaded = _load_local_or_url_bytes(ref, allow_remote_url=allow_remote_url)
   if not loaded:
     return None
   raw, mime = loaded
@@ -295,6 +311,7 @@ def extract_from_content_parts(
   content: Any,
   *,
   source_id_base: str,
+  allow_remote_url: bool = False,
 ) -> list[MediaSignal]:
   """Parse OpenAI/Hermes content (string or multimodal part list)."""
   signals: list[MediaSignal] = []
@@ -304,7 +321,11 @@ def extract_from_content_parts(
   if isinstance(content, str):
     # Prefer media if the whole string is a data URL or media path.
     if content.startswith("data:") or _looks_like_media_path(content):
-      sig = media_signal_from_ref(content, source_id=f"{source_id_base}/media")
+      sig = media_signal_from_ref(
+        content,
+        source_id=f"{source_id_base}/media",
+        allow_remote_url=allow_remote_url,
+      )
       if sig:
         signals.append(sig)
         return signals
@@ -314,7 +335,11 @@ def extract_from_content_parts(
     return signals
 
   if isinstance(content, dict):
-    return extract_from_content_parts([content], source_id_base=source_id_base)
+    return extract_from_content_parts(
+      [content],
+      source_id_base=source_id_base,
+      allow_remote_url=allow_remote_url,
+    )
 
   if not isinstance(content, list):
     return signals
@@ -345,7 +370,9 @@ def extract_from_content_parts(
       url = url or str(part.get("url") or part.get("image") or "")
       media_i += 1
       sig = media_signal_from_ref(
-        url, source_id=f"{source_id_base}/image/{media_i}"
+        url,
+        source_id=f"{source_id_base}/image/{media_i}",
+        allow_remote_url=allow_remote_url,
       )
       if sig:
         signals.append(sig)
@@ -386,6 +413,7 @@ def extract_from_content_parts(
           url if not url.startswith("data:") and "base64" not in url[:40]
           else (url if url.startswith("data:") else f"data:audio/wav;base64,{url}"),
           source_id=f"{source_id_base}/audio/{media_i}",
+          allow_remote_url=allow_remote_url,
         )
         if sig:
           signals.append(sig)
@@ -397,7 +425,9 @@ def extract_from_content_parts(
       if isinstance(val, str) and _looks_like_media_path(val):
         media_i += 1
         sig = media_signal_from_ref(
-          val, source_id=f"{source_id_base}/file/{media_i}"
+          val,
+          source_id=f"{source_id_base}/file/{media_i}",
+          allow_remote_url=allow_remote_url,
         )
         if sig:
           signals.append(sig)
@@ -428,6 +458,7 @@ def extract_tool_calls(
   message: dict[str, Any],
   *,
   source_id_base: str,
+  allow_remote_url: bool = False,
 ) -> list[MediaSignal]:
   """Ingest assistant tool_calls as compact text signals (name + args)."""
   signals: list[MediaSignal] = []
@@ -453,7 +484,11 @@ def extract_tool_calls(
           signals.append(t)
         # Tool args may embed image paths / data URLs
         signals.extend(
-          _scan_for_media_refs(args, source_id_base=f"{source_id_base}/tool_call/{i}")
+          _scan_for_media_refs(
+            args,
+            source_id_base=f"{source_id_base}/tool_call/{i}",
+            allow_remote_url=allow_remote_url,
+          )
         )
     return signals
 
@@ -472,7 +507,11 @@ def extract_tool_calls(
     if t:
       signals.append(t)
     signals.extend(
-      _scan_for_media_refs(args_obj, source_id_base=f"{source_id_base}/tool_call/{i}")
+      _scan_for_media_refs(
+        args_obj,
+        source_id_base=f"{source_id_base}/tool_call/{i}",
+        allow_remote_url=allow_remote_url,
+      )
     )
   return signals
 
@@ -484,7 +523,9 @@ def _safe_json(raw: str) -> Any:
     return raw
 
 
-def _scan_for_media_refs(obj: Any, *, source_id_base: str) -> list[MediaSignal]:
+def _scan_for_media_refs(
+  obj: Any, *, source_id_base: str, allow_remote_url: bool = False
+) -> list[MediaSignal]:
   signals: list[MediaSignal] = []
   seen: set[str] = set()
 
@@ -497,14 +538,18 @@ def _scan_for_media_refs(obj: Any, *, source_id_base: str) -> list[MediaSignal]:
       if node.startswith("data:image") or node.startswith("data:audio"):
         seen.add(node[:64])
         sig = media_signal_from_ref(
-          node, source_id=f"{source_id_base}/media/{len(signals)+1}"
+          node,
+          source_id=f"{source_id_base}/media/{len(signals)+1}",
+          allow_remote_url=allow_remote_url,
         )
         if sig:
           signals.append(sig)
       elif _looks_like_media_path(node):
         seen.add(node)
         sig = media_signal_from_ref(
-          node, source_id=f"{source_id_base}/media/{len(signals)+1}"
+          node,
+          source_id=f"{source_id_base}/media/{len(signals)+1}",
+          allow_remote_url=allow_remote_url,
         )
         if sig:
           signals.append(sig)
@@ -526,12 +571,17 @@ def extract_from_message(
   *,
   role: Literal["user", "agent"],
   source_id_base: str,
+  allow_remote_url: bool = False,
 ) -> list[MediaSignal]:
   """Full message → multimodal signals (text, images, audio, tool calls)."""
   signals: list[MediaSignal] = []
   content = message.get("content")
   signals.extend(
-    extract_from_content_parts(content, source_id_base=source_id_base)
+    extract_from_content_parts(
+      content,
+      source_id_base=source_id_base,
+      allow_remote_url=allow_remote_url,
+    )
   )
 
   # Explicit attachments some Hermes gateway paths use
@@ -541,7 +591,9 @@ def extract_from_message(
       for i, item in enumerate(blob):
         if isinstance(item, str):
           sig = media_signal_from_ref(
-            item, source_id=f"{source_id_base}/{key}/{i}"
+            item,
+            source_id=f"{source_id_base}/{key}/{i}",
+            allow_remote_url=allow_remote_url,
           )
           if sig:
             signals.append(sig)
@@ -555,14 +607,20 @@ def extract_from_message(
           )
           if url:
             sig = media_signal_from_ref(
-              url, source_id=f"{source_id_base}/{key}/{i}"
+              url,
+              source_id=f"{source_id_base}/{key}/{i}",
+              allow_remote_url=allow_remote_url,
             )
             if sig:
               signals.append(sig)
 
   if role == "agent" or str(message.get("role") or "") == "assistant":
     signals.extend(
-      extract_tool_calls(message, source_id_base=source_id_base)
+      extract_tool_calls(
+        message,
+        source_id_base=source_id_base,
+        allow_remote_url=allow_remote_url,
+      )
     )
   return _dedupe_signals(signals)
 
@@ -573,6 +631,7 @@ def extract_from_messages(
   user_source: str,
   agent_source: str,
   max_messages: int = 24,
+  allow_remote_url: bool = False,
 ) -> list[MediaSignal]:
   """Scan a transcript tail for multimodal + tool signals."""
   msgs = [m for m in messages if isinstance(m, dict)]
@@ -583,11 +642,21 @@ def extract_from_messages(
     role_raw = str(msg.get("role") or "")
     if role_raw == "user":
       out.extend(
-        extract_from_message(msg, role="user", source_id_base=user_source)
+        extract_from_message(
+          msg,
+          role="user",
+          source_id_base=user_source,
+          allow_remote_url=allow_remote_url,
+        )
       )
     elif role_raw == "assistant":
       out.extend(
-        extract_from_message(msg, role="agent", source_id_base=agent_source)
+        extract_from_message(
+          msg,
+          role="agent",
+          source_id_base=agent_source,
+          allow_remote_url=allow_remote_url,
+        )
       )
     elif role_raw == "tool":
       name = str(msg.get("name") or msg.get("tool_name") or "tool")
@@ -596,6 +665,7 @@ def extract_from_messages(
           msg,
           role="agent",
           source_id_base=f"{agent_source}/tool/{name}",
+          allow_remote_url=allow_remote_url,
         )
       )
   return _dedupe_signals(out)
