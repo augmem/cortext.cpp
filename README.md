@@ -16,7 +16,6 @@ window back to an LLM.
 Links: [Releases](https://github.com/augmem/cortext/releases) /
 [Python](bindings/python/README.md) /
 [JavaScript](bindings/javascript/README.md) /
-[Hermes Agent](integrations/hermes/README.md) /
 [Paper](docs/paper/_manuscript/index.md) /
 [Roadmap](ROADMAP.md)
 
