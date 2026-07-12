@@ -473,10 +473,22 @@ pub fn build(b: *std.Build) void {
             mod.addCMacro("_GNU_SOURCE", "1");
             mod.addCMacro("_XOPEN_SOURCE", "600");
             mod.addCMacro("GGML_USE_CPU_REPACK", "1");
-            addGgmlSources(mod, ggml, ggml_base_sources, &.{
-                "-w",
-                "-D_GLIBCXX_ASSERTIONS",
-            });
+            if (target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .x86) {
+                // Zig's native x86 feature detection can define AVX-512 BF16
+                // without making the corresponding intrinsics available to
+                // its C frontend. Build the portable GGML path instead.
+                addGgmlSources(mod, ggml, ggml_base_sources, &.{
+                    "-w",
+                    "-D_GLIBCXX_ASSERTIONS",
+                    "-mno-avx512bf16",
+                    "-U__AVX512BF16__",
+                });
+            } else {
+                addGgmlSources(mod, ggml, ggml_base_sources, &.{
+                    "-w",
+                    "-D_GLIBCXX_ASSERTIONS",
+                });
+            }
             addGgmlSources(mod, ggml, ggml_cpu_sources, &.{
                 "-w",
                 "-D_GLIBCXX_ASSERTIONS",

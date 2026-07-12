@@ -17,6 +17,14 @@ CheckSpikeBypass::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &signal = context.GetSignal ();
 
+  if (signal.retention == Retention::Ephemeral)
+    {
+      // Ephemeral retrieval probes must not turn an open Natural unit into a
+      // capacity/spike boundary or finalize its episode.
+      context.SetSpikeBypass (false);
+      return;
+    }
+
   // Get composite score
   const double score = context.GetCompositeScore ().value_or (0.0);
 

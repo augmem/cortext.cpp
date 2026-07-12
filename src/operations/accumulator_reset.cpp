@@ -20,6 +20,12 @@ ResetAccumulatorAfterFlush::Execute (OperationContext &context,
 
   auto &p_ctx = context.GetProcessorContext ();
   const auto &signal = context.GetSignal ();
+  if (signal.retention == Retention::Ephemeral)
+    {
+      // Ephemeral probes expose a retrieval boundary but must leave an open
+      // same-source Natural accumulator intact.
+      return;
+    }
   auto it = p_ctx.accumulator_states.find (signal.source_id);
   if (it == p_ctx.accumulator_states.end ())
     {

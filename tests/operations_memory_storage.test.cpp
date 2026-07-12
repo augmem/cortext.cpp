@@ -545,10 +545,7 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
     rec.mime = s.mimetype;
     rec.score = 0.5;
     rec.serial_position = 0;
-    auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                     { *s.payload });
-    REQUIRE (blob_rows.size () == 1);
-    rec.blob_id = BlobFromAny (blob_rows[0].at ("id"));
+    rec.payload = *s.payload;
     acc.signals.push_back (std::move (rec));
   }
   pctx.accumulator_states[s.source_id] = std::move (acc);
@@ -561,6 +558,10 @@ TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",
   auto tx = store->Begin ();
   op.Execute (ctx, *tx);
   tx->Commit ();
+
+  REQUIRE (pctx.accumulator_states.at (s.source_id)
+               .signals.at (0)
+               .payload.empty ());
 
   auto stored_id = ctx.GetStoredEmbeddingId ();
   REQUIRE (stored_id.has_value ());

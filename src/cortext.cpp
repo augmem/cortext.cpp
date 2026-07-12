@@ -345,18 +345,6 @@ ApplyRetrievalScore (Cortext::Context::Memory &memory,
   memory.relevance = it->second.relevance;
 }
 
-inline bool
-ShouldForceInputBoundary (Retention retention)
-{
-  return retention == Retention::Durable || retention == Retention::Ephemeral;
-}
-
-inline bool
-ShouldForceDurableWrite (Retention retention)
-{
-  return retention == Retention::Durable;
-}
-
 bool
 LoadObjectPayload (Store *store, ObjectStore *object_store,
                    const std::vector<unsigned char> &blob_id,
@@ -1405,7 +1393,7 @@ struct Cortext::Impl
                           std::uint64_t timestamp,
                           const std::string &source_id,
                           const std::string &text,
-                          Retention retention = Retention::Durable)
+                          Retention retention = Retention::Natural)
   {
     telemetry::ScopedSpan span ("cortext.api.process_text_cached");
     const auto total_start = std::chrono::steady_clock::now ();
@@ -1417,8 +1405,6 @@ struct Cortext::Impl
     s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp != 0 ? timestamp : NowMillis ();
     s.source_id = source_id;
-    s.force_boundary = ShouldForceInputBoundary (retention);
-    s.force_write = ShouldForceDurableWrite (retention);
     s.retention = retention;
     s.payload = std::vector<unsigned char> (text.begin (), text.end ());
     s.modality = "text";
@@ -1544,7 +1530,8 @@ struct Cortext::Impl
         out.interrupt_gate_boundary_mult_eff;
     result.interrupt_gate_affect_drive = out.interrupt_gate_affect_drive;
     result.boundary_score = out.boundary_score;
-    
+    result.boundary_type = out.boundary_type;
+
     // Populate output metrics
     result.output.composite_score = out.composite_score;
     result.output.threshold = out.threshold_T_dynamic;
@@ -1891,8 +1878,6 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -1947,8 +1932,6 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp;
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -2016,8 +1999,6 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   // Store raw PCM bytes (f32le) as payload
   const std::size_t byte_len = num_samples * sizeof (float);
@@ -2093,8 +2074,6 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.modality = "audio";
   ApplyStoredMedia (s, media);
@@ -2163,8 +2142,6 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   // Store raw image bytes as payload
   const std::size_t byte_len
@@ -2241,8 +2218,6 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.modality = "image";
   ApplyStoredMedia (s, media);
@@ -2368,8 +2343,6 @@ internal::ReplayIngress::ProcessTextAt (Cortext &cortext,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
@@ -2441,8 +2414,6 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   const std::size_t byte_len = num_samples * sizeof (float);
   s.payload = std::vector<unsigned char> (byte_len);
@@ -2518,8 +2489,6 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
-  s.force_boundary = ShouldForceInputBoundary (retention);
-  s.force_write = ShouldForceDurableWrite (retention);
   s.retention = retention;
   const std::size_t byte_len
       = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
@@ -2761,13 +2730,16 @@ struct StreamingTextProbeSession::Impl
     if (text.empty () || !has_cached_embedding
         || aggregate_embedding_sum.size () == 0)
       {
-        return timestamp != 0 ? cortext->ProcessTextAt (text, source_id, timestamp)
-                              : cortext->ProcessText (text, source_id);
+        return timestamp != 0
+                   ? cortext->ProcessTextAt (text, source_id, timestamp,
+                                              Retention::Durable)
+                   : cortext->ProcessText (text, source_id,
+                                           Retention::Durable);
       }
     const Eigen::VectorXf final_embedding
         = NormalizeProbeEmbedding (aggregate_embedding_sum);
     return cortext->impl_->ProcessTextEmbeddingAt (
-        final_embedding, timestamp, source_id, text);
+        final_embedding, timestamp, source_id, text, Retention::Durable);
   }
 
   void

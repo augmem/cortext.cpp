@@ -122,6 +122,13 @@ code is 8841.", ran an ephemeral `recall "garage door code"`, retrieved the
 stored memory, and confirmed the SQLite memory/signal counts were unchanged
 before and after recall.
 
+On 2026-07-11, retention was expanded to four policies:
+`Natural` (default when omitted: `force_boundary=false`, `force_write=false`
+so accumulator boundary/write-gate algorithms decide), `Durable` (historical
+chat convenience: force both flags), `Boundary` (force turn edge only), and
+`Ephemeral` (no-store query). Binding surfaces expose retention through process
+options; CLI remember continues to use `Durable` and recall uses `Ephemeral`.
+
 The same patch was run through the normalized memory-eval smoke slice with all
 configured benchmark adapters, using durable history ingestion and ephemeral
 queries through the public API:

@@ -31,14 +31,13 @@ struct Signal
   // Opaque provenance/grouping key. Core code may compare it for exact stream
   // equality, but must not parse application roles or modalities from it.
   std::string source_id;
-  bool force_boundary = false;
-  bool force_write = false;
   // Internal maintenance hint. When set, the signal drives consolidation
   // without giving behavioral meaning to the opaque source_id string.
   bool force_consolidation = false;
-  // Durable by default. Ephemeral signals update live processing state and
-  // retrieval context, but the write path must not persist them as memories.
-  Retention retention = Retention::Durable;
+  // Natural by default: episode algorithms decide whether to close and store.
+  // Durable explicitly closes and commits; Boundary closes only; Ephemeral
+  // never stores.
+  Retention retention = Retention::Natural;
 
   // Payload for storage (persisted to objstore when write gate passes).
   std::optional<std::vector<unsigned char>> payload;

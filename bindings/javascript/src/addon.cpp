@@ -1,5 +1,7 @@
 #include <node_api.h>
 
+#include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -160,10 +162,99 @@ GetOptionalBoolProperty (napi_env env, napi_value obj, const char *name,
 }
 
 bool
+ParseRetentionProperty (napi_env env, napi_value value, int &out)
+{
+  if (IsNullOrUndefined (env, value))
+    {
+      out = CORTEXT_RETENTION_NATURAL;
+      return true;
+    }
+  napi_valuetype type = napi_undefined;
+  if (napi_typeof (env, value, &type) != napi_ok)
+    {
+      return false;
+    }
+  if (type == napi_number)
+    {
+      double number = 0.0;
+      if (napi_get_value_double (env, value, &number) != napi_ok)
+        {
+          return false;
+        }
+      // Reject NaN/Inf and non-integers (e.g. 1.9 must not truncate to 1).
+      if (!std::isfinite (number) || std::floor (number) != number)
+        {
+          return false;
+        }
+      if (number < CORTEXT_RETENTION_NATURAL
+          || number > CORTEXT_RETENTION_EPHEMERAL)
+        {
+          return false;
+        }
+      const int code = static_cast<int> (number);
+      out = code;
+      return true;
+    }
+  if (type == napi_string)
+    {
+      size_t length = 0;
+      if (napi_get_value_string_utf8 (env, value, nullptr, 0, &length)
+          != napi_ok)
+        {
+          return false;
+        }
+      std::string text (length + 1, '\0');
+      if (napi_get_value_string_utf8 (env, value, text.data (), length + 1,
+                                     &length)
+          != napi_ok)
+        {
+          return false;
+        }
+      text.resize (length);
+      std::string lower;
+      lower.reserve (text.size ());
+      for (unsigned char ch : text)
+        {
+          lower.push_back (static_cast<char> (std::tolower (ch)));
+        }
+      if (lower == "natural")
+        {
+          out = CORTEXT_RETENTION_NATURAL;
+          return true;
+        }
+      if (lower == "durable")
+        {
+          out = CORTEXT_RETENTION_DURABLE;
+          return true;
+        }
+      if (lower == "boundary")
+        {
+          out = CORTEXT_RETENTION_BOUNDARY;
+          return true;
+        }
+      if (lower == "ephemeral")
+        {
+          out = CORTEXT_RETENTION_EPHEMERAL;
+          return true;
+        }
+      return false;
+    }
+  return false;
+}
+
+bool
+InitializeProcessJSONOptions (cortext_process_json_options &out)
+{
+  out.struct_size = sizeof (out);
+  cortext_process_json_options_init (&out);
+  return true;
+}
+
+bool
 GetProcessJSONOptions (napi_env env, napi_value value,
                        cortext_process_json_options &out)
 {
-  cortext_process_json_options_init (&out);
+  InitializeProcessJSONOptions (out);
   if (IsNullOrUndefined (env, value))
     {
       return true;
@@ -188,6 +279,28 @@ GetProcessJSONOptions (napi_env env, napi_value value,
       return false;
     }
   out.include_embedding = omit_embedding ? 0 : include_embedding;
+
+  napi_value retention_value = nullptr;
+  bool has_retention = false;
+  if (napi_has_named_property (env, value, "retention", &has_retention)
+      != napi_ok)
+    {
+      return false;
+    }
+  if (has_retention)
+    {
+      if (napi_get_named_property (env, value, "retention", &retention_value)
+          != napi_ok)
+        {
+          return false;
+        }
+      int retention = CORTEXT_RETENTION_NATURAL;
+      if (!ParseRetentionProperty (env, retention_value, retention))
+        {
+          return false;
+        }
+      out.retention = retention;
+    }
   return true;
 }
 
@@ -422,7 +535,7 @@ ProcessTextJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 3)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (
@@ -486,7 +599,7 @@ ProcessAudioJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 3)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (
@@ -550,7 +663,7 @@ ProcessAudioWithMediaJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 5)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (
@@ -639,7 +752,7 @@ ProcessImageJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 6)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (
@@ -723,7 +836,7 @@ ProcessImageWithMediaJSON (napi_env env, napi_callback_info info)
     }
   if (argc < 8)
     {
-      cortext_process_json_options_init (&options);
+      InitializeProcessJSONOptions (options);
     }
 
   return JSONStringResult (

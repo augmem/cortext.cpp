@@ -16,18 +16,25 @@ window back to an LLM.
 Links: [Releases](https://github.com/augmem/cortext/releases) /
 [Python](bindings/python/README.md) /
 [JavaScript](bindings/javascript/README.md) /
+[Hermes Agent](integrations/hermes/README.md) /
 [Paper](docs/paper/_manuscript/index.md) /
 [Roadmap](ROADMAP.md)
 
 ## Recent Changes
 
+- `v1.1.11`: Retention is now `Natural` (default), `Durable`, `Boundary`, and
+  `Ephemeral`. Omitted retention is Natural: `force_boundary=false` and
+  `force_write=false` so episode algorithms decide. `Durable` keeps force
+  boundary + force write (explicit chat turns). `Boundary` forces the turn
+  edge only. `Ephemeral` remains no-store query. Exposed on C++ Process*,
+  C `cortext_process_json_options.retention`, and Python/JS/Go bindings.
 - `v1.1.10`: public `Retention::Ephemeral` calls force a retrieval boundary
   without writing the query, so CLI/package recall works as documented.
 - `v1.1.9`: package examples use real OpenAI Chat Completions message arrays.
 - `v1.1.8`: PyPI and npm packages ship cross-platform native libraries/addons
   and download the verified AIST q8_0 model into a user cache on first use.
-- Public C++ `Retention::Ephemeral` is the no-storage query path: it still
-  updates live context and retrieves memory, but does not store the query.
+- Public retention policies: Natural (default/episode), Durable (force turn
+  store), Boundary (force edge), Ephemeral (query without store).
 - Command-line tools are built with `CORTEXT_BUILD_TOOLS=ON`; examples remain
   behind `CORTEXT_BUILD_EXAMPLES=ON`.
 
@@ -189,6 +196,8 @@ Important CMake options:
 
 ## C++ API
 
+<!-- C++ quickstart matching the ProcessText retention contract in include/cortext/cortext.hpp -->
+
 ```cpp
 #include <cortext/cortext.hpp>
 
@@ -218,7 +227,8 @@ int main ()
 
   auto engine = cortext::Cortext::Create (cfg, "memory.db");
 
-  engine->ProcessText ("The garage door code is 8841.", "chat/main");
+  engine->ProcessText ("The garage door code is 8841.", "chat/main",
+                       cortext::Retention::Durable);
 
   auto ctx = engine->ProcessText (
       "garage door code",
@@ -246,8 +256,10 @@ Public entrypoints:
 
 Core calls:
 
-- `ProcessText`, `ProcessAudio`, `ProcessImage`: process a signal and store it
-  by default.
+- `ProcessText`, `ProcessAudio`, `ProcessImage`: process a signal (default
+  retention is Natural — no forced turn edge; storage via write gate).
+- `Retention::Durable`: force turn boundary + force write (chat convenience).
+- `Retention::Boundary`: force turn boundary only; write gate still applies.
 - `Retention::Ephemeral`: process and retrieve without storing the input.
 - `EmbedText`, `EmbedAudio`, `EmbedImage`: embedding-only calls that do not
   mutate memory state.

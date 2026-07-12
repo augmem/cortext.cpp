@@ -821,17 +821,20 @@ ProcessScenario (const Scenario &scenario, const Options &opts,
                                               event.byte_count);
           (void)engine->ProcessImage (pixels.data (), event.width,
                                       event.height, event.channels,
-                                      event.source_id);
+                                      event.source_id,
+                                      cortext::Retention::Durable);
         }
       else if (event.modality == "audio")
         {
           const auto pcm = ReadAudioEvent (event);
           (void)engine->ProcessAudio (pcm.data (), pcm.size (),
-                                      event.source_id);
+                                      event.source_id,
+                                      cortext::Retention::Durable);
         }
       else if (event.modality == "text")
         {
-          (void)engine->ProcessText (event.text, event.source_id);
+          (void)engine->ProcessText (event.text, event.source_id,
+                                     cortext::Retention::Durable);
         }
       else
         {

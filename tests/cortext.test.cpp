@@ -321,6 +321,67 @@ TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
            == AnyToLongLong (before_signals[0].at ("n")));
 }
 
+TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
+           "[cortext][retention][aist]")
+{
+  REQUIRE (static_cast<int> (cortext::Retention::Natural) == 0);
+  REQUIRE (static_cast<int> (cortext::Retention::Durable) == 1);
+  REQUIRE (static_cast<int> (cortext::Retention::Boundary) == 2);
+  REQUIRE (static_cast<int> (cortext::Retention::Ephemeral) == 3);
+
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+
+  std::unique_ptr<cortext::Cortext> ctx;
+  REQUIRE_NOTHROW (ctx = cortext::Cortext::Create (cfg, store));
+  REQUIRE (ctx != nullptr);
+
+  // Omitted retention defaults to Natural: does not force explicit_turn.
+  // boundary_score can legitimately hit 1.0 under natural algorithms, so
+  // assert on boundary_type rather than score as the force diagnostic.
+  const auto before_objects
+      = store->Execute ("SELECT COUNT(*) AS n FROM objstore_data");
+  auto natural = ctx->ProcessTextAt (
+      "Streaming token about weather.", "stream/main", 1000ULL);
+  if (natural.boundary_type.has_value ())
+    {
+      REQUIRE (*natural.boundary_type != "explicit_turn");
+    }
+  const auto after_objects
+      = store->Execute ("SELECT COUNT(*) AS n FROM objstore_data");
+  REQUIRE (AnyToLongLong (after_objects[0].at ("n"))
+           == AnyToLongLong (before_objects[0].at ("n")));
+
+  auto durable = ctx->ProcessTextAt (
+      "The garage door code is 8841.", "chat/main", 2000ULL,
+      cortext::Retention::Durable);
+  REQUIRE (durable.at_boundary);
+  REQUIRE (durable.boundary_score.has_value ());
+  REQUIRE (*durable.boundary_score == 1.0);
+  REQUIRE (durable.boundary_type.has_value ());
+  REQUIRE (*durable.boundary_type == "explicit_turn");
+  REQUIRE (durable.output.stored_memory_id.has_value ());
+
+  auto boundary = ctx->ProcessTextAt (
+      "Close the unit without force write.", "chat/main", 3000ULL,
+      cortext::Retention::Boundary);
+  REQUIRE (boundary.at_boundary);
+  REQUIRE (boundary.boundary_score.has_value ());
+  REQUIRE (*boundary.boundary_score == 1.0);
+  REQUIRE (boundary.boundary_type.has_value ());
+  REQUIRE (*boundary.boundary_type == "explicit_turn");
+
+  auto ephemeral = ctx->ProcessTextAt (
+      "garage door code", "query/main", 4000ULL,
+      cortext::Retention::Ephemeral);
+  REQUIRE (ephemeral.at_boundary);
+  REQUIRE (ephemeral.boundary_type.has_value ());
+  REQUIRE (*ephemeral.boundary_type == "explicit_turn");
+  REQUIRE_FALSE (ephemeral.output.stored_memory_id.has_value ());
+}
+
 TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
            "[cortext][belief_revision][eval][aist]")
 {
@@ -345,11 +406,14 @@ TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
   const std::string corrected_pill
       = "The doctor changed Bailey's morning pill to 9am.";
 
-  auto ingest_vet = ctx->ProcessTextAt (stale_vet, "cli/main", 1000ULL);
-  auto correct_vet = ctx->ProcessTextAt (corrected_vet, "cli/main", 2000ULL);
-  auto ingest_pill = ctx->ProcessTextAt (stale_pill, "cli/main", 3000ULL);
-  auto correct_pill = ctx->ProcessTextAt (corrected_pill, "cli/main",
-                                          4000ULL);
+  auto ingest_vet = ctx->ProcessTextAt (
+      stale_vet, "cli/main", 1000ULL, cortext::Retention::Durable);
+  auto correct_vet = ctx->ProcessTextAt (
+      corrected_vet, "cli/main", 2000ULL, cortext::Retention::Durable);
+  auto ingest_pill = ctx->ProcessTextAt (
+      stale_pill, "cli/main", 3000ULL, cortext::Retention::Durable);
+  auto correct_pill = ctx->ProcessTextAt (
+      corrected_pill, "cli/main", 4000ULL, cortext::Retention::Durable);
 
   REQUIRE (ingest_vet.output.stored_memory_id.has_value ());
   REQUIRE (correct_vet.output.stored_memory_id.has_value ());
@@ -414,7 +478,8 @@ TEST_CASE ("internal replay ingress preserves media event timestamps",
 
   REQUIRE_NOTHROW (
       cortext::internal::ReplayIngress::ProcessAudioAt (
-          *ctx, pcm.data (), pcm.size (), "stream/reply", replay_ts));
+          *ctx, pcm.data (), pcm.size (), "stream/reply", replay_ts,
+          cortext::Retention::Durable));
   ctx->Flush ();
 
   auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
@@ -553,7 +618,7 @@ TEST_CASE ("timestamped replay persists working memory source timestamps",
   const std::uint64_t replay_ts = 1573184762000ULL;
   REQUIRE_NOTHROW (
       ctx->ProcessTextAt ("timestamped working memory replay", "stream/main",
-                          replay_ts));
+                          replay_ts, cortext::Retention::Durable));
   ctx->Flush ();
 
   auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
@@ -675,7 +740,7 @@ TEST_CASE ("replay clock override preserves working memory on reopen",
     REQUIRE (ctx != nullptr);
     REQUIRE_NOTHROW (ctx->ProcessTextAt (
         "timestamped working memory replay survives reopen", "stream/main",
-        replay_ts));
+        replay_ts, cortext::Retention::Durable));
     ctx->Flush ();
   }
 
@@ -706,7 +771,9 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
     {
       REQUIRE_NOTHROW (ctx->ProcessTextAt (
           "shared replay consolidation topic package pickup dinner logistics",
-          "stream/main", source_ts + static_cast<std::uint64_t> (i) * 1000ULL));
+          "stream/main",
+          source_ts + static_cast<std::uint64_t> (i) * 1000ULL,
+          cortext::Retention::Durable));
     }
   ctx->Flush ();
 
@@ -1753,12 +1820,21 @@ TEST_CASE ("C API handles NULL inputs correctly",
     auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
 
-    REQUIRE (cortext_process_text (h, "before reset", "reset/source") == 0);
+    cortext_process_json_options durable_opts{};
+    durable_opts.struct_size = sizeof (durable_opts);
+    cortext_process_json_options_init (&durable_opts);
+    durable_opts.retention = CORTEXT_RETENTION_DURABLE;
+
+    char *before_json = cortext_process_text_json_with_options (
+        h, "before reset", "reset/source", &durable_opts);
+    REQUIRE (before_json != nullptr);
+    cortext_string_free (before_json);
+
     REQUIRE (cortext_reset (h) == 0);
     REQUIRE (cortext_last_error () == nullptr);
 
-    char *json_ptr
-        = cortext_process_text_json (h, "after reset", "reset/source");
+    char *json_ptr = cortext_process_text_json_with_options (
+        h, "after reset", "reset/source", &durable_opts);
     REQUIRE (json_ptr != nullptr);
 
     auto parsed = nlohmann::json::parse (json_ptr);
@@ -1797,8 +1873,13 @@ TEST_CASE ("C API handles NULL inputs correctly",
     auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
     REQUIRE (h != nullptr);
 
-    char *json_ptr
-        = cortext_process_text_json (h, "json api stores ids", "json/source");
+    cortext_process_json_options durable_opts{};
+    durable_opts.struct_size = sizeof (durable_opts);
+    cortext_process_json_options_init (&durable_opts);
+    durable_opts.retention = CORTEXT_RETENTION_DURABLE;
+
+    char *json_ptr = cortext_process_text_json_with_options (
+        h, "json api stores ids", "json/source", &durable_opts);
     REQUIRE (json_ptr != nullptr);
 
     auto parsed = nlohmann::json::parse (json_ptr);
@@ -1816,9 +1897,12 @@ TEST_CASE ("C API handles NULL inputs correctly",
     cortext_string_free (json_ptr);
 
     cortext_process_json_options options{};
+    options.struct_size = sizeof (options);
     cortext_process_json_options_init (&options);
     REQUIRE (options.include_embedding == 1);
+    REQUIRE (options.retention == CORTEXT_RETENTION_NATURAL);
     options.include_embedding = 0;
+    options.retention = CORTEXT_RETENTION_DURABLE;
     json_ptr = cortext_process_text_json_with_options (
         h, "json api can omit embedding", "json/source", &options);
     REQUIRE (json_ptr != nullptr);
@@ -1839,6 +1923,29 @@ TEST_CASE ("C API handles NULL inputs correctly",
 
     cortext_string_free (json_ptr);
     cortext_free (h);
+  }
+
+  SECTION ("JSON options initializer preserves the legacy struct prefix")
+  {
+    struct LegacyProcessJsonOptions
+    {
+      std::size_t struct_size;
+      int include_embedding;
+    };
+    struct LegacyOptionsWithGuard
+    {
+      LegacyProcessJsonOptions options;
+      int guard = 0x1234;
+    } legacy;
+
+    legacy.options.struct_size = sizeof (legacy.options);
+    cortext_process_json_options_init (
+        reinterpret_cast<cortext_process_json_options *> (&legacy.options));
+
+    REQUIRE (legacy.options.struct_size
+             == offsetof (cortext_process_json_options, retention));
+    REQUIRE (legacy.options.include_embedding == 1);
+    REQUIRE (legacy.guard == 0x1234);
   }
 
   SECTION ("Embed JSON C API returns parseable embedding")
