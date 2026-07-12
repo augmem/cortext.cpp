@@ -6,7 +6,9 @@ hooks do all the work:
 
 1. **User seam** — ingest text + screenshots + media after user input.
 2. **Pre-LLM seam** — inject recalled context before every model call.
-3. **Post-LLM seam** — ingest assistant text, tool calls/results, media.
+3. **Action seam** — interrupt a proposed tool action when relevant prior
+   context says it should be reconsidered.
+4. **Post-LLM seam** — ingest assistant text, tool calls/results, media.
 
 No ``cortext_*`` tools are exposed. ``system_prompt_block`` is empty.
 Prefetch text is unlabeled prior context only.
@@ -54,6 +56,7 @@ DEFAULT_STABILITY = 0.65
 DEFAULT_USER_ID = "user"
 DEFAULT_AGENT_ID = "agent"
 _MAX_TOOL_RESULT_CHARS = 2000
+_MAX_TOOL_INTENT_CHARS = 2000
 
 # Provenance scheme (opaque to Cortext; used for same-source grouping):
 #   hermes/{user|agent}/{actor_id}/{session_id}/...
@@ -129,6 +132,21 @@ def _content_key(text: str) -> str:
   return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _tool_intent_text(tool_name: str, args: dict[str, Any] | None) -> str:
+  """Encode a proposed Hermes action as a bounded, readable text signal."""
+  name = (tool_name or "").strip()
+  if not name:
+    return ""
+  try:
+    serialized_args = json.dumps(
+      args or {}, ensure_ascii=False, sort_keys=True, default=str
+    )
+  except (TypeError, ValueError):
+    serialized_args = repr(args)
+  text = f"Proposed tool action: {name}\nArguments: {serialized_args}"
+  return text[:_MAX_TOOL_INTENT_CHARS]
+
+
 def _default_config() -> dict[str, Any]:
   return {
     "db_path": f"$HERMES_HOME/{DEFAULT_DB_NAME}",
@@ -139,6 +157,7 @@ def _default_config() -> dict[str, Any]:
     # Seam toggles — all on by default so Cortext runs at every boundary.
     "seam_user": True,  # after user interaction
     "seam_pre_llm": True,  # before every LLM call
+    "seam_pre_tool": True,  # before each tool executes
     "seam_post_llm": True,  # after LLM / completed turn
     "auto_sync_turns": True,  # alias for seam_post_llm (Hermes-friendly name)
     "auto_consolidate": True,
@@ -279,6 +298,11 @@ class CortextMemoryProvider(MemoryProvider):
         "description": "Stability (T) knob — durability bias [0,1]",
         "default": str(DEFAULT_STABILITY),
       },
+      {
+        "key": "seam_pre_tool",
+        "description": "Interrupt tool actions when recalled context requires reconsideration",
+        "default": "true",
+      },
     ]
 
   def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
@@ -298,6 +322,7 @@ class CortextMemoryProvider(MemoryProvider):
       "auto_consolidate",
       "seam_user",
       "seam_pre_llm",
+      "seam_pre_tool",
       "seam_post_llm",
       "ingest_tool_results",
       "ingest_media",
@@ -361,7 +386,7 @@ class CortextMemoryProvider(MemoryProvider):
     )
     self._engine = cortext.Cortext(str(db_path), config=cfg)
     logger.info(
-      "Cortext ready (db=%s session=%s user=%s agent=%s seams=user/pre_llm/post_llm)",
+      "Cortext ready (db=%s session=%s user=%s agent=%s seams=user/pre_llm/pre_tool/post_llm)",
       db_path,
       self._session_id,
       self._user_id,
@@ -524,7 +549,66 @@ class CortextMemoryProvider(MemoryProvider):
     self._ingest_queue.put(_warm)
 
   # =========================================================================
-  # Seam 3 — POST-LLM: after the model completes a turn
+  # Seam 3 — ACTION: before each tool executes
+  # =========================================================================
+
+  def pre_tool_call(
+    self,
+    tool_name: str,
+    args: dict[str, Any] | None,
+    task_id: str = "",
+    **kwargs: Any,
+  ) -> dict[str, str] | None:
+    """Block an unsafe action when Cortext raises a live interrupt signal.
+
+    Hermes calls this hook synchronously, so the proposed action is processed
+    with ``Retention.NATURAL``. This lets the engine decide whether the action
+    belongs to the current natural memory boundary while returning an immediate
+    interrupt decision for the tool loop.
+    """
+    del kwargs
+    if not self._seam_pre_tool_enabled() or not self._should_write():
+      return None
+    if not self._engine:
+      return None
+    intent = _tool_intent_text(tool_name, args)
+    if not intent:
+      return None
+
+    try:
+      import augmem.cortext as cortext
+
+      retention = cortext.Retention.NATURAL
+      source = self._source_id(
+        "agent", "tool_intent", task_id or str(self._turn_number or 0)
+      )
+      with self._write_gate:
+        packet = self._process(intent, source_id=source, retention=retention)
+    except Exception as exc:
+      logger.warning("Cortext tool gate failed: %s", exc)
+      return None
+
+    if not packet.get("should_interrupt"):
+      return None
+    memories = packet.get("retrieved_memory") or []
+    if not isinstance(memories, list):
+      return None
+    correction = _format_memories(
+      [item for item in memories if isinstance(item, dict)],
+      limit=min(2, self._top_k()),
+    )
+    if not correction:
+      return None
+    # Hermes presents this as a tool error/feedback message. Keep it unbranded
+    # so the agent receives only the relevant prior context.
+    return {
+      "action": "block",
+      "message": "Reconsider this action using the following prior context:\n"
+      f"{correction}",
+    }
+
+  # =========================================================================
+  # Seam 4 — POST-LLM: after the model completes a turn
   # =========================================================================
 
   def sync_turn(
@@ -771,6 +855,9 @@ class CortextMemoryProvider(MemoryProvider):
 
   def _seam_pre_llm_enabled(self) -> bool:
     return _as_bool(self._config.get("seam_pre_llm"), True)
+
+  def _seam_pre_tool_enabled(self) -> bool:
+    return _as_bool(self._config.get("seam_pre_tool"), True)
 
   def _seam_post_llm_enabled(self) -> bool:
     # Prefer seam_post_llm; fall back to auto_sync_turns for older configs.
@@ -1030,4 +1117,6 @@ class CortextMemoryProvider(MemoryProvider):
 def register(ctx: Any) -> None:
   """Hermes plugin entry point."""
   config = load_config(os.environ.get("HERMES_HOME"))
-  ctx.register_memory_provider(CortextMemoryProvider(config=config))
+  provider = CortextMemoryProvider(config=config)
+  ctx.register_memory_provider(provider)
+  ctx.register_hook("pre_tool_call", provider.pre_tool_call)
