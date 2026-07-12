@@ -54,8 +54,9 @@ class _FakeEngine:
     channels: int,
     source_id: str,
     include_embedding: bool = True,
+    retention: Any = None,
   ) -> dict[str, Any]:
-    del data, width, height, channels, include_embedding
+    del data, width, height, channels, include_embedding, retention
     self.modalities.append("image")
     return self._next("<image>", source_id)
 
@@ -68,15 +69,17 @@ class _FakeEngine:
     source_id: str,
     media: Any = None,
     include_embedding: bool = True,
+    retention: Any = None,
   ) -> dict[str, Any]:
-    del data, width, height, channels, media, include_embedding
+    del data, width, height, channels, media, include_embedding, retention
     self.modalities.append("image")
     return self._next("<image+media>", source_id)
 
   def process_audio(
-    self, pcm: Any, source_id: str, include_embedding: bool = True
+    self, pcm: Any, source_id: str, include_embedding: bool = True,
+    retention: Any = None,
   ) -> dict[str, Any]:
-    del pcm, include_embedding
+    del pcm, include_embedding, retention
     self.modalities.append("audio")
     return self._next("<audio>", source_id)
 
@@ -86,8 +89,9 @@ class _FakeEngine:
     source_id: str,
     media: Any = None,
     include_embedding: bool = True,
+    retention: Any = None,
   ) -> dict[str, Any]:
-    del pcm, media, include_embedding
+    del pcm, media, include_embedding, retention
     self.modalities.append("audio")
     return self._next("<audio+media>", source_id)
 

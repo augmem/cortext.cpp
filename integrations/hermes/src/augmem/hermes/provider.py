@@ -516,7 +516,8 @@ class CortextMemoryProvider(MemoryProvider):
       except Exception as exc:
         logger.debug("Cortext queue_prefetch failed: %s", exc)
 
-    threading.Thread(target=_warm, daemon=True).start()
+    self._ensure_ingest_worker()
+    self._ingest_queue.put(_warm)
 
   # =========================================================================
   # Seam 3 — POST-LLM: after the model completes a turn

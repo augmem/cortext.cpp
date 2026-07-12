@@ -1067,7 +1067,7 @@ ProcessRun (const ModalityRun &run, const Options &opts)
           auto c = ctx->ProcessImage (
               frame.data (), opts.width, opts.height, opts.channels,
               "signal-filter/image/" + opts.process_policy + "/"
-                  + std::to_string (i));
+                  + std::to_string (i), cortext::Retention::Durable);
           AppendContextStats (stats, c);
         }
     }
@@ -1085,7 +1085,7 @@ ProcessRun (const ModalityRun &run, const Options &opts)
           auto c = ctx->ProcessAudio (
               audio.data () + begin, end - begin,
               "signal-filter/audio/" + opts.process_policy + "/"
-                  + std::to_string (i));
+                  + std::to_string (i), cortext::Retention::Durable);
           AppendContextStats (stats, c);
         }
     }
@@ -1100,7 +1100,7 @@ ProcessRun (const ModalityRun &run, const Options &opts)
             continue;
           auto c = ctx->ProcessText (
               lines[i], "signal-filter/text/" + opts.process_policy + "/"
-                            + std::to_string (i));
+                            + std::to_string (i), cortext::Retention::Durable);
           AppendContextStats (stats, c);
         }
     }

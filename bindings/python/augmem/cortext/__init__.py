@@ -815,7 +815,13 @@ def _native_media(
 def _coerce_retention(retention: Retention | int | None) -> int:
     if retention is None:
         return int(Retention.NATURAL)
-    return int(retention)
+    try:
+        value = int(retention)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid retention: {retention!r}") from exc
+    if value not in {int(member) for member in Retention}:
+        raise ValueError(f"invalid retention: {retention!r}")
+    return value
 
 
 def _native_process_json_options(

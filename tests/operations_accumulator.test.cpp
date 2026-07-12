@@ -3,6 +3,7 @@
 #include "test_helpers.hpp"
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/accumulator.hpp>
+#include <cortext/operations/accumulator_reset.hpp>
 #include <cortext/operations/boundary.hpp>
 #include <cortext/operations/coherence.hpp>
 #include <cortext/operations/write_gate.hpp>
@@ -16,6 +17,7 @@ using cortext::operations::CheckSpikeBypass;
 using cortext::operations::ComputeWriteGate;
 using cortext::operations::DetectBoundary;
 using cortext::operations::UpdateAccumulator;
+using cortext::operations::ResetAccumulatorAfterFlush;
 
 namespace
 {
@@ -96,6 +98,34 @@ TEST_CASE ("Accumulator updates state", "[accumulator][4.4.1]")
     REQUIRE (updated.signals.size () == 1);
     REQUIRE (updated.mu_acc.size () == s.embedding.size ());
   }
+}
+
+TEST_CASE ("Ephemeral signal preserves an open same-source accumulator",
+           "[accumulator][retention]")
+{
+  Signal s;
+  s.source_id = "stream/source";
+  s.embedding = MakeRandomEmbedding ();
+  s.timestamp = 2000;
+  s.retention = Retention::Ephemeral;
+
+  ProcessorContext pctx;
+  AccumulatorState state;
+  state.Reset (MakeRandomEmbedding (), 1000);
+  state.n_signals = 3;
+  pctx.accumulator_states[s.source_id] = std::move (state);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFlushRequired (true);
+
+  UpdateAccumulator update;
+  update.Execute (ctx, cortext::testing::GetNullTransaction ());
+  ResetAccumulatorAfterFlush reset;
+  reset.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (pctx.accumulator_states.at (s.source_id).n_signals == 3);
 }
 
 TEST_CASE ("Boundary detection triggers on drift spike",
