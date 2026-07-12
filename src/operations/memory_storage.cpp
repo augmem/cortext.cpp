@@ -409,6 +409,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                               ElapsedMillis (savepoint_begin_start));
   bool savepoint_finished = false;
   bool object_savepoint_finished = false;
+  std::vector<SignalRecord *> deferred_payload_records;
   auto rollback_savepoints = [&] {
     std::exception_ptr rollback_error;
     if (object_savepoint && !object_savepoint_finished)
@@ -437,6 +438,12 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           {
             rollback_error = std::current_exception ();
           }
+      }
+    // Preserve deferred bytes for a retry. A rolled-back object transaction
+    // invalidates ids assigned during this attempted write.
+    for (auto *rec : deferred_payload_records)
+      {
+        rec->blob_id.clear ();
       }
     if (rollback_error)
       {
@@ -505,11 +512,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
               const auto object_put_start = SteadyClock::now ();
               rec.blob_id = PutObject (object_savepoint.get (), *savepoint,
                                        rec.payload);
-              // The object id is now the durable payload reference. Keeping
-              // the bytes would retain raw media in both the accumulator and
-              // downstream working-memory records after a successful write.
-              rec.payload.clear ();
-              rec.payload.shrink_to_fit ();
+              deferred_payload_records.push_back (&rec);
               signal_payload_put_ms += ElapsedMillis (object_put_start);
             }
         }
@@ -800,6 +803,13 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       savepoint_finished = true;
       context.AddOperationTiming ("MemoryStorage.commit_savepoints",
                                   ElapsedMillis (savepoint_commit_start));
+      // The object and SQL savepoints both committed, so records can retain
+      // only their durable ids before working-memory copies them onward.
+      for (auto *rec : deferred_payload_records)
+        {
+          rec->payload.clear ();
+          rec->payload.shrink_to_fit ();
+        }
 
       // Set stored_embedding_id in context for output
       context.SetStoredEmbeddingId (embedding_id);

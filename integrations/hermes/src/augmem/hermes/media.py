@@ -780,15 +780,19 @@ def process_signal_on_engine(
   if signal.modality == "image":
     try:
       import augmem.cortext as cortext
-
-      media = None
-      if signal.media_bytes:
-        media = cortext.Media(
-          data=signal.media_bytes,
-          mimetype=signal.media_mimetype or "image/png",
-        )
-      if media is not None:
-        return engine.process_image_with_media(
+    except ImportError:
+      cortext = None
+    if cortext is not None and signal.media_bytes:
+      media = cortext.Media(
+        data=signal.media_bytes,
+        mimetype=signal.media_mimetype or "image/png",
+      )
+      try:
+        process_with_media = engine.process_image_with_media
+      except AttributeError:
+        process_with_media = None
+      if process_with_media is not None:
+        return process_with_media(
           signal.image_rgb,
           signal.width,
           signal.height,
@@ -798,8 +802,6 @@ def process_signal_on_engine(
           include_embedding=False,
           retention=retention,
         )
-    except Exception:
-      pass
     return engine.process_image(
       signal.image_rgb,
       signal.width,
@@ -812,21 +814,25 @@ def process_signal_on_engine(
   if signal.modality == "audio":
     try:
       import augmem.cortext as cortext
-
-      if signal.media_bytes:
-        media = cortext.Media(
-          data=signal.media_bytes,
-          mimetype=signal.media_mimetype or "audio/wav",
-        )
-        return engine.process_audio_with_media(
+    except ImportError:
+      cortext = None
+    if cortext is not None and signal.media_bytes:
+      media = cortext.Media(
+        data=signal.media_bytes,
+        mimetype=signal.media_mimetype or "audio/wav",
+      )
+      try:
+        process_with_media = engine.process_audio_with_media
+      except AttributeError:
+        process_with_media = None
+      if process_with_media is not None:
+        return process_with_media(
           signal.pcm,
           signal.source_id,
           media,
           include_embedding=False,
           retention=retention,
         )
-    except Exception:
-      pass
     return engine.process_audio(
       signal.pcm,
       signal.source_id,

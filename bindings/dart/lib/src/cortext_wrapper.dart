@@ -56,10 +56,16 @@ final class Media {
 
 @immutable
 final class ProcessOptions {
-  const ProcessOptions({this.includeEmbedding = true});
+  const ProcessOptions({
+    this.includeEmbedding = true,
+    this.retention = Retention.natural,
+  });
 
   final bool includeEmbedding;
+  final Retention retention;
 }
+
+enum Retention { natural, durable, boundary, ephemeral }
 
 final class CortextLibrary {
   CortextLibrary._(this.dynamicLibrary)
@@ -639,7 +645,9 @@ final class Cortext {
     final pointer = malloc<cortext_process_json_options>();
     pointer.ref
       ..struct_size = sizeOf<cortext_process_json_options>()
-      ..include_embedding = options.includeEmbedding ? 1 : 0;
+      ..include_embedding = options.includeEmbedding ? 1 : 0
+      ..retention = options.retention.index
+      ..reserved = 0;
     return pointer;
   }
 
