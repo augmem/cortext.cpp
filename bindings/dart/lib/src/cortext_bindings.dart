@@ -896,4 +896,10 @@ final class cortext_process_json_options extends ffi.Struct {
 
   @ffi.Int()
   external int include_embedding;
+
+  @ffi.Int()
+  external int retention;
+
+  @ffi.Int()
+  external int reserved;
 }

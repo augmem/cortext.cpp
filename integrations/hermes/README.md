@@ -234,8 +234,9 @@ Exit codes: `0` pass, `1` fail, `2` skipped (missing deps/flags).
 
 ## Notes
 
-- Public Python bindings currently use durable `process_text` for both storage
-  and retrieval. Prefetch/search queries are labeled with `hermes/*` source ids
-  so they remain distinguishable from explicit remembers.
+- Provider store paths use `Retention.DURABLE`; prefetch/search uses
+  `Retention.EPHEMERAL` so recall does not create a new memory. Queries are
+  labeled with `hermes/*` source ids so they remain distinguishable from
+  explicit remembers.
 - Coding-repo retrieval (find symbol X in the tree) is out of scope; pair with a
   code-index MCP for that. Cortext is for long-horizon personal/project memory.

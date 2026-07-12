@@ -933,12 +933,14 @@ class CortextMemoryProvider(MemoryProvider):
             store_retention = cortext.Retention.DURABLE
           except Exception:
             store_retention = None
+          all_succeeded = True
           for signal in cleaned:
             try:
               process_signal_on_engine(
                 self._engine, signal, retention=store_retention
               )
             except Exception as exc:
+              all_succeeded = False
               logger.warning(
                 "Cortext %s ingest failed (%s): %s",
                 signal.modality,
@@ -951,7 +953,7 @@ class CortextMemoryProvider(MemoryProvider):
           with self._prefetch_lock:
             self._cached_prefetch = ""
             self._cached_prefetch_query = ""
-          if mark_user_key:
+          if mark_user_key and all_succeeded:
             with self._user_key_lock:
               self._last_user_turn_key = mark_user_key
         if also_warm_prefetch and self._seam_pre_llm_enabled():
