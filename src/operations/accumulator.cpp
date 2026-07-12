@@ -51,6 +51,14 @@ UpdateAccumulator::Execute (OperationContext &context,
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
+  // An Ephemeral probe must observe the current stream without becoming part
+  // of its open Natural unit. Otherwise a same-source query mutates (and its
+  // forced boundary later resets) pending, unstored signals.
+  if (signal.retention == Retention::Ephemeral)
+    {
+      context.SetInterruptAborted (false);
+      return;
+    }
   const std::string &source_id = signal.source_id;
   const int64_t episode_id
       = (p_ctx.episode_start_ts > 0)

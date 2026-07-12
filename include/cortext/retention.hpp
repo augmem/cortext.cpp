@@ -5,9 +5,9 @@ namespace cortext
 
 /// @brief Controls storage eligibility and turn-edge policy for a signal.
 ///
-/// When the retention argument is omitted from Process* APIs, the default is
-/// Natural lets episode algorithms decide. Durable keeps the historical
-/// chat-turn convenience of an explicit boundary and accepted write.
+/// When retention is omitted from Process* APIs, the default is Natural:
+/// episode algorithms decide the boundary and write. Durable keeps the
+/// historical chat-turn convenience of an explicit boundary and accepted write.
 ///
 /// - Natural (default): may store; boundary and write algorithms decide.
 ///   Episode algorithms (accumulator + detect_boundary + write_gate) decide.

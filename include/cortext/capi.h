@@ -305,7 +305,7 @@ extern "C"
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// This function encodes the text and processes it through the signal
-  /// pipeline. Timestamps are generated internally in milliseconds.
+  /// pipeline as a Durable turn commit. Timestamps are generated internally in milliseconds.
   /// Any retrieved memories are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_text (cortext_handle h, const char *text,
                                            const char *source_id);
@@ -318,7 +318,8 @@ extern "C"
   /// same-source grouping (must be non-NULL).
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
-  /// Audio must be 16kHz mono float32 PCM. Timestamps are generated internally.
+  /// Audio must be 16kHz mono float32 PCM. This is a Durable turn commit.
+  /// Timestamps are generated internally.
   /// Any retrieved memories are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_audio (cortext_handle h, const float *pcm,
                                             size_t num_samples,
@@ -344,6 +345,7 @@ extern "C"
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// Image data is expected in row-major order (height × width × channels).
+  /// This is a Durable turn commit.
   /// Timestamps are generated internally. Any retrieved memories are
   /// buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_image (cortext_handle h,

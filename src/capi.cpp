@@ -1475,7 +1475,8 @@ extern "C"
       }
 
     return invoke_status_only (
-        [&] { (void)p->ProcessText (std::string (text), std::string (source_id)); });
+        [&] { (void)p->ProcessText (std::string (text), std::string (source_id),
+                                    cortext::Retention::Durable); });
   }
 
   int
@@ -1490,7 +1491,8 @@ extern "C"
       }
 
     return invoke_status_only (
-        [&] { (void)p->ProcessAudio (pcm, num_samples, std::string (source_id)); });
+        [&] { (void)p->ProcessAudio (pcm, num_samples, std::string (source_id),
+                                     cortext::Retention::Durable); });
   }
 
   int
@@ -1512,7 +1514,7 @@ extern "C"
 
     return invoke_status_only ([&] {
       (void)p->ProcessAudio (pcm, num_samples, std::string (source_id),
-                             media_from_c (media));
+                             media_from_c (media), cortext::Retention::Durable);
     });
   }
 
@@ -1529,7 +1531,7 @@ extern "C"
 
     return invoke_status_only ([&] {
       (void)p->ProcessImage (data, width, height, channels,
-                             std::string (source_id));
+                             std::string (source_id), cortext::Retention::Durable);
     });
   }
 
@@ -1552,7 +1554,8 @@ extern "C"
 
     return invoke_status_only ([&] {
       (void)p->ProcessImage (data, width, height, channels,
-                             std::string (source_id), media_from_c (media));
+                             std::string (source_id), media_from_c (media),
+                             cortext::Retention::Durable);
     });
   }
 
