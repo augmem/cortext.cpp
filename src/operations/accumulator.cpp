@@ -3,13 +3,11 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/store/object_store.hpp"
 #include "cortext/signal.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "../experimental_env.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <string>
 
 namespace cortext::operations
@@ -17,19 +15,9 @@ namespace cortext::operations
 
 namespace
 {
-using SteadyClock = std::chrono::steady_clock;
-
-double
-ElapsedMillis (SteadyClock::time_point start)
-{
-  return std::chrono::duration<double, std::milli> (SteadyClock::now () - start)
-      .count ();
-}
-
 /// @brief Create a SignalRecord from the current signal and context
 SignalRecord
-CreateSignalRecord (const Signal &signal, double score, int serial_position,
-                    OperationContext &context, Transaction &tx)
+CreateSignalRecord (const Signal &signal, double score, int serial_position)
 {
   SignalRecord rec;
   rec.embedding = signal.embedding;
@@ -47,11 +35,10 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position,
     }
   if (signal.payload && !signal.payload->empty ())
     {
-      const auto put_start = SteadyClock::now ();
-      rec.blob_id
-          = PutObject (context.GetObjectTransaction (), tx, *signal.payload);
-      context.AddOperationTiming ("UpdateAccumulator.signal_payload_put",
-                                  ElapsedMillis (put_start));
+      // Object storage happens in MemoryStorage only after the write gate
+      // accepts the accumulator. Natural signals rejected by that gate must
+      // leave no raw payload behind in objstore.
+      rec.payload = *signal.payload;
     }
   return rec;
 }
@@ -59,17 +46,27 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position,
 
 void
 UpdateAccumulator::Execute (OperationContext &context,
-                            Transaction &tx) const
+                            Transaction & /*tx*/) const
 {
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
+  // An Ephemeral probe must observe the current stream without becoming part
+  // of its open Natural unit. Otherwise a same-source query mutates (and its
+  // forced boundary later resets) pending, unstored signals.
+  if (signal.retention == Retention::Ephemeral)
+    {
+      context.SetInterruptAborted (false);
+      return;
+    }
   const std::string &source_id = signal.source_id;
   const int64_t episode_id
       = (p_ctx.episode_start_ts > 0)
             ? static_cast<int64_t> (p_ctx.episode_start_ts)
             : 0;
-  const bool track_durable_signal = signal.retention == Retention::Durable;
+  // Ephemeral queries must not grow storable accumulator units.
+  // True for Natural/Boundary/Durable (everything that may persist signals).
+  const bool track_storable_signal = signal.retention != Retention::Ephemeral;
   context.SetInterruptAborted (false);
 
   // Use drift step for accumulation (Section 4.4.2)
@@ -105,14 +102,14 @@ UpdateAccumulator::Execute (OperationContext &context,
       state.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      if (track_durable_signal)
+      if (track_storable_signal)
         {
           state.signals.push_back (
-              CreateSignalRecord (signal, 0.0, 0, context, tx));
+              CreateSignalRecord (signal, 0.0, 0));
         }
 
       // Track primary modality (v2: first modality wins)
-      if (track_durable_signal)
+      if (track_storable_signal)
         {
           state.primary_modality = signal.modality;
         }
@@ -207,14 +204,14 @@ UpdateAccumulator::Execute (OperationContext &context,
       acc.s_arousal_sum = arousal;
 
       // Track first signal for SIGNALS table (Section 4.4)
-      if (track_durable_signal)
+      if (track_storable_signal)
         {
           acc.signals.push_back (
-              CreateSignalRecord (signal, 0.0, 0, context, tx));
+              CreateSignalRecord (signal, 0.0, 0));
         }
 
       // Track primary modality (v2: first modality wins)
-      if (track_durable_signal)
+      if (track_storable_signal)
         {
           acc.primary_modality = signal.modality;
         }
@@ -266,15 +263,15 @@ UpdateAccumulator::Execute (OperationContext &context,
 
   // Track signal for SIGNALS table (Section 4.4)
   // Serial position is the current signal count before accumulation
-  if (track_durable_signal)
+  if (track_storable_signal)
     {
       const int serial_pos = static_cast<int> (acc.signals.size ());
       acc.signals.push_back (
-          CreateSignalRecord (signal, 0.0, serial_pos, context, tx));
+          CreateSignalRecord (signal, 0.0, serial_pos));
     }
 
   // Track primary modality (v2: first modality wins)
-  if (track_durable_signal && acc.primary_modality.empty ())
+  if (track_storable_signal && acc.primary_modality.empty ())
     {
       acc.primary_modality = signal.modality;
     }

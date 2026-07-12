@@ -192,6 +192,9 @@ min_gap_s ← adjacent_window(F) × dt_ema
 adjacent_ok ← (since_last_s ≥ min_gap_s)
 force_check ← (drift_acc_pacing > max_wait_drift(F))
 ephemeral_query ← (retention == Ephemeral)
+# Natural (default): force_boundary=false, force_write=false — episode algorithms.
+# Durable: force_boundary=true, force_write=true — explicit chat-turn commit.
+# Boundary: force_boundary=true, force_write=false — close unit; write gate still applies.
 
 # Retrieval triggered when drift exceeds threshold, at memory boundary,
 # ephemeral query ingress, or when drift exceeds max_wait_drift.

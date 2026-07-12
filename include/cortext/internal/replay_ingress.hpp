@@ -20,7 +20,7 @@ public:
   static Cortext::Context ProcessTextAt (
       Cortext &cortext, const std::string &text,
       const std::string &source_id, std::uint64_t timestamp,
-      Retention retention = Retention::Durable,
+      Retention retention = Retention::Natural,
       bool hydrate_context = true);
 
   static Cortext::Context ProcessAudioAt (

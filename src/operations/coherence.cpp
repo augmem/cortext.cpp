@@ -19,6 +19,14 @@ ComputeCoherence::Execute (OperationContext &context,
   const auto &signal = context.GetSignal ();
   auto &p_ctx = context.GetProcessorContext ();
   const auto &config = context.GetConfig ();
+  if (signal.retention == Retention::Ephemeral)
+    {
+      // Retrieval-only probes must not tune the open same-source accumulator.
+      context.SetAccumulatorCoherence (1.0);
+      context.SetAccumulatorDriftStep (0.0);
+      context.SetMetric (Metric::drift_mag, 0.0);
+      return;
+    }
   const std::string &source_id = signal.source_id;
   const double drift_noise_floor = core::DriftNoiseFloor (config.stability);
   double drift_cos = 1.0;

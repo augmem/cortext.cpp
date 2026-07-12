@@ -56,7 +56,7 @@ DetectBoundary::Execute (OperationContext &context,
   const auto &config = context.GetConfig ();
   const std::string &source_id = signal.source_id;
 
-  if (signal.force_boundary)
+  if (RetentionForcesBoundary (signal.retention))
     {
       context.SetFlushRequired (true);
       context.SetAtBoundary (true);

@@ -204,18 +204,42 @@ extern "C"
     const char *mimetype;
   } cortext_media;
 
+  /// @brief Retention policy for process ingress (matches cortext::Retention).
+  ///
+  /// CORTEXT_RETENTION_NATURAL (0): default when omitted; episode algorithms
+  /// decide boundary and write acceptance.
+  /// CORTEXT_RETENTION_DURABLE (1): force turn boundary + force write.
+  /// CORTEXT_RETENTION_BOUNDARY (2): force turn boundary only.
+  /// CORTEXT_RETENTION_EPHEMERAL (3): never store; force retrieval boundary.
+  typedef enum cortext_retention
+  {
+    CORTEXT_RETENTION_NATURAL = 0,
+    CORTEXT_RETENTION_DURABLE = 1,
+    CORTEXT_RETENTION_BOUNDARY = 2,
+    CORTEXT_RETENTION_EPHEMERAL = 3
+  } cortext_retention;
+
   /// @brief Options for JSON process result payloads.
   ///
   /// Existing JSON process calls include the processed signal embedding by
   /// default. Pass include_embedding = 0 through the _with_options variants to
   /// omit that vector from the returned JSON payload.
+  ///
+  /// retention defaults to CORTEXT_RETENTION_NATURAL. Older clients that only
+  /// set struct_size + include_embedding keep Natural (false/false forces).
   typedef struct cortext_process_json_options
   {
     size_t struct_size;
     int include_embedding;
+    int retention; ///< cortext_retention; Natural when field absent/unknown
+    int reserved;  ///< Must be zero; distinguishes this layout from v1.1.10.
   } cortext_process_json_options;
 
   /// @brief Initializes process JSON options to current defaults.
+  ///
+  /// Set struct_size to sizeof(cortext_process_json_options) before calling
+  /// this function to initialize the retention field. A zero struct_size uses
+  /// the legacy prefix for ABI-safe initialization.
   CORTEXT_EXPORT void cortext_process_json_options_init (
       cortext_process_json_options *options);
 
@@ -281,7 +305,7 @@ extern "C"
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// This function encodes the text and processes it through the signal
-  /// pipeline. Timestamps are generated internally in milliseconds.
+  /// pipeline as a Durable turn commit. Timestamps are generated internally in milliseconds.
   /// Any retrieved memories are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_text (cortext_handle h, const char *text,
                                            const char *source_id);
@@ -294,7 +318,8 @@ extern "C"
   /// same-source grouping (must be non-NULL).
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
-  /// Audio must be 16kHz mono float32 PCM. Timestamps are generated internally.
+  /// Audio must be 16kHz mono float32 PCM. This is a Durable turn commit.
+  /// Timestamps are generated internally.
   /// Any retrieved memories are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_audio (cortext_handle h, const float *pcm,
                                             size_t num_samples,
@@ -320,6 +345,7 @@ extern "C"
   /// @return 0 on success, 1 if invalid parameters, 2 on internal error.
   ///
   /// Image data is expected in row-major order (height × width × channels).
+  /// This is a Durable turn commit.
   /// Timestamps are generated internally. Any retrieved memories are
   /// buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_image (cortext_handle h,

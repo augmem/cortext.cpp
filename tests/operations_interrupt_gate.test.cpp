@@ -131,6 +131,49 @@ TEST_CASE ("Alg27 allows on MU path", "[operations][interrupt_gate]")
   REQUIRE (oc.GetMniOverlapStar () == Catch::Approx (-1.0));
 }
 
+TEST_CASE ("Ephemeral interrupt leaves accumulator refractory state unchanged",
+           "[operations][interrupt_gate][retention]")
+{
+  auto store = CreateTestStore ();
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.7;
+  cfg.sensitivity = 0.6;
+  cfg.stability = 0.5;
+
+  ProcessorContext pc;
+  pc.signals_processed = 100;
+  pc.last_interrupt_tick = 7;
+  pc.recent_memory_centroids.push_back (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }));
+  AccumulatorState accumulator;
+  accumulator.Reset (MakeUnit256 ({ 1.0f, 0.0f, 0.0f }), 0);
+  accumulator.n_signals = 3;
+  accumulator.drift_accum = 0.8;
+  accumulator.drift_at_last_interrupt = 0.2;
+  pc.accumulator_states["test"] = std::move (accumulator);
+
+  const auto cand_emb = MakeUnit256 ({ 0.95f, 0.05f, 0.0f });
+  InsertTestEmbedding (*store, 1LL, cand_emb, 0);
+
+  auto sig = MakeSignal ();
+  sig.retention = Retention::Ephemeral;
+  OperationContext oc (sig, pc, cfg, store.get ());
+  oc.SetCoherence (1.0);
+  oc.SetThresholdTDynamic (0.0);
+  oc.SetAtBoundary (true);
+  oc.SetRetrievedMemoryEmbeddings ({{1LL, cand_emb}});
+
+  ComputeMniGateDecision op;
+  auto tx = store->Begin ();
+  op.Execute (oc, *tx);
+
+  REQUIRE (oc.GetInterruptAllowed ());
+  const auto &unchanged = pc.accumulator_states.at ("test");
+  REQUIRE (unchanged.drift_at_last_interrupt == Catch::Approx (0.2));
+  REQUIRE (pc.last_interrupt_tick == 7);
+}
+
 TEST_CASE ("Alg27 structured retrieval selects memory id",
            "[operations][interrupt_gate]")
 {

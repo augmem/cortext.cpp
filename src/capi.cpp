@@ -143,6 +143,36 @@ include_embedding_from_options (const cortext_process_json_options *options)
   return options->include_embedding != 0;
 }
 
+cortext::Retention
+retention_from_options (const cortext_process_json_options *options)
+{
+  // Omitted / undersized options => Natural (false/false forces).
+  if (!options)
+    {
+      return cortext::Retention::Natural;
+    }
+  // The prior two-field struct has the same sizeof as the initial three-field
+  // layout on common 64-bit ABIs because retention occupied tail padding.
+  // Require the expanded layout before reading retention so old padding is
+  // always interpreted as the Natural default.
+  if (options->struct_size < sizeof (cortext_process_json_options))
+    {
+      return cortext::Retention::Natural;
+    }
+  switch (options->retention)
+    {
+    case CORTEXT_RETENTION_DURABLE:
+      return cortext::Retention::Durable;
+    case CORTEXT_RETENTION_BOUNDARY:
+      return cortext::Retention::Boundary;
+    case CORTEXT_RETENTION_EPHEMERAL:
+      return cortext::Retention::Ephemeral;
+    case CORTEXT_RETENTION_NATURAL:
+    default:
+      return cortext::Retention::Natural;
+    }
+}
+
 std::any
 value_to_any (const cortext_db_value &value)
 {
@@ -1060,6 +1090,9 @@ context_to_json (const cortext::Cortext::Context &ctx,
     { "boundary_score",
       ctx.boundary_score.has_value () ? nlohmann::json (*ctx.boundary_score)
                                       : nlohmann::json (nullptr) },
+    { "boundary_type",
+      ctx.boundary_type.has_value () ? nlohmann::json (*ctx.boundary_type)
+                                     : nlohmann::json (nullptr) },
     { "output", std::move (output) },
     { "encode_ms", ctx.encode_ms },
     { "process_ms", ctx.process_ms },
@@ -1242,8 +1275,22 @@ extern "C"
       {
         return;
       }
-    options->struct_size = sizeof (*options);
+    // A caller compiled against the previous struct only allocated the
+    // prefix through include_embedding. It must set struct_size to opt into
+    // initialization of later fields; a zero size stays ABI-safe by using
+    // that legacy prefix.
+    constexpr std::size_t kLegacyOptionsSize
+        = offsetof (cortext_process_json_options, retention);
+    const std::size_t available
+        = options->struct_size == sizeof (*options) ? sizeof (*options)
+                                                  : kLegacyOptionsSize;
+    options->struct_size = available;
     options->include_embedding = 1;
+    if (available == sizeof (*options))
+      {
+        options->retention = CORTEXT_RETENTION_NATURAL;
+        options->reserved = 0;
+      }
   }
 
   cortext_handle
@@ -1428,7 +1475,8 @@ extern "C"
       }
 
     return invoke_status_only (
-        [&] { (void)p->ProcessText (std::string (text), std::string (source_id)); });
+        [&] { (void)p->ProcessText (std::string (text), std::string (source_id),
+                                    cortext::Retention::Durable); });
   }
 
   int
@@ -1443,7 +1491,8 @@ extern "C"
       }
 
     return invoke_status_only (
-        [&] { (void)p->ProcessAudio (pcm, num_samples, std::string (source_id)); });
+        [&] { (void)p->ProcessAudio (pcm, num_samples, std::string (source_id),
+                                     cortext::Retention::Durable); });
   }
 
   int
@@ -1465,7 +1514,7 @@ extern "C"
 
     return invoke_status_only ([&] {
       (void)p->ProcessAudio (pcm, num_samples, std::string (source_id),
-                             media_from_c (media));
+                             media_from_c (media), cortext::Retention::Durable);
     });
   }
 
@@ -1482,7 +1531,7 @@ extern "C"
 
     return invoke_status_only ([&] {
       (void)p->ProcessImage (data, width, height, channels,
-                             std::string (source_id));
+                             std::string (source_id), cortext::Retention::Durable);
     });
   }
 
@@ -1505,7 +1554,8 @@ extern "C"
 
     return invoke_status_only ([&] {
       (void)p->ProcessImage (data, width, height, channels,
-                             std::string (source_id), media_from_c (media));
+                             std::string (source_id), media_from_c (media),
+                             cortext::Retention::Durable);
     });
   }
 
@@ -1614,8 +1664,11 @@ extern "C"
   cortext_process_text_json (cortext_handle h, const char *text,
                              const char *source_id)
   {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
     return cortext_process_text_json_with_options (h, text, source_id,
-                                                   nullptr);
+                                                   &options);
   }
 
   char *
@@ -1630,8 +1683,12 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json (
-        [&] { return p->ProcessText (std::string (text), std::string (source_id)); },
+        [&] {
+          return p->ProcessText (std::string (text), std::string (source_id),
+                                 retention);
+        },
         include_embedding_from_options (options));
   }
 
@@ -1639,8 +1696,11 @@ extern "C"
   cortext_process_audio_json (cortext_handle h, const float *pcm,
                               size_t num_samples, const char *source_id)
   {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
     return cortext_process_audio_json_with_options (h, pcm, num_samples,
-                                                    source_id, nullptr);
+                                                    source_id, &options);
   }
 
   char *
@@ -1655,8 +1715,12 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json (
-        [&] { return p->ProcessAudio (pcm, num_samples, std::string (source_id)); },
+        [&] {
+          return p->ProcessAudio (pcm, num_samples, std::string (source_id),
+                                  retention);
+        },
         include_embedding_from_options (options));
   }
 
@@ -1687,9 +1751,10 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json ([&] {
       return p->ProcessAudio (pcm, num_samples, std::string (source_id),
-                              media_from_c (media));
+                              media_from_c (media), retention);
     },
                         include_embedding_from_options (options));
   }
@@ -1699,8 +1764,11 @@ extern "C"
                               int height, int channels,
                               const char *source_id)
   {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
     return cortext_process_image_json_with_options (
-        h, data, width, height, channels, source_id, nullptr);
+        h, data, width, height, channels, source_id, &options);
   }
 
   char *
@@ -1716,9 +1784,10 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json ([&] {
       return p->ProcessImage (data, width, height, channels,
-                              std::string (source_id));
+                              std::string (source_id), retention);
     },
                         include_embedding_from_options (options));
   }
@@ -1751,9 +1820,11 @@ extern "C"
         return nullptr;
       }
 
+    const auto retention = retention_from_options (options);
     return invoke_json ([&] {
       return p->ProcessImage (data, width, height, channels,
-                              std::string (source_id), media_from_c (media));
+                              std::string (source_id), media_from_c (media),
+                              retention);
     },
                         include_embedding_from_options (options));
   }

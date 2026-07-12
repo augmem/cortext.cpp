@@ -121,10 +121,10 @@ def answer(conversation_id: str, user_message: str) -> str:
     return completion.choices[0].message.content or ""
 ```
 
-Durable-write warning: `process_text`, `process_audio`, and `process_image`
-retrieve context and also write the input signal to the configured store. Do
-not use them as read-only queries for content that should not be remembered.
-Use `embed_text`, `embed_audio`, or `embed_image` for embedding-only work.
+Retention (default `Retention.NATURAL`): episode algorithms decide boundary and
+write. Pass `retention=Retention.DURABLE` for explicit turn commit,
+`Retention.BOUNDARY` for an explicit edge only, or `Retention.EPHEMERAL` for
+retrieve-without-store queries. Use `embed_*` for embedding-only work.
 
 ## Returned Context
 

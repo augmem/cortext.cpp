@@ -162,7 +162,6 @@ TEST_CASE ("ComputeWriteGate rejects ephemeral signals even with spike_bypass",
   s.timestamp = 100000;
   s.source_id = "test";
   s.retention = Retention::Ephemeral;
-  s.force_write = true;
 
   ProcessorContext pctx;
   SignalProcessor::Config cfg;

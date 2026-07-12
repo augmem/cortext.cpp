@@ -44,8 +44,21 @@ type Media struct {
 	MimeType string
 }
 
+// Retention controls whether an input is naturally gated, committed, bounded,
+// or used only for retrieval. Its zero value is Natural.
+type Retention int
+
+const (
+	RetentionNatural Retention = iota
+	RetentionDurable
+	RetentionBoundary
+	RetentionEphemeral
+)
+
 type ProcessOptions struct {
 	OmitEmbedding bool
+	// Retention is Natural when zero-value / omitted.
+	Retention Retention
 }
 
 func Version() string {
@@ -372,11 +385,30 @@ func makeNativeMedia(media *Media) (C.cortext_media, unsafe.Pointer, *C.char) {
 
 func makeNativeProcessOptions(options *ProcessOptions) C.cortext_process_json_options {
 	native := C.cortext_process_json_options{}
+	native.struct_size = C.size_t(unsafe.Sizeof(native))
 	C.cortext_process_json_options_init(&native)
-	if options != nil && options.OmitEmbedding {
-		native.include_embedding = 0
+	if options != nil {
+		if options.OmitEmbedding {
+			native.include_embedding = 0
+		}
+		if options.Retention != 0 {
+			native.retention = nativeRetention(options.Retention)
+		}
 	}
 	return native
+}
+
+func nativeRetention(retention Retention) C.int {
+	switch retention {
+	case RetentionDurable:
+		return C.CORTEXT_RETENTION_DURABLE
+	case RetentionBoundary:
+		return C.CORTEXT_RETENTION_BOUNDARY
+	case RetentionEphemeral:
+		return C.CORTEXT_RETENTION_EPHEMERAL
+	default:
+		return C.CORTEXT_RETENTION_NATURAL
+	}
 }
 
 func freeNativeMedia(mediaData unsafe.Pointer, mediaMime *C.char) {

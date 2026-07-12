@@ -529,6 +529,7 @@ AssembleOutputFields (const OperationContext &op_context,
   out.interrupt_gate_boundary_mult_eff
       = op_context.GetInterruptGateBoundaryMultEff ();
   out.boundary_score = op_context.GetBoundaryScore ();
+  out.boundary_type = op_context.GetBoundaryType ();
   out.interrupt_gate_affect_drive = op_context.GetInterruptGateAffectDrive ();
   out.composite_score = op_context.GetCompositeScore ();
   out.serial_position_multiplier = op_context.GetSerialPositionMultiplier ();

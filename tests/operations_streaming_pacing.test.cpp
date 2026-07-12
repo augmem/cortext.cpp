@@ -254,7 +254,7 @@ TEST_CASE ("CheckStreamingPacing always retrieves for ephemeral queries",
 
   REQUIRE (ctx.GetShouldCheckRetrieval ());
   REQUIRE (pctx.accumulator_states.at ("test").drift_acc_pacing == 0.0);
-  REQUIRE (pctx.last_retrieval_ts == s.timestamp);
+  REQUIRE (pctx.last_retrieval_ts == 0);
 }
 
 TEST_CASE ("CheckStreamingPacing force check on max_wait_drift",

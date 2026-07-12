@@ -108,6 +108,8 @@ public:
     double interrupt_gate_boundary_mult_eff = 0.0;
     double interrupt_gate_affect_drive = 0.0;
     std::optional<double> boundary_score;
+    /// @brief Boundary trigger label when at_boundary (e.g. explicit_turn).
+    std::optional<std::string> boundary_type;
     bool consolidation_recommended = false;
     bool consolidation_required = false;
 
