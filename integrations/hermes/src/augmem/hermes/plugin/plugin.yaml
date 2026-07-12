@@ -5,6 +5,7 @@ hooks:
   - on_turn_start
   - prefetch
   - queue_prefetch
+  - pre_tool_call
   - sync_turn
   - on_memory_write
   - on_delegation

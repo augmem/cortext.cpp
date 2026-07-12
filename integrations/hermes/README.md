@@ -69,6 +69,7 @@ $HERMES_HOME/plugins/memory/cortext
 
 Default `HERMES_HOME` is `~/.hermes`.
 
+<!-- configuration keys from integrations/hermes/src/augmem/hermes/provider.py -->
 ## Config
 
 Non-secret settings live in `$HERMES_HOME/cortext.json` (written by
@@ -81,6 +82,7 @@ Non-secret settings live in `$HERMES_HOME/cortext.json` (written by
   "sensitivity": 0.5,
   "stability": 0.65,
   "top_k": 6,
+  "seam_pre_tool": true,
   "auto_sync_turns": true,
   "auto_consolidate": true
 }
@@ -93,6 +95,7 @@ Non-secret settings live in `$HERMES_HOME/cortext.json` (written by
 | `sensitivity` | Responsiveness to new/surprising input (S) |
 | `stability` | Durability / write-rate bias (T) |
 | `top_k` | Memories injected per prefetch/search |
+| `seam_pre_tool` | Block a proposed tool action only when Cortext returns a live interrupt with relevant prior context |
 | `auto_sync_turns` | Persist each completed turn |
 | `auto_consolidate` | Run consolidation on session end / when recommended |
 
@@ -105,10 +108,11 @@ Non-secret settings live in `$HERMES_HOME/cortext.json` (written by
 | Prefetch text | Unlabeled bullet list of prior facts (no “Cortext” header) |
 | CLI / install | Operator-only (`augmem-hermes`); not visible to the model |
 
+<!-- lifecycle seams from integrations/hermes/src/augmem/hermes/provider.py -->
 ## Lifecycle (every seam)
 
-Cortext runs at **three turn seams** by default (`seam_user`, `seam_pre_llm`,
-`seam_post_llm` — all `true`):
+Cortext runs at **four turn seams** by default (`seam_user`, `seam_pre_llm`,
+`seam_pre_tool`, `seam_post_llm` — all `true`):
 
 ```text
  user message
@@ -120,7 +124,13 @@ Cortext runs at **three turn seams** by default (`seam_user`, `seam_pre_llm`,
  [PRE-LLM]    prefetch → recall packet injected before every model call
      │         (including tool-loop follow-up calls)
      ▼
-   LLM (+ tools)
+   LLM
+     │
+     ▼
+ [ACTION]     pre_tool_call → Natural action signal; block only on a live
+     │         interrupt with relevant retrieved context
+     ▼
+   tool executes
      │
      ▼
  [POST-LLM]   sync_turn → ingest assistant (+ tool results), async
@@ -137,6 +147,7 @@ Cortext runs at **three turn seams** by default (`seam_user`, `seam_pre_llm`,
 | After user interaction | `on_pre_compress` | Snapshot before context drop |
 | Before every LLM call | `prefetch` | Inject recalled memories |
 | Before next turn | `queue_prefetch` | Warm cache (async) |
+| Before tool execution | `pre_tool_call` | Process proposed action with `Retention.NATURAL`; block only on an interrupt with prior context |
 | After LLM turn | `sync_turn` | Store assistant + tool calls/results + media |
 
 ### Multimodal inputs
@@ -235,7 +246,9 @@ Exit codes: `0` pass, `1` fail, `2` skipped (missing deps/flags).
 ## Notes
 
 - Provider store paths use `Retention.DURABLE`; prefetch/search uses
-  `Retention.EPHEMERAL` so recall does not create a new memory. Queries are
+  `Retention.EPHEMERAL` so recall does not create a new memory. The action
+  gate uses `Retention.NATURAL` so the engine's boundary policy can retain an
+  action trace while returning an immediate interrupt decision. Queries are
   labeled with `hermes/*` source ids so they remain distinguishable from
   explicit remembers.
 - Coding-repo retrieval (find symbol X in the tree) is out of scope; pair with a

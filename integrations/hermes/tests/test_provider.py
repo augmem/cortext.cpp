@@ -21,6 +21,7 @@ class _FakeEngine:
   def __init__(self) -> None:
     self.calls: list[tuple[str, str]] = []
     self.modalities: list[str] = []
+    self.text_retentions: list[Any] = []
     self.flushed = 0
     self.closed = 0
     self.consolidated = 0
@@ -42,8 +43,9 @@ class _FakeEngine:
     include_embedding: bool = True,
     retention: Any = None,
   ) -> dict[str, Any]:
-    del include_embedding, retention
+    del include_embedding
     self.modalities.append("text")
+    self.text_retentions.append(retention)
     return self._next(text, source_id)
 
   def process_image(
@@ -334,16 +336,67 @@ def test_register_entry_point() -> None:
   from augmem.hermes.provider import register
 
   registered: list[Any] = []
+  hooks: dict[str, Any] = {}
 
   class _Ctx:
     def register_memory_provider(self, provider: Any) -> None:
       registered.append(provider)
+
+    def register_hook(self, name: str, callback: Any) -> None:
+      hooks[name] = callback
 
   register(_Ctx())
   assert len(registered) == 1
   assert registered[0].name == "cortext"
   assert registered[0].get_tool_schemas() == []
   assert registered[0].system_prompt_block() == ""
+  assert hooks["pre_tool_call"] == registered[0].pre_tool_call
+
+
+def test_pre_tool_call_blocks_with_natural_action_context() -> None:
+  import augmem.cortext as cortext
+
+  provider = CortextMemoryProvider()
+  engine = _FakeEngine()
+  engine.push(
+    {
+      "should_interrupt": True,
+      "interrupt_aborted": False,
+      "retrieved_memory": [
+        {"text": "Never delete production data without approval.", "rel": 0.95}
+      ],
+    }
+  )
+  provider._engine = engine
+  provider._agent_context = "primary"
+  provider._session_id = "s1"
+  provider._agent_id = "hermes"
+
+  result = provider.pre_tool_call(
+    "terminal", {"command": "rm -rf production"}, "task-7"
+  )
+
+  assert result is not None
+  assert result["action"] == "block"
+  assert "Never delete production data" in result["message"]
+  assert "cortext" not in result["message"].lower()
+  assert engine.calls == [
+    (
+      'Proposed tool action: terminal\nArguments: {"command": "rm -rf production"}',
+      "hermes/agent/hermes/s1/tool_intent/task-7",
+    )
+  ]
+  assert engine.text_retentions == [cortext.Retention.NATURAL]
+
+
+def test_pre_tool_call_allows_action_without_interrupt() -> None:
+  provider = CortextMemoryProvider()
+  engine = _FakeEngine()
+  engine.push({"should_interrupt": False, "retrieved_memory": []})
+  provider._engine = engine
+  provider._agent_context = "primary"
+
+  assert provider.pre_tool_call("terminal", {"command": "pwd"}) is None
 
 
 def test_sync_turn_ingests_tool_calls_and_results() -> None:
