@@ -3242,8 +3242,8 @@ production path; experiment harnesses under <code>scripts/</code> and
 <td>dependency removal</td>
 <td><code>.gitmodules</code> and the worktree no longer contain the
 removed decoder/runtime submodules; the remaining third-party tree is
-limited to SQLite/vector/object storage, opt-out OpenTelemetry, planum,
-and build/test dependencies</td>
+limited to SQLite/vector/object storage, opt-out OpenTelemetry, and
+build/test dependencies</td>
 </tr>
 <tr>
 <td>API removal</td>

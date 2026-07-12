@@ -93,14 +93,6 @@ add_executable(cortext_tests
 # Asset- and submodule-dependent tests are gated at configure time: a test
 # is either compiled in (and must pass) or absent. No runtime skips.
 
-# The planum bridge test needs the planum.cpp submodule headers.
-if(EXISTS ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include/planum/contract/perception_event.hpp)
-  target_sources(cortext_tests PRIVATE
-    audio_planum_bridge.test.cpp
-    ${CMAKE_SOURCE_DIR}/src/audio/planum_bridge.cpp
-  )
-endif()
-
 # AIST encoder integration needs the model under models/ and the default
 # tri-modal build contract.
 if((CORTEXT_FETCH_AIST_MODEL OR EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
@@ -114,9 +106,6 @@ endif()
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2 nlohmann_json::nlohmann_json)
 target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTING=1)
-target_include_directories(cortext_tests PRIVATE
-  ${CMAKE_SOURCE_DIR}/third_party/planum.cpp/include
-)
 
 include(Catch)
 

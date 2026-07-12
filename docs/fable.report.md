@@ -113,7 +113,7 @@ The model fetch itself has good hygiene: pinned sha256 + size verified, atomic r
 | T3 | Non-hermetic suite: dozens of undocumented `CORTEXT_*` env toggles (see 4.3) are read by shipping code and nothing scrubs the environment; `thread_config.test.cpp:26-80` mutates globals with raw setenv and can leak on failure | tests/, src/ | High |
 | T4 | Temp-DB collisions: `store.test.cpp:30` names by 1-second wall clock; `operations_memory_storage.test.cpp:63` uses unseeded `rand()` | tests/ as cited | Medium |
 | T5 | All 486 cases registered as a single opaque CTest entry; no per-case reporting or sharding | `tests/CMakeLists.txt:119-124` | Medium |
-| T6 | The planum submodule is pinned to a stub commit containing only a README, so the configure-time gate for `audio_planum_bridge.test.cpp` can never pass: a permanently dead test | `.gitmodules`; `tests/CMakeLists.txt:94-98` | Medium |
+| T6 | ~~The Planum submodule was pinned to a stub commit containing only a README, so the configure-time bridge test could never pass.~~ **Resolved 2026-07-12:** removed the dead submodule, private bridge, and gated test. | `.gitmodules`; `tests/CMakeLists.txt` | Medium |
 
 ### 4.3 The hidden knob surface (turnkey violation)
 
