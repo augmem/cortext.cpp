@@ -17,6 +17,14 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const auto &signal = context.GetSignal ();
+  const bool ephemeral_query = signal.retention == Retention::Ephemeral;
+  if (ephemeral_query)
+    {
+      // A probe always retrieves, but must not advance or reset the pacing
+      // state that belongs to the open same-source Natural stream.
+      context.SetShouldCheckRetrieval (true);
+      return;
+    }
 
   // Compute thresholds from knobs
   const double pacing_thresh = core::StreamingPacingThreshold (cfg.sensitivity);
@@ -32,8 +40,6 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   auto &acc = it->second;
 
   const bool at_boundary = context.GetFlushRequired ();
-  const bool ephemeral_query = signal.retention == Retention::Ephemeral;
-
   const Eigen::VectorXf *x_ptr = &signal.embedding;
   if (acc.mu_acc.size () > 0)
     {
