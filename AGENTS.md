@@ -304,4 +304,3 @@ No project skills found. Add skills to any of: `.claude/skills/`, `.agents/skill
 - Define explicit behavior for unexpected events and use `sml::unexpected_event` rather than silent drops.
 - Keep tracing deterministic, bounded, and allocation-free.
 - Reproduce reported SML bugs with a failing unit test before fixing them.
-- `planum.cpp` should follow the same rules; its local copy lives at `third_party/planum.cpp/docs/sml.rules.md`.

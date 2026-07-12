@@ -33,7 +33,7 @@ only the intended surfaces. The verification pass used the following gates.
 | Gate | Evidence |
 |---|---|
 | runtime code removal | repository scans over `include/`, `src/`, `bindings/`, `CMakeLists.txt`, and runtime examples find no retained internal decoder, adapter-registry, semantic batch, static taxonomy, fact-layer, or processor-local STM-shadow production path; experiment harnesses under `scripts/` and `tools/` are explicit non-runtime tooling |
-| dependency removal | `.gitmodules` and the worktree no longer contain the removed decoder/runtime submodules; the remaining third-party tree is limited to SQLite/vector/object storage, opt-out OpenTelemetry, planum, and build/test dependencies |
+| dependency removal | `.gitmodules` and the worktree no longer contain the removed decoder/runtime submodules; the remaining third-party tree is limited to SQLite/vector/object storage, opt-out OpenTelemetry, and build/test dependencies |
 | API removal | public consolidation mode enums and mode-specific C API calls are gone; bindings no longer expose the removed mode fields |
 | current behavior | `Cortext::Consolidate()` and `Signal::force_consolidation` drive the one retained consolidation path; graph retrieval returns source-backed memory context from vector and graph evidence |
 | paper consistency | this section, @sec-consolidation, @sec-implementation, and @sec-optimization describe the current branch rather than deleted adapter-era workflows |
