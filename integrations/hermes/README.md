@@ -16,7 +16,17 @@ gets a Cortext system prompt, and never has to “use memory.” Ingest and
 recall run only through Hermes lifecycle hooks. Prefetch injects unlabeled
 prior context before each model call.
 
+<!-- installation commands matching integrations/hermes/pyproject.toml and integrations/hermes/src/augmem/hermes/cli.py -->
 ## Install
+
+Install into the **same Python environment as `hermes`**. The installer adds
+the provider under `$HERMES_HOME/plugins/memory/cortext` and selects it as the
+active memory provider automatically:
+
+```bash
+python -m pip install augmem.hermes
+augmem-hermes install
+```
 
 From this monorepo (editable, uses the local Python bindings):
 
@@ -40,6 +50,14 @@ hermes config set memory.provider cortext
 # or
 hermes memory setup   # select "cortext"
 ```
+
+Pass `--no-enable` to `augmem-hermes install` when you want to install the
+files without changing Hermes's active memory provider.
+
+Hermes's current `hermes plugins install` command installs Git repositories,
+not PyPI package names. For this package, use the PyPI install above; a future
+Hermes PyPI-registry feature would be needed for
+`hermes plugins install augmem.hermes`.
 
 Requirements:
 

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -52,6 +53,32 @@ def install_plugin(hermes_home: Path | None = None, *, force: bool = False) -> P
     shutil.copytree(source, dest)
 
   return dest
+
+
+def enable_memory_provider(hermes_home: Path | None = None) -> bool:
+  """Select Cortext through Hermes's own config command when available."""
+  hermes = shutil.which("hermes")
+  if not hermes:
+    return False
+  home = hermes_home or _default_hermes_home()
+  env = dict(os.environ)
+  env["HERMES_HOME"] = str(home)
+  try:
+    result = subprocess.run(
+      [hermes, "config", "set", "memory.provider", "cortext"],
+      check=False,
+      capture_output=True,
+      text=True,
+      env=env,
+    )
+  except OSError:
+    return False
+  if result.returncode != 0:
+    detail = (result.stderr or result.stdout).strip()
+    if detail:
+      print(f"Could not activate Cortext: {detail}", file=sys.stderr)
+    return False
+  return True
 
 
 def status(hermes_home: Path | None = None) -> int:
@@ -118,6 +145,11 @@ def main(argv: list[str] | None = None) -> None:
     action="store_true",
     help="Replace an existing plugin install",
   )
+  install_p.add_argument(
+    "--no-enable",
+    action="store_true",
+    help="Install files without selecting Cortext as Hermes's memory provider",
+  )
 
   status_p = sub.add_parser("status", help="Show install and dependency status")
   _add_hermes_home_arg(status_p)
@@ -150,9 +182,12 @@ def main(argv: list[str] | None = None) -> None:
       print(f"install failed: {exc}", file=sys.stderr)
       raise SystemExit(1) from exc
     print(f"Installed Cortext memory plugin at {dest}")
-    print("Enable with:")
-    print("  hermes config set memory.provider cortext")
-    print("  # or: hermes memory setup  (select cortext)")
+    if not args.no_enable and enable_memory_provider(home):
+      print("Cortext is now Hermes's active memory provider.")
+    elif not args.no_enable:
+      print("Enable with:")
+      print("  hermes config set memory.provider cortext")
+      print("  # or: hermes memory setup  (select cortext)")
     return
 
   if args.command == "status":
