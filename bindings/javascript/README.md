@@ -28,6 +28,8 @@ are published.
 
 ## Quickstart
 
+<!-- quickstart retention examples matching bindings/javascript/index.d.ts -->
+
 ```ts
 import { Cortext } from "@augmem/cortext";
 
@@ -43,12 +45,13 @@ const memory = new Cortext(
 try {
   memory.processText("The garage door code is 8841.", "user/profile", {
     includeEmbedding: false,
+    retention: "durable",
   });
 
   const ctx = memory.processText(
     "We are leaving soon. What should I remember about the garage?",
     "chat/assistant",
-    { includeEmbedding: false }
+    { includeEmbedding: false, retention: "ephemeral" }
   );
 
   for (const item of ctx.retrieved_memory ?? []) {
@@ -97,7 +100,7 @@ export async function answer(conversationId: string, userMessage: string) {
   const ctx = memory.processText(
     userMessage,
     `conversation/${conversationId}`,
-    { includeEmbedding: false }
+    { includeEmbedding: false, retention: "durable" }
   );
 
   const memories = (ctx.retrieved_memory ?? [])
@@ -131,10 +134,10 @@ export async function answer(conversationId: string, userMessage: string) {
 }
 ```
 
-Durable-write warning: `processText`, `processAudio`, and `processImage`
-retrieve context and also write the input signal to the configured store. Do
-not use them as read-only queries for content that should not be remembered.
-Use `embedText`, `embedAudio`, or `embedImage` for embedding-only work.
+Retention defaults to `"natural"`, so episode algorithms decide whether a
+signal is stored. Use `retention: "durable"` to commit a turn immediately and
+`retention: "ephemeral"` for retrieve-without-store queries. Use `embedText`,
+`embedAudio`, or `embedImage` for embedding-only work.
 
 ## Returned Context
 

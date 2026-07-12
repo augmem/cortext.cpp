@@ -27,6 +27,8 @@ Python 3.10+ is required. Release wheels target Linux, macOS, and Windows on
 
 ## Quickstart
 
+<!-- quickstart retention examples matching bindings/python/augmem/cortext/__init__.py -->
+
 ```python
 import augmem.cortext as cortext
 
@@ -41,12 +43,14 @@ with cortext.Cortext("memory.sqlite", config=cfg) as memory:
         "The garage door code is 8841.",
         source_id="user/profile",
         include_embedding=False,
+        retention=cortext.Retention.DURABLE,
     )
 
     ctx = memory.process_text(
         "We are leaving soon. What should I remember about the garage?",
         source_id="chat/assistant",
         include_embedding=False,
+        retention=cortext.Retention.EPHEMERAL,
     )
 
     for item in ctx.get("retrieved_memory", []):
@@ -89,6 +93,7 @@ def answer(conversation_id: str, user_message: str) -> str:
         user_message,
         source_id=f"conversation/{conversation_id}",
         include_embedding=False,
+        retention=cortext.Retention.DURABLE,
     )
 
     memories = "\n".join(

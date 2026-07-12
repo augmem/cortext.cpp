@@ -22,7 +22,7 @@ Links: [Releases](https://github.com/augmem/cortext/releases) /
 
 ## Recent Changes
 
-- `v1.1.11`: Retention is now `Natural` (default), `Durable`, `Boundary`, and
+- `v1.2.0`: Retention is now `Natural` (default), `Durable`, `Boundary`, and
   `Ephemeral`. Omitted retention is Natural: `force_boundary=false` and
   `force_write=false` so episode algorithms decide. `Durable` keeps force
   boundary + force write (explicit chat turns). `Boundary` forces the turn
