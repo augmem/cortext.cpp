@@ -165,6 +165,10 @@ def load_config(hermes_home: str | Path | None = None) -> dict[str, Any]:
     logger.warning("Failed to read %s: %s", path, exc)
     return cfg
   if isinstance(raw, dict):
+    if "auto_sync_turns" in raw and "seam_post_llm" not in raw:
+      raw["seam_post_llm"] = raw["auto_sync_turns"]
+    if "seam_post_llm" in raw and "auto_sync_turns" not in raw:
+      raw["auto_sync_turns"] = raw["seam_post_llm"]
     cfg.update(raw)
   return cfg
 

@@ -14,6 +14,11 @@ UpdateDriftAccumulation::Execute (OperationContext &context, Transaction &tx) co
   (void)tx;
   auto &p_ctx = context.GetProcessorContext ();
   const auto &signal = context.GetSignal ();
+  if (signal.retention == Retention::Ephemeral)
+    {
+      context.SetDriftAccumSnapshot (0.0);
+      return;
+    }
 
   auto it = p_ctx.accumulator_states.find (signal.source_id);
   if (it == p_ctx.accumulator_states.end ())

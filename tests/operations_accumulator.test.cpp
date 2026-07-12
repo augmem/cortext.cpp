@@ -4,6 +4,9 @@
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/accumulator.hpp>
 #include <cortext/operations/accumulator_reset.hpp>
+#include <cortext/operations/accumulator_scores.hpp>
+#include <cortext/operations/drift_accumulation.hpp>
+#include <cortext/operations/streaming_pacing.hpp>
 #include <cortext/operations/boundary.hpp>
 #include <cortext/operations/coherence.hpp>
 #include <cortext/operations/write_gate.hpp>
@@ -18,6 +21,9 @@ using cortext::operations::ComputeWriteGate;
 using cortext::operations::DetectBoundary;
 using cortext::operations::UpdateAccumulator;
 using cortext::operations::ResetAccumulatorAfterFlush;
+using cortext::operations::UpdateAccumulatorScores;
+using cortext::operations::UpdateDriftAccumulation;
+using cortext::operations::CheckStreamingPacing;
 
 namespace
 {
@@ -113,7 +119,17 @@ TEST_CASE ("Ephemeral signal preserves an open same-source accumulator",
   AccumulatorState state;
   state.Reset (MakeRandomEmbedding (), 1000);
   state.n_signals = 3;
+  state.s_sum = 1.2;
+  state.s_max = 0.7;
+  state.prev_x = state.mu_acc;
+  state.drift_accum = 0.4;
+  state.x_last_check = state.mu_acc;
+  state.drift_acc_pacing = 0.3;
+  SignalRecord record;
+  record.score = 0.5;
+  state.signals.push_back (record);
   pctx.accumulator_states[s.source_id] = std::move (state);
+  pctx.last_retrieval_ts = 1500;
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
@@ -122,10 +138,24 @@ TEST_CASE ("Ephemeral signal preserves an open same-source accumulator",
 
   UpdateAccumulator update;
   update.Execute (ctx, cortext::testing::GetNullTransaction ());
+  ctx.SetCompositeScore (1.0);
+  UpdateAccumulatorScores update_scores;
+  update_scores.Execute (ctx, cortext::testing::GetNullTransaction ());
+  UpdateDriftAccumulation update_drift;
+  update_drift.Execute (ctx, cortext::testing::GetNullTransaction ());
+  CheckStreamingPacing pacing;
+  pacing.Execute (ctx, cortext::testing::GetNullTransaction ());
   ResetAccumulatorAfterFlush reset;
   reset.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  REQUIRE (pctx.accumulator_states.at (s.source_id).n_signals == 3);
+  const auto &unchanged = pctx.accumulator_states.at (s.source_id);
+  REQUIRE (unchanged.n_signals == 3);
+  REQUIRE (unchanged.s_sum == Catch::Approx (1.2));
+  REQUIRE (unchanged.s_max == Catch::Approx (0.7));
+  REQUIRE (unchanged.signals.back ().score == Catch::Approx (0.5));
+  REQUIRE (unchanged.drift_accum == Catch::Approx (0.4));
+  REQUIRE (unchanged.drift_acc_pacing == Catch::Approx (0.3));
+  REQUIRE (pctx.last_retrieval_ts == 1500);
 }
 
 TEST_CASE ("Boundary detection triggers on drift spike",

@@ -1664,8 +1664,11 @@ extern "C"
   cortext_process_text_json (cortext_handle h, const char *text,
                              const char *source_id)
   {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
     return cortext_process_text_json_with_options (h, text, source_id,
-                                                   nullptr);
+                                                   &options);
   }
 
   char *
@@ -1693,8 +1696,11 @@ extern "C"
   cortext_process_audio_json (cortext_handle h, const float *pcm,
                               size_t num_samples, const char *source_id)
   {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
     return cortext_process_audio_json_with_options (h, pcm, num_samples,
-                                                    source_id, nullptr);
+                                                    source_id, &options);
   }
 
   char *
@@ -1758,8 +1764,11 @@ extern "C"
                               int height, int channels,
                               const char *source_id)
   {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
     return cortext_process_image_json_with_options (
-        h, data, width, height, channels, source_id, nullptr);
+        h, data, width, height, channels, source_id, &options);
   }
 
   char *

@@ -14,6 +14,10 @@ UpdateAccumulatorScores::Execute (OperationContext &context,
                                   Transaction & /*tx*/) const
 {
   const auto &signal = context.GetSignal ();
+  if (signal.retention == Retention::Ephemeral)
+    {
+      return;
+    }
   auto &p_ctx = context.GetProcessorContext ();
 
   auto it = p_ctx.accumulator_states.find (signal.source_id);
