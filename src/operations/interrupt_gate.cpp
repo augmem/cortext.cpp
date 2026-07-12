@@ -157,12 +157,16 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   context.SetInterruptGateAffectDrive (constants::kNormalizedMin);
 
   auto acc_it = p_ctx.accumulator_states.find (signal.source_id);
-  if (acc_it == p_ctx.accumulator_states.end ())
+  if (acc_it == p_ctx.accumulator_states.end ()
+      && signal.retention != Retention::Ephemeral)
     {
       p_ctx.accumulator_states[signal.source_id] = AccumulatorState{};
       acc_it = p_ctx.accumulator_states.find (signal.source_id);
     }
-  auto &acc = acc_it->second;
+  const AccumulatorState empty_accumulator;
+  const auto &acc = acc_it == p_ctx.accumulator_states.end ()
+                        ? empty_accumulator
+                        : acc_it->second;
 
   // Retrieve candidates. Structured records are memory-keyed; the embedding
   // map is retained as a legacy embedding-keyed fallback.
@@ -603,10 +607,11 @@ ComputeMniGateDecision::Execute (OperationContext &context, Transaction &tx) con
   context.SetSelectedCandidateId (allow_interrupt
                                       ? std::make_optional (candidate_star_id)
                                       : std::nullopt);
-  if (allow_interrupt)
+  if (allow_interrupt && signal.retention != Retention::Ephemeral)
     {
       p_ctx.last_interrupt_tick = p_ctx.signals_processed;
-      acc.drift_at_last_interrupt = acc.drift_accum; // Update drift baseline
+      acc_it->second.drift_at_last_interrupt
+          = acc_it->second.drift_accum; // Update drift baseline
     }
 
   context.SetMniJaccard (novelty_star);     // Now stores embedding novelty
