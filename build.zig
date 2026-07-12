@@ -481,6 +481,7 @@ pub fn build(b: *std.Build) void {
                     "-w",
                     "-D_GLIBCXX_ASSERTIONS",
                     "-mno-avx512bf16",
+                    "-U__AVX512BF16__",
                 });
             } else {
                 addGgmlSources(mod, ggml, ggml_base_sources, &.{
