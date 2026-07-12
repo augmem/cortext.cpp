@@ -292,6 +292,43 @@ TEST_CASE ("Spike bypass triggers for high-salience signals",
   }
 }
 
+TEST_CASE ("Ephemeral probes do not trigger capacity episode finalization",
+           "[accumulator][retention]")
+{
+  Signal s;
+  s.source_id = "test_source";
+  s.embedding = MakeRandomEmbedding ();
+  s.timestamp = 5000;
+  s.retention = Retention::Ephemeral;
+
+  ProcessorContext pctx;
+  AccumulatorState state;
+  state.Reset (MakeRandomEmbedding (), 1000);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  state.n_signals = cortext::core::MaxSignalsPerMemory (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  pctx.accumulator_states[s.source_id] = std::move (state);
+
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetCompositeScore (1.0);
+  ctx.SetThresholdTDynamic (0.0);
+  ctx.SetBoundaryScore (1.0);
+
+  CheckSpikeBypass op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE_FALSE (ctx.GetSpikeBypass ());
+  REQUIRE_FALSE (ctx.ShouldFinalizeEpisode ());
+  REQUIRE (pctx.accumulator_states.at (s.source_id).n_signals
+           == cortext::core::MaxSignalsPerMemory (
+               cfg.focus, cfg.sensitivity, cfg.stability));
+}
+
 TEST_CASE ("Write gate computes window score", "[accumulator][4.4.5]")
 {
   SECTION ("GIVEN flush required and good window score")
