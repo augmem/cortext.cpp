@@ -1,4 +1,5 @@
 #include "test_helpers.hpp"
+#include <array>
 #include <any>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
@@ -1761,6 +1762,41 @@ TEST_CASE ("C API handles NULL inputs correctly",
         == 1);
     REQUIRE (std::string (cortext_last_error ())
              == "media mimetype must be non-NULL and non-empty when media data is provided");
+    cortext_free (h);
+  }
+
+  SECTION ("legacy image-with-media JSON entry point remains Durable")
+  {
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    const std::uint8_t px[3] = { 12, 34, 56 };
+    cortext_media media{ px, sizeof (px), "image/raw" };
+    char *json_ptr = cortext_process_image_with_media_json (
+        h, px, 1, 1, 3, "legacy/media", &media);
+    REQUIRE (json_ptr != nullptr);
+    const auto parsed = nlohmann::json::parse (json_ptr);
+    REQUIRE (parsed.at ("boundary_type") == "explicit_turn");
+    REQUIRE (parsed.at ("output").at ("stored_memory_id").is_number_integer ());
+    cortext_string_free (json_ptr);
+    cortext_free (h);
+  }
+
+  SECTION ("legacy audio-with-media JSON entry point remains Durable")
+  {
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    const std::array<float, 160> pcm{};
+    const std::uint8_t media_bytes[4] = { 'R', 'I', 'F', 'F' };
+    cortext_media media{ media_bytes, sizeof (media_bytes), "audio/wav" };
+    char *json_ptr = cortext_process_audio_with_media_json (
+        h, pcm.data (), pcm.size (), "legacy/media", &media);
+    REQUIRE (json_ptr != nullptr);
+    const auto parsed = nlohmann::json::parse (json_ptr);
+    REQUIRE (parsed.at ("boundary_type") == "explicit_turn");
+    REQUIRE (parsed.at ("output").at ("stored_memory_id").is_number_integer ());
+    cortext_string_free (json_ptr);
     cortext_free (h);
   }
 

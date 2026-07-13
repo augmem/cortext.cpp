@@ -110,7 +110,10 @@ DetectBoundary::Execute (OperationContext &context,
 
   // Adaptive gap signal (soft influence only)
   const double signal_gap
-      = static_cast<double> (signal.timestamp - acc.last_signal_ts) / 1000.0;
+      = signal.timestamp > acc.last_signal_ts
+            ? static_cast<double> (signal.timestamp - acc.last_signal_ts)
+                  / 1000.0
+            : 0.0;
   const double dt_ref = (p_ctx.dt_ema > 0.0) ? p_ctx.dt_ema : signal_gap;
   const double gap_ref_s = core::GapScale (config.stability)
                            * std::max (dt_ref, kEpsilon);
@@ -266,7 +269,10 @@ DetectBoundary::Execute (OperationContext &context,
                                    * inactivity_scale,
                          0.0, 1.0);
     }
-  boundary_score = std::max (boundary_score, gap_force);
+  if (!disable_natural)
+    {
+      boundary_score = std::max (boundary_score, gap_force);
+    }
 
   context.SetBoundaryScore (boundary_score);
 

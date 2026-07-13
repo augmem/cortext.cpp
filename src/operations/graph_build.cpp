@@ -434,6 +434,11 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
                                reinforcement_prune_threshold);
     }
 
+  // Edge creation, replacement, decay, or pruning changes fanout ordering.
+  // Invalidate in O(1); the cache is rebuilt lazily only if a later operation
+  // actually traverses associations.
+  context.GetProcessorContext ().association_fanout_cache.valid = false;
+
   // Count associations for logging
   long long edges_count = 0;
 

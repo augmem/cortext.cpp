@@ -17,6 +17,22 @@ The generated module exports the C ABI from `include/cortext/capi.h` and
 `malloc/free`. `bindings/wasm/cortext.js` is a small convenience wrapper for
 JavaScript callers.
 
+<!-- browser processText options matching bindings/wasm/cortext.js -->
+
+Browser text ingress defaults to natural retention, matching the native
+bindings. Select another policy explicitly when needed:
+
+```js
+runtime.processText(handle, "Remember this turn", "browser", {
+  retention: "durable",
+  includeEmbedding: false,
+});
+```
+
+Accepted retention values are `natural`, `durable`, `boundary`, and
+`ephemeral`. Image embedding rejects non-positive dimensions and buffers
+smaller than `width * height * channels` before copying into WASM memory.
+
 ## Model Assets
 
 Cortext still requires the AIST GGUF embedding model. For browser demos you can

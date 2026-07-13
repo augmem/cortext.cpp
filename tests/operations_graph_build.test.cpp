@@ -106,6 +106,26 @@ TEST_CASE ("V2: GraphBuild creates co-occurrence edges for similar memories in s
   REQUIRE (weight > 0.9); // Map01(sim) should still be high
 }
 
+TEST_CASE ("GraphBuild invalidates association fanout cache lazily",
+           "[operations][graph][cache][regression]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  ProcessorContext pctx;
+  pctx.association_fanout_cache.valid = true;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  Signal signal = MakeSignal (1234);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetConsolidationShouldStart (true);
+  auto tx = store->Begin ();
+  BuildGraphFromConsolidation op;
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE_FALSE (pctx.association_fanout_cache.valid);
+}
+
 TEST_CASE ("V2: GraphBuild creates causal edges for temporal drift within cluster",
            "[operations][graph][v2]")
 {

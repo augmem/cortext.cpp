@@ -138,3 +138,43 @@ TEST_CASE ("PropagateEmotionalCascade decays intensity per hop",
   double hop3 = source_intensity * std::pow (decay, 3);
   REQUIRE (hop3 == Catch::Approx (0.1).margin (1e-6));
 }
+
+TEST_CASE ("PropagateEmotionalCascade uses a millisecond consolidation window",
+           "[operations][emotion_cascade][timestamp][regression]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  std::vector<float> emb (kEmbeddingDim, 0.0f);
+  emb[0] = 1.0f;
+  constexpr long long now_ms = 1'000'000;
+  constexpr long long source_created_ms = now_ms - 60'000;
+  cortext::testing::SeedEmbeddingV2 (*store, 10, emb, source_created_ms);
+  cortext::testing::SeedEmbeddingV2 (*store, 20, emb, source_created_ms);
+  cortext::testing::SeedMemoryV2 (*store, 10, 10, "source", "LONG_TERM", 1.0,
+                                  source_created_ms);
+  cortext::testing::SeedMemoryV2 (*store, 20, 20, "target", "LONG_TERM", 1.0,
+                                  source_created_ms);
+  store->Execute (
+      "UPDATE memories SET flashbulb = 1, emotional_intensity = 0.8, "
+      "half_life_bonus = 2.0, cascade_radius = 1, cascade_decay = 0.5, "
+      "s_arousal_avg = 0.8 WHERE memory_id = 10");
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, "
+      "weight) VALUES(10, 20, 'co_occurs', 1.0)");
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.stability = 0.0; // Five-minute source window.
+  ProcessorContext pctx;
+  Signal signal = MakeSignal (now_ms);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  auto tx = store->Begin ();
+  PropagateEmotionalCascade op;
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  const auto rows = store->Execute (
+      "SELECT emotional_intensity FROM memories WHERE memory_id = 20");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (std::any_cast<double> (rows[0].at ("emotional_intensity")) > 0.0);
+}

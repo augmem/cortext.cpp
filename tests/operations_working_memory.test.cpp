@@ -210,6 +210,44 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   REQUIRE (pctx.wm_slots.front ().last_ts == Catch::Approx (0.0));
 }
 
+TEST_CASE ("Alg24 maintenance charges each elapsed interval once",
+           "[operations][working_memory][maintenance][decay][regression]")
+{
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  ProcessorContext::WMSlot slot;
+  slot.embedding = Eigen::VectorXf::Ones (3);
+  slot.strength = 2.0;
+  slot.last_ts = 0.0;
+  slot.strength_ts = 0.0;
+  pctx.wm_slots.push_back (slot);
+
+  WorkingMemory op;
+  Signal first;
+  first.embedding = slot.embedding;
+  first.source_id = "test";
+  first.timestamp = 1000;
+  OperationContext first_ctx (first, pctx, cfg);
+  op.Execute (first_ctx, cortext::testing::GetNullTransaction ());
+
+  Signal second = first;
+  second.timestamp = 2000;
+  OperationContext second_ctx (second, pctx, cfg);
+  op.Execute (second_ctx, cortext::testing::GetNullTransaction ());
+
+  const double cost
+      = core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus);
+  REQUIRE (pctx.wm_slots.front ().strength
+           == Catch::Approx (2.0 - 2.0 * cost));
+  REQUIRE (pctx.wm_slots.front ().last_ts == Catch::Approx (0.0));
+  REQUIRE (pctx.wm_slots.front ().strength_ts == Catch::Approx (2.0));
+}
+
 TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
            "[operations][working_memory][gate_threshold]")
 {

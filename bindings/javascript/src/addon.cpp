@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 #include "cortext/capi.h"
@@ -406,6 +407,23 @@ GetUint8Data (napi_env env, napi_value value, const uint8_t **data,
   return true;
 }
 
+bool
+CheckedImageByteCount (int32_t width, int32_t height, int32_t channels,
+                       size_t &expected)
+{
+  const size_t w = static_cast<size_t> (width);
+  const size_t h = static_cast<size_t> (height);
+  const size_t c = static_cast<size_t> (channels);
+  if (width <= 0 || height <= 0 || channels <= 0
+      || w > std::numeric_limits<size_t>::max () / h
+      || w * h > std::numeric_limits<size_t>::max () / c)
+    {
+      return false;
+    }
+  expected = w * h * c;
+  return true;
+}
+
 napi_value
 JSONStringResult (napi_env env, char *raw, const char *fallback)
 {
@@ -738,9 +756,11 @@ ProcessImageJSON (napi_env env, napi_callback_info info)
       return ThrowTypeError (env, "width, height, and channels must be positive");
     }
 
-  const size_t expected
-      = static_cast<size_t> (width) * static_cast<size_t> (height)
-        * static_cast<size_t> (channels);
+  size_t expected = 0;
+  if (!CheckedImageByteCount (width, height, channels, expected))
+    {
+      return ThrowTypeError (env, "image dimensions overflow addressable memory");
+    }
   if (byte_count < expected)
     {
       return ThrowTypeError (
@@ -802,9 +822,11 @@ ProcessImageWithMediaJSON (napi_env env, napi_callback_info info)
       return ThrowTypeError (env, "width, height, and channels must be positive");
     }
 
-  const size_t expected
-      = static_cast<size_t> (width) * static_cast<size_t> (height)
-        * static_cast<size_t> (channels);
+  size_t expected = 0;
+  if (!CheckedImageByteCount (width, height, channels, expected))
+    {
+      return ThrowTypeError (env, "image dimensions overflow addressable memory");
+    }
   if (byte_count < expected)
     {
       return ThrowTypeError (
@@ -881,9 +903,11 @@ EmbedImageJSON (napi_env env, napi_callback_info info)
       return ThrowTypeError (env, "width, height, and channels must be positive");
     }
 
-  const size_t expected
-      = static_cast<size_t> (width) * static_cast<size_t> (height)
-        * static_cast<size_t> (channels);
+  size_t expected = 0;
+  if (!CheckedImageByteCount (width, height, channels, expected))
+    {
+      return ThrowTypeError (env, "image dimensions overflow addressable memory");
+    }
   if (byte_count < expected)
     {
       return ThrowTypeError (

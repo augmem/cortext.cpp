@@ -187,7 +187,9 @@ pacing_thresh(S) = lerp(0.3, 0.05, S)
 max_wait_drift(F) = lerp(1.2, 0.30, F)
 adjacent_window(F) = round(lerp(6, 1, F))
 
-since_last_s ← if last_retrieval_ts == 0 then +∞ else (now_ms() − last_retrieval_ts) / 1000
+since_last_s ← if last_retrieval_ts == 0 then +∞
+               else if now_ms() <= last_retrieval_ts then 0
+               else (now_ms() − last_retrieval_ts) / 1000
 min_gap_s ← adjacent_window(F) × dt_ema
 adjacent_ok ← (since_last_s ≥ min_gap_s)
 force_check ← (drift_acc_pacing > max_wait_drift(F))

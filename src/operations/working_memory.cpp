@@ -93,16 +93,17 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
   // NOTE: We do NOT evict slots during passive decay. Slots should only be
   // replaced when at capacity and a new signal is accepted. This prevents
   // WM from going empty when signals are rejected or during idle periods.
-  // NOTE: We do NOT update last_ts during passive decay - recency should only
-  // reflect when a slot was actually accessed (chunked, rehearsed, or inserted).
+  // last_ts remains the access timestamp used by recency. strength_ts advances
+  // independently so each elapsed interval is charged exactly once.
   const double cost_per_slot
       = core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus);
   // Convert timestamp from milliseconds to seconds for decay calculations
   const double now_s = static_cast<double> (signal.timestamp) / 1000.0;
   for (auto &slot : p_ctx.wm_slots)
     {
-      const double last = slot.last_ts;
-      const double dt = std::max (0.0, now_s - last);
+      const double last_decay
+          = slot.strength_ts > 0.0 ? slot.strength_ts : slot.last_ts;
+      const double dt = std::max (0.0, now_s - last_decay);
       // Decay strength but floor at a minimum to preserve slot
       // Slot will be replaced via eviction when capacity is reached
       const double strength_after
@@ -110,7 +111,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                           cfg.focus, cfg.sensitivity, cfg.stability),
                       slot.strength - cost_per_slot * dt);
       slot.strength = strength_after;
-      // Do NOT update last_ts here - only update when slot is accessed
+      slot.strength_ts = std::max (last_decay, now_s);
     }
 
   // Complexity penalty from entropy over strengths.
@@ -291,6 +292,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
           wm_strength_max,
           std::max (constants::kNormalizedMin, slot.strength + add_strength));
       slot.last_ts = now_s;
+      slot.strength_ts = now_s;
 
       // Update memory-level metadata (Section 6.1.1)
       const int acc_n = std::max (1, acc_signal_count);
@@ -317,7 +319,8 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
         {
           slot.start_ts = acc_start_ts;
         }
-      if (slot.start_ts > 0)
+      if (slot.start_ts > 0
+          && signal.timestamp >= static_cast<std::uint64_t> (slot.start_ts))
         {
           slot.mem_elapsed = std::max (
               slot.mem_elapsed,
@@ -388,6 +391,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                                cfg.focus, cfg.sensitivity, cfg.stability);
       slot.strength = std::min (wm_strength_max, slot.strength + boost);
       slot.last_ts = now_s;
+      slot.strength_ts = now_s;
       slot.metadata_dirty = true;
       p_ctx.wm_slots_dirty = true;
       // Continue to insert logic - rehearsal doesn't prevent new slot creation
@@ -417,6 +421,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                   slot.strength
                       = std::min (wm_strength_max, slot.strength + boost);
                   slot.last_ts = now_s;
+                  slot.strength_ts = now_s;
                   slot.metadata_dirty = true;
                   p_ctx.wm_slots_dirty = true;
                   break; // Only boost once per slot per memory
@@ -532,6 +537,7 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
       core::WMInitialSlotStrength (cfg.focus, cfg.sensitivity,
                                    cfg.stability, benefit));
   slot.last_ts = now_s;
+  slot.strength_ts = now_s;
   slot.pos_index = p_ctx.signals_processed;
 
   // Memory-level metadata from accumulator (Section 6.1.1)
@@ -542,7 +548,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
                    : 0.0;
   slot.drift_acc = acc.drift_acc;
   slot.mem_elapsed
-      = static_cast<double> (signal.timestamp - acc.t_start) / 1000.0;
+      = signal.timestamp >= acc.t_start
+            ? static_cast<double> (signal.timestamp - acc.t_start) / 1000.0
+            : 0.0;
   slot.s_emotion_max = acc.s_emotion_max;
   slot.s_arousal_avg
       = acc_signal_count > 0

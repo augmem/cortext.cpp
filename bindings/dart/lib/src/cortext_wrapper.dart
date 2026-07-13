@@ -67,6 +67,21 @@ final class ProcessOptions {
 
 enum Retention { natural, durable, boundary, ephemeral }
 
+void _validateImageBuffer(Uint8List data, int width, int height, int channels) {
+  if (width <= 0 || height <= 0 || channels <= 0) {
+    throw ArgumentError('width, height, and channels must be positive');
+  }
+  if (width > 0x7fffffff || height > 0x7fffffff || channels > 0x7fffffff) {
+    throw ArgumentError('image dimensions exceed the native int range');
+  }
+  final expected = width * height * channels;
+  if (data.length < expected) {
+    throw ArgumentError(
+      'image buffer is smaller than width * height * channels',
+    );
+  }
+}
+
 final class CortextLibrary {
   CortextLibrary._(this.dynamicLibrary)
     : bindings = CortextBindings(dynamicLibrary);
@@ -269,10 +284,7 @@ final class Cortext {
     final textPointer = text.toNativeUtf8();
     try {
       return _takeJsonString(
-        _library.bindings.cortext_embed_text_json(
-          _handle,
-          textPointer.cast(),
-        ),
+        _library.bindings.cortext_embed_text_json(_handle, textPointer.cast()),
       );
     } finally {
       malloc.free(textPointer);
@@ -349,15 +361,15 @@ final class Cortext {
           ..size = media.data.length
           ..mimetype = mediaMimePointer.cast();
       }
-      final raw =
-          _library.bindings.cortext_process_audio_with_media_json_with_options(
-        _handle,
-        pcmPointer,
-        pcm.length,
-        sourcePointer.cast(),
-        mediaPointer,
-        optionsPointer,
-      );
+      final raw = _library.bindings
+          .cortext_process_audio_with_media_json_with_options(
+            _handle,
+            pcmPointer,
+            pcm.length,
+            sourcePointer.cast(),
+            mediaPointer,
+            optionsPointer,
+          );
       return _takeJsonString(raw);
     } finally {
       malloc.free(sourcePointer);
@@ -430,6 +442,7 @@ final class Cortext {
     ProcessOptions options = const ProcessOptions(),
   ]) {
     _ensureOpen();
+    _validateImageBuffer(data, width, height, channels);
     final sourcePointer = sourceId.toNativeUtf8();
     final optionsPointer = _allocateProcessOptions(options);
     Pointer<Uint8> dataPointer = nullptr;
@@ -467,6 +480,7 @@ final class Cortext {
     ProcessOptions options = const ProcessOptions(),
   ]) {
     _ensureOpen();
+    _validateImageBuffer(data, width, height, channels);
     final sourcePointer = sourceId.toNativeUtf8();
     final optionsPointer = _allocateProcessOptions(options);
     Pointer<Uint8> dataPointer = nullptr;
@@ -495,17 +509,17 @@ final class Cortext {
           ..size = media.data.length
           ..mimetype = mediaMimePointer.cast();
       }
-      final raw =
-          _library.bindings.cortext_process_image_with_media_json_with_options(
-        _handle,
-        dataPointer,
-        width,
-        height,
-        channels,
-        sourcePointer.cast(),
-        mediaPointer,
-        optionsPointer,
-      );
+      final raw = _library.bindings
+          .cortext_process_image_with_media_json_with_options(
+            _handle,
+            dataPointer,
+            width,
+            height,
+            channels,
+            sourcePointer.cast(),
+            mediaPointer,
+            optionsPointer,
+          );
       return _takeJsonString(raw);
     } finally {
       malloc.free(sourcePointer);
@@ -560,13 +574,9 @@ final class Cortext {
     );
   }
 
-  String embedImageJson(
-    Uint8List data,
-    int width,
-    int height,
-    int channels,
-  ) {
+  String embedImageJson(Uint8List data, int width, int height, int channels) {
     _ensureOpen();
+    _validateImageBuffer(data, width, height, channels);
     Pointer<Uint8> dataPointer = nullptr;
     try {
       if (data.isNotEmpty) {
@@ -588,12 +598,7 @@ final class Cortext {
     }
   }
 
-  Float32List embedImage(
-    Uint8List data,
-    int width,
-    int height,
-    int channels,
-  ) {
+  Float32List embedImage(Uint8List data, int width, int height, int channels) {
     return _decodeEmbedding(embedImageJson(data, width, height, channels));
   }
 

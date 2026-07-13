@@ -34,7 +34,16 @@ The remainder of this paper is organized as follows. Section 2 reviews relevant 
 
 ## Working Memory Models
 
-The working memory component of Cortext draws primarily on @cowan2001magical embedded-processes model, which posits a capacity limit of approximately 4±1 chunks for the focus of attention. This contrasts with @miller1956magical earlier estimate of 7±2 items, which subsequent research has shown conflates chunking with raw capacity [@cowan2010magical]. Our implementation respects these empirically-derived constraints while allowing for focus-dependent modulation within bounded ranges.
+The working memory component of Cortext draws conceptually on
+@cowan2001magical embedded-processes model, which posits a capacity limit of
+approximately 4±1 chunks for the focus of attention. This contrasts with
+@miller1956magical earlier estimate of 7±2 items, which subsequent research has
+shown conflates chunking with raw capacity [@cowan2010magical]. Cortext's
+production slots are larger, application-level memory units rather than a
+direct cognitive-chunk implementation: the shipped F/S-derived capacity is
+15--27 slots, with 21 at neutral knobs, selected from the product evaluation
+reported in @sec-experimental. The biological result motivates boundedness and
+competition, not a claim that the software reproduces human span numerically.
 
 @baddeley2000episodic multicomponent model informs our treatment of maintenance and rehearsal processes, though we adopt a more unified representational substrate based on distributed embeddings rather than separate phonological and visuospatial stores. The episodic buffer concept [@baddeley2000episodic] aligns with our approach to binding information across modalities through shared vector spaces.
 

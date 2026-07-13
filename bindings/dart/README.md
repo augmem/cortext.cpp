@@ -50,6 +50,8 @@ void main() {
 
 ## API
 
+<!-- public Dart binding API and image contract matching bindings/dart/lib/src/cortext_wrapper.dart -->
+
 - `Config`: Focus/Sensitivity/Stability, mechanism toggles, and signal-filter
   toggles.
 - `processText`, `processAudio`, `processImage`: decoded JSON maps.
@@ -58,4 +60,5 @@ void main() {
 - `consolidate`, `flush`, `reset`, `close`.
 
 Audio input is 16 kHz mono float32 PCM. Image input is row-major RGB/RGBA bytes
-with explicit dimensions.
+with explicit dimensions. Non-positive dimensions and buffers smaller than
+`width * height * channels` are rejected before native inference.

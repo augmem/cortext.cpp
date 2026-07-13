@@ -4,12 +4,25 @@
 
 Each memory maintains **multi-timescale traces** rather than a single leaky bucket. A mixture of fast/medium/slow/ultra-slow traces yields a power-law forgetting curve while preserving plasticity.
 
+Let `f = FocusBias(F)`, `s = SensitivityBias(S)`, and let `f0` and `s0` be
+their values at the neutral knobs. The active trace count is:
+
 ```
-N_traces(T) = 2 + round(2T)  # 2..4 coupled traces
-τ_fast  = 0.10 × half_life
-τ_med   = 0.50 × half_life
-τ_slow  = 2.00 × half_life
-τ_ultra = 8.00 × half_life
+N_traces(F,S,T) = clamp(round((2 + 2T) ×
+                         (1 + 0.08(f-f0) + 0.06(s-s0))), 1, 4)
+```
+
+The familiar `0.10/0.50/2.00/8.00` half-life multipliers are the neutral
+baseline, not universal constants. Production applies bounded F/S/T policy
+scales:
+
+```
+reactive = 1 + 0.14(s-s0) - 0.08(f-f0) + 0.06(T-0.5)
+stable   = 1 + 0.24(T-0.5) - 0.06(s-s0)
+τ_fast  = clamp(0.10 × reactive, 0.05, 0.20) × half_life
+τ_med   = clamp(0.50 × (1 + 0.12(T-0.5) - 0.06(f-f0)), 0.30, 0.80) × half_life
+τ_slow  = clamp(2.00 × stable, 1.20, 3.20) × half_life
+τ_ultra = clamp(8.00 × stable × (1 + 0.10(f-f0)), 4.00, 12.00) × half_life
 τ_list = [τ_fast, τ_med, τ_slow, τ_ultra]
 
 α_min_S = 0.05; α_span_S = 0.35
@@ -20,9 +33,9 @@ used_flag(m) = 1 if m was retrieved and used in current step, else 0
 Trace updates combine exponential decay, EWMA learning, and knob-scaled reinforcement (for i in 1..N_traces):
 ```
 λ_i ← ln(2) / τ_list[i]
-reinforcement ← clamp(S_eff × used_flag(m) +
-                       F_eff × clamp(influence_factor, 0, 1), 0, 1)
-                × serial_position_mult
+reinforcement ← clamp((S_eff × used_flag(m) +
+                       F_eff × clamp(influence_factor, 0, 1))
+                       × serial_position_mult, 0, 1)
 increment_i ← (α_S(t) × used_flag(m) + reinforcement) / N_traces
 trace_i ← clamp(trace_i × exp(−λ_i × Δt) + increment_i, 0, 1)
 ```
@@ -31,13 +44,21 @@ The reinforcement term distributes S- and F-scaled retrieval feedback uniformly 
 
 Trace coupling encourages long-lived knowledge without freezing plasticity:
 ```
-coupling = 0.05 + 0.10T
+coupling = clamp((0.05 + 0.10T) ×
+                 (1 - 0.10(f-f0) + 0.12(s-s0)), 0.02, 0.20)
 trace_{i+1} ← clamp(trace_{i+1} + coupling × trace_i, 0, 1)
 ```
 
 Combined strength uses a knob-shaped mixture that favors slow traces as Stability increases:
 ```
-w_raw ← [0.40 − 0.25T, 0.25, 0.20 + 0.15T, 0.15 + 0.10T]
+w_fast  = clamp((0.40 - 0.25T) ×
+                (1 - 0.08(f-f0) - 0.10(s-s0)), 0.05, 0.50)
+w_med   = clamp(0.25 × (1 - 0.04(f-f0) - 0.04(T-0.5)), 0.12, 0.35)
+w_slow  = clamp((0.20 + 0.15T) ×
+                (1 + 0.08(f-f0) + 0.06(s-s0)), 0.12, 0.45)
+w_ultra = clamp((0.15 + 0.10T) ×
+                (1 + 0.10(f-f0) + 0.06(s-s0)), 0.08, 0.35)
+w_raw ← [w_fast, w_med, w_slow, w_ultra]
 w ← normalize(w_raw[1..N_traces])
 strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
 ```
@@ -66,6 +87,13 @@ if m.kind == LONG_TERM
    AND m.created_at < last_consolidation_ts:
      evict(m)
 ```
+
+Eviction removes the memory's signal rows, reconstruction rows, graph edges,
+and object payloads in the same transaction. The cleanup candidate set includes
+the representative embedding and every embedding owned by its signals and
+reconstructions; an embedding is deleted only when no surviving row references
+it. This makes storage-pressure eviction reclaim the dominant vector payloads
+without a later global orphan sweep.
 
 The v1 hard cut removed the structured fact-evidence floor. Retention now
 depends on the trace strength, the storage-pressure gate, and the consolidation

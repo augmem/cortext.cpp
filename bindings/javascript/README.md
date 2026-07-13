@@ -160,6 +160,8 @@ needed in the returned packet.
 
 ## Audio and Image
 
+<!-- audio/image input contracts matching bindings/javascript/src/addon.cpp -->
+
 Audio input is a `Float32Array` containing 16 kHz mono PCM:
 
 ```ts
@@ -168,6 +170,9 @@ const ctx = memory.processAudio(pcm, "mic/main", { includeEmbedding: false });
 ```
 
 Image input is row-major RGB or RGBA bytes:
+
+The addon rejects non-positive or overflowing dimensions and buffers smaller
+than `width * height * channels` before native inference.
 
 ```ts
 const rgb = new Uint8Array(64 * 64 * 3);

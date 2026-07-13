@@ -681,6 +681,7 @@ TEST_CASE (
   vec[0] = 1.0f;
   cortext::testing::SeedEmbeddingV2 (*store, 9900LL, vec, 1000);
   cortext::testing::SeedEmbeddingV2 (*store, 9903LL, vec, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 9904LL, vec, 1000);
   cortext::testing::SeedMemoryV2 (*store, 9901LL, 9900LL, "weak",
                                   "LONG_TERM", 0.1, 1000);
 
@@ -817,6 +818,9 @@ TEST_CASE (
       "trigger, source_confidence, context_similarity) "
       "VALUES(?, ?, ?, ?, ?, 'retrieval', ?, ?)",
       { 1LL, 9901LL, 9903LL, 1100LL, 0.1, 0.9, 0.8 });
+  cortext::testing::SeedSignalV2 (*store, 9905LL, 9904LL, "weak", 1200);
+  store->Execute ("UPDATE signals SET memory_id = ? WHERE signal_id = ?",
+                  { 9901LL, 9905LL });
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
@@ -851,6 +855,12 @@ TEST_CASE (
       { 9903LL });
   REQUIRE (std::any_cast<long long> (
                reconstruction_embedding_rows[0].at ("cnt")) == 0LL);
+
+  auto signal_embedding_rows = store->Execute (
+      "SELECT COUNT(*) AS cnt FROM embeddings WHERE embedding_id = ?",
+      { 9904LL });
+  REQUIRE (std::any_cast<long long> (
+               signal_embedding_rows[0].at ("cnt")) == 0LL);
 }
 
 TEST_CASE (

@@ -59,7 +59,7 @@ The current branch includes the following implementation-level changes:
 | SQLite execution | prepared-statement reuse in the store layer | same SQL semantics, lower repeated parse overhead |
 | vector ranking | bounded top-k selection and architecture SIMD kernels in the vector path | same candidate contract; SIMD accepted after output checks |
 | retrieval seed surface | current-memory embedding lookup instead of all reconstruction versions; recent seed and same-source expansion use the live retrieval surface cache before SQL fallback | latest reconstruction remains visible without unbounded scan growth, and source-neighbor behavior is preserved without per-seed table scans |
-| graph expansion | retained edge types only: `co_occurs`, `similar_to`, `reinforces`, `causes`, `derived_from` | removed fact, label-bank, and temporal-retrieval side paths cannot influence rank |
+| graph expansion | retained traversal types: `co_occurs`, `similar_to`, `reinforces`, `causes`, `derived_from`, `next_in_episode`, `prev_in_episode`, `within_same_event`, and `supersedes` | removed fact and label-bank paths cannot influence rank; stored maintenance-only edge types are not traversed |
 | reconstruction | knob-bounded retrieval-time reconstruction append | constructive recall remains non-decoder and can be disabled cleanly |
 | memory storage | avoid redundant object-store writes for single-signal memory payloads | durable payload identity is preserved |
 | live replay ingress | internal replay path can skip per-event hydration when no probe needs it | public processing APIs still hydrate normally |
@@ -96,10 +96,13 @@ cmake --build build/codex-hardcut-check -j
   '[operations][graph][retrieval],[operations][constructive_recall][graph],[state_persistence][working_memory][decay]'
 ```
 
-The broad filtered test suite passed **429 test cases** and **2,489
-assertions**. The targeted graph/reconstruction/state suite passed **5 test
-cases** and **16 assertions**. Python experiment helpers that remain in the
-tree compile, and JSON config files that remain in the tree validate.
+Those hard-cutover commands historically passed **429 test cases** and **2,489
+assertions** in the broad filter and **5 test cases** and **16 assertions** in
+the targeted graph/reconstruction/state filter. After the July 12 safety work,
+the current warnings-as-errors debug tree passed the complete default native
+suite with **509 test cases** and **4,510 assertions** in 483.53 seconds. Python
+validation, Go tests and vet, Dart analysis and tests, the Node addon build, and
+the WebAssembly bundle build also passed.
 
 ## Remaining Bottlenecks
 
