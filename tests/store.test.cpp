@@ -121,20 +121,41 @@ public:
   }
 };
 
+class ScopedSQLiteLengthLimit
+{
+public:
+  ScopedSQLiteLengthLimit (SQLiteStore &store, int value)
+      : store_ (store),
+        old_limit_ (
+            SQLiteStoreStatementCacheInspector::SetLengthLimit (store, value))
+  {
+  }
+
+  ScopedSQLiteLengthLimit (const ScopedSQLiteLengthLimit &) = delete;
+  ScopedSQLiteLengthLimit &
+  operator= (const ScopedSQLiteLengthLimit &)
+      = delete;
+
+  ~ScopedSQLiteLengthLimit ()
+  {
+    SQLiteStoreStatementCacheInspector::SetLengthLimit (store_, old_limit_);
+  }
+
+private:
+  SQLiteStore &store_;
+  int old_limit_;
+};
+
 } // namespace cortext::internal
 
 TEST_CASE ("SQLiteStore propagates SQLite bind failures",
            "[store][binding][regression]")
 {
   auto store = cortext::SQLiteStore::Create (":memory:");
-  const int old_limit
-      = cortext::internal::SQLiteStoreStatementCacheInspector::SetLengthLimit (
-          *store, 32);
+  const cortext::internal::ScopedSQLiteLengthLimit length_limit (*store, 32);
   REQUIRE_THROWS_WITH (
       store->Execute ("SELECT ? AS value", { std::string (128, 'x') }),
       Catch::Matchers::ContainsSubstring ("Failed to bind SQLite parameter"));
-  cortext::internal::SQLiteStoreStatementCacheInspector::SetLengthLimit (
-      *store, old_limit);
 }
 
 TEST_CASE ("Store any numeric double conversion", "[store][utils]")
