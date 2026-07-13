@@ -2586,6 +2586,9 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
       try
         {
           const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
+          const auto strength_ts_ms = static_cast<long long> (
+              (slot.strength_ts > 0.0 ? slot.strength_ts : slot.last_ts)
+              * 1000.0);
           const auto slot_created_at
               = slot.start_ts > 0
                     ? static_cast<long long> (slot.start_ts)
@@ -2637,8 +2640,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                         slot.s_max, slot.s_avg, slot.s_emotion_max,
                         slot.s_arousal_avg, slot.drift_acc, slot.strength,
                         working_source_reliability, working_stability, ts_ms,
-                        static_cast<long long> (slot.strength_ts * 1000.0),
-                        memory_id });
+                        strength_ts_ms, memory_id });
                   add_timing ("SignalProcessor.wm_update_slot_memory",
                               t_sql_start);
                 }
@@ -2660,9 +2662,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
                     slot.drift_acc, slot.strength, working_source_reliability,
-                    working_stability, ts_ms,
-                    static_cast<long long> (slot.strength_ts * 1000.0),
-                    slot_created_at });
+                    working_stability, ts_ms, strength_ts_ms, slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
               add_timing ("SignalProcessor.wm_insert_slot_memory",
