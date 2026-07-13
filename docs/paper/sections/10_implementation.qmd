@@ -46,6 +46,14 @@ commands, or consolidation behavior from reserved source strings. Explicit
 maintenance is driven by API calls and `Signal::force_consolidation`, not magic
 source identifiers.
 
+SQLite parameters are checked at bind time, including exact statement/argument
+counts, so `SQLITE_TOOBIG`, `SQLITE_RANGE`, and allocation failures cannot be
+silently converted into NULL values. `Process()` and `Flush()` both snapshot
+mutable processor state until the database transaction commits; rollback
+restores working-memory dirty flags and persisted-record cursors. Association
+writers invalidate the fanout cache in constant time and rebuild it lazily on
+the next traversal.
+
 ## Current Operation Pipeline
 
 The production operation chain is:
@@ -97,18 +105,21 @@ batch semantic extraction job.
 ## Retrieval Implementation
 
 Production retrieval discovers a broad but bounded vector seed set from durable
-memory embeddings, expands through retained graph edges, applies temporal rank
-and source-backed ordering signals, and returns a compact selected set. Current
+memory embeddings, expands through retained graph edges and source/turn
+neighbors, applies temporal rank and supersession demotion, and returns a
+compact selected set. Current
 writes are excluded by timestamp, and working-memory overlap filters prevent the
 retrieval result from echoing the active memory tail. Association edges are used
 as graph evidence; they do not bypass final scoring or output caps.
 
 The retrieval trace path records a ranking ledger for selected and rejected
-candidates. The trace schema reports the active scalar components that still
-exist in the implementation: relevance, processor score, predictive bonus,
-pre-activation, durable-source boost, temporal/evidence annotations, and the
-ACT-R-inspired activation ledger. Deleted label-graph and fact-layer fields are
-not emitted.
+candidates. Production graph retrieval populates composite score, seed
+relevance, temporal score, and the base/spreading/supersession fields of the
+activation ledger. The shared trace structure still contains reserved
+processor, predictive, pre-activation, durable-source, and evidence fields, but
+this path leaves them at zero; their presence is not evidence that those terms
+participate in ranking. Deleted label-graph and fact-layer fields are not
+emitted.
 
 ## Soft Anchor Implementation Status
 
@@ -141,8 +152,8 @@ soft_anchor_links(memory_id, anchor_id, anchor_strength, anchor_label,
 
 Hydrated memories expose up to three soft-anchor entries through
 `Context::Memory::soft_anchors`, and the C API JSON mirrors those entries under
-each returned memory. The chat demo emits matching `<soft_anchor>` elements in
-the prompt snapshot.
+each returned memory. Production retrieval does not use those links as ranking
+features, and no bundled chat renderer is part of this claim.
 
 ## Computational Complexity
 
@@ -151,6 +162,11 @@ association surface. With `N` stored memories, naive vector seed discovery is
 `O(N)` before sqlite-vec pruning; graph expansion is bounded by F/S/T-derived
 row and fanout limits. Working-memory and soft-anchor updates operate over
 bounded live state and remain independent of total store size.
+
+The safety checks preserve these bounds: bind-result validation is one branch
+per existing parameter, working-memory decay adds one timestamp update per
+bounded slot, and graph writes perform only O(1) cache invalidation. None adds
+a per-signal database query or eager graph reconstruction.
 
 The retained long-horizon optimization target is that mean process latency
 stays approximately flat as the database grows. Recent profiling moved the

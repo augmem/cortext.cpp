@@ -651,7 +651,26 @@ GetPixelClamped (const std::uint8_t *data, int width, int height,
   x = std::clamp (x, 0, width - 1);
   y = std::clamp (y, 0, height - 1);
   c = std::clamp (c, 0, channels - 1);
-  return static_cast<float> (data[(y * width + x) * channels + c]);
+  const std::size_t index
+      = (static_cast<std::size_t> (y) * static_cast<std::size_t> (width)
+         + static_cast<std::size_t> (x))
+          * static_cast<std::size_t> (channels)
+        + static_cast<std::size_t> (c);
+  return static_cast<float> (data[index]);
+}
+
+bool
+IsImageExtentAddressable (int width, int height, int channels)
+{
+  if (width <= 0 || height <= 0 || channels <= 0)
+    {
+      return false;
+    }
+  const std::size_t w = static_cast<std::size_t> (width);
+  const std::size_t h = static_cast<std::size_t> (height);
+  const std::size_t c = static_cast<std::size_t> (channels);
+  return w <= std::numeric_limits<std::size_t>::max () / h
+         && w * h <= std::numeric_limits<std::size_t>::max () / c;
 }
 
 float
@@ -674,7 +693,8 @@ std::vector<float>
 PreprocessAistImageNHWC (const std::uint8_t *data, int width, int height,
                            int channels)
 {
-  if (data == nullptr || width <= 0 || height <= 0 || channels < 3)
+  if (data == nullptr || channels < 3
+      || !IsImageExtentAddressable (width, height, channels))
     {
       throw std::runtime_error ("EncodeImage: invalid input image");
     }
@@ -731,7 +751,8 @@ std::vector<float>
 PreprocessAistImageHWC (const std::uint8_t *data, int width, int height,
                           int channels)
 {
-  if (data == nullptr || width <= 0 || height <= 0 || channels < 3)
+  if (data == nullptr || channels < 3
+      || !IsImageExtentAddressable (width, height, channels))
     {
       throw std::runtime_error ("EncodeImage: invalid input image");
     }

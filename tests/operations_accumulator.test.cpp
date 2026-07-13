@@ -229,6 +229,35 @@ TEST_CASE ("Boundary detection triggers on temporal gap",
   }
 }
 
+TEST_CASE ("Boundary detection does not wrap out-of-order timestamps",
+           "[accumulator][boundary][timestamp][regression]")
+{
+  Signal s;
+  s.source_id = "test_source";
+  s.embedding = MakeRandomEmbedding ();
+  s.timestamp = 4000;
+
+  ProcessorContext pctx;
+  pctx.dt_ema = 1.0;
+  AccumulatorState state;
+  state.Reset (MakeRandomEmbedding (), 5000);
+  state.n_signals = 3;
+  state.last_signal_ts = 5000;
+  pctx.accumulator_states[s.source_id] = std::move (state);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetAccumulatorDriftStep (0.0);
+  ctx.SetAccumulatorCoherence (1.0);
+
+  DetectBoundary op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (ctx.GetBoundaryScore ().has_value ());
+  REQUIRE (*ctx.GetBoundaryScore () < 0.9);
+}
+
 TEST_CASE ("Spike bypass triggers for high-salience signals",
            "[accumulator][4.4.4]")
 {

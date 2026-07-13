@@ -99,6 +99,95 @@ struct CaptureLoadedPolicyStateOp : IOperation
   }
 };
 
+struct CaptureProcessorContextOp : IOperation
+{
+  ProcessorContext **captured = nullptr;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    if (captured)
+      {
+        *captured = &ctx.GetProcessorContext ();
+      }
+  }
+};
+
+class FailCommitTransaction final : public Transaction
+{
+public:
+  FailCommitTransaction (std::unique_ptr<Transaction> inner, bool *fail_next)
+      : inner_ (std::move (inner)), fail_next_ (fail_next)
+  {
+  }
+
+  std::unique_ptr<Transaction>
+  Begin () override
+  {
+    return std::make_unique<FailCommitTransaction> (inner_->Begin (), fail_next_);
+  }
+
+  std::vector<std::map<std::string, std::any>>
+  Execute (const std::string &query,
+           const std::vector<std::any> &params = {}) override
+  {
+    return inner_->Execute (query, params);
+  }
+
+  void
+  Commit () override
+  {
+    if (fail_next_ && *fail_next_)
+      {
+        *fail_next_ = false;
+        throw StoreError ("injected commit failure");
+      }
+    inner_->Commit ();
+  }
+
+  void
+  Rollback () override
+  {
+    inner_->Rollback ();
+  }
+
+private:
+  std::unique_ptr<Transaction> inner_;
+  bool *fail_next_;
+};
+
+class FailCommitStore final : public Store
+{
+public:
+  explicit FailCommitStore (std::shared_ptr<Store> inner)
+      : inner_ (std::move (inner))
+  {
+  }
+
+  std::vector<std::map<std::string, std::any>>
+  Execute (const std::string &query,
+           const std::vector<std::any> &params = {}) override
+  {
+    return inner_->Execute (query, params);
+  }
+
+  std::unique_ptr<Transaction>
+  Begin () override
+  {
+    return std::make_unique<FailCommitTransaction> (inner_->Begin (),
+                                                    &fail_next_commit);
+  }
+
+  void Commit () override { inner_->Commit (); }
+  void Rollback () override { inner_->Rollback (); }
+  void Close () override { inner_->Close (); }
+
+  bool fail_next_commit = false;
+
+private:
+  std::shared_ptr<Store> inner_;
+};
+
 inline SignalProcessor::Config
 MakeConfig ()
 {
@@ -1006,4 +1095,54 @@ TEST_CASE ("Working memory reload preserves floor like live passive decay",
       WithinAbs (core::WMStrengthFloor (cfg.focus, cfg.sensitivity,
                                         cfg.stability),
                  1e-9));
+}
+
+TEST_CASE ("Flush restores working-memory persistence state after commit failure",
+           "[state_persistence][working_memory][flush][regression]")
+{
+  auto sqlite = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*sqlite);
+  auto store = std::make_shared<FailCommitStore> (sqlite);
+
+  ProcessorContext *captured = nullptr;
+  auto capture = std::make_unique<CaptureProcessorContextOp> ();
+  capture->captured = &captured;
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (capture));
+  SignalProcessor processor (MakeConfig (), store, std::move (ops));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Ones (256);
+  signal.timestamp = 1000;
+  signal.source_id = "flush/source";
+  processor.Process (signal);
+  REQUIRE (captured != nullptr);
+
+  ProcessorContext::WMSlot slot;
+  slot.embedding = signal.embedding;
+  slot.strength = 1.0;
+  slot.last_ts = 1.0;
+  slot.strength_ts = 1.0;
+  slot.source_id = signal.source_id;
+  slot.start_ts = 1000;
+  SignalRecord record;
+  record.embedding = signal.embedding;
+  record.timestamp = 1000;
+  record.modality = "text";
+  record.mime = "text/plain";
+  slot.signal_records.push_back (std::move (record));
+  captured->wm_slots.push_back (std::move (slot));
+  captured->wm_slots_dirty = true;
+
+  store->fail_next_commit = true;
+  REQUIRE_THROWS_WITH (processor.Flush (), "injected commit failure");
+  REQUIRE (captured->wm_slots.size () == 1);
+  REQUIRE (captured->wm_slots[0].persisted_signal_record_count == 0);
+  REQUIRE (captured->wm_slots[0].signal_records_dirty);
+  REQUIRE (captured->wm_slots_dirty);
+
+  REQUIRE_NOTHROW (processor.Flush ());
+  const auto rows = sqlite->Execute (
+      "SELECT COUNT(*) AS count FROM signals WHERE source_id = ?",
+      { std::string ("flush/source") });
+  REQUIRE (GetInt64 (rows[0], "count") == 1);
 }

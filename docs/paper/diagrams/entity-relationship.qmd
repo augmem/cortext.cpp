@@ -21,13 +21,17 @@ Note: Allowed interrupts outside flush/spike events mark a pending abort; the
 next signal drops the partial unit only if it aligns more with the selected
 memory than with the current accumulator centroid. This is operational only
 and does not alter the schema.
-Note: Retrieval ranking adds an emotion bonus using memories.emotional_intensity
-and memories.s_arousal_avg, scaled by an affect_drive computed from current
-arousal/emotion/salience.
+Note: Emotional and predictive fields are persisted for feedback, decay, and
+analysis paths, but production graph retrieval does not currently use
+`emotional_intensity`, `s_arousal_avg`, or `pre_activation` in candidate
+ranking. Affect still modulates interrupt gating.
 Note: Strength-based eviction only applies to LONG_TERM memories; ASSOCIATION
 and LABEL nodes are retained unless explicitly pruned.
 Note: Retrieval seeding scans LONG_TERM and ASSOCIATION embeddings, then graph
-expansion follows retained association edges to surface connected nodes.
+expansion follows the production traversal subset: `co_occurs`, `similar_to`,
+`reinforces`, `causes`, `derived_from`, `next_in_episode`, `prev_in_episode`,
+`within_same_event`, and `supersedes`. Other stored edge types can support
+maintenance, hydration, or audit paths without participating in expansion.
 
 ```{mermaid}
 erDiagram
@@ -50,7 +54,7 @@ erDiagram
     EPISODES ||--o{ MEMORIES : "contains"
     MEMORIES ||--o{ SIGNALS : "contains"
     SIGNALS ||--|| EMBEDDINGS : "has"
-    SIGNALS ||--|| BLOBS : "stores"
+    SIGNALS ||--o| BLOBS : "optionally stores"
 
     %% Episodes: Temporal/semantic context boundaries (Section 3.1.3)
     EPISODES {
@@ -63,7 +67,7 @@ erDiagram
     }
 
     %% Memories / Graph nodes: grouped signals with decay metrics (LABEL nodes live here)
-    MEMORIES ||--|| EMBEDDINGS : "has"
+    MEMORIES ||--o| EMBEDDINGS : "optionally has"
     MEMORIES ||--o| BLOBS : "stores"
 
     MEMORIES {
@@ -103,6 +107,7 @@ erDiagram
         int suppression_count "Section 6.4 RIF"
         int cluster_id FK "Section 7.3, IDX partial NOT NULL"
         int last_access "timestamp (ms)"
+        int strength_updated_at "last applied WM decay (ms)"
         int created_at "timestamp (ms)"
         blob context "Section 3.1.4 temporal context"
         int retrieved_count "Section 5.2"
@@ -219,7 +224,7 @@ erDiagram
     ASSOCIATIONS {
         int source_memory_id PK,FK "IDX with edge_type"
         int target_memory_id PK,FK "IDX with edge_type"
-        text edge_type PK "derived_from|similar_to|co_occurs|implies|contradicts|reinforces|causes|has_label"
+        text edge_type PK "derived_from|has_label|similar_to|co_occurs|reinforces|causes|implies|contradicts|next_in_episode|prev_in_episode|within_same_event|supersedes"
         real weight "normalized [0,1] association weight (for cosine-based edges: clamp((cos+1)/2,0,1))"
         real decay_rate
         int last_reinforced "timestamp (ms)"
@@ -235,7 +240,7 @@ erDiagram
         text source_id PK "per-signal accumulator"
         int episode_id FK "current episode, IDX"
         blob mu_acc "256d running mean"
-        real drift_acc "WITHIN-UNIT drift accumulator (resets on reset_accumulator). Accumulates normalized context-centroid drift: drift_acc += drift_mag_t/2"
+        real drift_acc "WITHIN-UNIT drift accumulator (resets on reset_accumulator). Adds drift_mag_t times the bounded F/S/T drift gain"
         real s_sum "score sum"
         real s_max "max score"
         int n "count of signals in current unit"
@@ -247,7 +252,7 @@ erDiagram
         real drift_at_last_interrupt "PER-STREAM snapshot of drift_accum taken on interrupt; refractory drift since last interrupt is Δ = drift_accum - drift_at_last_interrupt"
         real drift_acc_pacing "streaming pacing accumulator (per stream)"
         blob x_last_check "embedding at last trigger_check (per stream; 256d)"
-        blob prev_x "previous signal embedding for this stream (per stream; 256d) used when referencing x_{t−1}"
+        blob prev_x "previous accumulator centroid for this stream (per stream; 256d)"
         blob c_t "temporal context state (Section 3.1.4)"
         int t_start "memory start timestamp (ms)"
         int last_write_ts "for write refractory (ms)"

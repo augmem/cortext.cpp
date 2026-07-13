@@ -345,6 +345,11 @@ WriteSupersessionEdges (OperationContext &context, Transaction &tx,
       ++edge_count;
     }
 
+  if (edge_count > 0)
+    {
+      context.GetProcessorContext ().association_fanout_cache.valid = false;
+    }
+
   telemetry::LogDebug (
       "cortext.memory_storage.supersession_scan",
       { telemetry::Attribute::Int64 ("source_memory_id", memory_id),

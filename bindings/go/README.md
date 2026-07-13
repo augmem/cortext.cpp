@@ -55,12 +55,17 @@ func main() {
 
 ## API
 
+<!-- public Go binding API and Config semantics matching bindings/go/cortext.go -->
+
 - `Config`: Focus/Sensitivity/Stability, mechanism toggles, and signal-filter
-  toggles. Pass `nil` to `New` for native defaults.
+  toggles. Fields are optional pointers, so omitted values retain native
+  defaults while explicit zero/false values remain representable. Use
+  `cortext.Ptr(value)` in struct literals, or pass `nil` to `New` for all
+  native defaults.
 - `ProcessText`, `ProcessAudio`, `ProcessImage`: decoded JSON context maps.
 - `ProcessTextJSON`, `ProcessAudioJSON`, `ProcessImageJSON`: raw JSON bytes.
 - `EmbedText`, `EmbedAudio`, `EmbedImage`: embed-only helpers.
 - `Consolidate`, `Flush`, `Reset`, `Close`.
 
 Audio input is 16 kHz mono float32 PCM. Image input is row-major RGB/RGBA bytes
-with explicit dimensions.
+with explicit dimensions; undersized buffers are rejected before entering C.

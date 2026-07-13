@@ -670,9 +670,13 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                       "WHERE memory_id IN (" + placeholders + ") "
                       "UNION "
                       "SELECT embedding_id FROM current_memory_embeddings "
+                      "WHERE memory_id IN (" + placeholders + ") "
+                      "UNION "
+                      "SELECT embedding_id FROM signals "
                       "WHERE memory_id IN (" + placeholders + ")",
                       [&] {
                         std::vector<std::any> p = params;
+                        AppendParams (p, evictable_memory_ids, begin, end);
                         AppendParams (p, evictable_memory_ids, begin, end);
                         return p;
                       } ());
@@ -693,7 +697,7 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                     }
                 });
   context.AddOperationTiming (
-      "MemoryStrength.eviction_select_reconstruction_embeddings_sql",
+      "MemoryStrength.eviction_select_owned_embeddings_sql",
       ElapsedMillis (reconstruction_embedding_select_start));
 
   const auto objstore_blob_select_start = SteadyClock::now ();

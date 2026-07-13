@@ -1520,6 +1520,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
       // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
       auto rows = store.Execute (
           "SELECT memory_id, embedding_id, source_id, strength, last_access, "
+          "       strength_updated_at, "
           "       n_signals, s_max, s_avg, s_emotion_max, s_arousal_avg, "
           "       drift_mag, modality, start_ts "
           "FROM memories "
@@ -1571,11 +1572,14 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
           // DB stores milliseconds, convert to seconds for last_ts
           const auto ts_ms = ExtractInt64 (row, "last_access", now_ms);
           slot.last_ts = static_cast<double> (ts_ms) / 1000.0;
+          const auto strength_ts_ms
+              = ExtractInt64 (row, "strength_updated_at", ts_ms);
+          slot.strength_ts = static_cast<double> (strength_ts_ms) / 1000.0;
           slot.start_ts = ExtractInt64 (row, "start_ts", 0);
 
           // Apply time-based decay
           const double now_s = static_cast<double> (now_ms) / 1000.0;
-          const double elapsed = now_s - slot.last_ts;
+          const double elapsed = now_s - slot.strength_ts;
           if (elapsed > 0)
             {
               slot.strength
@@ -1586,6 +1590,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
             {
               slot.strength = std::max (strength_floor, slot.strength);
             }
+          slot.strength_ts = std::max (slot.strength_ts, now_s);
 
           // Load extended metadata
           slot.n_signals = static_cast<int> (ExtractInt64 (row, "n_signals", 1));
@@ -2088,7 +2093,19 @@ SignalProcessor::Flush ()
   if (!store_)
     {
       return;
+    }
+  ProcessorContext context_snapshot;
+  DetachedProcessorCaches context_cache_snapshot;
+  {
+    auto detached_caches = DetachRebuildableProcessorCaches (*context_);
+    context_snapshot = *context_;
+    context_cache_snapshot = detached_caches;
+    RestoreRebuildableProcessorCaches (*context_, detached_caches);
   }
+  auto restore_context_snapshot = [&] {
+    *context_ = std::move (context_snapshot);
+    RestoreRebuildableProcessorCaches (*context_, context_cache_snapshot);
+  };
   auto tx = store_->Begin ();
   std::unique_ptr<ObjectTransaction> object_tx;
   if (object_store_)
@@ -2098,16 +2115,41 @@ SignalProcessor::Flush ()
           object_tx = object_store_->Begin ();
         }
     }
-  FinalizeEpisode (tx.get (), nullptr);
-  PersistState (*tx);           // v2: Unified state
-  PersistWorkingMemory (*tx, true); // v2: To MEMORIES
-  const auto now_ms = clock_->NowMillis ();
-  StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
-  if (object_tx)
+  try
     {
-      object_tx->Commit ();
+      FinalizeEpisode (tx.get (), nullptr);
+      PersistState (*tx);               // v2: Unified state
+      PersistWorkingMemory (*tx, true); // v2: To MEMORIES
+      const auto now_ms = clock_->NowMillis ();
+      StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
+      if (object_tx)
+        {
+          object_tx->Commit ();
+        }
+      tx->Commit ();
     }
-  tx->Commit ();
+  catch (...)
+    {
+      if (object_tx)
+        {
+          try
+            {
+              object_tx->Rollback ();
+            }
+          catch (...)
+            {
+            }
+        }
+      try
+        {
+          tx->Rollback ();
+        }
+      catch (...)
+        {
+        }
+      restore_context_snapshot ();
+      throw;
+    }
   CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
 }
 
@@ -2586,7 +2628,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                       "start_ts = ?, n_signals = ?, s_max = ?, s_avg = ?, "
                       "s_emotion_max = ?, s_arousal_avg = ?, drift_mag = ?, "
                       "strength = ?, source_reliability = ?, stability = ?, "
-                      "last_access = ?, end_ts = NULL "
+                      "last_access = ?, strength_updated_at = ?, end_ts = NULL "
                       "WHERE memory_id = ? AND kind = 'WORKING'",
                       { embedding_id,
                         slot.source_id.empty () ? std::string ("unknown")
@@ -2595,6 +2637,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                         slot.s_max, slot.s_avg, slot.s_emotion_max,
                         slot.s_arousal_avg, slot.drift_acc, slot.strength,
                         working_source_reliability, working_stability, ts_ms,
+                        static_cast<long long> (slot.strength_ts * 1000.0),
                         memory_id });
                   add_timing ("SignalProcessor.wm_update_slot_memory",
                               t_sql_start);
@@ -2609,15 +2652,17 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                   "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
                   " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
                   " strength, source_reliability, stability, last_access, "
-                  " created_at) "
-                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  " strength_updated_at, created_at) "
+                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   { embedding_id,
                     slot.source_id.empty () ? std::string ("unknown")
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
                     slot.drift_acc, slot.strength, working_source_reliability,
-                    working_stability, ts_ms, slot_created_at });
+                    working_stability, ts_ms,
+                    static_cast<long long> (slot.strength_ts * 1000.0),
+                    slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
               add_timing ("SignalProcessor.wm_insert_slot_memory",
