@@ -1,16 +1,20 @@
 // tests/state_persistence.test.cpp
 #include <any>
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
+#include "../src/working_memory_time_internal.hpp"
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cortext/clock.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/focus.hpp>
+#include <cortext/operations/working_memory.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/schema.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cmath>
+#include <limits>
 #include <memory>
 
 using namespace cortext;
@@ -1224,6 +1228,301 @@ TEST_CASE ("Working memory persistence falls back to last access when the "
       core::WMStrengthFloor (cfg.focus, cfg.sensitivity, cfg.stability),
       0.6 - core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus) * 0.5);
   REQUIRE_THAT (captured->wm_slots[0].strength,
+                WithinAbs (expected_strength, 1e-9));
+}
+
+TEST_CASE ("Passive working memory decay persists without a forced flush",
+           "[state_persistence][working_memory][decay][regression]")
+{
+  constexpr std::uint64_t kInitialMs = 1'000;
+  constexpr std::uint64_t kDecayMs = 1'001;
+  constexpr double kInitialStrength = 2.0;
+
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  auto clock = std::make_shared<FixedClock> (kInitialMs);
+
+  SignalProcessor::Config cfg = MakeConfig ();
+  cfg.clock = clock;
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto process_at = [] (SignalProcessor &processor, std::uint64_t timestamp) {
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Ones (256);
+    signal.timestamp = timestamp;
+    signal.source_id = "passive-decay/source";
+    processor.Process (signal);
+  };
+  auto make_capture = [] (ProcessorContext **captured) {
+    auto capture = std::make_unique<CaptureProcessorContextOp> ();
+    capture->captured = captured;
+    return capture;
+  };
+
+  {
+    ProcessorContext *captured = nullptr;
+    auto ops = std::make_unique<DynamicOperationSet> (
+        make_capture (&captured));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    process_at (processor, kInitialMs);
+    REQUIRE (captured != nullptr);
+
+    ProcessorContext::WMSlot slot;
+    slot.embedding = Eigen::VectorXf::Ones (256);
+    slot.strength = kInitialStrength;
+    slot.last_ts = static_cast<double> (kInitialMs) / 1000.0;
+    slot.strength_ts = slot.last_ts;
+    slot.source_id = "passive-decay/source";
+    slot.start_ts = static_cast<int64_t> (kInitialMs);
+    captured->wm_slots.push_back (std::move (slot));
+    captured->wm_slots_dirty = true;
+    processor.Flush ();
+  }
+
+  const double expected_strength
+      = kInitialStrength
+        - core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus)
+              * static_cast<double> (kDecayMs - kInitialMs) / 1000.0;
+
+  {
+    ProcessorContext *captured = nullptr;
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<operations::WorkingMemory> (),
+        make_capture (&captured));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    clock->SetNowMillis (kDecayMs);
+    process_at (processor, kDecayMs);
+    REQUIRE (captured != nullptr);
+    REQUIRE (captured->wm_slots.size () == 1);
+    REQUIRE_THAT (captured->wm_slots[0].strength,
+                  WithinAbs (expected_strength, 1e-9));
+    REQUIRE_FALSE (captured->wm_slots_dirty);
+  }
+
+  auto rows = store->Execute (
+      "SELECT strength, strength_updated_at FROM memories "
+      "WHERE kind = 'WORKING' AND end_ts IS NULL");
+  REQUIRE (rows.size () == 1);
+  REQUIRE_THAT (GetDouble (rows[0], "strength"),
+                WithinAbs (expected_strength, 1e-9));
+  REQUIRE (GetInt64 (rows[0], "strength_updated_at")
+           == static_cast<long long> (kDecayMs));
+
+  SignalProcessor::Config reopen_cfg = cfg;
+  reopen_cfg.sensitivity = 1.0;
+  ProcessorContext *reloaded = nullptr;
+  auto reopen_ops = std::make_unique<DynamicOperationSet> (
+      make_capture (&reloaded));
+  SignalProcessor reopened (reopen_cfg, store, std::move (reopen_ops));
+  process_at (reopened, kDecayMs);
+  REQUIRE (reloaded != nullptr);
+  REQUIRE (reloaded->wm_slots.size () == 1);
+  REQUIRE_THAT (reloaded->wm_slots[0].strength,
+                WithinAbs (expected_strength, 1e-9));
+}
+
+TEST_CASE ("Working memory reload does not persist a knob-floor recharge",
+           "[state_persistence][working_memory][decay][regression]")
+{
+  constexpr std::uint64_t kInitialMs = 1'000;
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  auto clock = std::make_shared<FixedClock> (kInitialMs);
+
+  SignalProcessor::Config prior_cfg = MakeConfig ();
+  prior_cfg.clock = clock;
+  prior_cfg.focus = 1.0;
+  prior_cfg.sensitivity = 1.0;
+  prior_cfg.stability = 0.0;
+  const double prior_floor = core::WMStrengthFloor (
+      prior_cfg.focus, prior_cfg.sensitivity, prior_cfg.stability);
+
+  auto process_at = [] (SignalProcessor &processor, std::uint64_t timestamp) {
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Ones (256);
+    signal.timestamp = timestamp;
+    signal.source_id = "floor-recharge/source";
+    processor.Process (signal);
+  };
+  auto make_capture = [] (ProcessorContext **captured) {
+    auto capture = std::make_unique<CaptureProcessorContextOp> ();
+    capture->captured = captured;
+    return capture;
+  };
+
+  {
+    ProcessorContext *captured = nullptr;
+    auto ops = std::make_unique<DynamicOperationSet> (make_capture (&captured));
+    SignalProcessor processor (prior_cfg, store, std::move (ops));
+    process_at (processor, kInitialMs);
+    REQUIRE (captured != nullptr);
+
+    ProcessorContext::WMSlot slot;
+    slot.embedding = Eigen::VectorXf::Ones (256);
+    slot.strength = prior_floor;
+    slot.last_ts = static_cast<double> (kInitialMs) / 1000.0;
+    slot.strength_ts = slot.last_ts;
+    slot.source_id = "floor-recharge/source";
+    slot.start_ts = static_cast<int64_t> (kInitialMs);
+    captured->wm_slots.push_back (std::move (slot));
+    captured->wm_slots_dirty = true;
+    processor.Flush ();
+  }
+
+  SignalProcessor::Config current_cfg = prior_cfg;
+  current_cfg.focus = 0.0;
+  current_cfg.sensitivity = 0.0;
+  current_cfg.stability = 1.0;
+  REQUIRE (prior_floor
+           < core::WMStrengthFloor (current_cfg.focus,
+                                    current_cfg.sensitivity,
+                                    current_cfg.stability));
+
+  auto verify_reload = [&] (std::uint64_t timestamp) {
+    clock->SetNowMillis (timestamp);
+    ProcessorContext *captured = nullptr;
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<operations::WorkingMemory> (),
+        make_capture (&captured));
+    SignalProcessor processor (current_cfg, store, std::move (ops));
+    process_at (processor, timestamp);
+    REQUIRE (captured != nullptr);
+    REQUIRE (captured->wm_slots.size () == 1);
+    REQUIRE_THAT (captured->wm_slots[0].strength,
+                  WithinAbs (prior_floor, 1e-9));
+
+    auto rows = store->Execute (
+        "SELECT strength, strength_updated_at FROM memories "
+        "WHERE kind = 'WORKING' AND end_ts IS NULL");
+    REQUIRE (rows.size () == 1);
+    REQUIRE_THAT (GetDouble (rows[0], "strength"),
+                  WithinAbs (prior_floor, 1e-9));
+    REQUIRE (GetInt64 (rows[0], "strength_updated_at")
+             == static_cast<long long> (kInitialMs));
+  };
+
+  verify_reload (kInitialMs);
+  verify_reload (kInitialMs - 100);
+}
+
+TEST_CASE ("Working memory timestamp conversion is checked and portable",
+           "[state_persistence][working_memory][timestamp][regression]")
+{
+  REQUIRE (internal::WorkingMemorySecondsToMillis (1.001) == 1001);
+  REQUIRE (internal::WorkingMemorySecondsToMillis (0.0) == 0);
+  REQUIRE_THROWS_AS (internal::WorkingMemorySecondsToMillis (-0.001),
+                     std::invalid_argument);
+  REQUIRE_THROWS_AS (
+      internal::WorkingMemorySecondsToMillis (
+          std::numeric_limits<double>::quiet_NaN ()),
+      std::invalid_argument);
+  REQUIRE_THROWS_AS (
+      internal::WorkingMemorySecondsToMillis (
+          std::numeric_limits<double>::infinity ()),
+      std::invalid_argument);
+
+  const double exclusive_upper_millis = std::ldexp (1.0, 63);
+  const double exclusive_upper_seconds = exclusive_upper_millis / 1000.0;
+  REQUIRE_THROWS_AS (
+      internal::WorkingMemorySecondsToMillis (exclusive_upper_seconds),
+      std::out_of_range);
+  REQUIRE_THROWS_AS (
+      internal::WorkingMemorySecondsToMillis (
+          std::numeric_limits<double>::max ()),
+      std::out_of_range);
+
+  const double safe_seconds
+      = std::nextafter (exclusive_upper_seconds, 0.0);
+  const double safe_millis = safe_seconds * 1000.0;
+  REQUIRE (safe_millis < exclusive_upper_millis);
+  REQUIRE (internal::WorkingMemorySecondsToMillis (safe_seconds)
+           == static_cast<int64_t> (safe_millis));
+}
+
+TEST_CASE ("Load-time working memory decay persists on the next process",
+           "[state_persistence][working_memory][decay][regression]")
+{
+  constexpr std::uint64_t kInitialMs = 1'000;
+  constexpr std::uint64_t kLoadMs = 1'001;
+  constexpr double kInitialStrength = 2.0;
+
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  auto clock = std::make_shared<FixedClock> (kInitialMs);
+  SignalProcessor::Config cfg = MakeConfig ();
+  cfg.clock = clock;
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  auto process_at = [] (SignalProcessor &processor, std::uint64_t timestamp) {
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Ones (256);
+    signal.timestamp = timestamp;
+    signal.source_id = "load-decay/source";
+    processor.Process (signal);
+  };
+  auto make_capture = [] (ProcessorContext **captured) {
+    auto capture = std::make_unique<CaptureProcessorContextOp> ();
+    capture->captured = captured;
+    return capture;
+  };
+
+  {
+    ProcessorContext *captured = nullptr;
+    auto ops = std::make_unique<DynamicOperationSet> (
+        make_capture (&captured));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    process_at (processor, kInitialMs);
+    REQUIRE (captured != nullptr);
+
+    ProcessorContext::WMSlot slot;
+    slot.embedding = Eigen::VectorXf::Ones (256);
+    slot.strength = kInitialStrength;
+    slot.last_ts = static_cast<double> (kInitialMs) / 1000.0;
+    slot.strength_ts = slot.last_ts;
+    slot.source_id = "load-decay/source";
+    slot.start_ts = static_cast<int64_t> (kInitialMs);
+    captured->wm_slots.push_back (std::move (slot));
+    captured->wm_slots_dirty = true;
+    processor.Flush ();
+  }
+
+  const double expected_strength
+      = kInitialStrength
+        - core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus)
+              * static_cast<double> (kLoadMs - kInitialMs) / 1000.0;
+  clock->SetNowMillis (kLoadMs);
+  {
+    ProcessorContext *captured = nullptr;
+    auto ops = std::make_unique<DynamicOperationSet> (
+        make_capture (&captured));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    process_at (processor, kLoadMs);
+    REQUIRE (captured != nullptr);
+    REQUIRE (captured->wm_slots.size () == 1);
+    REQUIRE_THAT (captured->wm_slots[0].strength,
+                  WithinAbs (expected_strength, 1e-9));
+  }
+
+  auto rows = store->Execute (
+      "SELECT strength, strength_updated_at FROM memories "
+      "WHERE kind = 'WORKING' AND end_ts IS NULL");
+  REQUIRE (rows.size () == 1);
+  REQUIRE_THAT (GetDouble (rows[0], "strength"),
+                WithinAbs (expected_strength, 1e-9));
+  REQUIRE (GetInt64 (rows[0], "strength_updated_at")
+           == static_cast<long long> (kLoadMs));
+
+  SignalProcessor::Config reopen_cfg = cfg;
+  reopen_cfg.sensitivity = 1.0;
+  ProcessorContext *reloaded = nullptr;
+  auto reopen_ops = std::make_unique<DynamicOperationSet> (
+      make_capture (&reloaded));
+  SignalProcessor reopened (reopen_cfg, store, std::move (reopen_ops));
+  process_at (reopened, kLoadMs);
+  REQUIRE (reloaded != nullptr);
+  REQUIRE (reloaded->wm_slots.size () == 1);
+  REQUIRE_THAT (reloaded->wm_slots[0].strength,
                 WithinAbs (expected_strength, 1e-9));
 }
 

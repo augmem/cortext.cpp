@@ -167,9 +167,11 @@ soft-anchor updates operate over bounded live state and remain independent of
 total store size.
 
 The safety checks preserve these bounds: bind-result validation is one branch
-per existing parameter, working-memory decay adds one timestamp update per
-bounded slot, and graph writes perform only O(1) cache invalidation. None adds
-a per-signal database query or eager graph reconstruction.
+per existing parameter, working-memory decay advances one timestamp per bounded
+slot and schedules at most one memory-row update per changed slot during normal
+persistence, and graph writes perform only O(1) cache invalidation. None adds a
+store-size-dependent query or eager graph reconstruction; working-memory
+persistence remains bounded by the configured live-slot capacity.
 
 The retained long-horizon optimization target is that mean process latency
 stays approximately flat as the database grows. The July 2026 exact-replay

@@ -103,15 +103,27 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     {
       const double last_decay
           = slot.strength_ts > 0.0 ? slot.strength_ts : slot.last_ts;
-      const double dt = std::max (0.0, now_s - last_decay);
-      // Decay strength but floor at a minimum to preserve slot
-      // Slot will be replaced via eviction when capacity is reached
-      const double strength_after
-          = std::max (core::WMStrengthFloor (
-                          cfg.focus, cfg.sensitivity, cfg.stability),
-                      slot.strength - cost_per_slot * dt);
+      const double dt = now_s - last_decay;
+      double strength_after = slot.strength;
+      double strength_ts_after = slot.strength_ts;
+      if (dt > 0.0)
+        {
+          // Decay strength but floor at a minimum to preserve the slot. The
+          // active floor applies only while charging positive elapsed time;
+          // a knob change must not recharge an already-weaker slot.
+          strength_after
+              = std::max (core::WMStrengthFloor (
+                              cfg.focus, cfg.sensitivity, cfg.stability),
+                          slot.strength - cost_per_slot * dt);
+          strength_ts_after = now_s;
+        }
+      if (slot.strength != strength_after
+          || slot.strength_ts != strength_ts_after)
+        {
+          slot.metadata_dirty = true;
+        }
       slot.strength = strength_after;
-      slot.strength_ts = std::max (last_decay, now_s);
+      slot.strength_ts = strength_ts_after;
     }
 
   // Complexity penalty from entropy over strengths.

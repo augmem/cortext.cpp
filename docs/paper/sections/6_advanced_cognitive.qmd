@@ -91,12 +91,21 @@ separate timestamps so repeated maintenance passes charge each elapsed interval
 once without making an untouched slot appear recently accessed:
 
 ```
-Δt_decay ← max(0, now_s() − strength_ts)
-strength ← max(strength_floor(F,S,T),
-               strength − maintenance_cost_per_memory × Δt_decay)
-strength_ts ← max(strength_ts, now_s())
+Δt_decay ← now_s() − strength_ts
+if Δt_decay > 0:
+  strength ← max(strength_floor(F,S,T),
+                 strength − maintenance_cost_per_memory × Δt_decay)
+  strength_ts ← now_s()
 # last_ts changes only on chunking, rehearsal, or insertion
 ```
+
+The active floor is applied only while charging positive elapsed time. A
+same-time or out-of-order signal therefore cannot recharge a slot that was
+legitimately persisted below the current floor under an earlier knob setting.
+
+Persisted working-memory rows mirror `strength_ts` as `strength_updated_at`.
+Load-time decay advances the same timestamp and leaves changed slot metadata
+dirty so the next normal process persists both values.
 
 The manifold_complexity is defined as a normalized local variability proxy (see Appendix B): manifold_complexity ← clamp((1 − mean_cos_window) / 2, 0, 1).
 
