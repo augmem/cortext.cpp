@@ -98,12 +98,21 @@ export class CortextWasm {
     }
   }
 
-  processText(handle, text, sourceId = "browser") {
+  processText(handle, text, sourceId = "browser", {
+    includeEmbedding = true,
+    retention = "natural",
+  } = {}) {
     const textPtr = this.#writeString(text);
     const sourcePtr = this.#writeString(sourceId);
     try {
       return this.#readJson(
-        this.module._cortext_process_text_json(handle, textPtr, sourcePtr),
+        this.module._cortext_wasm_process_text_json(
+          handle,
+          textPtr,
+          sourcePtr,
+          includeEmbedding ? 1 : 0,
+          this.#retentionValue(retention),
+        ),
       );
     } finally {
       this.module._free(textPtr);
@@ -132,6 +141,23 @@ export class CortextWasm {
 
   embedImage(handle, pixels, width, height, channels) {
     const pixelArray = pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels);
+    if (!Number.isInteger(width) || !Number.isInteger(height)
+        || !Number.isInteger(channels) || width <= 0 || height <= 0
+        || channels <= 0) {
+      throw new TypeError("width, height, and channels must be positive integers");
+    }
+    if (width > 0x7fffffff || height > 0x7fffffff || channels > 0x7fffffff) {
+      throw new RangeError("image dimensions exceed the native int range");
+    }
+    const expected = width * height * channels;
+    if (!Number.isSafeInteger(expected)) {
+      throw new RangeError("image dimensions overflow addressable memory");
+    }
+    if (pixelArray.length < expected) {
+      throw new RangeError(
+        "image buffer is smaller than width * height * channels",
+      );
+    }
     const dataPtr = this.module._malloc(pixelArray.length);
     if (!dataPtr) {
       throw new Error("Failed to allocate image buffer");
@@ -160,6 +186,21 @@ export class CortextWasm {
     }
     this.module.stringToUTF8(value, ptr, size);
     return ptr;
+  }
+
+  #retentionValue(retention) {
+    const values = { natural: 0, durable: 1, boundary: 2, ephemeral: 3 };
+    if (typeof retention === "number" && Number.isInteger(retention)
+        && retention >= 0 && retention <= 3) {
+      return retention;
+    }
+    if (typeof retention === "string"
+        && Object.prototype.hasOwnProperty.call(values, retention)) {
+      return values[retention];
+    }
+    throw new TypeError(
+      "retention must be natural, durable, boundary, or ephemeral",
+    );
   }
 
   #readJson(ptr) {

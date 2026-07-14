@@ -210,6 +210,113 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   REQUIRE (pctx.wm_slots.front ().last_ts == Catch::Approx (0.0));
 }
 
+TEST_CASE ("Alg24 maintenance charges each elapsed interval once",
+           "[operations][working_memory][maintenance][decay][regression]")
+{
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  ProcessorContext::WMSlot slot;
+  slot.embedding = Eigen::VectorXf::Ones (3);
+  slot.strength = 2.0;
+  slot.last_ts = 0.0;
+  slot.strength_ts = 0.0;
+  slot.metadata_dirty = false;
+  pctx.wm_slots.push_back (slot);
+
+  WorkingMemory op;
+  Signal first;
+  first.embedding = slot.embedding;
+  first.source_id = "test";
+  first.timestamp = 1000;
+  OperationContext first_ctx (first, pctx, cfg);
+  op.Execute (first_ctx, cortext::testing::GetNullTransaction ());
+  REQUIRE (pctx.wm_slots.front ().metadata_dirty);
+  REQUIRE_FALSE (pctx.wm_slots_dirty);
+
+  pctx.wm_slots.front ().metadata_dirty = false;
+  OperationContext same_time_ctx (first, pctx, cfg);
+  op.Execute (same_time_ctx, cortext::testing::GetNullTransaction ());
+  REQUIRE_FALSE (pctx.wm_slots.front ().metadata_dirty);
+  REQUIRE_FALSE (pctx.wm_slots_dirty);
+
+  Signal second = first;
+  second.timestamp = 2000;
+  OperationContext second_ctx (second, pctx, cfg);
+  op.Execute (second_ctx, cortext::testing::GetNullTransaction ());
+  REQUIRE (pctx.wm_slots.front ().metadata_dirty);
+  REQUIRE_FALSE (pctx.wm_slots_dirty);
+
+  const double cost
+      = core::WMMaintenanceCostPerSlot (cfg.sensitivity, cfg.focus);
+  REQUIRE (pctx.wm_slots.front ().strength
+           == Catch::Approx (2.0 - 2.0 * cost));
+  REQUIRE (pctx.wm_slots.front ().last_ts == Catch::Approx (0.0));
+  REQUIRE (pctx.wm_slots.front ().strength_ts == Catch::Approx (2.0));
+
+  pctx.wm_slots.front ().metadata_dirty = false;
+  Signal backward = second;
+  backward.timestamp = 1500;
+  OperationContext backward_ctx (backward, pctx, cfg);
+  op.Execute (backward_ctx, cortext::testing::GetNullTransaction ());
+  REQUIRE (pctx.wm_slots.front ().strength
+           == Catch::Approx (2.0 - 2.0 * cost));
+  REQUIRE_FALSE (pctx.wm_slots.front ().metadata_dirty);
+  REQUIRE_FALSE (pctx.wm_slots_dirty);
+}
+
+TEST_CASE ("Alg24 maintenance does not recharge below-floor slots without time",
+           "[operations][working_memory][maintenance][decay][regression]")
+{
+  SignalProcessor::Config prior_cfg;
+  cortext::testing::RequireEncoder (prior_cfg);
+  prior_cfg.focus = 1.0;
+  prior_cfg.sensitivity = 1.0;
+  prior_cfg.stability = 0.0;
+
+  SignalProcessor::Config current_cfg = prior_cfg;
+  current_cfg.focus = 0.0;
+  current_cfg.sensitivity = 0.0;
+  current_cfg.stability = 1.0;
+
+  const double prior_floor = core::WMStrengthFloor (
+      prior_cfg.focus, prior_cfg.sensitivity, prior_cfg.stability);
+  REQUIRE (prior_floor
+           < core::WMStrengthFloor (current_cfg.focus,
+                                    current_cfg.sensitivity,
+                                    current_cfg.stability));
+
+  ProcessorContext pctx;
+  ProcessorContext::WMSlot slot;
+  slot.embedding = Eigen::VectorXf::Ones (3);
+  slot.strength = prior_floor;
+  slot.last_ts = 2.0;
+  slot.strength_ts = 2.0;
+  slot.metadata_dirty = false;
+  pctx.wm_slots.push_back (slot);
+
+  WorkingMemory op;
+  Signal signal;
+  signal.embedding = slot.embedding;
+  signal.source_id = "test";
+  signal.timestamp = 2000;
+  OperationContext same_time_ctx (signal, pctx, current_cfg);
+  op.Execute (same_time_ctx, cortext::testing::GetNullTransaction ());
+  REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (prior_floor));
+  REQUIRE_FALSE (pctx.wm_slots.front ().metadata_dirty);
+
+  signal.timestamp = 1500;
+  OperationContext backward_ctx (signal, pctx, current_cfg);
+  op.Execute (backward_ctx, cortext::testing::GetNullTransaction ());
+  REQUIRE (pctx.wm_slots.front ().strength == Catch::Approx (prior_floor));
+  REQUIRE (pctx.wm_slots.front ().strength_ts == Catch::Approx (2.0));
+  REQUIRE_FALSE (pctx.wm_slots.front ().metadata_dirty);
+}
+
 TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
            "[operations][working_memory][gate_threshold]")
 {

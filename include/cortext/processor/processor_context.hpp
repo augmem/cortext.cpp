@@ -420,6 +420,7 @@ struct ProcessorContext
     Eigen::VectorXf embedding;           ///< e_rep (representative embedding)
     double strength = 0.0;               ///< Slot activation strength
     double last_ts = 0.0;                ///< Last access timestamp (seconds)
+    double strength_ts = 0.0;            ///< Last decay timestamp (seconds)
     int pos_index = 0;                   ///< Position index
 
     // Memory-level metadata (Section 6.1.1)

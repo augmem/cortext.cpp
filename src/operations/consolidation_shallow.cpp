@@ -1,5 +1,6 @@
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/consolidation_shallow.hpp"
+#include "historical_surface_search_cache_internal.hpp"
 
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -231,6 +232,15 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
           surface_entry.vector_seed_eligible = true;
           surface_entry.embedding = centroid_vec;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
+          historical_surface_search_cache_internal::UpsertCurrent (
+              p_ctx,
+              { centroid_embedding_id, centroid_memory_id, 0,
+                std::string (), std::string (), centroid_vec });
+          historical_surface_search_cache_internal::Append (
+              p_ctx,
+              { centroid_embedding_id, centroid_memory_id,
+                static_cast<long long> (now_ts), "ASSOCIATION",
+                association_id, centroid_vec });
         }
 
       // Update cluster_id and derived_from edges.

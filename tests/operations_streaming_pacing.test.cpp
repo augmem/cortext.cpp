@@ -257,6 +257,36 @@ TEST_CASE ("CheckStreamingPacing always retrieves for ephemeral queries",
   REQUIRE (pctx.last_retrieval_ts == 0);
 }
 
+TEST_CASE ("CheckStreamingPacing blocks repeated timestamps within adjacency gap",
+           "[operations][streaming_pacing][timestamp][regression]")
+{
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  const double threshold = core::StreamingPacingThreshold (cfg.sensitivity);
+  const double max_wait = core::MaxWaitDrift (cfg.focus);
+  REQUIRE (threshold < max_wait);
+  auto &acc = pctx.accumulator_states["test"];
+  acc.drift_acc_pacing = (threshold + max_wait) * 0.5;
+  acc.x_last_check = Eigen::VectorXf::Ones (4);
+  pctx.last_retrieval_ts = 1000;
+  pctx.dt_ema = 1.0;
+  pctx.retrieval_bias = 1.0;
+
+  Signal s = MakeSignal (Eigen::VectorXf::Ones (4));
+  s.timestamp = 1000;
+  OperationContext ctx (s, pctx, cfg);
+  CheckStreamingPacing op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE_FALSE (ctx.GetShouldCheckRetrieval ());
+  REQUIRE (pctx.last_retrieval_ts == 1000);
+}
+
 TEST_CASE ("CheckStreamingPacing force check on max_wait_drift",
            "[operations][streaming_pacing]")
 {

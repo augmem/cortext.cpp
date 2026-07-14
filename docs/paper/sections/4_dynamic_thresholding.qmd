@@ -170,9 +170,21 @@ hysteresis ← hysteresis_t
 
 ## Write Pacing and Memory Accumulation {#sec-write-pacing}
 
-The write gate operates per step, but coherent "thoughts" often span multiple signals. Composite scoring is computed on the current accumulator centroid (μ_acc), so write decisions are driven by the accumulated group rather than any single raw signal. This section introduces memory-level accumulation that groups signals into natural units before storage decisions, inspired by Event Segmentation Theory (Zacks & Swallow, 2007).
+The write gate operates per step, but coherent "thoughts" often span multiple
+signals. Composite scoring is computed on the current accumulator centroid
+(μ_acc), so write decisions are driven by the accumulated group rather than any
+single raw signal. This section introduces memory-level accumulation that groups
+signals into natural units before storage decisions, inspired by Event
+Segmentation Theory [@zacks2007event].
 
-This approach draws from EM-LLM (Fountas et al., 2024), which segments token sequences into episodic events using surprise-based boundary detection refined by graph-theoretic cohesion metrics. Their work shows that combining prediction error signals with within-segment coherence produces boundaries strongly correlated with human event perception. Our adaptation uses EMA prediction error (surprisal_t) for surprise and cosine similarity for cohesion, while drift provides auxiliary boundary pressure, enabling modality-agnostic operation across text tokens, audio chunks, video frames, or any signal stream.
+This approach draws from EM-LLM [@fountas2024em], which segments token
+sequences into episodic events using surprise-based boundary detection refined
+by graph-theoretic cohesion metrics. Their work shows that combining prediction
+error signals with within-segment coherence produces boundaries correlated with
+human event perception. Our adaptation uses EMA prediction error
+(`surprisal_t`) for surprise and cosine similarity for cohesion, while drift
+provides auxiliary boundary pressure, enabling modality-agnostic operation
+across text tokens, audio chunks, video frames, or any signal stream.
 
 ### Memory Accumulator State {#sec-accumulator}
 
@@ -300,7 +312,7 @@ x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(max(ema_var_x, var_floor)
 topic_shift ← 1 − map01(cos(e_t, c_t))
 
 # Likelihood of a boundary given observations
-support_policy ← BoundarySupportPolicy(F,S,T, coĥ, topiĉ)
+support_policy ← BoundarySupportPolicyForKnobs(F,S,T, coĥ, topiĉ)
 support ← support_policy.support
 support_gate ← support_policy.support_gate   # downweight isolated spikes
 gap_gate ← support_policy.gap_gate
@@ -313,7 +325,7 @@ w_g(F,S,T) = clamp(0.01 × lerp(1.10, 0.90, F)
 [w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
                                       w_c×support_boost, w_t×support_boost, w_g×gap_gate])
 z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
-change_point_policy ← BoundaryChangePointPolicy(S,T,support)
+change_point_policy ← BoundaryChangePointPolicyForKnobs(S,T,support)
 z_center_eff ← change_point_policy.z_center_eff
 z_t ← w_s×(surprisal̂ − z_center_eff) +
       w_d×(drift̂ − z_center_eff) +
@@ -340,7 +352,7 @@ Pressure-capacity ratio (continuous flush trigger derived from knobs):
 
 ```
 capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
-[capacity, pressure] ← BoundaryPressurePolicy(S,T, drift_acc)
+[capacity, pressure] ← BoundaryPressurePolicyForKnobs(S,T, drift_acc)
 saturation_ratio ← pressure / max(capacity, ε)
 k_flush(S,T) = k_surprise(S,T)
 pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
@@ -415,7 +427,7 @@ We avoid hard timeouts for episode boundaries. Instead, when the stream becomes
 quiet and natural indicators are weak, inactivity softly boosts the boundary score:
 
 ```
-inactivity_policy ← BoundaryInactivityPolicy(S,T)
+inactivity_policy ← BoundaryInactivityPolicyForKnobs(S,T)
 support_relax = exp(−inactivity_policy.support_relax_rate × gap_z⁺)
 gap_ratio = signal_gap_s / max(dt_ema, ε)
 gap_z_inact = log1p(max(gap_ratio − 1, 0))
@@ -459,6 +471,10 @@ Implementation note: `Δt_write` is treated as a signed elapsed duration and
 clamped at zero. Backward event timestamps therefore receive the maximum
 refractory multiplier instead of underflowing into an effectively infinite
 elapsed interval.
+
+The same defensive rule applies to boundary gaps and retrieval pacing:
+non-increasing timestamps produce a zero elapsed interval. They cannot create
+an unsigned wraparound boundary or bypass the adjacent-retrieval limiter.
 
 Final write decision:
 

@@ -16,19 +16,23 @@ import (
 	"unsafe"
 )
 
+// Config overrides native defaults. Nil fields retain their native defaults.
 type Config struct {
-	Focus                  float64
-	Sensitivity            float64
-	Stability              float64
-	AffectInterrupt        bool
-	AffectRetrieval        bool
-	ReinforcementEnabled   bool
-	ProceduralEnabled      bool
-	SequentialEdgesEnabled bool
-	SignalFilterAudio      bool
-	SignalFilterImage      bool
-	SignalFilterText       bool
+	Focus                  *float64
+	Sensitivity            *float64
+	Stability              *float64
+	AffectInterrupt        *bool
+	AffectRetrieval        *bool
+	ReinforcementEnabled   *bool
+	ProceduralEnabled      *bool
+	SequentialEdgesEnabled *bool
+	SignalFilterAudio      *bool
+	SignalFilterImage      *bool
+	SignalFilterText       *bool
 }
+
+// Ptr returns a pointer to value for optional Config fields.
+func Ptr[T any](value T) *T { return &value }
 
 type Handle struct {
 	ptr C.cortext_handle
@@ -77,17 +81,39 @@ func New(dbPath string, cfg *Config) (*Handle, error) {
 	C.cortext_config_init(&nativeCfg)
 
 	if cfg != nil {
-		nativeCfg.focus = C.double(cfg.Focus)
-		nativeCfg.sensitivity = C.double(cfg.Sensitivity)
-		nativeCfg.stability = C.double(cfg.Stability)
-		nativeCfg.affect_interrupt = boolToCInt(cfg.AffectInterrupt)
-		nativeCfg.affect_retrieval = boolToCInt(cfg.AffectRetrieval)
-		nativeCfg.reinforcement_enabled = boolToCInt(cfg.ReinforcementEnabled)
-		nativeCfg.procedural_enabled = boolToCInt(cfg.ProceduralEnabled)
-		nativeCfg.sequential_edges_enabled = boolToCInt(cfg.SequentialEdgesEnabled)
-		nativeCfg.signal_filter_audio_enabled = boolToCInt(cfg.SignalFilterAudio)
-		nativeCfg.signal_filter_image_enabled = boolToCInt(cfg.SignalFilterImage)
-		nativeCfg.signal_filter_text_enabled = boolToCInt(cfg.SignalFilterText)
+		if cfg.Focus != nil {
+			nativeCfg.focus = C.double(*cfg.Focus)
+		}
+		if cfg.Sensitivity != nil {
+			nativeCfg.sensitivity = C.double(*cfg.Sensitivity)
+		}
+		if cfg.Stability != nil {
+			nativeCfg.stability = C.double(*cfg.Stability)
+		}
+		if cfg.AffectInterrupt != nil {
+			nativeCfg.affect_interrupt = boolToCInt(*cfg.AffectInterrupt)
+		}
+		if cfg.AffectRetrieval != nil {
+			nativeCfg.affect_retrieval = boolToCInt(*cfg.AffectRetrieval)
+		}
+		if cfg.ReinforcementEnabled != nil {
+			nativeCfg.reinforcement_enabled = boolToCInt(*cfg.ReinforcementEnabled)
+		}
+		if cfg.ProceduralEnabled != nil {
+			nativeCfg.procedural_enabled = boolToCInt(*cfg.ProceduralEnabled)
+		}
+		if cfg.SequentialEdgesEnabled != nil {
+			nativeCfg.sequential_edges_enabled = boolToCInt(*cfg.SequentialEdgesEnabled)
+		}
+		if cfg.SignalFilterAudio != nil {
+			nativeCfg.signal_filter_audio_enabled = boolToCInt(*cfg.SignalFilterAudio)
+		}
+		if cfg.SignalFilterImage != nil {
+			nativeCfg.signal_filter_image_enabled = boolToCInt(*cfg.SignalFilterImage)
+		}
+		if cfg.SignalFilterText != nil {
+			nativeCfg.signal_filter_text_enabled = boolToCInt(*cfg.SignalFilterText)
+		}
 	}
 
 	handle := C.cortext_create_with_config(&nativeCfg, cDBPath)
@@ -127,6 +153,7 @@ func (h *Handle) ProcessTextJSONWithOptions(text string, sourceID string, option
 		cSourceID,
 		&nativeOptions,
 	)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -143,6 +170,7 @@ func (h *Handle) EmbedTextJSON(text string) ([]byte, error) {
 	defer C.free(unsafe.Pointer(cText))
 
 	raw := C.cortext_embed_text_json(h.ptr, cText)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -175,6 +203,8 @@ func (h *Handle) ProcessAudioJSONWithOptions(pcm []float32, sourceID string, opt
 		cSourceID,
 		&nativeOptions,
 	)
+	runtime.KeepAlive(pcm)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -203,6 +233,8 @@ func (h *Handle) ProcessAudioWithMediaJSONWithOptions(pcm []float32, sourceID st
 		&nativeMedia,
 		&nativeOptions,
 	)
+	runtime.KeepAlive(pcm)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -229,6 +261,8 @@ func (h *Handle) EmbedAudioJSON(pcm []float32) ([]byte, error) {
 	}
 
 	raw := C.cortext_embed_audio_json(h.ptr, rawPCM, C.size_t(len(pcm)))
+	runtime.KeepAlive(pcm)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -245,6 +279,9 @@ func (h *Handle) ProcessImageJSON(data []byte, width int, height int, channels i
 }
 
 func (h *Handle) ProcessImageJSONWithOptions(data []byte, width int, height int, channels int, sourceID string, options *ProcessOptions) ([]byte, error) {
+	if err := validateImageBuffer(data, width, height, channels); err != nil {
+		return nil, err
+	}
 	cSourceID := C.CString(sourceID)
 	defer C.free(unsafe.Pointer(cSourceID))
 
@@ -263,6 +300,8 @@ func (h *Handle) ProcessImageJSONWithOptions(data []byte, width int, height int,
 		cSourceID,
 		&nativeOptions,
 	)
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -271,6 +310,9 @@ func (h *Handle) ProcessImageWithMediaJSON(data []byte, width int, height int, c
 }
 
 func (h *Handle) ProcessImageWithMediaJSONWithOptions(data []byte, width int, height int, channels int, sourceID string, media *Media, options *ProcessOptions) ([]byte, error) {
+	if err := validateImageBuffer(data, width, height, channels); err != nil {
+		return nil, err
+	}
 	cSourceID := C.CString(sourceID)
 	defer C.free(unsafe.Pointer(cSourceID))
 
@@ -293,6 +335,8 @@ func (h *Handle) ProcessImageWithMediaJSONWithOptions(data []byte, width int, he
 		&nativeMedia,
 		&nativeOptions,
 	)
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -313,6 +357,9 @@ func (h *Handle) ProcessImageWithMediaAndOptions(data []byte, width int, height 
 }
 
 func (h *Handle) EmbedImageJSON(data []byte, width int, height int, channels int) ([]byte, error) {
+	if err := validateImageBuffer(data, width, height, channels); err != nil {
+		return nil, err
+	}
 	var rawData *C.uint8_t
 	if len(data) > 0 {
 		rawData = (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(data)))
@@ -325,6 +372,8 @@ func (h *Handle) EmbedImageJSON(data []byte, width int, height int, channels int
 		C.int(height),
 		C.int(channels),
 	)
+	runtime.KeepAlive(data)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -338,6 +387,7 @@ func (h *Handle) EmbedImage(data []byte, width int, height int, channels int) ([
 
 func (h *Handle) ConsolidateJSON() ([]byte, error) {
 	raw := C.cortext_consolidate_json(h.ptr)
+	runtime.KeepAlive(h)
 	return takeJSONString(raw)
 }
 
@@ -347,6 +397,7 @@ func (h *Handle) Consolidate() (map[string]any, error) {
 
 func (h *Handle) Flush() error {
 	status := C.cortext_flush(h.ptr)
+	runtime.KeepAlive(h)
 	if status != 0 {
 		return lastError()
 	}
@@ -355,6 +406,7 @@ func (h *Handle) Flush() error {
 
 func (h *Handle) Reset() error {
 	status := C.cortext_reset(h.ptr)
+	runtime.KeepAlive(h)
 	if status != 0 {
 		return lastError()
 	}
@@ -366,6 +418,25 @@ func boolToCInt(value bool) C.int {
 		return 1
 	}
 	return 0
+}
+
+func validateImageBuffer(data []byte, width int, height int, channels int) error {
+	if width <= 0 || height <= 0 || channels <= 0 {
+		return errors.New("width, height, and channels must be positive")
+	}
+	const maxCInt = int64(1<<31 - 1)
+	if int64(width) > maxCInt || int64(height) > maxCInt || int64(channels) > maxCInt {
+		return errors.New("image dimensions exceed the native int range")
+	}
+	maxInt := int(^uint(0) >> 1)
+	if width > maxInt/height || width*height > maxInt/channels {
+		return errors.New("image dimensions overflow addressable memory")
+	}
+	expected := width * height * channels
+	if len(data) < expected {
+		return errors.New("image buffer is smaller than width * height * channels")
+	}
+	return nil
 }
 
 func makeNativeMedia(media *Media) (C.cortext_media, unsafe.Pointer, *C.char) {

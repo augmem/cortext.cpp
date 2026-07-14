@@ -10,7 +10,11 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include "cortext/store/schema.hpp"
 #include "cortext/store/utils.hpp"
+#include "operations/constructive_recall_internal.hpp"
+#include "operations/historical_surface_search_cache_internal.hpp"
+#include "working_memory_time_internal.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <any>
 #include <cmath>
@@ -225,6 +229,118 @@ public:
 private:
   ProcessorContext *ctx_ = nullptr;
   DetachedProcessorCaches caches_;
+};
+
+struct ProcessorRollbackSnapshot
+{
+  ProcessorContext context;
+  DetachedProcessorCaches caches;
+  bool initialized = false;
+};
+
+#if defined(CORTEXT_TESTING)
+std::atomic_size_t g_processor_rollback_snapshot_owner_count { 0 };
+std::atomic_size_t g_processor_rollback_snapshot_reuse_count { 0 };
+#endif
+
+/// Owns the caller-provided operation and the rollback storage for its
+/// SignalProcessor. A single handle already requires external synchronization;
+/// depth-indexed slots additionally preserve the prior stack-local behavior for
+/// synchronous nested Process calls without a global or thread-local registry.
+class SnapshotOwningOperation final : public IOperation
+{
+public:
+  class Lease
+  {
+  public:
+    Lease (SnapshotOwningOperation &owner, ProcessorRollbackSnapshot &snapshot)
+        : owner_ (&owner), snapshot_ (&snapshot)
+    {
+    }
+
+    ~Lease ()
+    {
+      if (owner_)
+        {
+          owner_->Release ();
+        }
+    }
+
+    Lease (const Lease &) = delete;
+    Lease &operator= (const Lease &) = delete;
+
+    Lease (Lease &&other) noexcept
+        : owner_ (std::exchange (other.owner_, nullptr)),
+          snapshot_ (std::exchange (other.snapshot_, nullptr))
+    {
+    }
+
+    Lease &
+    operator= (Lease &&) = delete;
+
+    ProcessorRollbackSnapshot &
+    Get () const
+    {
+      return *snapshot_;
+    }
+
+  private:
+    SnapshotOwningOperation *owner_ = nullptr;
+    ProcessorRollbackSnapshot *snapshot_ = nullptr;
+  };
+
+  explicit SnapshotOwningOperation (std::unique_ptr<IOperation> operation)
+      : operation_ (std::move (operation))
+  {
+#if defined(CORTEXT_TESTING)
+    g_processor_rollback_snapshot_owner_count.fetch_add (
+        1, std::memory_order_relaxed);
+#endif
+  }
+
+  ~SnapshotOwningOperation () override
+  {
+#if defined(CORTEXT_TESTING)
+    g_processor_rollback_snapshot_owner_count.fetch_sub (
+        1, std::memory_order_relaxed);
+#endif
+  }
+
+  Lease
+  Acquire ()
+  {
+    if (active_depth_ == snapshots_.size ())
+      {
+        snapshots_.push_back (std::make_unique<ProcessorRollbackSnapshot> ());
+      }
+    auto &snapshot = *snapshots_[active_depth_];
+    ++active_depth_;
+#if defined(CORTEXT_TESTING)
+    if (snapshot.initialized)
+      {
+        g_processor_rollback_snapshot_reuse_count.fetch_add (
+            1, std::memory_order_relaxed);
+      }
+#endif
+    return Lease (*this, snapshot);
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction &tx) const override
+  {
+    operation_->Execute (ctx, tx);
+  }
+
+private:
+  void
+  Release ()
+  {
+    --active_depth_;
+  }
+
+  std::unique_ptr<IOperation> operation_;
+  std::vector<std::unique_ptr<ProcessorRollbackSnapshot>> snapshots_;
+  std::size_t active_depth_ = 0;
 };
 
 void
@@ -1352,10 +1468,80 @@ LoadRetrievalSuppressionIds (Store &store, ProcessorContext &ctx)
 }
 
 void
+LoadHistoricalSurfaceSearchCache (Store &store, ProcessorContext &ctx)
+{
+  try
+    {
+      auto embedding_rows = store.Execute (
+          "SELECT e.embedding_id, e.embedding, "
+          "       COALESCE(m.memory_id, 0) AS memory_id, "
+          "       COALESCE(m.start_ts, 0) AS start_ts, "
+          "       COALESCE(m.kind, '') AS kind, "
+          "       COALESCE(m.source_id, '') AS source_id "
+          "FROM embeddings e "
+          "LEFT JOIN memories m ON m.embedding_id = e.embedding_id "
+          "ORDER BY e.embedding_id");
+      std::vector<
+          operations::historical_surface_search_cache_internal::Entry>
+          search_entries;
+      search_entries.reserve (embedding_rows.size ());
+      for (const auto &row : embedding_rows)
+        {
+          auto emb_it = row.find ("embedding");
+          if (emb_it == row.end () || !emb_it->second.has_value ())
+            {
+              continue;
+            }
+          search_entries.push_back (
+              { ExtractInt64 (row, "embedding_id", 0),
+                ExtractInt64 (row, "memory_id", 0),
+                ExtractInt64 (row, "start_ts", 0),
+                ExtractString (row, "kind"), ExtractString (row, "source_id"),
+                BlobToEigen (emb_it->second) });
+        }
+      auto current_rows = store.Execute (
+          "SELECT memory_id, embedding_id, embedding "
+          "FROM current_memory_embeddings ORDER BY memory_id");
+      std::vector<
+          operations::historical_surface_search_cache_internal::Entry>
+          current_entries;
+      current_entries.reserve (current_rows.size ());
+      for (const auto &row : current_rows)
+        {
+          auto emb_it = row.find ("embedding");
+          if (emb_it == row.end () || !emb_it->second.has_value ())
+            {
+              continue;
+            }
+          current_entries.push_back (
+              { ExtractInt64 (row, "embedding_id", 0),
+                ExtractInt64 (row, "memory_id", 0), 0, std::string (),
+                std::string (), BlobToEigen (emb_it->second) });
+        }
+      if (search_entries.size () != embedding_rows.size ()
+          || current_entries.size () != current_rows.size ()
+          || !operations::historical_surface_search_cache_internal::Reset (
+              ctx, std::move (search_entries), std::move (current_entries)))
+        {
+          operations::historical_surface_search_cache_internal::Erase (ctx);
+        }
+    }
+  catch (const std::exception &e)
+    {
+      operations::historical_surface_search_cache_internal::Erase (ctx);
+      telemetry::LogWarn (
+          "Failed to load historical surface search cache",
+          { telemetry::Attribute::String ("component", "signal_processor"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+}
+
+void
 LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
 {
   try
     {
+      operations::historical_surface_search_cache_internal::Erase (ctx);
       ctx.retrieval_surface_cache.clear ();
       ctx.retrieval_surface_index.clear ();
       ctx.retrieval_surface_embedding_index.clear ();
@@ -1365,19 +1551,35 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
       ctx.association_cache_index.clear ();
       ctx.association_fanout_cache = {};
 
+      const long long constructive_recall_enabled
+          = operations::constructive_recall::Disabled () ? 0LL : 1LL;
       auto rows = store.Execute (
           "SELECT m.memory_id, m.embedding_id AS base_embedding_id, "
-	          "       COALESCE(cme.embedding_id, m.embedding_id) AS embedding_id, "
-	          "       CASE WHEN cme.memory_id IS NOT NULL "
-	          "            THEN cme.embedding ELSE e.embedding END AS embedding, "
-	          "       COALESCE(m.created_at, cme.created_at, e.created_at, 0) "
-	          "         AS created_at, "
-	          "       COALESCE(m.start_ts, 0) AS start_ts, "
+          "       CASE WHEN ?1 != 0 AND latest_r.reconstruction_id IS NOT NULL "
+          "            THEN latest_r.embedding_id "
+          "            WHEN ?1 != 0 AND cme.memory_id IS NOT NULL "
+          "            THEN cme.embedding_id "
+          "            ELSE m.embedding_id "
+          "       END AS embedding_id, "
+          "       CASE WHEN ?1 != 0 AND latest_r.reconstruction_id IS NOT NULL "
+          "            THEN latest_e.embedding "
+          "            WHEN ?1 != 0 AND cme.memory_id IS NOT NULL "
+          "            THEN cme.embedding "
+          "            ELSE base_e.embedding END AS embedding, "
+          "       base_e.embedding AS base_embedding, "
+          "       COALESCE(m.created_at, "
+          "                CASE WHEN ?1 != 0 THEN latest_r.created_at END, "
+          "                CASE WHEN ?1 != 0 THEN cme.created_at END, "
+          "                base_e.created_at, 0) "
+          "         AS created_at, "
+          "       COALESCE(m.start_ts, 0) AS start_ts, "
           "       COALESCE(m.last_access, 0) AS last_access, "
           "       COALESCE(m.retrieved_count, 0) AS retrieved_count, "
           "       COALESCE(m.used_count, 0) AS used_count, "
           "       COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
-          "                cme.created_at, e.created_at, 0) AS event_ts, "
+          "                CASE WHEN ?1 != 0 THEN latest_r.created_at END, "
+          "                CASE WHEN ?1 != 0 THEN cme.created_at END, "
+          "                base_e.created_at, 0) AS event_ts, "
           "       m.context, m.source_reliability, "
           "       m.source_contradiction_count, m.emotional_intensity, "
           "       m.s_arousal_avg, m.kind, m.source_id, m.modality, "
@@ -1392,16 +1594,24 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
           "                 AND a.edge_type = 'derived_from'"
           "             )) "
           "            THEN 1 ELSE 0 END AS vector_seed_eligible "
-	          "FROM memories m "
-	          "LEFT JOIN current_memory_embeddings cme "
-	          "  ON cme.memory_id = m.memory_id "
-          "JOIN embeddings e "
-          "  ON e.embedding_id = COALESCE(cme.embedding_id, m.embedding_id) "
+          "FROM memories m "
+          "LEFT JOIN current_memory_embeddings cme "
+          "  ON cme.memory_id = m.memory_id "
+          "LEFT JOIN memory_reconstructions latest_r "
+          "  ON latest_r.reconstruction_id = ("
+          "    SELECT MAX(mr2.reconstruction_id) "
+          "    FROM memory_reconstructions mr2 "
+          "    WHERE mr2.memory_id = m.memory_id"
+          "  ) "
+          "LEFT JOIN embeddings latest_e "
+          "  ON latest_e.embedding_id = latest_r.embedding_id "
+          "JOIN embeddings base_e ON base_e.embedding_id = m.embedding_id "
           "WHERE cme.memory_id IS NOT NULL "
           "   OR m.kind = 'LABEL' "
           "   OR (m.kind != 'WORKING' "
           "       AND m.kind != 'LABEL' "
-          "       AND m.embedding_id IS NOT NULL)");
+          "       AND m.embedding_id IS NOT NULL)",
+          { constructive_recall_enabled });
 
       ctx.retrieval_surface_cache.reserve (rows.size ());
       ctx.retrieval_surface_index.reserve (rows.size ());
@@ -1435,12 +1645,12 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
           entry.pre_activation = ExtractDouble (row, "pre_activation", 0.0);
           entry.vector_seed_eligible
               = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
-	          entry.embedding = BlobToEigen (emb_it->second);
-	          auto ctx_it = row.find ("context");
-	          if (ctx_it != row.end () && ctx_it->second.has_value ())
-	            {
-	              entry.context_embedding = BlobToEigen (ctx_it->second);
-	            }
+          entry.embedding = BlobToEigen (emb_it->second);
+          auto ctx_it = row.find ("context");
+          if (ctx_it != row.end () && ctx_it->second.has_value ())
+            {
+              entry.context_embedding = BlobToEigen (ctx_it->second);
+            }
           const long long association_memory_id = entry.memory_id;
           const long long association_embedding_id = entry.embedding_id;
           const Eigen::VectorXf association_embedding = entry.embedding;
@@ -1450,7 +1660,8 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
                                       association_embedding_id,
                                       association_embedding,
                                       association_is_association);
-	        }
+        }
+      LoadHistoricalSurfaceSearchCache (store, ctx);
       ctx.SortRetrievalSurfaceSourceIndexes ();
       telemetry::LogDebug (
           "cortext.retrieval_surface_cache.load",
@@ -1460,6 +1671,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
     }
   catch (const std::exception &e)
     {
+      operations::historical_surface_search_cache_internal::Erase (ctx);
       telemetry::LogWarn (
           "Failed to load retrieval surface cache",
           { telemetry::Attribute::String ("component", "signal_processor"),
@@ -1520,6 +1732,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
       // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
       auto rows = store.Execute (
           "SELECT memory_id, embedding_id, source_id, strength, last_access, "
+          "       strength_updated_at, "
           "       n_signals, s_max, s_avg, s_emotion_max, s_arousal_avg, "
           "       drift_mag, modality, start_ts "
           "FROM memories "
@@ -1571,21 +1784,29 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
           // DB stores milliseconds, convert to seconds for last_ts
           const auto ts_ms = ExtractInt64 (row, "last_access", now_ms);
           slot.last_ts = static_cast<double> (ts_ms) / 1000.0;
+          const auto persisted_strength_ts_ms
+              = ExtractInt64 (row, "strength_updated_at", ts_ms);
+          const auto strength_ts_ms = persisted_strength_ts_ms > 0
+                                          ? persisted_strength_ts_ms
+                                          : ts_ms;
+          slot.strength_ts = static_cast<double> (strength_ts_ms) / 1000.0;
           slot.start_ts = ExtractInt64 (row, "start_ts", 0);
 
           // Apply time-based decay
+          const double strength_before = slot.strength;
+          const double strength_ts_before = slot.strength_ts;
           const double now_s = static_cast<double> (now_ms) / 1000.0;
-          const double elapsed = now_s - slot.last_ts;
+          const double elapsed = now_s - slot.strength_ts;
           if (elapsed > 0)
             {
               slot.strength
                   = std::max (strength_floor,
                               slot.strength - cost_per_slot * elapsed);
+              slot.strength_ts = now_s;
             }
-          else
-            {
-              slot.strength = std::max (strength_floor, slot.strength);
-            }
+          const bool metadata_changed
+              = slot.strength != strength_before
+                || slot.strength_ts != strength_ts_before;
 
           // Load extended metadata
           slot.n_signals = static_cast<int> (ExtractInt64 (row, "n_signals", 1));
@@ -1683,7 +1904,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
             }
 
           slot.persisted_signal_record_count = slot.signal_records.size ();
-          slot.metadata_dirty = false;
+          slot.metadata_dirty = metadata_changed;
           slot.embedding_dirty = false;
           slot.signal_records_dirty = false;
           ctx.wm_slots.push_back (std::move (slot));
@@ -1791,6 +2012,25 @@ LoadSoftAnchors (Store &store, ProcessorContext &ctx)
 
 } // namespace
 
+#if defined(CORTEXT_TESTING)
+namespace testing
+{
+std::size_t
+ProcessorRollbackSnapshotOwnerCountForTest ()
+{
+  return g_processor_rollback_snapshot_owner_count.load (
+      std::memory_order_relaxed);
+}
+
+std::size_t
+ProcessorRollbackSnapshotReuseCountForTest ()
+{
+  return g_processor_rollback_snapshot_reuse_count.load (
+      std::memory_order_relaxed);
+}
+} // namespace testing
+#endif
+
 SignalProcessor::SignalProcessor (const Config &config,
                                   std::shared_ptr<Store> store,
                                   std::unique_ptr<IOperation> root_operation,
@@ -1799,7 +2039,8 @@ SignalProcessor::SignalProcessor (const Config &config,
       clock_ (config.clock ? config.clock : std::make_shared<SystemClock> ()),
       store_ (std::move (store)),
       object_store_ (std::move (object_store)),
-      root_operation_ (std::move (root_operation)),
+      root_operation_ (std::make_unique<SnapshotOwningOperation> (
+          std::move (root_operation))),
       context_ (std::make_unique<ProcessorContext> ())
 {
   if (!config_.encoder)
@@ -1857,7 +2098,13 @@ SignalProcessor::SignalProcessor (const Config &config,
 
 }
 
-SignalProcessor::~SignalProcessor () = default;
+SignalProcessor::~SignalProcessor ()
+{
+  if (context_)
+    {
+      operations::historical_surface_search_cache_internal::Erase (*context_);
+    }
+}
 
 SignalProcessor::Output
 SignalProcessor::Process (const Signal &signal)
@@ -1878,12 +2125,24 @@ SignalProcessor::Process (const Signal &signal)
     }
   const auto tx_begin_end = std::chrono::steady_clock::now ();
   const auto snapshot_start = std::chrono::steady_clock::now ();
-  ProcessorContext context_snapshot;
-  DetachedProcessorCaches context_cache_snapshot;
+  auto &snapshot_owner
+      = static_cast<SnapshotOwningOperation &> (*root_operation_);
+  auto snapshot_lease = snapshot_owner.Acquire ();
+  auto &rollback_snapshot = snapshot_lease.Get ();
   {
     auto detached_caches = DetachRebuildableProcessorCaches (*context_);
-    context_snapshot = *context_;
-    context_cache_snapshot = detached_caches;
+    try
+      {
+        rollback_snapshot.context = *context_;
+        rollback_snapshot.caches = detached_caches;
+        rollback_snapshot.initialized = true;
+      }
+    catch (...)
+      {
+        rollback_snapshot.initialized = false;
+        RestoreRebuildableProcessorCaches (*context_, detached_caches);
+        throw;
+      }
     RestoreRebuildableProcessorCaches (*context_, detached_caches);
   }
   const auto snapshot_end = std::chrono::steady_clock::now ();
@@ -1912,12 +2171,15 @@ SignalProcessor::Process (const Signal &signal)
       }
   };
   auto restore_context_snapshot = [&] {
-    *context_ = std::move (context_snapshot);
-    RestoreRebuildableProcessorCaches (*context_, context_cache_snapshot);
+    operations::historical_surface_search_cache_internal::Erase (*context_);
+    *context_ = std::move (rollback_snapshot.context);
+    RestoreRebuildableProcessorCaches (*context_, rollback_snapshot.caches);
+    rollback_snapshot.initialized = false;
     if (store_)
       {
         LoadPredictivePreActivationIds (*store_, *context_);
         LoadRetrievalSuppressionIds (*store_, *context_);
+        LoadHistoricalSurfaceSearchCache (*store_, *context_);
       }
   };
 
@@ -2000,6 +2262,11 @@ SignalProcessor::Process (const Signal &signal)
               ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
           if (signal.force_consolidation)
             {
+              // Force persistence can prune or rewrite broad embedding sets,
+              // so its transaction invalidates the private historical mirror.
+              // Rebuild only after the authoritative commit succeeds; a failed
+              // commit restores the exact pre-signal snapshot in the catch path.
+              LoadRetrievalSurfaceCache (*store_, *context_);
               CheckpointSQLiteStore (
                   store_.get (), true, &op_context,
                   "SignalProcessor.sqlite_wal_checkpoint");
@@ -2088,7 +2355,19 @@ SignalProcessor::Flush ()
   if (!store_)
     {
       return;
+    }
+  ProcessorContext context_snapshot;
+  DetachedProcessorCaches context_cache_snapshot;
+  {
+    auto detached_caches = DetachRebuildableProcessorCaches (*context_);
+    context_snapshot = *context_;
+    context_cache_snapshot = detached_caches;
+    RestoreRebuildableProcessorCaches (*context_, detached_caches);
   }
+  auto restore_context_snapshot = [&] {
+    *context_ = std::move (context_snapshot);
+    RestoreRebuildableProcessorCaches (*context_, context_cache_snapshot);
+  };
   auto tx = store_->Begin ();
   std::unique_ptr<ObjectTransaction> object_tx;
   if (object_store_)
@@ -2098,16 +2377,43 @@ SignalProcessor::Flush ()
           object_tx = object_store_->Begin ();
         }
     }
-  FinalizeEpisode (tx.get (), nullptr);
-  PersistState (*tx);           // v2: Unified state
-  PersistWorkingMemory (*tx, true); // v2: To MEMORIES
-  const auto now_ms = clock_->NowMillis ();
-  StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
-  if (object_tx)
+  try
     {
-      object_tx->Commit ();
+      FinalizeEpisode (tx.get (), nullptr);
+      PersistState (*tx);               // v2: Unified state
+      PersistWorkingMemory (*tx, true); // v2: To MEMORIES
+      const auto now_ms = clock_->NowMillis ();
+      StartNewEpisode (tx.get (), static_cast<uint64_t> (now_ms));
+      if (object_tx)
+        {
+          object_tx->Commit ();
+        }
+      tx->Commit ();
     }
-  tx->Commit ();
+  catch (...)
+    {
+      if (object_tx)
+        {
+          try
+            {
+              object_tx->Rollback ();
+            }
+          catch (...)
+            {
+            }
+        }
+      try
+        {
+          tx->Rollback ();
+        }
+      catch (...)
+        {
+        }
+      restore_context_snapshot ();
+      LoadHistoricalSurfaceSearchCache (*store_, *context_);
+      throw;
+    }
+  LoadRetrievalSurfaceCache (*store_, *context_);
   CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
 }
 
@@ -2391,6 +2697,14 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
   if (!context_)
     return;
 
+  if (op_context == nullptr)
+    {
+      // The process-wide historical registry is not part of the processor
+      // snapshot. Rebuild it from authoritative SQL after either commit or
+      // rollback of any flush-time embedding mutation.
+      operations::historical_surface_search_cache_internal::Erase (*context_);
+    }
+
   auto add_timing
       = [op_context] (const char *name,
                       std::chrono::steady_clock::time_point start) {
@@ -2481,6 +2795,13 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
             == 0);
   if (force || should_incremental_prune)
     {
+      if (force)
+        {
+          // Force pruning can delete a broad set of embedding rows. Exact
+          // incremental ownership is not available here, so fail closed.
+          operations::historical_surface_search_cache_internal::Erase (
+              *context_);
+        }
       const int prune_batch = force ? kClosedWorkingMemoryPruneBatch
                                     : kClosedWorkingMemoryIncrementalPruneBatch;
       const auto t_prune_select_start = std::chrono::steady_clock::now ();
@@ -2514,7 +2835,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
   bool all_slots_clean = true;
 
   // Upsert current slots as MEMORIES with kind='WORKING'. Clean slots are
-  // left untouched; passive decay is recovered from last_access on reload.
+  // left untouched; passive maintenance marks changed metadata dirty.
   for (auto &slot : context_->wm_slots)
     {
       std::string failure_stage = "slot_precheck";
@@ -2543,7 +2864,10 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
 
       try
         {
-          const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
+          const auto ts_ms
+              = internal::WorkingMemorySecondsToMillis (slot.last_ts);
+          const auto strength_ts_ms = internal::WorkingMemorySecondsToMillis (
+              slot.strength_ts > 0.0 ? slot.strength_ts : slot.last_ts);
           const auto slot_created_at
               = slot.start_ts > 0
                     ? static_cast<long long> (slot.start_ts)
@@ -2566,6 +2890,13 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                           t_sql_start);
               embedding_id
                   = emb_rows.empty () ? 0 : ExtractInt64 (emb_rows[0], "id", 0);
+              if (embedding_id > 0)
+                {
+                  operations::historical_surface_search_cache_internal::Append (
+                      *context_,
+                      { embedding_id, 0, 0, std::string (), std::string (),
+                        slot.embedding });
+                }
             }
           if (embedding_id == 0)
             {
@@ -2586,7 +2917,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                       "start_ts = ?, n_signals = ?, s_max = ?, s_avg = ?, "
                       "s_emotion_max = ?, s_arousal_avg = ?, drift_mag = ?, "
                       "strength = ?, source_reliability = ?, stability = ?, "
-                      "last_access = ?, end_ts = NULL "
+                      "last_access = ?, strength_updated_at = ?, end_ts = NULL "
                       "WHERE memory_id = ? AND kind = 'WORKING'",
                       { embedding_id,
                         slot.source_id.empty () ? std::string ("unknown")
@@ -2595,7 +2926,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                         slot.s_max, slot.s_avg, slot.s_emotion_max,
                         slot.s_arousal_avg, slot.drift_acc, slot.strength,
                         working_source_reliability, working_stability, ts_ms,
-                        memory_id });
+                        strength_ts_ms, memory_id });
                   add_timing ("SignalProcessor.wm_update_slot_memory",
                               t_sql_start);
                 }
@@ -2609,15 +2940,15 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                   "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
                   " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
                   " strength, source_reliability, stability, last_access, "
-                  " created_at) "
-                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  " strength_updated_at, created_at) "
+                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   { embedding_id,
                     slot.source_id.empty () ? std::string ("unknown")
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
                     slot.drift_acc, slot.strength, working_source_reliability,
-                    working_stability, ts_ms, slot_created_at });
+                    working_stability, ts_ms, strength_ts_ms, slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
               add_timing ("SignalProcessor.wm_insert_slot_memory",
@@ -2681,6 +3012,16 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                             {
                               signal_embedding_id = ExtractInt64 (
                                   sig_rows[0], "id", embedding_id);
+                            }
+                          if (signal_embedding_id > 0)
+                            {
+                              operations::
+                                  historical_surface_search_cache_internal::
+                                      Append (
+                                          *context_,
+                                          { signal_embedding_id, 0, 0,
+                                            std::string (), std::string (),
+                                            rec.embedding });
                             }
                           add_timing (
                               "SignalProcessor.wm_insert_signal_embedding",

@@ -1730,8 +1730,11 @@ extern "C"
                                          const char *source_id,
                                          const cortext_media *media)
   {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
     return cortext_process_audio_with_media_json_with_options (
-        h, pcm, num_samples, source_id, media, nullptr);
+        h, pcm, num_samples, source_id, media, &options);
   }
 
   char *
@@ -1799,8 +1802,11 @@ extern "C"
                                          const char *source_id,
                                          const cortext_media *media)
   {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
     return cortext_process_image_with_media_json_with_options (
-        h, data, width, height, channels, source_id, media, nullptr);
+        h, data, width, height, channels, source_id, media, &options);
   }
 
   char *

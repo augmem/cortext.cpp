@@ -5,6 +5,7 @@
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include <algorithm>
 #include <any>
 #include <cmath>
 #include <string>
@@ -246,7 +247,9 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
   // Define recent window for emotional sources (last consolidation interval)
   const int consolidation_interval
       = core::ConsolidationIntervalSeconds (cfg.stability);
-  const long long recent_window_ts = now_ts - consolidation_interval;
+  const long long recent_window_ms
+      = static_cast<long long> (consolidation_interval) * 1000LL;
+  const long long recent_window_ts = std::max (0LL, now_ts - recent_window_ms);
   const double theta_intensity = core::ThetaIntensity (cfg.sensitivity);
   const double theta_arousal = core::ThetaArousal (cfg.sensitivity);
 

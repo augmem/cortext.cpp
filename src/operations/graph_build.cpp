@@ -372,6 +372,7 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
     {
       return;
     }
+  context.GetProcessorContext ().association_fanout_cache.valid = false;
   Store *store = context.GetStore ();
   const auto &cfg = context.GetConfig ();
   const long long now_ts
@@ -433,6 +434,11 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
       DecayReinforcementEdges (tx, reinforcement_decay,
                                reinforcement_prune_threshold);
     }
+
+  // Edge creation, replacement, decay, or pruning changes fanout ordering.
+  // Invalidate in O(1); the cache is rebuilt lazily only if a later operation
+  // actually traverses associations.
+  context.GetProcessorContext ().association_fanout_cache.valid = false;
 
   // Count associations for logging
   long long edges_count = 0;

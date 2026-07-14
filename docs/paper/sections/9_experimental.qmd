@@ -44,8 +44,8 @@ comments remain to imply that the deleted runtime paths can still be selected.
 
 ## Regression Results
 
-The current branch passed the following local verification commands after the
-cutover:
+The following commands and counts are the historical hard-cutover verification
+record:
 
 ```bash
 cmake -S . -B build/codex-hardcut-check \
@@ -69,6 +69,14 @@ The targeted graph/reconstruction/state tests passed **5 test cases** and
 
 An examples-enabled build also completed after configuring with
 `CORTEXT_BUILD_EXAMPLES=ON`.
+
+After the July 12 safety fixes documented below, the current warnings-as-errors
+debug tree passed the complete default native suite: **509 test cases** and
+**4,510 assertions** in 483.53 seconds. The source lists 510 cases; one hidden
+Catch2 case is intentionally excluded from the default invocation. Focused
+regression, store/binding, performance, and model-backed C API filters also
+passed, as did Go tests and vet, Dart analysis and tests, Python validation,
+the Node addon build, and the WebAssembly bundle build.
 
 On 2026-07-07, the belief-revision supersession patch added focused
 modality-agnostic regression/evals. The storage probe uses an image-modality
@@ -113,6 +121,10 @@ The resulting databases each contained 115 `reinforces` edges and 34
 normal harness run. This is a local no-regression smoke screen for retrieval
 mechanics, not a blind-judge quality result.
 
+The mechanism-eval directory above was local run output and is not checked into
+this repository; the numerical result is retained as a historical run record,
+not a checkout-reproducible aggregate artifact.
+
 On 2026-07-08, the public retention path was re-screened after fixing
 `Retention::Ephemeral` to force a processing boundary without granting durable
 write permission. The focused regression suite verified that public ephemeral
@@ -129,9 +141,39 @@ chat convenience: force both flags), `Boundary` (force turn edge only), and
 `Ephemeral` (no-store query). Binding surfaces expose retention through process
 options; CLI remember continues to use `Durable` and recall uses `Ephemeral`.
 
-The same patch was run through the normalized memory-eval smoke slice with all
-configured benchmark adapters, using durable history ingestion and ephemeral
-queries through the public API:
+On 2026-07-12, a safety regression screen covered the retained ingress and
+storage paths. Focused tests injected a root-transaction commit failure and
+verified that a retry persisted the same working-memory signal record; applied
+two passive WM maintenance passes and verified linear rather than compounded
+decay; replayed a backward timestamp without a forced gap boundary; retained an
+emotional source sixty seconds old inside the five-minute cascade window;
+evicted a memory with a distinct signal embedding and verified the vector row
+was reclaimed; and verified supersession/graph writes invalidate cached
+fanout. Binding checks reject undersized images before native inference, legacy
+media JSON entry points remain Durable, and WASM text ingress now exposes all
+four retention policies with Natural as its default.
+
+The same patch ran the deterministic steady-state live-loop harness for 1,000
+synthetic signals in a warnings-as-errors debug build. It completed in 25.809 s
+(38.746 signals/s) with 238 writes, 239 boundaries, 231 interrupts, 5,461 total
+candidates, 253 final memories, 46 associations, and 1,355 embeddings. The
+performance-tag regression tests also passed. A matched AppleClang Release
+comparison against the unchanged parent tree then alternated five 1,000-signal
+runs per build. Median throughput was 180.140 signals/s for the parent and
+179.580 signals/s for the patched tree (-0.31%); means were 177.919 and 177.354
+signals/s (-0.32%), respectively. Every run produced identical writes,
+boundaries, interrupts, candidate totals, threshold and effective-focus sums,
+and final memory, association, and embedding counts. The observed throughput
+difference is within run-to-run variation. This comparison covers the core
+operation and persistence loop with synthetic embeddings, not model inference
+or language-runtime overhead. At that measured head, the implemented checks
+added no per-signal query or eager graph rebuild. The later passive-decay
+durability repair adds at most one bounded memory-row update per changed live
+slot during normal persistence and is outside this historical measurement.
+
+Separately, the July 8 retention work was run through the normalized memory-eval
+smoke slice with all configured benchmark adapters, using durable history
+ingestion and ephemeral queries through the public API:
 
 ```bash
 scripts/run_memory_evals.py --profile smoke --benchmarks all --no-prepare \
@@ -149,6 +191,11 @@ Packet-answer accuracy stayed at 0.0 over the scored slice, while the Codex,
 Grok, and Antigravity adapters each scored 0.2 over five scored queries. This
 is a regression check for public ephemeral retrieval and harness wiring, not a
 state-of-the-art quality claim.
+
+That `logs/memory_evals/...` directory is local-only and is not included in the
+paper artifact bundle. The checked-in manuscript therefore treats these smoke
+numbers as a historical harness record rather than independently auditable raw
+evidence.
 
 ## Retrieval Behavior After Removal
 
@@ -319,7 +366,11 @@ TencentDB packets in this configuration. The result should not be read as a
 production TencentDB benchmark: the TencentDB run used the local Qwen model for
 both memory extraction and judging, ran without a TencentDB embedding service,
 and logged several extraction/LLM parse failures. The aggregate artifact is
-`eval_runs/msc_tencentdb_qwen_20260706T213907Z/judge_vllm_qwen_omni.json`.
+`eval_runs/msc_tencentdb_qwen_20260706T213907Z/judge_vllm_qwen_omni.json`, a
+local-only path that is not checked into this repository. Consequently this
+table is a historical comparator record and cannot be independently audited
+from the PR checkout; the checked-in artifact-backed MSC results below and
+above carry stronger provenance.
 
 ### 128k RAG-Ablation Probe
 
@@ -454,12 +505,15 @@ July arms completed 39/39 judgments and passed the prompt-fit and context-leak
 gates. The aggregate artifact is
 `docs/paper/artifacts/neuromodulator_mechanism_sweep_20260706T232135Z/mechanism_sweep_summary.json`.
 
-The June removal arms below are read only against the June control.
+The June removal arms below are read only against the June control. The
+`reading` column records the decision made in that research branch at the time;
+it is not an inventory of mechanisms consumed by the current production
+ranker.
 
 | removed mechanism | wins | sufficiency | noise | tokens | reading |
 |---|---:|---:|---:|---:|---|
 | temporal_retrieval | 22/39 | 3.74 | 0.97 | 543 | largest hygiene loss; retained |
-| predictive_bonus | 22/39 | 3.79 | 0.86 | 655 | 30% packet bloat, ties triple; retained |
+| predictive_bonus | 22/39 | 3.79 | 0.86 | 655 | 30% packet bloat, ties triple; historical retain, absent from current ranker |
 | metacognitive | 24/39 | 3.85 | 0.74 | 473 | removal mildly positive; cut in v1 |
 | daily_consolidation | 23/39 | 4.03 | 0.41 | 352 | removal mildly positive; deferred to long horizon |
 | constructive_recall | 22/39 | 3.79 | 0.74 | 430 | late-corpus sufficiency cost; weak retain |
@@ -471,8 +525,11 @@ The June removal arms below are read only against the June control.
 | stm_shadow | 22/39 | 3.97 | 0.70 | 500 | exact null |
 | stm_ltm_graph_label_handoff | 22/39 | 3.97 | 0.68 | 500 | exact null; deferred to long horizon |
 
-In the June removal set, temporal retrieval and predictive pre-activation stayed
-because their removal cost measurable packet quality or packet size. Removing
+In the June research branch, temporal retrieval and predictive pre-activation
+stayed because their removal cost measurable packet quality or packet size.
+The hard-cutover production graph ranker retains temporal scoring but no longer
+reads `pre_activation`, so that predictive verdict does not describe current
+runtime behavior. Removing
 the metacognitive layer was mildly positive and had no long-horizon story to
 defer to, which supported cutting it in v1. Removing daily consolidation was
 also mildly positive at this horizon, but we deferred that arm because
