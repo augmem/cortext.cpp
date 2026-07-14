@@ -1,6 +1,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include "test_helpers.hpp"
+#include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/memory_storage.hpp>
 #include <cortext/processor.hpp>
@@ -9,10 +10,18 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
+#include "../src/operations/constructive_recall_internal.hpp"
+#include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include <algorithm>
+#include <atomic>
+#include <cstddef>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <limits>
+#include <memory>
+#include <new>
+#include <thread>
 
 using namespace cortext;
 using cortext::operations::MemoryStorage;
@@ -103,6 +112,74 @@ private:
   std::string path_;
   std::unique_ptr<Store> store_;
 };
+
+void
+RequireDisabledCurrentSurfaceCacheParity (const char *disabled_flag)
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  cortext::testing::ScopedEnvVar disabled (disabled_flag, "1");
+  const bool hook_active
+      = std::strcmp (disabled_flag,
+                     "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL") == 0
+            ? operations::constructive_recall::Disabled ()
+            : operations::constructive_recall::
+                  CurrentSurfaceWritesDisabled ();
+  if (!hook_active)
+    {
+      SKIP ("current-surface write hook is disabled in this build");
+    }
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  Signal signal;
+  signal.embedding = UnitVec (0);
+  signal.timestamp = 2000;
+  signal.source_id = "disabled/current/source";
+  signal.modality = "text";
+  signal.mimetype = "text/plain";
+
+  ProcessorContext pctx;
+  REQUIRE (cache::Reset (pctx, {}));
+  AccumulatorState acc;
+  acc.mu_acc = signal.embedding;
+  acc.c_t = signal.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.8;
+  acc.s_max = 0.8;
+  acc.t_start = signal.timestamp;
+  SignalRecord rec;
+  rec.embedding = signal.embedding;
+  rec.timestamp = signal.timestamp;
+  rec.modality = signal.modality;
+  rec.mime = signal.mimetype;
+  rec.score = 0.8;
+  rec.serial_position = 0;
+  acc.signals.push_back (std::move (rec));
+  pctx.accumulator_states[signal.source_id] = std::move (acc);
+
+  OperationContext ctx (signal, pctx, cfg, store);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (signal.embedding);
+  MemoryStorage op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE (ctx.GetStoredMemoryId ().has_value ());
+  const auto current_rows = store->Execute (
+      "SELECT memory_id FROM current_memory_embeddings WHERE memory_id = ?",
+      { *ctx.GetStoredMemoryId () });
+  REQUIRE (current_rows.empty ());
+  const auto owner = cache::Find (pctx);
+  REQUIRE (owner != nullptr);
+  REQUIRE (owner->current_memory_index.count (*ctx.GetStoredMemoryId ()) == 0);
+  REQUIRE (pctx.retrieval_surface_index.count (*ctx.GetStoredMemoryId ()) == 1);
+  cache::Erase (pctx);
+}
 
 } // namespace
 
@@ -505,6 +582,402 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
   REQUIRE (stale_rows.size () == 1);
   REQUIRE (AnyToLongLong (stale_rows[0].at ("source_contradiction_count"))
            == 1LL);
+
+}
+
+TEST_CASE ("Typed supersession candidates retain borrowed cache vectors",
+           "[operations][memory_storage][supersession][cache]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  ProcessorContext pctx;
+  const Eigen::VectorXf zero = Eigen::VectorXf::Zero (kEmbeddingDim);
+  REQUIRE (cache::Reset (
+      pctx, { { 100, 10, 1000, "LONG_TERM", "source/10", zero } }));
+
+  auto owner = cache::Find (pctx);
+  REQUIRE (owner != nullptr);
+  const Eigen::VectorXf *borrowed = &owner->entries[0].embedding;
+  cache::SupersessionCandidateRows result;
+  result.cache_owner = owner;
+  result.rows.push_back ({ 10, borrowed, std::nullopt });
+
+  cache::Erase (pctx);
+  owner.reset ();
+  REQUIRE (cache::Find (pctx) == nullptr);
+  REQUIRE (result.rows[0].Embedding () == borrowed);
+  REQUIRE (result.rows[0].Embedding ()->size () == kEmbeddingDim);
+  REQUIRE (result.rows[0].Embedding ()->norm () == 0.0f);
+
+  cache::SupersessionCandidate owned;
+  owned.memory_id = 11;
+  owned.owned_embedding = Eigen::VectorXf::Ones (4);
+  REQUIRE (owned.Embedding () == &*owned.owned_embedding);
+  REQUIRE (owned.Embedding ()->size () == 4);
+
+  cache::SupersessionCandidate invalid;
+  invalid.memory_id = 12;
+  REQUIRE (invalid.Embedding () == nullptr);
+}
+
+TEST_CASE ("Historical surface cache survives sequential thread migration and "
+           "erases across threads",
+           "[operations][memory_storage][cache][lifecycle]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const std::size_t baseline_size = cache::RegistrySizeForTest ();
+  alignas (ProcessorContext) std::byte storage[sizeof (ProcessorContext)];
+  auto *pctx = std::construct_at (
+      reinterpret_cast<ProcessorContext *> (storage));
+  const Eigen::VectorXf first = UnitVec (0);
+  const Eigen::VectorXf second = UnitVec (1);
+  REQUIRE (cache::Reset (
+      *pctx, { { 100, 10, 1000, "LONG_TERM", "source/10", first } }));
+  REQUIRE (cache::RegistrySizeForTest () == baseline_size + 1);
+
+  std::atomic<bool> worker_found{ false };
+  std::thread migrate ([&] {
+    const auto owner = cache::Find (*pctx);
+    worker_found.store (owner != nullptr && owner->entries.size () == 1,
+                        std::memory_order_relaxed);
+    cache::Append (
+        *pctx, { 101, 11, 2000, "LONG_TERM", "source/11", second });
+  });
+  migrate.join ();
+
+  REQUIRE (worker_found.load (std::memory_order_relaxed));
+  auto owner = cache::Find (*pctx);
+  REQUIRE (owner != nullptr);
+  REQUIRE (owner->entries.size () == 2);
+  owner.reset ();
+
+  std::thread teardown ([&] { cache::Erase (*pctx); });
+  teardown.join ();
+  REQUIRE (cache::Find (*pctx) == nullptr);
+  REQUIRE (cache::RegistrySizeForTest () == baseline_size);
+  std::destroy_at (pctx);
+
+  pctx = std::construct_at (reinterpret_cast<ProcessorContext *> (storage));
+  REQUIRE (cache::Find (*pctx) == nullptr);
+  REQUIRE (cache::Reset (
+      *pctx, { { 102, 12, 3000, "LONG_TERM", "source/12", first } }));
+  cache::Erase (*pctx);
+  std::destroy_at (pctx);
+  REQUIRE (cache::RegistrySizeForTest () == baseline_size);
+}
+
+TEST_CASE ("Precomputed supersession query norm preserves cosine results",
+           "[operations][memory_storage][supersession][cosine]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  auto require_equivalent = [] (const Eigen::VectorXf &query,
+                                const Eigen::VectorXf &target) {
+    const double expected = core::CosineSimilarity (query, target);
+    const double actual = cache::SupersessionCosineSimilarity (
+        query, query.norm (), target);
+    REQUIRE (actual == expected);
+  };
+
+  const Eigen::VectorXf empty;
+  require_equivalent (empty, empty);
+  require_equivalent (Eigen::VectorXf::Ones (4),
+                      Eigen::VectorXf::Ones (3));
+  require_equivalent (Eigen::VectorXf::Zero (4),
+                      Eigen::VectorXf::Ones (4));
+  require_equivalent (Eigen::VectorXf::Ones (4),
+                      Eigen::VectorXf::Zero (4));
+
+  const Eigen::VectorXf query = UnitVec (0);
+  require_equivalent (query, UnitVec (0));
+  require_equivalent (query, -UnitVec (0));
+  require_equivalent (query, VectorWithCosineToDim0 (0.37f));
+
+  SignalProcessor::Config cfg;
+  const float threshold = static_cast<float> (
+      core::SupersessionSimilarityThreshold (
+          cfg.focus, cfg.sensitivity, cfg.stability));
+  require_equivalent (
+      query, VectorWithCosineToDim0 (
+                 std::nextafter (
+                     threshold, -std::numeric_limits<float>::infinity ())));
+  require_equivalent (
+      query, VectorWithCosineToDim0 (
+                 std::nextafter (
+                     threshold, std::numeric_limits<float>::infinity ())));
+
+  const Eigen::VectorXf tied = VectorWithCosineToDim0 (0.52f);
+  const double query_norm = query.norm ();
+  const double first
+      = cache::SupersessionCosineSimilarity (query, query_norm, tied);
+  const double second
+      = cache::SupersessionCosineSimilarity (query, query_norm, tied);
+  REQUIRE (first == second);
+}
+
+TEST_CASE ("MemoryStorage preserves SQL KNN behavior with signal-only decoys",
+           "[operations][memory_storage][supersession][knn_population]")
+{
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const Eigen::VectorXf stale_embedding = UnitVec (0);
+  const Eigen::VectorXf correction_embedding = VectorWithCosineToDim0 (0.94f);
+  cortext::testing::SeedEmbeddingV2 (*store, 100, stale_embedding, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 10, 100, "belief/stale",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 101, correction_embedding, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 11, 101, "belief/duplicate",
+                                  "LONG_TERM", 1.0, 1000);
+
+  const int candidate_limit = std::max (
+      1, core::SupersessionCandidateLimit (
+             cfg.focus, cfg.sensitivity, cfg.stability));
+  Eigen::VectorXf decoy_embedding = correction_embedding;
+  decoy_embedding[2] = 0.01f;
+  decoy_embedding.normalize ();
+  for (int i = 0; i < candidate_limit; ++i)
+    {
+      cortext::testing::SeedEmbeddingV2 (
+          *store, 1000LL + i, decoy_embedding, 1000);
+    }
+
+  const auto sql_candidates = store->Execute (
+      "SELECT m.memory_id FROM embeddings e "
+      "JOIN memories m ON m.embedding_id = e.embedding_id "
+      "WHERE e.embedding MATCH ? AND k = ? "
+      "  AND m.memory_id != ? "
+      "  AND m.embedding_id IS NOT NULL "
+      "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+      "  AND COALESCE(m.start_ts, 0) < ?",
+      { std::vector<float> (correction_embedding.data (),
+                            correction_embedding.data ()
+                                + correction_embedding.size ()),
+        static_cast<long long> (candidate_limit), -1LL, 2000LL });
+  REQUIRE (std::none_of (
+      sql_candidates.begin (), sql_candidates.end (), [] (const auto &row) {
+        return AnyToLongLong (row.at ("memory_id")) == 10LL;
+      }));
+
+  Signal s;
+  s.embedding = correction_embedding;
+  s.timestamp = 2000;
+  s.source_id = "belief/source";
+  s.modality = "text";
+  s.mimetype = "text/plain";
+
+  ProcessorContext pctx;
+  ProcessorContext::RetrievalSurfaceEntry stale_surface;
+  stale_surface.memory_id = 10;
+  stale_surface.embedding_id = 100;
+  stale_surface.start_ts = 1000;
+  stale_surface.kind = "LONG_TERM";
+  stale_surface.embedding = stale_embedding;
+  pctx.UpsertRetrievalSurface (std::move (stale_surface));
+  ProcessorContext::RetrievalSurfaceEntry duplicate_surface;
+  duplicate_surface.memory_id = 11;
+  duplicate_surface.embedding_id = 101;
+  duplicate_surface.start_ts = 1000;
+  duplicate_surface.kind = "LONG_TERM";
+  duplicate_surface.embedding = correction_embedding;
+  pctx.UpsertRetrievalSurface (std::move (duplicate_surface));
+  std::vector<operations::historical_surface_search_cache_internal::Entry>
+      historical_entries = {
+        { 100, 10, 1000, "LONG_TERM", "belief/stale", stale_embedding },
+        { 101, 11, 1000, "LONG_TERM", "belief/duplicate",
+          correction_embedding }
+      };
+  for (int i = 0; i < candidate_limit; ++i)
+    {
+      historical_entries.push_back (
+          { 1000LL + i, 0, 0, std::string (), std::string (),
+            decoy_embedding });
+    }
+  REQUIRE (operations::historical_surface_search_cache_internal::Reset (
+      pctx, std::move (historical_entries),
+      { { 100, 10, 0, std::string (), std::string (), stale_embedding },
+        { 101, 11, 0, std::string (), std::string (),
+          correction_embedding } }));
+  AccumulatorState acc;
+  acc.mu_acc = s.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.8;
+  acc.s_max = 0.8;
+  acc.t_start = s.timestamp;
+  SignalRecord rec;
+  rec.embedding = s.embedding;
+  rec.timestamp = s.timestamp;
+  rec.modality = s.modality;
+  rec.mime = s.mimetype;
+  rec.score = 0.8;
+  rec.serial_position = 0;
+  acc.signals.push_back (std::move (rec));
+  pctx.accumulator_states[s.source_id] = std::move (acc);
+
+  OperationContext ctx (s, pctx, cfg, store);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (s.embedding);
+  MemoryStorage op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE (ctx.GetStoredMemoryId ().has_value ());
+  const auto edge_rows = store->Execute (
+      "SELECT 1 FROM associations "
+      "WHERE source_memory_id = ? AND target_memory_id = ? "
+      "  AND edge_type = 'supersedes'",
+      { *ctx.GetStoredMemoryId (), 10LL });
+  // The private cache mirrors the eligible memory population returned by the
+  // sqlite-vec query. Orphan/signal-only embeddings do not hide this candidate
+  // in either path.
+  REQUIRE (edge_rows.size () == 1);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Runtime reconstruction occupies the sqlite-vec pre-filter cutoff",
+           "[operations][memory_storage][supersession][reconstruction][knn_population]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const int candidate_limit = std::max (
+      1, core::SupersessionCandidateLimit (
+             cfg.focus, cfg.sensitivity, cfg.stability));
+  REQUIRE (candidate_limit >= 4);
+  const Eigen::VectorXf target_embedding = VectorWithCosineToDim0 (0.94f);
+  const Eigen::VectorXf closer_embedding = VectorWithCosineToDim0 (0.99f);
+  const Eigen::VectorXf reconstruction_embedding
+      = VectorWithCosineToDim0 (0.999f);
+  cortext::testing::SeedEmbeddingV2 (*store, 100, target_embedding, 1000);
+  cortext::testing::SeedMemoryV2 (*store, 10, 100, "belief/target",
+                                  "LONG_TERM", 1.0, 1000);
+
+  std::vector<cache::Entry> initial_entries = {
+    { 100, 10, 1000, "LONG_TERM", "belief/target", target_embedding }
+  };
+  for (int i = 0; i < candidate_limit - 3; ++i)
+    {
+      const long long embedding_id = 200 + i;
+      const long long memory_id = 20 + i;
+      cortext::testing::SeedEmbeddingV2 (
+          *store, embedding_id, closer_embedding, 1000);
+      cortext::testing::SeedMemoryV2 (
+          *store, memory_id, embedding_id,
+          "belief/closer/" + std::to_string (i), "LONG_TERM", 1.0, 1000);
+      initial_entries.push_back (
+          { embedding_id, memory_id, 1000, "LONG_TERM",
+            "belief/closer/" + std::to_string (i), closer_embedding });
+    }
+
+  ProcessorContext pctx;
+  REQUIRE (cache::Reset (pctx, std::move (initial_entries)));
+  operations::constructive_recall::ReconstructionUpdatePolicy policy;
+  policy.update_current_surface = false;
+  auto reconstruction_tx = store->Begin ();
+  const long long reconstruction_id
+      = operations::constructive_recall::AppendReconstructionWithEmbedding (
+          *reconstruction_tx, 10, reconstruction_embedding, {}, 1500, 0.1,
+          "test", 1.0, 1.0, policy, &pctx);
+  REQUIRE (reconstruction_id > 0);
+  reconstruction_tx->Commit ();
+  const auto reconstruction_rows = store->Execute (
+      "SELECT embedding_id FROM memory_reconstructions "
+      "WHERE reconstruction_id = ?",
+      { reconstruction_id });
+  REQUIRE (reconstruction_rows.size () == 1);
+  const long long reconstruction_embedding_id = AnyToLongLong (
+      reconstruction_rows[0].at ("embedding_id")).value_or (0);
+  REQUIRE (reconstruction_embedding_id > 0);
+  const auto cache_owner = cache::Find (pctx);
+  REQUIRE (cache_owner != nullptr);
+  REQUIRE (cache_owner->embedding_index.count (reconstruction_embedding_id)
+           == 1);
+  REQUIRE (cache_owner->entries[
+               cache_owner->embedding_index.at (reconstruction_embedding_id)]
+               .memory_id
+           == 0);
+
+  Signal signal;
+  signal.embedding = UnitVec (0);
+  signal.timestamp = 2000;
+  signal.source_id = "belief/correction";
+  signal.modality = "text";
+  signal.mimetype = "text/plain";
+  AccumulatorState acc;
+  acc.mu_acc = signal.embedding;
+  acc.c_t = signal.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.8;
+  acc.s_max = 0.8;
+  acc.t_start = signal.timestamp;
+  SignalRecord rec;
+  rec.embedding = signal.embedding;
+  rec.timestamp = signal.timestamp;
+  rec.modality = signal.modality;
+  rec.mime = signal.mimetype;
+  rec.score = 0.8;
+  rec.serial_position = 0;
+  acc.signals.push_back (std::move (rec));
+  pctx.accumulator_states[signal.source_id] = std::move (acc);
+
+  OperationContext ctx (signal, pctx, cfg, store);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (signal.embedding);
+  MemoryStorage op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+  REQUIRE (ctx.GetStoredMemoryId ().has_value ());
+
+  const auto sql_candidates = store->Execute (
+      "SELECT m.memory_id FROM embeddings e "
+      "JOIN memories m ON m.embedding_id = e.embedding_id "
+      "WHERE e.embedding MATCH ? AND k = ? "
+      "  AND m.memory_id != ? "
+      "  AND m.embedding_id IS NOT NULL "
+      "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+      "  AND COALESCE(m.start_ts, 0) < ?",
+      { std::vector<float> (signal.embedding.data (),
+                            signal.embedding.data ()
+                                + signal.embedding.size ()),
+        static_cast<long long> (candidate_limit), *ctx.GetStoredMemoryId (),
+        2000LL });
+  REQUIRE (std::none_of (
+      sql_candidates.begin (), sql_candidates.end (), [] (const auto &row) {
+        return AnyToLongLong (row.at ("memory_id")) == 10LL;
+      }));
+  const auto target_edges = store->Execute (
+      "SELECT 1 FROM associations "
+      "WHERE source_memory_id = ? AND target_memory_id = ? "
+      "  AND edge_type = 'supersedes'",
+      { *ctx.GetStoredMemoryId (), 10LL });
+  REQUIRE (target_edges.empty ());
+  cache::Erase (pctx);
+}
+
+TEST_CASE ("MemoryStorage current cache mirrors disabled SQL current paths",
+           "[operations][memory_storage][cache][current_surface]")
+{
+  SECTION ("current-surface writes disabled")
+    {
+      RequireDisabledCurrentSurfaceCacheParity (
+          "CORTEXT_DISABLE_CURRENT_MEMORY_SURFACE_WRITES");
+    }
+  SECTION ("constructive recall disabled")
+    {
+      RequireDisabledCurrentSurfaceCacheParity (
+          "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL");
+    }
 }
 
 TEST_CASE ("MemoryStorage stores payload in objstore and retrieves it",

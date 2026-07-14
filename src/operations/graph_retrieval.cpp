@@ -1,6 +1,7 @@
 #include "cortext/operations/graph_retrieval.hpp"
 
 #include "constructive_recall_internal.hpp"
+#include "historical_surface_search_cache_internal.hpp"
 #include "retrieval_trace_state.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -192,6 +193,27 @@ RefreshCandidateToCurrentSurface (Transaction &tx, Candidate &candidate,
   return false;
 }
 
+bool
+RefreshCandidateFromProcessorSurface (const ProcessorContext &p_ctx,
+                                      Candidate &candidate,
+                                      int embedding_dim)
+{
+  const auto it = p_ctx.retrieval_surface_index.find (candidate.memory_id);
+  if (it == p_ctx.retrieval_surface_index.end ()
+      || it->second >= p_ctx.retrieval_surface_cache.size ())
+    {
+      return false;
+    }
+  const auto &entry = p_ctx.retrieval_surface_cache[it->second];
+  if (entry.embedding_id <= 0 || entry.embedding.size () != embedding_dim)
+    {
+      return false;
+    }
+  candidate.embedding_id = entry.embedding_id;
+  candidate.embedding = entry.embedding;
+  return true;
+}
+
 void
 RefreshProcessorSurfaces (Transaction &tx, ProcessorContext &p_ctx,
                           long long memory_id, long long old_embedding_id,
@@ -245,6 +267,13 @@ RefreshProcessorSurfaces (Transaction &tx, ProcessorContext &p_ctx,
       entry.embedding = embedding;
       entry.embedding_norm = embedding.norm ();
     }
+  if (!constructive_recall::CurrentSurfaceWritesDisabled ())
+    {
+      historical_surface_search_cache_internal::UpsertCurrent (
+          p_ctx,
+          { new_embedding_id, memory_id, 0, std::string (), std::string (),
+            embedding });
+    }
 }
 
 void
@@ -262,6 +291,180 @@ AppendUniqueRows (
         }
       rows.push_back (std::move (row));
     }
+}
+
+std::optional<std::vector<std::map<std::string, std::any>>>
+LoadHistoricalSeedRowsFromCache (
+    const ProcessorContext &p_ctx, const Eigen::VectorXf &query_embedding,
+    long long exclusion_ts, int candidate_limit)
+{
+  const auto state
+      = historical_surface_search_cache_internal::Find (p_ctx);
+  const std::size_t embedding_count = state ? state->entries.size () : 0;
+  const int embedding_dim = static_cast<int> (query_embedding.size ());
+  if (!state || embedding_dim <= 0 || candidate_limit <= 0
+      || state->embedding_dim != embedding_dim
+      || state->search.size ()
+             != embedding_count * static_cast<std::size_t> (embedding_dim))
+    {
+      return std::nullopt;
+    }
+
+  using RowMajorMatrix
+      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+  const Eigen::Map<const RowMajorMatrix> matrix (
+      state->search.data (), static_cast<Eigen::Index> (embedding_count),
+      embedding_dim);
+  auto &distance_scratch = state->distance_scratch;
+  distance_scratch.resize (embedding_count);
+  Eigen::Map<Eigen::VectorXf> distances (
+      distance_scratch.data (), static_cast<Eigen::Index> (embedding_count));
+  distances = (matrix.rowwise () - query_embedding.transpose ())
+                  .rowwise ()
+                  .squaredNorm ();
+  auto &ranked = state->ranked_scratch;
+  ranked.clear ();
+  ranked.reserve (embedding_count);
+  for (std::size_t index = 0; index < embedding_count; ++index)
+    {
+      const auto &entry = state->entries[index];
+      if (entry.embedding_id <= 0 || entry.embedding.size () != embedding_dim)
+        {
+          return std::nullopt;
+        }
+      ranked.push_back (
+          { index, distances[static_cast<Eigen::Index> (index)] });
+    }
+  auto by_distance = [&state] (
+                         const historical_surface_search_cache_internal::RankedEntry &a,
+                         const historical_surface_search_cache_internal::RankedEntry &b) {
+    if (a.distance != b.distance)
+      {
+        return a.distance < b.distance;
+      }
+    return state->entries[a.index].embedding_id
+           < state->entries[b.index].embedding_id;
+  };
+  if (static_cast<int> (ranked.size ()) > candidate_limit)
+    {
+      std::nth_element (ranked.begin (), ranked.begin () + candidate_limit,
+                        ranked.end (), by_distance);
+      ranked.resize (static_cast<std::size_t> (candidate_limit));
+    }
+  std::sort (ranked.begin (), ranked.end (), by_distance);
+
+  std::vector<std::map<std::string, std::any>> rows;
+  rows.reserve (ranked.size ());
+  for (const auto &candidate : ranked)
+    {
+      const auto &entry = state->entries[candidate.index];
+      if (entry.memory_id <= 0
+          || (entry.kind != "LONG_TERM" && entry.kind != "ASSOCIATION")
+          || entry.start_ts >= exclusion_ts)
+        {
+          continue;
+        }
+      rows.push_back (
+          { { "memory_id", entry.memory_id },
+            { "embedding_id", entry.embedding_id },
+            { "start_ts", entry.start_ts },
+            { "embedding", ToFloatVector (entry.embedding) },
+            { "source_id", entry.source_id } });
+    }
+  return rows;
+}
+
+std::optional<std::vector<std::map<std::string, std::any>>>
+LoadCurrentSeedRowsFromCache (
+    const ProcessorContext &p_ctx, const Eigen::VectorXf &query_embedding,
+    long long exclusion_ts, int candidate_limit)
+{
+  const auto state
+      = historical_surface_search_cache_internal::Find (p_ctx);
+  const std::size_t entry_count = state ? state->current_entries.size () : 0;
+  const int embedding_dim = static_cast<int> (query_embedding.size ());
+  if (!state || embedding_dim <= 0 || candidate_limit <= 0
+      || state->embedding_dim != embedding_dim
+      || state->current_search.size ()
+             != entry_count * static_cast<std::size_t> (embedding_dim))
+    {
+      return std::nullopt;
+    }
+  if (entry_count == 0)
+    {
+      return std::vector<std::map<std::string, std::any>>{};
+    }
+
+  using RowMajorMatrix
+      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+  const Eigen::Map<const RowMajorMatrix> matrix (
+      state->current_search.data (), static_cast<Eigen::Index> (entry_count),
+      embedding_dim);
+  auto &distance_scratch = state->distance_scratch;
+  distance_scratch.resize (entry_count);
+  Eigen::Map<Eigen::VectorXf> distances (
+      distance_scratch.data (), static_cast<Eigen::Index> (entry_count));
+  distances = (matrix.rowwise () - query_embedding.transpose ())
+                  .rowwise ()
+                  .squaredNorm ();
+  auto &ranked = state->ranked_scratch;
+  ranked.clear ();
+  ranked.reserve (entry_count);
+  for (std::size_t index = 0; index < entry_count; ++index)
+    {
+      const auto &entry = state->current_entries[index];
+      if (entry.memory_id <= 0 || entry.embedding_id <= 0
+          || entry.embedding.size () != embedding_dim)
+        {
+          return std::nullopt;
+        }
+      ranked.push_back (
+          { index, distances[static_cast<Eigen::Index> (index)] });
+    }
+  auto by_distance = [&state] (
+                         const historical_surface_search_cache_internal::RankedEntry &a,
+                         const historical_surface_search_cache_internal::RankedEntry &b) {
+    if (a.distance != b.distance)
+      {
+        return a.distance < b.distance;
+      }
+    return state->current_entries[a.index].memory_id
+           < state->current_entries[b.index].memory_id;
+  };
+  if (static_cast<int> (ranked.size ()) > candidate_limit)
+    {
+      std::nth_element (ranked.begin (), ranked.begin () + candidate_limit,
+                        ranked.end (), by_distance);
+      ranked.resize (static_cast<std::size_t> (candidate_limit));
+    }
+  std::sort (ranked.begin (), ranked.end (), by_distance);
+
+  std::vector<std::map<std::string, std::any>> rows;
+  rows.reserve (ranked.size ());
+  for (const auto &candidate : ranked)
+    {
+      const auto &entry = state->current_entries[candidate.index];
+      const auto surface_it = p_ctx.retrieval_surface_index.find (
+          entry.memory_id);
+      if (surface_it == p_ctx.retrieval_surface_index.end ()
+          || surface_it->second >= p_ctx.retrieval_surface_cache.size ())
+        {
+          return std::nullopt;
+        }
+      const auto &surface = p_ctx.retrieval_surface_cache[surface_it->second];
+      if ((surface.kind != "LONG_TERM" && surface.kind != "ASSOCIATION")
+          || surface.start_ts >= exclusion_ts)
+        {
+          continue;
+        }
+      rows.push_back (
+          { { "memory_id", entry.memory_id },
+            { "embedding_id", entry.embedding_id },
+            { "start_ts", surface.start_ts },
+            { "embedding", ToFloatVector (entry.embedding) },
+            { "source_id", surface.source_id } });
+    }
+  return rows;
 }
 
 std::optional<TurnSourceId>
@@ -490,9 +693,25 @@ ApplySupersessionDemotion (
       return;
     }
 
+  const double penalty_weight
+      = core::RetrievalSupersededMemoryPenalty (F, S, T);
+  auto apply_penalty = [&candidates, penalty_weight] (
+                           long long memory_id, double superseded_weight) {
+    auto it = candidates.find (memory_id);
+    if (it == candidates.end ())
+      {
+        return;
+      }
+    const double penalty
+        = penalty_weight * core::Clamp (superseded_weight, 0.0, 1.0);
+    it->second.superseded_penalty = std::max (
+        it->second.superseded_penalty, penalty);
+    it->second.score = std::max (0.0, it->second.score - penalty);
+  };
+
   std::vector<std::any> params;
   params.reserve (candidates.size ());
-  std::string values;
+  std::string placeholders;
   for (const auto &[memory_id, candidate] : candidates)
     {
       (void)candidate;
@@ -500,43 +719,30 @@ ApplySupersessionDemotion (
         {
           continue;
         }
-      if (!values.empty ())
+      if (!placeholders.empty ())
         {
-          values += ",";
+          placeholders += ",";
         }
-      values += "(?)";
+      placeholders += "?";
       params.push_back (memory_id);
     }
-  if (values.empty ())
+  if (placeholders.empty ())
     {
       return;
     }
 
   const auto rows = tx.Execute (
-      "WITH candidate(id) AS (VALUES " + values + ") "
       "SELECT a.target_memory_id AS memory_id, "
       "       MAX(COALESCE(a.weight, 0.0)) AS superseded_weight "
       "FROM associations a "
-      "JOIN candidate c ON c.id = a.target_memory_id "
       "WHERE a.edge_type = 'supersedes' "
+      "  AND a.target_memory_id IN (" + placeholders + ") "
       "GROUP BY a.target_memory_id",
       params);
-  const double penalty_weight
-      = core::RetrievalSupersededMemoryPenalty (F, S, T);
   for (const auto &row : rows)
     {
       const long long memory_id = AnyLongLong (row, "memory_id");
-      auto it = candidates.find (memory_id);
-      if (it == candidates.end ())
-        {
-          continue;
-        }
-      const double superseded_weight = core::Clamp (
-          AnyDouble (row, "superseded_weight"), 0.0, 1.0);
-      const double penalty = penalty_weight * superseded_weight;
-      it->second.superseded_penalty = std::max (
-          it->second.superseded_penalty, penalty);
-      it->second.score = std::max (0.0, it->second.score - penalty);
+      apply_penalty (memory_id, AnyDouble (row, "superseded_weight"));
     }
 }
 
@@ -684,126 +890,158 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
 
     {
       bool historical_knn_loaded = false;
-      try
+      start_profile_timing ();
+      if (auto current_knn_rows = LoadCurrentSeedRowsFromCache (
+              p_ctx, signal.embedding,
+              static_cast<long long> (exclusion_ts), seed_search_limit))
         {
-          start_profile_timing ();
-          auto current_knn_rows = tx.Execute (
-              "SELECT m.memory_id, cme.embedding_id, m.start_ts, "
-              "       cme.embedding, m.source_id "
-              "FROM ("
-              "  SELECT memory_id, embedding_id, embedding, distance "
-              "  FROM current_memory_embeddings "
-              "  WHERE embedding MATCH ? "
-              "    AND k = ?"
-              ") cme "
-              "JOIN memories m ON m.memory_id = cme.memory_id "
-              "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-              "  AND COALESCE(m.start_ts, 0) < ? "
-              "ORDER BY distance",
-              { ToFloatVector (signal.embedding),
-                static_cast<long long> (seed_search_limit),
-                static_cast<long long> (exclusion_ts) });
           historical_knn_loaded = historical_knn_loaded
-                                  || !current_knn_rows.empty ();
-          AppendUniqueRows (rows, std::move (current_knn_rows),
+                                  || !current_knn_rows->empty ();
+          AppendUniqueRows (rows, std::move (*current_knn_rows),
                             seen_seed_memory_ids);
-          profile_timing ("GraphRetrieve.seed_current_knn_sql",
+          profile_timing ("GraphRetrieve.seed_current_knn_cache",
                           section_start);
         }
-      catch (const std::exception &e)
+      else
         {
-          telemetry::LogDebug (
-              "cortext.graph_retrieval.current_knn_unavailable",
-              { telemetry::Attribute::String ("error", e.what ()) });
+          try
+            {
+              auto current_knn_rows = tx.Execute (
+                  "SELECT m.memory_id, cme.embedding_id, m.start_ts, "
+                  "       cme.embedding, m.source_id "
+                  "FROM ("
+                  "  SELECT memory_id, embedding_id, embedding, distance "
+                  "  FROM current_memory_embeddings "
+                  "  WHERE embedding MATCH ? "
+                  "    AND k = ?"
+                  ") cme "
+                  "JOIN memories m ON m.memory_id = cme.memory_id "
+                  "WHERE m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+                  "  AND COALESCE(m.start_ts, 0) < ? "
+                  "ORDER BY distance",
+                  { ToFloatVector (signal.embedding),
+                    static_cast<long long> (seed_search_limit),
+                    static_cast<long long> (exclusion_ts) });
+              historical_knn_loaded = historical_knn_loaded
+                                      || !current_knn_rows.empty ();
+              AppendUniqueRows (rows, std::move (current_knn_rows),
+                                seen_seed_memory_ids);
+              profile_timing ("GraphRetrieve.seed_current_knn_sql",
+                              section_start);
+            }
+          catch (const std::exception &e)
+            {
+              telemetry::LogDebug (
+                  "cortext.graph_retrieval.current_knn_unavailable",
+                  { telemetry::Attribute::String ("error", e.what ()) });
+            }
         }
-      try
+      start_profile_timing ();
+      if (auto historical_knn_rows = LoadHistoricalSeedRowsFromCache (
+              p_ctx, signal.embedding,
+              static_cast<long long> (exclusion_ts), seed_search_limit))
         {
-          start_profile_timing ();
-          auto historical_knn_rows = tx.Execute (
-              "SELECT m.memory_id, m.embedding_id, m.start_ts, e.embedding, "
-              "       m.source_id "
-              "FROM embeddings e "
-              "JOIN memories m ON m.embedding_id = e.embedding_id "
-              "WHERE e.embedding MATCH ? "
-              "  AND k = ? "
-              "  AND m.embedding_id IS NOT NULL "
-              "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-              "  AND COALESCE(m.start_ts, 0) < ? "
-              "ORDER BY distance",
-              { ToFloatVector (signal.embedding),
-                static_cast<long long> (seed_search_limit),
-                static_cast<long long> (exclusion_ts) });
           historical_knn_loaded = historical_knn_loaded
-                                  || !historical_knn_rows.empty ();
-          AppendUniqueRows (rows, std::move (historical_knn_rows),
+                                  || !historical_knn_rows->empty ();
+          AppendUniqueRows (rows, std::move (*historical_knn_rows),
                             seen_seed_memory_ids);
-          profile_timing ("GraphRetrieve.seed_historical_knn_sql",
+          profile_timing ("GraphRetrieve.seed_historical_knn_cache",
                           section_start);
         }
-      catch (const std::exception &e)
+      else
         {
-          telemetry::LogDebug (
-              "cortext.graph_retrieval.knn_unavailable",
-              { telemetry::Attribute::String ("error", e.what ()) });
+          try
+            {
+              auto historical_knn_rows = tx.Execute (
+                  "SELECT m.memory_id, m.embedding_id, m.start_ts, "
+                  "       e.embedding, m.source_id "
+                  "FROM embeddings e "
+                  "JOIN memories m ON m.embedding_id = e.embedding_id "
+                  "WHERE e.embedding MATCH ? "
+                  "  AND k = ? "
+                  "  AND m.embedding_id IS NOT NULL "
+                  "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+                  "  AND COALESCE(m.start_ts, 0) < ? "
+                  "ORDER BY distance",
+                  { ToFloatVector (signal.embedding),
+                    static_cast<long long> (seed_search_limit),
+                    static_cast<long long> (exclusion_ts) });
+              historical_knn_loaded = historical_knn_loaded
+                                      || !historical_knn_rows.empty ();
+              AppendUniqueRows (rows, std::move (historical_knn_rows),
+                                seen_seed_memory_ids);
+              profile_timing ("GraphRetrieve.seed_historical_knn_sql",
+                              section_start);
+            }
+          catch (const std::exception &e)
+            {
+              telemetry::LogDebug (
+                  "cortext.graph_retrieval.knn_unavailable",
+                  { telemetry::Attribute::String ("error", e.what ()) });
+            }
         }
 
       start_profile_timing ();
-      const auto seed_bounds = tx.Execute (
-          "SELECT COALESCE(MIN(m.memory_id), 0) AS min_memory_id, "
-          "       COALESCE(MAX(m.memory_id), 0) AS max_memory_id "
-          "FROM memories m "
-          "WHERE m.embedding_id IS NOT NULL "
-          "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-          "  AND COALESCE(m.start_ts, 0) < ?",
-          { static_cast<long long> (exclusion_ts) });
-      if (!historical_knn_loaded && !seed_bounds.empty ())
+      if (!historical_knn_loaded)
         {
-          const long long min_memory_id
-              = AnyLongLong (seed_bounds[0], "min_memory_id");
-          const long long max_memory_id
-              = AnyLongLong (seed_bounds[0], "max_memory_id");
-          if (min_memory_id > 0 && max_memory_id > min_memory_id)
+          const auto seed_bounds = tx.Execute (
+              "SELECT COALESCE(MIN(m.memory_id), 0) AS min_memory_id, "
+              "       COALESCE(MAX(m.memory_id), 0) AS max_memory_id "
+              "FROM memories m "
+              "WHERE m.embedding_id IS NOT NULL "
+              "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+              "  AND COALESCE(m.start_ts, 0) < ?",
+              { static_cast<long long> (exclusion_ts) });
+          if (!seed_bounds.empty ())
             {
-              const long long span = max_memory_id - min_memory_id + 1;
-              const long long sample_count = static_cast<long long> (
-                  std::max (1, seed_search_limit));
-              const long long stride = std::max (1LL, span / sample_count);
-              if (stride > 1)
+              const long long min_memory_id
+                  = AnyLongLong (seed_bounds[0], "min_memory_id");
+              const long long max_memory_id
+                  = AnyLongLong (seed_bounds[0], "max_memory_id");
+              if (min_memory_id > 0 && max_memory_id > min_memory_id)
                 {
-                  auto historical_rows = tx.Execute (
-                      "WITH RECURSIVE sample(target_id, n) AS ("
-                      "  SELECT ?1, 0 "
-                      "  UNION ALL "
-                      "  SELECT target_id + ?2, n + 1 FROM sample "
-                      "  WHERE n + 1 < ?3 AND target_id + ?2 <= ?4"
-                      "), targets(target_id) AS ("
-                      "  SELECT target_id FROM sample "
-                      "  UNION ALL "
-                      "  SELECT target_id + (?2 / 2) FROM sample "
-                      "  WHERE target_id + (?2 / 2) <= ?4"
-                      "), sampled_ids AS ("
-                      "  SELECT ("
-                      "    SELECT m.memory_id FROM memories m "
-                      "    WHERE m.memory_id >= targets.target_id "
-                      "      AND m.embedding_id IS NOT NULL "
-                      "      AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-                      "      AND COALESCE(m.start_ts, 0) < ?5 "
-                      "    ORDER BY m.memory_id ASC LIMIT 1"
-                      "  ) AS memory_id "
-                      "  FROM targets"
-                      ") "
-                      "SELECT m.memory_id, m.embedding_id, m.start_ts, "
-                      "       e.embedding, m.source_id "
-                      "FROM sampled_ids sid "
-                      "JOIN memories m ON m.memory_id = sid.memory_id "
-                      "JOIN embeddings e ON e.embedding_id = m.embedding_id "
-                      "WHERE sid.memory_id IS NOT NULL "
-                      "GROUP BY m.memory_id "
-                      "ORDER BY m.memory_id ASC",
-                      { min_memory_id, stride, sample_count, max_memory_id,
-                        static_cast<long long> (exclusion_ts) });
-                  AppendUniqueRows (rows, std::move (historical_rows),
-                                    seen_seed_memory_ids);
+                  const long long span = max_memory_id - min_memory_id + 1;
+                  const long long sample_count = static_cast<long long> (
+                      std::max (1, seed_search_limit));
+                  const long long stride
+                      = std::max (1LL, span / sample_count);
+                  if (stride > 1)
+                    {
+                      auto historical_rows = tx.Execute (
+                          "WITH RECURSIVE sample(target_id, n) AS ("
+                          "  SELECT ?1, 0 "
+                          "  UNION ALL "
+                          "  SELECT target_id + ?2, n + 1 FROM sample "
+                          "  WHERE n + 1 < ?3 AND target_id + ?2 <= ?4"
+                          "), targets(target_id) AS ("
+                          "  SELECT target_id FROM sample "
+                          "  UNION ALL "
+                          "  SELECT target_id + (?2 / 2) FROM sample "
+                          "  WHERE target_id + (?2 / 2) <= ?4"
+                          "), sampled_ids AS ("
+                          "  SELECT ("
+                          "    SELECT m.memory_id FROM memories m "
+                          "    WHERE m.memory_id >= targets.target_id "
+                          "      AND m.embedding_id IS NOT NULL "
+                          "      AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+                          "      AND COALESCE(m.start_ts, 0) < ?5 "
+                          "    ORDER BY m.memory_id ASC LIMIT 1"
+                          "  ) AS memory_id "
+                          "  FROM targets"
+                          ") "
+                          "SELECT m.memory_id, m.embedding_id, m.start_ts, "
+                          "       e.embedding, m.source_id "
+                          "FROM sampled_ids sid "
+                          "JOIN memories m ON m.memory_id = sid.memory_id "
+                          "JOIN embeddings e ON e.embedding_id = m.embedding_id "
+                          "WHERE sid.memory_id IS NOT NULL "
+                          "GROUP BY m.memory_id "
+                          "ORDER BY m.memory_id ASC",
+                          { min_memory_id, stride, sample_count, max_memory_id,
+                            static_cast<long long> (exclusion_ts) });
+                      AppendUniqueRows (rows, std::move (historical_rows),
+                                        seen_seed_memory_ids);
+                    }
                 }
             }
         }
@@ -842,8 +1080,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         }
       if (constructive_recall_enabled)
         {
-          (void)RefreshCandidateToCurrentSurface (tx, candidate,
-                                                  embedding_dim);
+          if (!RefreshCandidateFromProcessorSurface (
+                  p_ctx, candidate, embedding_dim))
+            {
+              (void)RefreshCandidateToCurrentSurface (tx, candidate,
+                                                      embedding_dim);
+            }
         }
       candidate.seed_score = core::Map01 (
           Cosine (signal.embedding, candidate.embedding));
@@ -943,8 +1185,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
             }
           if (constructive_recall_enabled)
             {
-              (void)RefreshCandidateToCurrentSurface (tx, candidate,
-                                                      embedding_dim);
+              if (!RefreshCandidateFromProcessorSurface (
+                      p_ctx, candidate, embedding_dim))
+                {
+                  (void)RefreshCandidateToCurrentSurface (
+                      tx, candidate, embedding_dim);
+                }
             }
           auto it_source = row.find ("source_id");
           if (it_source != row.end ()
@@ -1243,8 +1489,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                     }
                   if (constructive_recall_enabled)
                     {
-                      (void)RefreshCandidateToCurrentSurface (tx, candidate,
-                                                              embedding_dim);
+                      if (!RefreshCandidateFromProcessorSurface (
+                              p_ctx, candidate, embedding_dim))
+                        {
+                          (void)RefreshCandidateToCurrentSurface (
+                              tx, candidate, embedding_dim);
+                        }
                     }
                   const double gap_ms = std::max (
                       1.0, std::abs (
@@ -1348,8 +1598,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                     }
                   if (constructive_recall_enabled)
                     {
-                      (void)RefreshCandidateToCurrentSurface (tx, candidate,
-                                                              embedding_dim);
+                      if (!RefreshCandidateFromProcessorSurface (
+                              p_ctx, candidate, embedding_dim))
+                        {
+                          (void)RefreshCandidateToCurrentSurface (
+                              tx, candidate, embedding_dim);
+                        }
                     }
                   const int turn_distance = std::max (1, std::abs (delta));
                   const double gap_ms = std::max (
@@ -1386,6 +1640,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
 
   start_profile_timing ();
   ApplySupersessionDemotion (tx, candidates, F, S, T);
+  profile_timing ("GraphRetrieve.supersession_demotion", section_start);
+  start_profile_timing ();
   std::vector<Candidate> ranked;
   ranked.reserve (candidates.size ());
   for (auto &[id, candidate] : candidates)
@@ -1438,7 +1694,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
     {
       ranked.resize (static_cast<std::size_t> (output_limit));
     }
-  profile_timing ("GraphRetrieve.final_rank", section_start);
+  profile_timing ("GraphRetrieve.rank_candidates", section_start);
 
   std::unordered_map<long long, Eigen::VectorXf> out;
   out.reserve (ranked.size ());
@@ -1524,7 +1780,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                 tx, candidate.memory_id, reconstructed, blob_id,
                 static_cast<long long> (signal.timestamp), uncertainty,
                 "retrieval", source_confidence, context_score, policy,
-                &timings);
+                &timings, &context.GetProcessorContext ());
             const long long current_embedding_id
                 = LoadCurrentSurfaceEmbeddingId (tx, candidate.memory_id,
                                                  candidate.embedding_id);

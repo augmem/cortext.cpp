@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cortext/processor/processor_context.hpp"
 #include "cortext/store/store.hpp"
 #include <Eigen/Dense>
 #include <optional>
@@ -39,6 +40,7 @@ struct ReconstructionAppendTimings
 };
 
 bool Disabled ();
+bool CurrentSurfaceWritesDisabled ();
 
 std::optional<ReconstructionRecord>
 LoadLatestReconstruction (Store *store, long long memory_id);
@@ -84,7 +86,8 @@ AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,
                                    std::string_view trigger,
                                    double source_confidence = 1.0,
                                    double context_similarity = 0.0,
-                                   ReconstructionUpdatePolicy policy = {});
+                                   ReconstructionUpdatePolicy policy = {},
+                                   ProcessorContext *p_ctx = nullptr);
 
 long long
 AppendReconstructionWithEmbeddingUnchecked (
@@ -93,6 +96,7 @@ AppendReconstructionWithEmbeddingUnchecked (
     double uncertainty, std::string_view trigger,
     double source_confidence = 1.0, double context_similarity = 0.0,
     ReconstructionUpdatePolicy policy = {},
-    ReconstructionAppendTimings *timings = nullptr);
+    ReconstructionAppendTimings *timings = nullptr,
+    ProcessorContext *p_ctx = nullptr);
 
 } // namespace cortext::operations::constructive_recall
