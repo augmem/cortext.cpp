@@ -1,5 +1,6 @@
 // tests/state_persistence.test.cpp
 #include <any>
+#include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -1229,6 +1230,9 @@ TEST_CASE ("Working memory persistence falls back to last access when the "
 TEST_CASE ("Flush restores working-memory persistence state after commit failure",
            "[state_persistence][working_memory][flush][regression]")
 {
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const std::size_t baseline_cache_count = cache::RegistrySizeForTest ();
   auto sqlite = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
   cortext::testing::InitializeCoreSchema (*sqlite);
   auto store = std::make_shared<FailCommitStore> (sqlite);
@@ -1245,6 +1249,8 @@ TEST_CASE ("Flush restores working-memory persistence state after commit failure
   signal.source_id = "flush/source";
   processor.Process (signal);
   REQUIRE (captured != nullptr);
+  REQUIRE (cache::RegistrySizeForTest () == baseline_cache_count + 1);
+  REQUIRE (cache::Find (*captured) != nullptr);
 
   ProcessorContext::WMSlot slot;
   slot.embedding = signal.embedding;
@@ -1268,6 +1274,13 @@ TEST_CASE ("Flush restores working-memory persistence state after commit failure
   REQUIRE (captured->wm_slots[0].persisted_signal_record_count == 0);
   REQUIRE (captured->wm_slots[0].signal_records_dirty);
   REQUIRE (captured->wm_slots_dirty);
+  REQUIRE (cache::RegistrySizeForTest () == baseline_cache_count + 1);
+  REQUIRE (cache::Find (*captured) != nullptr);
+
+  signal.timestamp = 2000;
+  REQUIRE_NOTHROW (processor.Process (signal));
+  REQUIRE (cache::RegistrySizeForTest () == baseline_cache_count + 1);
+  REQUIRE (cache::Find (*captured) != nullptr);
 
   REQUIRE_NOTHROW (processor.Flush ());
   const auto rows = sqlite->Execute (

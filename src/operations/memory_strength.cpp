@@ -1,4 +1,5 @@
 #include "cortext/operations/memory_strength.hpp"
+#include "historical_surface_search_cache_internal.hpp"
 #include <algorithm>
 #include <limits>
 #include <cstdint>
@@ -658,6 +659,10 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
     {
       p_ctx.RemoveRetrievalSurface (memory_id);
     }
+  // The embedding deletion phase can preserve rows still referenced by other
+  // owners. Drop the private accelerator rather than guess at post-transaction
+  // membership; the exact SQL path remains authoritative after eviction.
+  historical_surface_search_cache_internal::Erase (p_ctx);
 
   const auto reconstruction_embedding_select_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),
@@ -810,6 +815,13 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   context.AddOperationTiming ("MemoryStrength.eviction_delete_objstore_blobs_sql",
                               ElapsedMillis (objstore_delete_start));
 
+  if (!evictable_embedding_ids.empty ())
+    {
+      // Some candidates may remain referenced after eviction. Invalidate the
+      // private population rather than guessing which conditional deletes won.
+      historical_surface_search_cache_internal::Erase (
+          context.GetProcessorContext ());
+    }
   const auto embedding_delete_start = SteadyClock::now ();
   ForEachChunk (evictable_embedding_ids.size (),
                 [&] (std::size_t begin, std::size_t end) {

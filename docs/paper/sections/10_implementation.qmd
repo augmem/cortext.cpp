@@ -157,11 +157,14 @@ features, and no bundled chat renderer is part of this claim.
 
 ## Computational Complexity
 
-The dominant per-signal cost is retrieval over the durable SQLite embedding and
-association surface. With `N` stored memories, naive vector seed discovery is
-`O(N)` before sqlite-vec pruning; graph expansion is bounded by F/S/T-derived
-row and fanout limits. Working-memory and soft-anchor updates operate over
-bounded live state and remain independent of total store size.
+The dominant per-signal cost is exact candidate discovery over the durable
+embedding and association surface. With `N` stored memories and embedding
+dimension `d`, the current write path computes exact current/base distances in
+`O(Nd)` and performs `O(N)` bounded-top-k selection before writing a
+knob-capped number of supersession edges. Graph expansion after seed discovery
+is bounded by F/S/T-derived row and fanout limits. Working-memory and
+soft-anchor updates operate over bounded live state and remain independent of
+total store size.
 
 The safety checks preserve these bounds: bind-result validation is one branch
 per existing parameter, working-memory decay adds one timestamp update per
@@ -169,8 +172,19 @@ bounded slot, and graph writes perform only O(1) cache invalidation. None adds
 a per-signal database query or eager graph reconstruction.
 
 The retained long-horizon optimization target is that mean process latency
-stays approximately flat as the database grows. Recent profiling moved the
-largest known costs out of per-row reconstruction, repeated parse work, and
-unbounded deleted feature paths. Further gains now primarily depend on SQLite
-row-materialization overhead, vector blob copies, and vector-index internals
-rather than hidden decoder calls.
+stays approximately flat as the database grows. The July 2026 exact-replay
+audit did not prove that target. At the end of the 2,636-event replay, the
+private historical surface contained 6,762 embedding entries but only 6,622
+bit-identical vector groups. Exact grouping could therefore remove at most 140
+distance evaluations (2.0704%); 97.9296% of the population still had to be
+evaluated. A non-selecting previous-query triangle-bound probe likewise
+evaluated 99.975% of historical candidates on average over 1,000 events and
+99.804% in the final 100.
+
+The retained implementation removes repeated SQL, row decoding, duplicate
+ranking, and redundant query-norm work, but the exact current/base population
+and tie contract leave candidate discovery linear in durable history on this
+corpus. Further asymptotic gains require an approved change to candidate
+semantics, consolidation/tiering/eviction semantics, storage/index backend, or
+public state ownership. They do not depend on hidden decoder calls, and the
+current result must not be described as flat storage or flat throughput.

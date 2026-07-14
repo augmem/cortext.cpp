@@ -5090,12 +5090,14 @@ this claim.
 
 ## Computational Complexity
 
-The dominant per-signal cost is retrieval over the durable SQLite
-embedding and association surface. With `N` stored memories, naive
-vector seed discovery is `O(N)` before sqlite-vec pruning; graph
-expansion is bounded by F/S/T-derived row and fanout limits.
-Working-memory and soft-anchor updates operate over bounded live state
-and remain independent of total store size.
+The dominant per-signal cost is exact candidate discovery over the
+durable embedding and association surface. With `N` stored memories and
+embedding dimension `d`, the current write path computes exact
+current/base distances in `O(Nd)` and performs `O(N)` bounded-top-k
+selection before writing a knob-capped number of supersession edges.
+Graph expansion after seed discovery is bounded by F/S/T-derived row and
+fanout limits. Working-memory and soft-anchor updates operate over
+bounded live state and remain independent of total store size.
 
 The safety checks preserve these bounds: bind-result validation is one
 branch per existing parameter, working-memory decay adds one timestamp
@@ -5104,11 +5106,25 @@ invalidation. None adds a per-signal database query or eager graph
 reconstruction.
 
 The retained long-horizon optimization target is that mean process
-latency stays approximately flat as the database grows. Recent profiling
-moved the largest known costs out of per-row reconstruction, repeated
-parse work, and unbounded deleted feature paths. Further gains now
-primarily depend on SQLite row-materialization overhead, vector blob
-copies, and vector-index internals rather than hidden decoder calls.
+latency stays approximately flat as the database grows. The July 2026
+exact-replay audit did not prove that target. At the end of the
+2,636-event replay, the private historical surface contained 6,762
+embedding entries but only 6,622 bit-identical vector groups. Exact
+grouping could therefore remove at most 140 distance evaluations
+(2.0704%); 97.9296% of the population still had to be evaluated. A
+non-selecting previous-query triangle-bound probe likewise evaluated
+99.975% of historical candidates on average over 1,000 events and
+99.804% in the final 100.
+
+The retained implementation removes repeated SQL, row decoding,
+duplicate ranking, and redundant query-norm work, but the exact
+current/base population and tie contract leave candidate discovery
+linear in durable history on this corpus. Further asymptotic gains
+require an approved change to candidate semantics,
+consolidation/tiering/eviction semantics, storage/index backend, or
+public state ownership. They do not depend on hidden decoder calls, and
+the current result must not be described as flat storage or flat
+throughput.
 
 # Performance Optimization
 
@@ -5149,9 +5165,11 @@ configuration choices.
 
 The engine is optimized around three constraints:
 
--   **Bounded online work:** F/S/T-derived limits cap retrieval fanout,
-    reconstruction history, consolidation breadth, working-memory size,
-    and graph updates.
+-   **Bounded online outputs:** F/S/T-derived limits cap retrieval
+    fanout, reconstruction history, consolidation breadth,
+    working-memory size, graph updates, and written supersession edges.
+    These caps do not by themselves bound exact candidate discovery as
+    stored history grows.
 -   **Current-state retrieval surfaces:** retrieval scores the current
     durable representative for each memory instead of scanning every
     historical embedding version.
@@ -5159,9 +5177,10 @@ The engine is optimized around three constraints:
     after the ranked packet is selected, not while discovering
     candidates.
 
-This keeps latency tied to selected memories, bounded graph
-neighborhoods, and SQLite/vector-index costs rather than source text
-length or hidden decoder calls.
+This keeps post-selection latency tied to selected memories and bounded
+graph neighborhoods rather than source text length or hidden decoder
+calls. Exact write-time and retrieval-seed discovery can still scale
+with the durable embedding surface.
 
 ## Implemented Optimizations
 
@@ -5224,6 +5243,41 @@ payloads</td>
 <td>durable payload identity is preserved</td>
 </tr>
 <tr>
+<td>exact durable-neighbor ranking</td>
+<td>maintain private current/base embedding surfaces in a process-wide
+lifecycle registry, including signal-only rows that affect the
+sqlite-vec population; rank into typed borrowed/owned candidates; reuse
+the query norm across exact cosine checks</td>
+<td>the registry follows processor teardown across sequential thread
+migration and mirrors authoritative SQL write decisions; the same
+candidate population, K, filters, tie order, cosine results, thresholds,
+and supersession edges are retained; SQL remains the fallback and no
+public header or API layout changes</td>
+</tr>
+<tr>
+<td>graph retrieval</td>
+<td>share certified exact neighbor rows from the immediately preceding
+write, refresh current representatives from the processor surface, and
+apply supersession demotion from a transactionally coherent fanout
+cache</td>
+<td>the SQL paths remain fallbacks; retrieved order and penalties remain
+identical</td>
+</tr>
+<tr>
+<td>rollback snapshots</td>
+<td>detach rebuildable durable caches before copying processor state and
+reload them after a failed transaction</td>
+<td>generic rollback still restores durable and volatile processor state
+exactly</td>
+</tr>
+<tr>
+<td>synaptic tagging</td>
+<td>use indexed temporal candidate supersets with boundary ties before
+applying the original exact score and order</td>
+<td>the same nearest source-backed memories are tagged without a
+whole-source group scan</td>
+</tr>
+<tr>
 <td>live replay ingress</td>
 <td>internal replay path can skip per-event hydration when no probe
 needs it</td>
@@ -5248,6 +5302,170 @@ saved baseline. At 1,000-event progress checkpoints,
 81.6-303.6 ms in the baseline. The verification artifact is
 `docs/paper/artifacts/graph_profile/full_msc_verify_final/summary_slim.json`.
 
+## Durable-Ingestion Scaling Audit
+
+On 2026-07-14, a fixed 2,636-event private replay was used to profile
+the sequential durable-ingestion path. Durable artifacts contain only
+aggregate timings, counts, and cryptographic behavior/database digests;
+no message text, identifiers, or local paths are published. The baseline
+and every retained candidate produced the same event-by-event behavior
+digest and the same canonical logical database digest, ending with 2,657
+memories, 2,657 signals, and 57,643 associations.
+
+The exact origin/main baseline averaged 1,022.552 ms of process time and
+2,720,276 ms wall time. Its final-five/first-five 100-event-window
+ratios were 9.808 for `MemoryStorage`, 9.821 for supersession-edge work,
+9.318 for process latency, and 0.101 for sequential messages per second.
+
+The retained Candidate 34 computes the typed supersession query norm
+once and reuses the exact `double` across the candidate loop. It
+produced the same event-by-event behavior digest
+`4e728353eab989086481217cd140930875b112dcccb1fe372acdefc9b16c6bb8` and
+canonical logical-database digest
+`a2a538e619b9b10b1a5f2892993a168e7b0f8be31cd0eaa912937f9d26a2ddfe`. The
+sanitized, content-bound aggregate supporting this retained candidate is
+`artifacts/flat_storage_cost/candidate_34_summary.json`; raw profiles
+and databases remain private proof inputs. The final current-source run,
+after making the private pre-filter population mirror every runtime
+reconstruction and working-memory embedding and repairing restart
+hydration of the latest reconstruction, including base-only ablation
+parity, averaged 8.560 ms process time, 14.551 ms total latency, and
+39,338 ms wall time. It had the same behavior/database digests and
+57,643/2,657/2,657 association/memory/signal counts. Its fixed gate
+results were:
+
+Earlier Candidate 34 timing samples omitted runtime reconstruction
+embeddings from the private pre-filter mirror. Their behavior and
+database digests remain valid, but their scan-cost measurements are
+superseded by this corrected run.
+
+<table>
+<thead>
+<tr>
+<th>Gate metric</th>
+<th style="text-align: right;">Candidate 34 observed</th>
+<th style="text-align: right;">Required</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MemoryStorage</code> final-five/first-five</td>
+<td style="text-align: right;">2.063758</td>
+<td style="text-align: right;">≤ 1.05</td>
+</tr>
+<tr>
+<td><code>MemoryStorage</code> Theil–Sen slope (ms/message)</td>
+<td style="text-align: right;">0.000684779</td>
+<td style="text-align: right;">≤ 0.01</td>
+</tr>
+<tr>
+<td><code>MemoryStorage</code> bootstrap 95% upper slope</td>
+<td style="text-align: right;">0.000703932</td>
+<td style="text-align: right;">≤ 0.02</td>
+</tr>
+<tr>
+<td>supersession final-five/first-five</td>
+<td style="text-align: right;">2.528664</td>
+<td style="text-align: right;">≤ 1.05</td>
+</tr>
+<tr>
+<td>supersession Theil–Sen slope (ms/message)</td>
+<td style="text-align: right;">0.000686189</td>
+<td style="text-align: right;">≤ 0.01</td>
+</tr>
+<tr>
+<td>supersession bootstrap 95% upper slope</td>
+<td style="text-align: right;">0.000694684</td>
+<td style="text-align: right;">≤ 0.02</td>
+</tr>
+<tr>
+<td>process final-five/first-five</td>
+<td style="text-align: right;">1.739414</td>
+<td style="text-align: right;">0.90–1.10</td>
+</tr>
+<tr>
+<td>messages/s final-five/first-five</td>
+<td style="text-align: right;">0.692262</td>
+<td style="text-align: right;">0.90–1.10</td>
+</tr>
+</tbody>
+</table>
+
+The small absolute slopes pass their loose ceilings, but both storage
+ratios and both throughput ratios fail. Candidate 34 is therefore a
+material improvement over the baseline and earlier exact candidates,
+**not** proof of flat storage cost or flat end-to-end throughput.
+
+A separate current-source 1,000-event durable SQLite-profile sensitivity
+run used 50-event audit windows. It matched the established 1,000-event
+behavior and logical-database digests and ended with 19,845
+associations, 1,021 memories, and 1,021 signals. The final
+current-source run also failed the ratio gates: 1.633813 for
+`MemoryStorage`, 2.070751 for supersession, 1.414776 for process
+latency, and 0.844665 for messages/s. This confirms that the non-flat
+conclusion is not an artifact of the realtime SQLite benchmark profile.
+
+Explicit consolidation required a separate lifecycle proof because force
+persistence broadly prunes and rewrites embedding rows. Candidate 34 now
+rebuilds the historical search registry from authoritative SQL only
+after a successful force commit; a failed commit restores the
+rolled-back registry. On the same 1,500-message prefix with forced
+consolidations at messages 750 and 1,500, the exact pre-repair
+SQL-fallback tree and the repaired tree produced the same event-behavior
+digest
+`a86d5aa3ed1ae945a794fd6b071f3d80bdada008a66cc2076313d7da404c6a5a` and
+logical-database digest
+`4751e7d7b6711d7e968ff7c31761150a22fab9735dbd4c961b3227f4bfa3bf81`.
+Across the 750 messages after the midpoint consolidation, mean process
+time was 8.098 ms with the rebuild versus 496.352 ms on the fallback;
+mean `MemoryStorage` time was 1.117 versus 485.853 ms, and total replay
+wall time was 19,586 versus 388,127 ms. A repaired full 2,636-message
+midpoint run also completed two consolidations in 38,929 ms and retained
+a 10.088 ms post-midpoint mean process time. The corresponding full
+pre-repair comparator was intentionally stopped incomplete after 1,906
+messages because the demonstrated fallback made it disproportionate; it
+has no final digest or audit and is not counted as full baseline
+evidence.
+
+The fixed diminishing-returns audit then evaluated three distinct
+behavior-exact, database-exact, warning-clean full-corpus changes:
+caching target norms, retaining typed-container capacity, and
+serializing the SQL query only when fallback was used. All three missed
+every predeclared flatness-breakthrough threshold and were reverted.
+Direct validated append and reusable assembly scratch also regressed at
+their bounded exact gates. Chronological blocks, a sparse grid, a
+matrix-vector kernel, persistent rank populations, rank refill,
+cross-operation exact memoization, and previous-query triangle bounds
+had already failed their exact gates or feasibility conditions.
+
+At 2,636 events, the historical surface held 6,762 entries but 6,622
+exact vector groups, so grouping removes only 140 evaluations (2.0704%).
+The triangle-bound probe evaluated 99.975% of 256-dimensional candidates
+on average over 1,000 events and 99.804% in its final 100. Under the
+current observable candidate semantics, the retained scan remains
+`O(Nd)` on this corpus. Another narrow constant-factor repair is not
+expected to flatten it. Changing the candidate contract,
+consolidation/tiering/eviction semantics, storage/index backend, public
+processor-state ownership, or fixed proof gate requires separate
+approval.
+
+## Standard Eviction-Frontier Estimate
+
+The standard file-backed pressure gate is 500,000,000 bytes. Exact
+databases occupied 10,014,720 bytes at 500 messages, 18,169,856 bytes at
+1,000, and 48,857,088 bytes at 2,636. The full-span storage slope
+projects the gate at approximately 27,445 messages; the observed
+interval slopes give a planning range of roughly 26,700–30,500 messages.
+
+Projecting Candidate 34’s corrected post-warmup trends to 27,445
+messages gives 89.8 ms of engine process time (11.1 writes/s) and 103.7
+ms sequential end-to-end latency (9.6 messages/s). This is a
+pre-frontier estimate extrapolated about 10.4 times beyond the measured
+corpus, not a direct run or post-eviction claim. Storage pressure only
+permits eviction: a memory must also satisfy the consolidation-age and
+strength predicates. The measured corpus has `last_consolidation_ts=0`,
+so it would not evict at the pressure frontier as-is.
+
 ## Verification Gates
 
 The optimization and cutover work is gated by:
@@ -5268,12 +5486,32 @@ cmake --build build/codex-hardcut-check -j
 
 Those hard-cutover commands historically passed **429 test cases** and
 **2,489 assertions** in the broad filter and **5 test cases** and **16
-assertions** in the targeted graph/reconstruction/state filter. After
-the July 12 safety work, the current warnings-as-errors debug tree
-passed the complete default native suite with **509 test cases** and
-**4,510 assertions** in 483.53 seconds. Python validation, Go tests and
+assertions** in the targeted graph/reconstruction/state filter. The July
+12 safety tree passed the complete default native suite with **509 test
+cases** and **4,510 assertions**, plus Python validation, Go tests and
 vet, Dart analysis and tests, the Node addon build, and the WebAssembly
-bundle build also passed.
+bundle build. Candidate 34 separately completed a warning-clean native
+build, passed the complete registered CTest suite (1/1), matched the
+retained exact behavior and logical-database digests at 500 and 2,636
+events, and matched the established 1,000-event digests under the
+durable SQLite profile. After integration onto the current
+runtime-safety branch, the combined tree passed the complete registered
+CTest suite (1/1) and the focused rollback, cache, state-persistence,
+memory-storage, graph-retrieval, graph-cache, and reconsolidation
+groups. A fresh 500-event comparison against the exact pre-integration
+branch head produced the same event-behavior digest, the same canonical
+logical-database digest, and the same 9,091/521/521
+association/memory/signal counts. Mean process latency was 9.492 ms on
+the combined tree versus 47.846 ms on the control, and mean sequential
+end-to-end latency was 17.297 versus 55.919 ms. The 500-event comparison
+is an integration equivalence and bounded performance check, not a
+flatness result; the full audit above remains the source of truth for
+non-flat storage cost and throughput. The merged rollback path also has
+an injected failed-`Flush()` regression: it asserts that working-memory
+dirty state and the private historical-search registry are restored,
+then performs a normal write before any successful flush to prove that
+the exact accelerator remains available during the previously untested
+post-failure interval.
 
 ## Remaining Bottlenecks
 
@@ -5336,10 +5574,11 @@ outside the repository. Recommended reported metrics are:
 </tbody>
 </table>
 
-The hard-cut branch is therefore optimized enough to resume
-product-quality experiments, but not declared theoretically optimal.
-Further gains should come from profiling the retained
-SQLite/vector/object-store path rather than rebuilding deleted decoder
+The hard-cut branch is therefore suitable for continued product-quality
+experiments, but the measured durable-ingestion path is explicitly
+non-flat. Further asymptotic gains require an approved semantics,
+lifecycle, backend, or state-ownership change rather than another
+unproven narrow hot-loop rewrite or the restoration of deleted decoder
 features.
 
 # Conclusion and Future Directions

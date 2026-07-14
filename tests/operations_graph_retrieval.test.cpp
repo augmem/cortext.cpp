@@ -1,4 +1,5 @@
 #include "test_helpers.hpp"
+#include "../src/operations/constructive_recall_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -8,6 +9,7 @@
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
+#include <cortext/store/utils.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -488,6 +490,141 @@ TEST_CASE ("Graph retrieval KNN searches current memory surface",
            != out.candidate_memory_ids.end ());
   REQUIRE (std::find (selected.begin (), selected.end (), current_embedding_id)
            != selected.end ());
+}
+
+TEST_CASE ("Graph retrieval reloads latest reconstruction when current writes "
+           "are disabled",
+           "[operations][graph][retrieval][constructive_recall][restart]")
+{
+  cortext::testing::ScopedEnvVar disable_current (
+      "CORTEXT_DISABLE_CURRENT_MEMORY_SURFACE_WRITES", "1");
+  if (!operations::constructive_recall::CurrentSurfaceWritesDisabled ())
+    {
+      SKIP ("current-surface write hook is disabled in this build");
+    }
+  cortext::testing::ScopedEnvVar reconstruction_interval (
+      "CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS", "999999999");
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SeedMemory (*store, 10, 100, UnitVec (2), 1000);
+  SeedMemory (*store, 20, 200, VectorWithCosineToDim0 (0.90f), 1000);
+  auto reconstruction_tx = store->Begin ();
+  const long long reconstruction_id
+      = operations::constructive_recall::AppendReconstructionWithEmbedding (
+          *reconstruction_tx, 10, UnitVec (0), {}, 1500, 0.1, "retrieval",
+          1.0, 1.0);
+  REQUIRE (reconstruction_id > 0);
+  reconstruction_tx->Commit ();
+  const auto latest_rows = store->Execute (
+      "SELECT embedding_id FROM memory_reconstructions "
+      "WHERE reconstruction_id = ?",
+      { reconstruction_id });
+  REQUIRE (latest_rows.size () == 1);
+  const long long latest_embedding_id = cortext::store::AnyToLongLong (
+      latest_rows[0].at ("embedding_id")).value_or (0);
+  REQUIRE (latest_embedding_id > 0);
+  REQUIRE (store->Execute (
+               "SELECT 1 FROM current_memory_embeddings WHERE memory_id = ?",
+               { 10LL })
+               .empty ());
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  // Construction is the restart boundary: it reloads processor surfaces from
+  // the durable base/current/reconstruction tables.
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  operations::retrieval_trace::ClearLastRankedCandidates ();
+  const auto out = processor.Process (MakeSignal (UnitVec (0), 2000));
+  const auto ranked = operations::retrieval_trace::GetLastRankedCandidates ();
+  const auto target = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 10LL;
+      });
+  const auto competitor = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 20LL;
+      });
+  REQUIRE (target != ranked.end ());
+  REQUIRE (competitor != ranked.end ());
+  REQUIRE (target->embedding_id == latest_embedding_id);
+  REQUIRE (target->score > competitor->score);
+  REQUIRE_FALSE (out.candidate_memory_ids.empty ());
+  REQUIRE (out.candidate_memory_ids.front () == 10LL);
+}
+
+TEST_CASE ("Graph retrieval reloads base embedding when constructive recall is "
+           "disabled",
+           "[operations][graph][retrieval][constructive_recall][restart][ablation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 101, UnitVec (1), 1250);
+  SeedMemory (*store, 20, 200, VectorWithCosineToDim0 (0.90f), 1000);
+  auto reconstruction_tx = store->Begin ();
+  const long long reconstruction_id
+      = operations::constructive_recall::AppendReconstructionWithEmbedding (
+          *reconstruction_tx, 10, UnitVec (2), {}, 1500, 0.1, "retrieval",
+          1.0, 1.0);
+  REQUIRE (reconstruction_id > 0);
+  reconstruction_tx->Commit ();
+  cortext::testing::SeedCurrentMemoryEmbeddingV2 (*store, 10, 101);
+
+  const auto latest_rows = store->Execute (
+      "SELECT embedding_id FROM memory_reconstructions "
+      "WHERE reconstruction_id = ?",
+      { reconstruction_id });
+  REQUIRE (latest_rows.size () == 1);
+  const long long latest_embedding_id = cortext::store::AnyToLongLong (
+      latest_rows[0].at ("embedding_id")).value_or (0);
+  REQUIRE (latest_embedding_id > 0);
+  REQUIRE (latest_embedding_id != 100LL);
+  REQUIRE (latest_embedding_id != 101LL);
+
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  if (!operations::constructive_recall::Disabled ())
+    {
+      SKIP ("constructive-recall disable hook is disabled in this build");
+    }
+  const auto authoritative
+      = operations::constructive_recall::LoadCurrentEmbedding (
+          store.get (), 10, 100, kEmbeddingDim);
+  REQUIRE (authoritative.has_value ());
+  REQUIRE ((*authoritative - UnitVec (0)).norm () < 1e-5f);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  operations::retrieval_trace::ClearLastRankedCandidates ();
+  const auto out = processor.Process (MakeSignal (UnitVec (0), 2000));
+  const auto ranked = operations::retrieval_trace::GetLastRankedCandidates ();
+  const auto target = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 10LL;
+      });
+  const auto competitor = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 20LL;
+      });
+  REQUIRE (target != ranked.end ());
+  REQUIRE (competitor != ranked.end ());
+  REQUIRE (target->embedding_id == 100LL);
+  REQUIRE (target->score > competitor->score);
+  REQUIRE_FALSE (out.candidate_memory_ids.empty ());
+  REQUIRE (out.candidate_memory_ids.front () == 10LL);
 }
 
 TEST_CASE ("Graph retrieval returns refreshed output after reconstruction",
