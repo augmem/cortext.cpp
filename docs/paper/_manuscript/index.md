@@ -2189,11 +2189,22 @@ accounting use separate timestamps so repeated maintenance passes charge
 each elapsed interval once without making an untouched slot appear
 recently accessed:
 
-    Δt_decay ← max(0, now_s() − strength_ts)
-    strength ← max(strength_floor(F,S,T),
-                   strength − maintenance_cost_per_memory × Δt_decay)
-    strength_ts ← max(strength_ts, now_s())
+    Δt_decay ← now_s() − strength_ts
+    if Δt_decay > 0:
+      strength ← max(strength_floor(F,S,T),
+                     strength − maintenance_cost_per_memory × Δt_decay)
+      strength_ts ← now_s()
     # last_ts changes only on chunking, rehearsal, or insertion
+
+The active floor is applied only while charging positive elapsed time. A
+same-time or out-of-order signal therefore cannot recharge a slot that
+was legitimately persisted below the current floor under an earlier knob
+setting.
+
+Persisted working-memory rows mirror `strength_ts` as
+`strength_updated_at`. Load-time decay advances the same timestamp and
+leaves changed slot metadata dirty so the next normal process persists
+both values.
 
 The manifold_complexity is defined as a normalized local variability
 proxy (see Appendix B): manifold_complexity ← clamp((1 −
@@ -3496,8 +3507,11 @@ boundaries, interrupts, candidate totals, threshold and effective-focus
 sums, and final memory, association, and embedding counts. The observed
 throughput difference is within run-to-run variation. This comparison
 covers the core operation and persistence loop with synthetic
-embeddings, not model inference or language-runtime overhead; the
-implemented checks add no per-signal query or eager graph rebuild.
+embeddings, not model inference or language-runtime overhead. At that
+measured head, the implemented checks added no per-signal query or eager
+graph rebuild. The later passive-decay durability repair adds at most
+one bounded memory-row update per changed live slot during normal
+persistence and is outside this historical measurement.
 
 Separately, the July 8 retention work was run through the normalized
 memory-eval smoke slice with all configured benchmark adapters, using
@@ -5100,10 +5114,12 @@ fanout limits. Working-memory and soft-anchor updates operate over
 bounded live state and remain independent of total store size.
 
 The safety checks preserve these bounds: bind-result validation is one
-branch per existing parameter, working-memory decay adds one timestamp
-update per bounded slot, and graph writes perform only O(1) cache
-invalidation. None adds a per-signal database query or eager graph
-reconstruction.
+branch per existing parameter, working-memory decay advances one
+timestamp per bounded slot and schedules at most one memory-row update
+per changed slot during normal persistence, and graph writes perform
+only O(1) cache invalidation. None adds a store-size-dependent query or
+eager graph reconstruction; working-memory persistence remains bounded
+by the configured live-slot capacity.
 
 The retained long-horizon optimization target is that mean process
 latency stays approximately flat as the database grows. The July 2026

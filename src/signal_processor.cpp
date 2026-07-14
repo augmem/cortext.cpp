@@ -12,6 +12,7 @@
 #include "cortext/store/utils.hpp"
 #include "operations/constructive_recall_internal.hpp"
 #include "operations/historical_surface_search_cache_internal.hpp"
+#include "working_memory_time_internal.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1783,12 +1784,17 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
           // DB stores milliseconds, convert to seconds for last_ts
           const auto ts_ms = ExtractInt64 (row, "last_access", now_ms);
           slot.last_ts = static_cast<double> (ts_ms) / 1000.0;
-          const auto strength_ts_ms
+          const auto persisted_strength_ts_ms
               = ExtractInt64 (row, "strength_updated_at", ts_ms);
+          const auto strength_ts_ms = persisted_strength_ts_ms > 0
+                                          ? persisted_strength_ts_ms
+                                          : ts_ms;
           slot.strength_ts = static_cast<double> (strength_ts_ms) / 1000.0;
           slot.start_ts = ExtractInt64 (row, "start_ts", 0);
 
           // Apply time-based decay
+          const double strength_before = slot.strength;
+          const double strength_ts_before = slot.strength_ts;
           const double now_s = static_cast<double> (now_ms) / 1000.0;
           const double elapsed = now_s - slot.strength_ts;
           if (elapsed > 0)
@@ -1796,12 +1802,11 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
               slot.strength
                   = std::max (strength_floor,
                               slot.strength - cost_per_slot * elapsed);
+              slot.strength_ts = now_s;
             }
-          else
-            {
-              slot.strength = std::max (strength_floor, slot.strength);
-            }
-          slot.strength_ts = std::max (slot.strength_ts, now_s);
+          const bool metadata_changed
+              = slot.strength != strength_before
+                || slot.strength_ts != strength_ts_before;
 
           // Load extended metadata
           slot.n_signals = static_cast<int> (ExtractInt64 (row, "n_signals", 1));
@@ -1899,7 +1904,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
             }
 
           slot.persisted_signal_record_count = slot.signal_records.size ();
-          slot.metadata_dirty = false;
+          slot.metadata_dirty = metadata_changed;
           slot.embedding_dirty = false;
           slot.signal_records_dirty = false;
           ctx.wm_slots.push_back (std::move (slot));
@@ -2830,7 +2835,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
   bool all_slots_clean = true;
 
   // Upsert current slots as MEMORIES with kind='WORKING'. Clean slots are
-  // left untouched; passive decay is recovered from last_access on reload.
+  // left untouched; passive maintenance marks changed metadata dirty.
   for (auto &slot : context_->wm_slots)
     {
       std::string failure_stage = "slot_precheck";
@@ -2859,10 +2864,10 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
 
       try
         {
-          const auto ts_ms = static_cast<int64_t> (slot.last_ts * 1000.0);
-          const auto strength_ts_ms = static_cast<long long> (
-              (slot.strength_ts > 0.0 ? slot.strength_ts : slot.last_ts)
-              * 1000.0);
+          const auto ts_ms
+              = internal::WorkingMemorySecondsToMillis (slot.last_ts);
+          const auto strength_ts_ms = internal::WorkingMemorySecondsToMillis (
+              slot.strength_ts > 0.0 ? slot.strength_ts : slot.last_ts);
           const auto slot_created_at
               = slot.start_ts > 0
                     ? static_cast<long long> (slot.start_ts)
