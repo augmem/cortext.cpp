@@ -1,5 +1,5 @@
 #include "cortext/operations/reconsolidation.hpp"
-
+#include "historical_surface_search_cache_internal.hpp"
 #include "association_fanout_cache_internal.hpp"
 #include "constructive_recall_internal.hpp"
 #include "neuromodulator_internal.hpp"
@@ -66,7 +66,8 @@ void
 RefreshProcessorSurfaces (Transaction &tx, ProcessorContext *p_ctx,
                           long long memory_id, long long old_embedding_id,
                           long long new_embedding_id,
-                          const Eigen::VectorXf &embedding)
+                          const Eigen::VectorXf &embedding,
+                          bool current_surface_written)
 {
   if (!p_ctx)
     {
@@ -123,6 +124,13 @@ RefreshProcessorSurfaces (Transaction &tx, ProcessorContext *p_ctx,
       entry.embedding = embedding;
       entry.embedding_norm = embedding.norm ();
     }
+  if (current_surface_written)
+    {
+      historical_surface_search_cache_internal::UpsertCurrent (
+          *p_ctx,
+          { new_embedding_id, memory_id, 0, std::string (), std::string (),
+            embedding });
+    }
 }
 
 long long
@@ -160,6 +168,13 @@ WriteEmbeddingInPlaceOrFork (Transaction &tx, long long memory_id,
                              long long timestamp,
                              ProcessorContext *p_ctx = nullptr)
 {
+  if (p_ctx != nullptr)
+    {
+      // Replacing or forking a joined base row changes both the vector and its
+      // join metadata. Fall back to authoritative SQL rather than risk a
+      // partially updated pre-filter population.
+      historical_surface_search_cache_internal::Erase (*p_ctx);
+    }
   auto ref_rows = tx.Execute (
       "SELECT "
       "  (SELECT COUNT(*) FROM memories WHERE embedding_id = ?) "
@@ -188,7 +203,7 @@ WriteEmbeddingInPlaceOrFork (Transaction &tx, long long memory_id,
           ") VALUES (?, ?, ?, ?)",
           { memory_id, ToFloatVector (embedding), embedding_id, timestamp });
       RefreshProcessorSurfaces (tx, p_ctx, memory_id, embedding_id,
-                                embedding_id, embedding);
+                                embedding_id, embedding, true);
       return embedding_id;
     }
 
@@ -215,7 +230,7 @@ WriteEmbeddingInPlaceOrFork (Transaction &tx, long long memory_id,
           { memory_id, ToFloatVector (embedding), replacement_embedding_id,
             timestamp });
       RefreshProcessorSurfaces (tx, p_ctx, memory_id, embedding_id,
-                                replacement_embedding_id, embedding);
+                                replacement_embedding_id, embedding, true);
     }
   return replacement_embedding_id;
 }
@@ -529,14 +544,17 @@ WriteNeighborUpdates (Transaction &tx, long long embedding_id,
   const auto blob_id = constructive_recall::LoadCurrentBlobId (tx, memory_id);
   constructive_recall::AppendReconstructionWithEmbedding (
       tx, memory_id, blended, blob_id, timestamp, std::min (1.0, lability),
-      "reconsolidation", 1.0, 1.0, policy);
+      "reconsolidation", 1.0, 1.0, policy, p_ctx);
   if (auto current = constructive_recall::LoadCurrentEmbedding (
           tx, memory_id, embedding_id, static_cast<int> (blended.size ())))
     {
       const long long current_embedding_id = LoadCurrentSurfaceEmbeddingId (
           tx, memory_id, embedding_id);
       RefreshProcessorSurfaces (tx, p_ctx, memory_id, embedding_id,
-                                current_embedding_id, *current);
+                                current_embedding_id, *current,
+                                policy.update_current_surface
+                                    && !constructive_recall::
+                                            CurrentSurfaceWritesDisabled ());
     }
 }
 
@@ -785,15 +803,20 @@ ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
           constructive_recall::AppendReconstructionWithEmbedding (
               tx, memory_id, blended, blob_id, now_ts, uncertainty,
               "reconsolidation", 1.0, contextual_relevance,
-              reconstruction_update_policy);
+              reconstruction_update_policy, &p_ctx);
           if (auto current = constructive_recall::LoadCurrentEmbedding (
                   tx, memory_id, embedding_id,
                   static_cast<int> (blended.size ())))
             {
               const long long current_embedding_id = LoadCurrentSurfaceEmbeddingId (
                   tx, memory_id, embedding_id);
+              const bool current_surface_written
+                  = reconstruction_update_policy.update_current_surface
+                    && !constructive_recall::
+                           CurrentSurfaceWritesDisabled ();
               RefreshProcessorSurfaces (tx, &p_ctx, memory_id, embedding_id,
-                                        current_embedding_id, *current);
+                                        current_embedding_id, *current,
+                                        current_surface_written);
             }
           context.AddOperationTiming ("Reconsolidation.primary_append",
                                       ElapsedMillis (primary_append_start));

@@ -1,5 +1,6 @@
 #include "cortext/operations/memory_storage.hpp"
 #include "constructive_recall_internal.hpp"
+#include "historical_surface_search_cache_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -129,11 +130,37 @@ ToFloatVector (const Eigen::VectorXf &v)
   return out;
 }
 
+struct BorrowedSupersessionCandidate
+{
+  long long memory_id = 0;
+  const Eigen::VectorXf *embedding = nullptr;
+};
+
+using historical_surface_search_cache_internal::SupersessionCandidate;
+using historical_surface_search_cache_internal::SupersessionCandidateRows;
+
 void
-AppendUniqueSupersessionRows (
-    std::vector<std::map<std::string, std::any>> &rows,
-    std::vector<std::map<std::string, std::any>> extra_rows,
+AppendUniqueBorrowedSupersessionRows (
+    std::vector<SupersessionCandidate> &rows,
+    std::vector<BorrowedSupersessionCandidate> extra_rows,
     std::unordered_set<long long> &seen_memory_ids)
+{
+  for (const auto &row : extra_rows)
+    {
+      if (row.memory_id <= 0
+          || !seen_memory_ids.insert (row.memory_id).second)
+        {
+          continue;
+        }
+      rows.push_back ({ row.memory_id, row.embedding, std::nullopt });
+    }
+}
+
+void
+AppendUniqueOwnedSupersessionRows (
+    std::vector<SupersessionCandidate> &rows,
+    std::vector<std::map<std::string, std::any>> extra_rows,
+    std::unordered_set<long long> &seen_memory_ids, int embedding_dim)
 {
   for (auto &row : extra_rows)
     {
@@ -148,71 +175,273 @@ AppendUniqueSupersessionRows (
         {
           continue;
         }
-      rows.push_back (std::move (row));
+      SupersessionCandidate candidate;
+      candidate.memory_id = *memory_id;
+      const auto embedding_it = row.find ("embedding");
+      if (embedding_it != row.end ())
+        {
+          Eigen::VectorXf decoded;
+          if (DecodeEmbeddingAny (embedding_it->second, embedding_dim,
+                                  decoded))
+            {
+              candidate.owned_embedding = std::move (decoded);
+            }
+        }
+      rows.push_back (std::move (candidate));
     }
 }
 
-std::vector<std::map<std::string, std::any>>
+std::optional<std::vector<BorrowedSupersessionCandidate>>
+LoadHistoricalSupersessionRowsFromCache (
+    const std::shared_ptr<
+        const historical_surface_search_cache_internal::State> &state,
+    const Eigen::VectorXf &query_embedding,
+    long long memory_id, long long end_ts, int candidate_limit)
+{
+  const std::size_t embedding_count = state ? state->entries.size () : 0;
+  const int embedding_dim = static_cast<int> (query_embedding.size ());
+  if (!state || embedding_dim <= 0 || candidate_limit <= 0
+      || state->embedding_dim != embedding_dim
+      || state->search.size ()
+             != embedding_count * static_cast<std::size_t> (embedding_dim))
+    {
+      return std::nullopt;
+    }
+
+  using RowMajorMatrix
+      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+  const Eigen::Map<const RowMajorMatrix> matrix (
+      state->search.data (), static_cast<Eigen::Index> (embedding_count),
+      embedding_dim);
+  auto &distance_scratch = state->distance_scratch;
+  distance_scratch.resize (embedding_count);
+  Eigen::Map<Eigen::VectorXf> distances (
+      distance_scratch.data (), static_cast<Eigen::Index> (embedding_count));
+  distances = (matrix.rowwise () - query_embedding.transpose ())
+                  .rowwise ()
+                  .squaredNorm ();
+  auto &ranked = state->ranked_scratch;
+  ranked.clear ();
+  ranked.reserve (embedding_count);
+  for (std::size_t index = 0; index < embedding_count; ++index)
+    {
+      const auto &entry = state->entries[index];
+      if (entry.embedding_id <= 0 || entry.embedding.size () != embedding_dim)
+        {
+          return std::nullopt;
+        }
+      ranked.push_back (
+          { index, distances[static_cast<Eigen::Index> (index)] });
+    }
+  auto by_distance = [&state] (
+                         const historical_surface_search_cache_internal::RankedEntry &a,
+                         const historical_surface_search_cache_internal::RankedEntry &b) {
+    if (a.distance != b.distance)
+      {
+        return a.distance < b.distance;
+      }
+    return state->entries[a.index].embedding_id
+           < state->entries[b.index].embedding_id;
+  };
+  if (static_cast<int> (ranked.size ()) > candidate_limit)
+    {
+      std::nth_element (ranked.begin (), ranked.begin () + candidate_limit,
+                        ranked.end (), by_distance);
+      ranked.resize (static_cast<std::size_t> (candidate_limit));
+    }
+  std::sort (ranked.begin (), ranked.end (), by_distance);
+
+  std::vector<BorrowedSupersessionCandidate> rows;
+  rows.reserve (ranked.size ());
+  for (const auto &candidate : ranked)
+    {
+      const auto &entry = state->entries[candidate.index];
+      if (entry.memory_id <= 0 || entry.memory_id == memory_id
+          || (entry.kind != "LONG_TERM" && entry.kind != "ASSOCIATION")
+          || entry.start_ts >= end_ts)
+        {
+          continue;
+        }
+      rows.push_back ({ entry.memory_id, &entry.embedding });
+    }
+  return rows;
+}
+
+std::optional<std::vector<BorrowedSupersessionCandidate>>
+LoadCurrentSupersessionRowsFromCache (
+    const std::shared_ptr<
+        const historical_surface_search_cache_internal::State> &state,
+    const ProcessorContext &p_ctx, const Eigen::VectorXf &query_embedding,
+    long long memory_id, long long end_ts, int candidate_limit)
+{
+  const std::size_t entry_count = state ? state->current_entries.size () : 0;
+  const int embedding_dim = static_cast<int> (query_embedding.size ());
+  if (!state || embedding_dim <= 0 || candidate_limit <= 0
+      || state->embedding_dim != embedding_dim
+      || state->current_search.size ()
+             != entry_count * static_cast<std::size_t> (embedding_dim))
+    {
+      return std::nullopt;
+    }
+  if (entry_count == 0)
+    {
+      return std::vector<BorrowedSupersessionCandidate>{};
+    }
+
+  using RowMajorMatrix
+      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+  const Eigen::Map<const RowMajorMatrix> matrix (
+      state->current_search.data (), static_cast<Eigen::Index> (entry_count),
+      embedding_dim);
+  auto &distance_scratch = state->distance_scratch;
+  distance_scratch.resize (entry_count);
+  Eigen::Map<Eigen::VectorXf> distances (
+      distance_scratch.data (), static_cast<Eigen::Index> (entry_count));
+  distances = (matrix.rowwise () - query_embedding.transpose ())
+                  .rowwise ()
+                  .squaredNorm ();
+  auto &ranked = state->ranked_scratch;
+  ranked.clear ();
+  ranked.reserve (entry_count);
+  for (std::size_t index = 0; index < entry_count; ++index)
+    {
+      const auto &entry = state->current_entries[index];
+      if (entry.memory_id <= 0 || entry.embedding_id <= 0
+          || entry.embedding.size () != embedding_dim)
+        {
+          return std::nullopt;
+        }
+      ranked.push_back (
+          { index, distances[static_cast<Eigen::Index> (index)] });
+    }
+  auto by_distance = [&state] (
+                         const historical_surface_search_cache_internal::RankedEntry &a,
+                         const historical_surface_search_cache_internal::RankedEntry &b) {
+    if (a.distance != b.distance)
+      {
+        return a.distance < b.distance;
+      }
+    return state->current_entries[a.index].memory_id
+           < state->current_entries[b.index].memory_id;
+  };
+  if (static_cast<int> (ranked.size ()) > candidate_limit)
+    {
+      std::nth_element (ranked.begin (), ranked.begin () + candidate_limit,
+                        ranked.end (), by_distance);
+      ranked.resize (static_cast<std::size_t> (candidate_limit));
+    }
+  std::sort (ranked.begin (), ranked.end (), by_distance);
+
+  std::vector<BorrowedSupersessionCandidate> rows;
+  rows.reserve (ranked.size ());
+  for (const auto &candidate : ranked)
+    {
+      const auto &entry = state->current_entries[candidate.index];
+      const auto surface_it = p_ctx.retrieval_surface_index.find (
+          entry.memory_id);
+      if (surface_it == p_ctx.retrieval_surface_index.end ()
+          || surface_it->second >= p_ctx.retrieval_surface_cache.size ())
+        {
+          return std::nullopt;
+        }
+      const auto &surface = p_ctx.retrieval_surface_cache[surface_it->second];
+      if (entry.memory_id == memory_id
+          || (surface.kind != "LONG_TERM" && surface.kind != "ASSOCIATION")
+          || surface.start_ts >= end_ts)
+        {
+          continue;
+        }
+      rows.push_back ({ entry.memory_id, &entry.embedding });
+    }
+  return rows;
+}
+
+SupersessionCandidateRows
 LoadSupersessionCandidateRows (Transaction &tx,
+                               const ProcessorContext &p_ctx,
                                const Eigen::VectorXf &embedding_to_store,
                                long long memory_id, long long end_ts,
                                int candidate_limit)
 {
-  std::vector<std::map<std::string, std::any>> rows;
+  SupersessionCandidateRows result;
+  result.cache_owner
+      = historical_surface_search_cache_internal::Find (p_ctx);
   std::unordered_set<long long> seen_memory_ids;
   const std::vector<float> query_embedding = ToFloatVector (
       embedding_to_store);
-  try
+  if (auto current_rows = LoadCurrentSupersessionRowsFromCache (
+          result.cache_owner, p_ctx, embedding_to_store, memory_id, end_ts,
+          candidate_limit))
     {
-      auto current_rows = tx.Execute (
-          "SELECT m.memory_id, cme.embedding "
-          "FROM ("
-          "  SELECT memory_id, embedding "
-          "  FROM current_memory_embeddings "
-          "  WHERE embedding MATCH ? "
-          "    AND k = ?"
-          ") cme "
-          "JOIN memories m ON m.memory_id = cme.memory_id "
-          "WHERE m.memory_id != ? "
-          "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-          "  AND COALESCE(m.start_ts, 0) < ?",
-          { query_embedding, static_cast<long long> (candidate_limit),
-            memory_id, end_ts });
-      AppendUniqueSupersessionRows (rows, std::move (current_rows),
-                                    seen_memory_ids);
+      AppendUniqueBorrowedSupersessionRows (
+          result.rows, std::move (*current_rows), seen_memory_ids);
     }
-  catch (const std::exception &e)
+  else
     {
-      telemetry::LogDebug (
-          "cortext.memory_storage.supersession_current_knn_unavailable",
-          { telemetry::Attribute::String ("error", e.what ()) });
-    }
-
-  try
-    {
-      auto historical_rows = tx.Execute (
-          "SELECT m.memory_id, e.embedding "
-          "FROM embeddings e "
-          "JOIN memories m ON m.embedding_id = e.embedding_id "
-          "WHERE e.embedding MATCH ? "
-          "  AND k = ? "
-          "  AND m.memory_id != ? "
-          "  AND m.embedding_id IS NOT NULL "
-          "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-          "  AND COALESCE(m.start_ts, 0) < ?",
-          { query_embedding, static_cast<long long> (candidate_limit),
-            memory_id, end_ts });
-      AppendUniqueSupersessionRows (rows, std::move (historical_rows),
-                                    seen_memory_ids);
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogDebug (
-          "cortext.memory_storage.supersession_historical_knn_unavailable",
-          { telemetry::Attribute::String ("error", e.what ()) });
+      try
+        {
+          auto current_rows = tx.Execute (
+              "SELECT m.memory_id, cme.embedding "
+              "FROM ("
+              "  SELECT memory_id, embedding "
+              "  FROM current_memory_embeddings "
+              "  WHERE embedding MATCH ? "
+              "    AND k = ?"
+              ") cme "
+              "JOIN memories m ON m.memory_id = cme.memory_id "
+              "WHERE m.memory_id != ? "
+              "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+              "  AND COALESCE(m.start_ts, 0) < ?",
+              { query_embedding, static_cast<long long> (candidate_limit),
+                memory_id, end_ts });
+          AppendUniqueOwnedSupersessionRows (
+              result.rows, std::move (current_rows), seen_memory_ids,
+              static_cast<int> (embedding_to_store.size ()));
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogDebug (
+              "cortext.memory_storage.supersession_current_knn_unavailable",
+              { telemetry::Attribute::String ("error", e.what ()) });
+        }
     }
 
-  if (rows.empty ())
+  if (auto historical_rows = LoadHistoricalSupersessionRowsFromCache (
+          result.cache_owner, embedding_to_store, memory_id, end_ts,
+          candidate_limit))
+    {
+      AppendUniqueBorrowedSupersessionRows (
+          result.rows, std::move (*historical_rows), seen_memory_ids);
+    }
+  else
+    {
+      try
+        {
+          auto historical_rows = tx.Execute (
+              "SELECT m.memory_id, e.embedding "
+              "FROM embeddings e "
+              "JOIN memories m ON m.embedding_id = e.embedding_id "
+              "WHERE e.embedding MATCH ? "
+              "  AND k = ? "
+              "  AND m.memory_id != ? "
+              "  AND m.embedding_id IS NOT NULL "
+              "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
+              "  AND COALESCE(m.start_ts, 0) < ?",
+              { query_embedding, static_cast<long long> (candidate_limit),
+                memory_id, end_ts });
+          AppendUniqueOwnedSupersessionRows (
+              result.rows, std::move (historical_rows), seen_memory_ids,
+              static_cast<int> (embedding_to_store.size ()));
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogDebug (
+              "cortext.memory_storage.supersession_historical_knn_unavailable",
+              { telemetry::Attribute::String ("error", e.what ()) });
+        }
+    }
+
+  if (result.rows.empty ())
     {
       auto recent_rows = tx.Execute (
           "SELECT m.memory_id, "
@@ -230,11 +459,12 @@ LoadSupersessionCandidateRows (Transaction &tx,
           "ORDER BY m.memory_id DESC "
           "LIMIT ?",
           { memory_id, end_ts, static_cast<long long> (candidate_limit) });
-      AppendUniqueSupersessionRows (rows, std::move (recent_rows),
-                                    seen_memory_ids);
+      AppendUniqueOwnedSupersessionRows (
+          result.rows, std::move (recent_rows), seen_memory_ids,
+          static_cast<int> (embedding_to_store.size ()));
     }
 
-  return rows;
+  return result;
 }
 
 struct SupersessionEdge
@@ -262,8 +492,9 @@ WriteSupersessionEdges (OperationContext &context, Transaction &tx,
                                            cfg.stability));
   const int max_edges = core::SupersessionMaxEdges (
       cfg.focus, cfg.sensitivity, cfg.stability);
-  const auto rows = LoadSupersessionCandidateRows (
-      tx, embedding_to_store, memory_id, end_ts, candidate_limit);
+  const auto candidate_rows = LoadSupersessionCandidateRows (
+      tx, context.GetProcessorContext (), embedding_to_store, memory_id, end_ts,
+      candidate_limit);
 
   const double similarity_threshold = core::SupersessionSimilarityThreshold (
       cfg.focus, cfg.sensitivity, cfg.stability);
@@ -277,29 +508,25 @@ WriteSupersessionEdges (OperationContext &context, Transaction &tx,
   std::vector<SupersessionEdge> edges;
   edges.reserve (static_cast<std::size_t> (max_edges));
   int edge_count = 0;
-  for (const auto &row : rows)
+  const double query_norm = embedding_to_store.norm ();
+  for (const auto &row : candidate_rows.rows)
     {
       ++scanned_count;
-      auto memory_it = row.find ("memory_id");
-      auto embedding_it = row.find ("embedding");
-      if (memory_it == row.end () || embedding_it == row.end ())
+      if (row.memory_id <= 0)
         {
           continue;
         }
-      const auto target_id_opt = store::AnyToLongLong (memory_it->second);
-      if (!target_id_opt || *target_id_opt <= 0)
-        {
-          continue;
-        }
-      Eigen::VectorXf target_embedding;
-      if (!DecodeEmbeddingAny (embedding_it->second, embedding_dim,
-                               target_embedding))
+      const Eigen::VectorXf *target_embedding = row.Embedding ();
+      if (target_embedding == nullptr
+          || target_embedding->size () != embedding_dim)
         {
           continue;
         }
       ++decoded_count;
-      const double similarity = core::CosineSimilarity (embedding_to_store,
-                                                        target_embedding);
+      const double similarity
+          = historical_surface_search_cache_internal::
+              SupersessionCosineSimilarity (embedding_to_store, query_norm,
+                                             *target_embedding);
       best_similarity = std::max (best_similarity, similarity);
       if (similarity < similarity_threshold)
         {
@@ -313,7 +540,7 @@ WriteSupersessionEdges (OperationContext &context, Transaction &tx,
         }
       const double weight = core::SupersessionEdgeWeight (
           similarity, cfg.focus, cfg.sensitivity, cfg.stability);
-      edges.push_back ({ *target_id_opt, similarity, weight });
+      edges.push_back ({ row.memory_id, similarity, weight });
     }
 
   std::sort (edges.begin (), edges.end (),
@@ -690,6 +917,11 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           = mem_id_rows.empty ()
                 ? 0
                 : AnyToLongLong (mem_id_rows[0].at ("id")).value_or (0);
+      std::vector<historical_surface_search_cache_internal::Entry>
+          inserted_search_entries;
+      inserted_search_entries.push_back (
+          { embedding_id, memory_id, static_cast<long long> (start_ts),
+            "LONG_TERM", signal.source_id, embedding_to_store });
 
       // 10. Insert SIGNALS rows (one per tracked signal)
       std::optional<long long> stored_signal_id;
@@ -731,6 +963,10 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                   "cortext.memory_storage.signal_embedding_error_total", 1);
               return;
             }
+          inserted_search_entries.push_back (
+              { signal_embedding_id, 0, 0, std::string (), std::string (),
+                sig_rec.embedding.size () > 0 ? sig_rec.embedding
+                                              : embedding_to_store });
 
           const auto signal_row_start = SteadyClock::now ();
           savepoint->Execute (
@@ -772,6 +1008,14 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                   signal_row_insert_ms);
       context.AddOperationTiming ("MemoryStorage.select_signal_ids",
                                   signal_id_select_ms);
+
+      for (auto &entry : inserted_search_entries)
+        {
+          // Signal-only embeddings participate in sqlite-vec's top-k
+          // population even though the subsequent memory join filters them.
+          historical_surface_search_cache_internal::Append (
+              p_ctx, std::move (entry));
+        }
 
       // 10. Leave signal tracking until accumulator resets (used by WM gating)
       const auto supersession_start = SteadyClock::now ();
@@ -834,22 +1078,30 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       if (memory_id > 0 && embedding_to_store.size () > 0)
         {
           const auto surface_start = SteadyClock::now ();
-	          ProcessorContext::RetrievalSurfaceEntry surface_entry;
-	          surface_entry.memory_id = memory_id;
-	          surface_entry.embedding_id = embedding_id;
-	          surface_entry.created_at = static_cast<long long> (end_ts);
-	          surface_entry.start_ts = static_cast<long long> (start_ts);
+          ProcessorContext::RetrievalSurfaceEntry surface_entry;
+          surface_entry.memory_id = memory_id;
+          surface_entry.embedding_id = embedding_id;
+          surface_entry.created_at = static_cast<long long> (end_ts);
+          surface_entry.start_ts = static_cast<long long> (start_ts);
           surface_entry.event_ts = static_cast<long long> (start_ts);
           surface_entry.kind = "LONG_TERM";
-	          surface_entry.source_id = signal.source_id;
-	          surface_entry.modality = primary_modality;
-	          surface_entry.source_reliability = source_reliability;
+          surface_entry.source_id = signal.source_id;
+          surface_entry.modality = primary_modality;
+          surface_entry.source_reliability = source_reliability;
           if (acc.c_t.size () > 0)
             {
               surface_entry.context_embedding = acc.c_t;
             }
           surface_entry.embedding = embedding_to_store;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
+          if (!constructive_recall::Disabled ()
+              && !constructive_recall::CurrentSurfaceWritesDisabled ())
+            {
+              historical_surface_search_cache_internal::UpsertCurrent (
+                  p_ctx,
+                  { embedding_id, memory_id, 0, std::string (),
+                    std::string (), embedding_to_store });
+            }
 
           const int k_key = core::SparseKeySize (
               context.GetConfig ().focus, context.GetConfig ().sensitivity,

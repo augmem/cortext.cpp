@@ -372,6 +372,7 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
     {
       return;
     }
+  context.GetProcessorContext ().association_fanout_cache.valid = false;
   Store *store = context.GetStore ();
   const auto &cfg = context.GetConfig ();
   const long long now_ts

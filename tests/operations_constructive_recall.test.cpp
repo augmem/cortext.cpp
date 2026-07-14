@@ -1,5 +1,6 @@
 #include "test_helpers.hpp"
 #include "../src/operations/constructive_recall_internal.hpp"
+#include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
 
 #include <catch2/catch_approx.hpp>
@@ -210,6 +211,11 @@ TEST_CASE ("Constructive recall bounds reconstruction history and keeps current 
   policy.history_limit = 3;
   policy.prune_batch_limit = 16;
   policy.delete_orphan_embeddings = true;
+  ProcessorContext pctx;
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  REQUIRE (cache::Reset (
+      pctx, { { 1LL, 1LL, 1LL, "LONG_TERM", "test", base } }));
 
   Eigen::VectorXf latest = base;
   {
@@ -221,7 +227,7 @@ TEST_CASE ("Constructive recall bounds reconstruction history and keeps current 
         latest = MakeVec ({ { i % 4, 1.0f }, { (i + 1) % 4, 0.1f } });
         operations::constructive_recall::AppendReconstructionWithEmbedding (
             *tx, 1LL, latest, {}, 10LL + i, 0.2, "retrieval", 0.8, 0.7,
-            policy);
+            policy, &pctx);
       }
     tx->Commit ();
   }
@@ -247,6 +253,19 @@ TEST_CASE ("Constructive recall bounds reconstruction history and keeps current 
   REQUIRE (cortext::store::AnyToLongLong (
                current_rows[0].at ("embedding_id")).value_or (0)
            == latest_embedding_id);
+
+  auto embedding_rows = store->Execute (
+      "SELECT embedding_id FROM embeddings ORDER BY embedding_id", {});
+  const auto cache_owner = cache::Find (pctx);
+  REQUIRE (cache_owner != nullptr);
+  REQUIRE (cache_owner->entries.size () == embedding_rows.size ());
+  for (const auto &row : embedding_rows)
+    {
+      const long long embedding_id = cortext::store::AnyToLongLong (
+          row.at ("embedding_id")).value_or (0);
+      REQUIRE (cache_owner->embedding_index.count (embedding_id) == 1);
+    }
+  cache::Erase (pctx);
 
   const auto current = operations::constructive_recall::LoadCurrentEmbedding (
       store.get (), 1LL, 1LL, kEmbeddingDim);
