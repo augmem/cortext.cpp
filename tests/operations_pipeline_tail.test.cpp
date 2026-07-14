@@ -148,6 +148,54 @@ TEST_CASE ("ApplySynapticTagging targets spike-source temporal neighbors",
   REQUIRE (strength (5) == Catch::Approx (0.0));
 }
 
+TEST_CASE ("ApplySynapticTagging ranks a memory by its nearest source signal",
+           "[operations][synaptic_tagging][signals]")
+{
+  auto store = MakeStore ();
+  const long long now_ts = 5000LL;
+  cortext::testing::SeedEmbeddingV2 (*store, 11, UnitVec (1), 1000);
+  cortext::testing::SeedMemoryV2 (*store, 1, 11, "spike-source",
+                                  "LONG_TERM", 1.0, 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 12, UnitVec (2), 4900);
+  cortext::testing::SeedMemoryV2 (*store, 2, 12, "spike-source",
+                                  "LONG_TERM", 1.0, 4900);
+  cortext::testing::SeedEmbeddingV2 (*store, 14, UnitVec (4), now_ts);
+  cortext::testing::SeedMemoryV2 (*store, 4, 14, "spike-source",
+                                  "LONG_TERM", 1.0, now_ts);
+  store->Execute (
+      "INSERT INTO signals(memory_id, source_id, embedding_id, timestamp, "
+      "modality, serial_position, created_at) "
+      "VALUES(?, ?, ?, ?, 'text', 0, ?)",
+      { 1LL, std::string ("spike-source"), 11LL, 4999LL, 4999LL });
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.5;
+  const auto signal = MakeSignal ("spike-source", now_ts);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetMetric (Metric::embedding_surprisal, 1.0);
+  ctx.SetStoredMemoryId (4LL);
+
+  ApplySynapticTagging op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  auto strength = [&store] (long long memory_id) {
+    const auto rows = store->Execute (
+        "SELECT tag_strength FROM memories WHERE memory_id = ?",
+        { memory_id });
+    REQUIRE (rows.size () == 1);
+    return cortext::testing::GetDouble (rows[0], "tag_strength");
+  };
+  REQUIRE (strength (1LL) == 1.0);
+  REQUIRE (strength (2LL) == 0.0);
+  REQUIRE (strength (4LL) == 1.0);
+}
+
 #if defined(CORTEXT_EXPERIMENT_HOOKS)
 TEST_CASE ("ApplySynapticTagging can remove tag TTL for long-horizon ablation",
            "[operations][synaptic_tagging][experiment_hooks]")

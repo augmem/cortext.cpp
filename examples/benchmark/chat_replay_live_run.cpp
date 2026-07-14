@@ -2,6 +2,7 @@
 #include <cortext/core/knobs.hpp>
 #include <cortext/cortext.hpp>
 #include <cortext/internal/replay_ingress.hpp>
+#include <cortext/store/object_store.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
 
@@ -81,6 +82,7 @@ struct Config
   int checkpoint_query_days = 0;
   int checkpoint_queries_per_day = 0;
   bool full_operation_ms = false;
+  bool behavior_oracle = false;
   std::string sqlite_profile = "realtime";
 };
 
@@ -526,6 +528,179 @@ ContextMemoryIdsJson (
   return out;
 }
 
+std::string
+PrivateValueDigest (const std::vector<unsigned char> &bytes)
+{
+  const auto digest = cortext::ComputeObjectId (bytes);
+  std::ostringstream out;
+  out << std::hex << std::setfill ('0');
+  for (const unsigned char byte : digest)
+    {
+      out << std::setw (2) << static_cast<unsigned int> (byte);
+    }
+  return out.str ();
+}
+
+std::string
+PrivateValueDigest (const std::string &value)
+{
+  return PrivateValueDigest (
+      std::vector<unsigned char> (value.begin (), value.end ()));
+}
+
+nlohmann::json
+PublicMemoryBehaviorJson (
+    const std::vector<cortext::Cortext::Context::Memory> &memories)
+{
+  nlohmann::json out = nlohmann::json::array ();
+  for (const auto &memory : memories)
+    {
+      nlohmann::json content = nlohmann::json::array ();
+      for (const auto &blob : memory.content)
+        {
+          content.push_back (
+              { { "bytes", blob.size () },
+                { "blake3", PrivateValueDigest (blob) } });
+        }
+      nlohmann::json soft_anchors = nlohmann::json::array ();
+      for (const auto &anchor : memory.soft_anchors)
+        {
+          soft_anchors.push_back (
+              { { "id_blake3", PrivateValueDigest (anchor.id) },
+                { "strength", anchor.strength },
+                { "likelihood", anchor.likelihood },
+                { "label_blake3", PrivateValueDigest (anchor.label) },
+                { "tier_blake3", PrivateValueDigest (anchor.tier) },
+                { "score", anchor.score },
+                { "margin", anchor.margin },
+                { "entropy", anchor.entropy } });
+        }
+      out.push_back (
+          { { "source_id_blake3", PrivateValueDigest (memory.source_id) },
+            { "id", memory.id },
+            { "timestamp", memory.timestamp },
+            { "retrieved_count", memory.retrieved_count },
+            { "used_count", memory.used_count },
+            { "content", std::move (content) },
+            { "modality", memory.modality },
+            { "mimetype", memory.mimetype },
+            { "relevance", memory.relevance },
+            { "mismatch", memory.mismatch },
+            { "surprise", memory.surprise },
+            { "rarity", memory.rarity },
+            { "drift", memory.drift },
+            { "contradiction", memory.contradiction },
+            { "utility", memory.utility },
+            { "periphery", memory.periphery },
+            { "coverage", memory.coverage },
+            { "salience", memory.salience },
+            { "valence", memory.valence },
+            { "arousal", memory.arousal },
+            { "composite_score", memory.composite_score },
+            { "threshold_t", memory.threshold_t },
+            { "soft_anchors", std::move (soft_anchors) } });
+    }
+  return out;
+}
+
+nlohmann::json
+PublicBehaviorJson (const cortext::Cortext::Context &ctx)
+{
+  nlohmann::json metrics = nlohmann::json::object ();
+  for (const auto &[metric, value] : ctx.output.metrics)
+    {
+      metrics[std::to_string (metric)] = value;
+    }
+  std::vector<unsigned char> embedding_bytes (
+      ctx.embedding.size () * sizeof (float));
+  if (!embedding_bytes.empty ())
+    {
+      std::memcpy (embedding_bytes.data (), ctx.embedding.data (),
+                   embedding_bytes.size ());
+    }
+  return {
+    { "working_memory", PublicMemoryBehaviorJson (ctx.working_memory) },
+    { "retrieved_memory", PublicMemoryBehaviorJson (ctx.retrieved_memory) },
+    { "embedding_size", ctx.embedding.size () },
+    { "embedding_blake3", PrivateValueDigest (embedding_bytes) },
+    { "should_interrupt", ctx.should_interrupt },
+    { "interrupt_aborted", ctx.interrupt_aborted },
+    { "at_boundary", ctx.at_boundary },
+    { "consolidation_recommended", ctx.consolidation_recommended },
+    { "consolidation_required", ctx.consolidation_required },
+    { "interrupt_gate_has_candidates", ctx.interrupt_gate_has_candidates },
+    { "interrupt_gate_blocked_no_store",
+      ctx.interrupt_gate_blocked_no_store },
+    { "interrupt_gate_rel_pass", ctx.interrupt_gate_rel_pass },
+    { "interrupt_gate_novelty_pass", ctx.interrupt_gate_novelty_pass },
+    { "interrupt_gate_mu_pass", ctx.interrupt_gate_mu_pass },
+    { "interrupt_gate_novelty_mu_pass",
+      ctx.interrupt_gate_novelty_mu_pass },
+    { "interrupt_gate_dup_pass", ctx.interrupt_gate_dup_pass },
+    { "interrupt_gate_boundary_mu_pass",
+      ctx.interrupt_gate_boundary_mu_pass },
+    { "interrupt_gate_rel_star", ctx.interrupt_gate_rel_star },
+    { "interrupt_gate_retrieval_thresh",
+      ctx.interrupt_gate_retrieval_thresh },
+    { "interrupt_gate_boundary_mult_eff",
+      ctx.interrupt_gate_boundary_mult_eff },
+    { "interrupt_gate_affect_drive", ctx.interrupt_gate_affect_drive },
+    { "boundary_score",
+      ctx.boundary_score.has_value () ? nlohmann::json (*ctx.boundary_score)
+                                       : nlohmann::json (nullptr) },
+    { "boundary_type",
+      ctx.boundary_type.has_value () ? nlohmann::json (*ctx.boundary_type)
+                                      : nlohmann::json (nullptr) },
+    { "output",
+      {
+        { "composite_score",
+          ctx.output.composite_score.has_value ()
+              ? nlohmann::json (*ctx.output.composite_score)
+              : nlohmann::json (nullptr) },
+        { "threshold",
+          ctx.output.threshold.has_value ()
+              ? nlohmann::json (*ctx.output.threshold)
+              : nlohmann::json (nullptr) },
+        { "decision",
+          ctx.output.decision.has_value ()
+              ? nlohmann::json (*ctx.output.decision)
+              : nlohmann::json (nullptr) },
+        { "effective_focus", ctx.output.effective_focus },
+        { "coherence", ctx.output.coherence },
+        { "emotion_intensity", ctx.output.emotion_intensity },
+        { "valence", ctx.output.valence },
+        { "arousal", ctx.output.arousal },
+        { "metrics", std::move (metrics) },
+        { "stored_embedding_id",
+          ctx.output.stored_embedding_id.has_value ()
+              ? nlohmann::json (*ctx.output.stored_embedding_id)
+              : nlohmann::json (nullptr) },
+        { "stored_memory_id",
+          ctx.output.stored_memory_id.has_value ()
+              ? nlohmann::json (*ctx.output.stored_memory_id)
+              : nlohmann::json (nullptr) },
+        { "stored_signal_id",
+          ctx.output.stored_signal_id.has_value ()
+              ? nlohmann::json (*ctx.output.stored_signal_id)
+              : nlohmann::json (nullptr) },
+        { "signal_filter_evaluated", ctx.output.signal_filter_evaluated },
+        { "signal_filter_accepted", ctx.output.signal_filter_accepted },
+        { "signal_filter_modality", ctx.output.signal_filter_modality },
+        { "signal_filter_reason", ctx.output.signal_filter_reason },
+        { "signal_filter_score", ctx.output.signal_filter_score },
+        { "signal_filter_threshold", ctx.output.signal_filter_threshold },
+        { "signal_filter_quiet_seconds",
+          ctx.output.signal_filter_quiet_seconds },
+        { "soft_anchor_enabled", ctx.output.soft_anchor_enabled },
+        { "soft_anchor_state_count", ctx.output.soft_anchor_state_count },
+        { "soft_anchor_link_count", ctx.output.soft_anchor_link_count },
+        { "soft_anchor_create_count", ctx.output.soft_anchor_create_count },
+        { "soft_anchor_update_count", ctx.output.soft_anchor_update_count },
+        { "soft_anchor_none_count", ctx.output.soft_anchor_none_count },
+      } },
+  };
+}
+
 int
 EstimateMemoryTokens (const cortext::Cortext::Context::Memory &memory)
 {
@@ -779,6 +954,7 @@ WorkingSetCurveRow (int event_index,
     { "process_ms", ctx.process_ms },
     { "hydrate_ms", ctx.hydrate_ms },
     { "top_operation_ms", std::move (top_ops) },
+    { "behavior", PublicBehaviorJson (ctx) },
   };
   if (full_operation_ms)
     {
@@ -1524,6 +1700,8 @@ ParseArgs (int argc, char **argv)
         cfg.progress_stride = std::stoi (require_value ());
       else if (arg == "--full-operation-ms")
         cfg.full_operation_ms = true;
+      else if (arg == "--behavior-oracle")
+        cfg.behavior_oracle = true;
       else if (arg == "--sqlite-profile")
         cfg.sqlite_profile = require_value ();
       else
@@ -2565,7 +2743,8 @@ main (int argc, char **argv)
               const auto cortext_started = std::chrono::steady_clock::now ();
               auto ctx = cortext::internal::ReplayIngress::ProcessTextAt (
                   *engine, msg.text, source, msg.timestamp,
-                  cortext::Retention::Durable, run_probe);
+                  cortext::Retention::Durable,
+                  run_probe || cfg.behavior_oracle);
               const auto cortext_ended = std::chrono::steady_clock::now ();
               if (run_probe)
                 {
@@ -2936,6 +3115,7 @@ main (int argc, char **argv)
       out["warmup_events"] = cfg.warmup_events;
       out["probe_stride"] = cfg.probe_stride;
       out["full_operation_ms"] = cfg.full_operation_ms;
+      out["behavior_oracle"] = cfg.behavior_oracle;
       out["probe_count"] = resume.probe_count_offset + probe_count_this_run;
       out["probe_count_this_run"] = probe_count_this_run;
       out["probe_count_before_resume"] = resume.probe_count_offset;
@@ -2948,6 +3128,12 @@ main (int argc, char **argv)
           = "one row per successfully ingested timeline event after the "
             "durable replay ingress call; non-probe text rows may omit "
             "hydrated context packets";
+      out["behavior_oracle_policy"]
+          = "when enabled, hydrate the normal durable-ingest result for every "
+            "text event and record all public non-timing outputs in the "
+            "working-set curve; private strings, content blobs, and embeddings "
+            "are represented only by size and BLAKE3 digest; do not run the "
+            "comparison RAG probe";
       out["working_set_curve"] = working_set_curve;
       out["rag_top_k"] = cfg.rag_top_k;
       out["normal_rag_retrieval"] = "raw_chat_vector";
