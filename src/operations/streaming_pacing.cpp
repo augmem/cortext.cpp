@@ -67,10 +67,13 @@ CheckStreamingPacing::Execute (OperationContext &context, Transaction &tx) const
   const bool force_check = acc.drift_acc_pacing > max_wait;
   const uint64_t now_ts = signal.timestamp;
   double since_last_s = std::numeric_limits<double>::infinity ();
-  if (p_ctx.last_retrieval_ts > 0 && now_ts > p_ctx.last_retrieval_ts)
+  if (p_ctx.last_retrieval_ts > 0)
     {
-      since_last_s
-          = static_cast<double> (now_ts - p_ctx.last_retrieval_ts) / 1000.0;
+      since_last_s = now_ts > p_ctx.last_retrieval_ts
+                         ? static_cast<double> (
+                               now_ts - p_ctx.last_retrieval_ts)
+                               / 1000.0
+                         : 0.0;
     }
   const double min_gap_s
       = static_cast<double> (std::max (0, adjacent_window))

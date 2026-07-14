@@ -98,13 +98,18 @@ related-work sections before those files.
 
 ## Working Memory Models
 
-The working memory component of Cortext draws primarily on Cowan (2001)
-embedded-processes model, which posits a capacity limit of approximately
-4±1 chunks for the focus of attention. This contrasts with Miller (1956)
-earlier estimate of 7±2 items, which subsequent research has shown
-conflates chunking with raw capacity (Cowan 2010). Our implementation
-respects these empirically-derived constraints while allowing for
-focus-dependent modulation within bounded ranges.
+The working memory component of Cortext draws conceptually on Cowan
+(2001) embedded-processes model, which posits a capacity limit of
+approximately 4±1 chunks for the focus of attention. This contrasts with
+Miller (1956) earlier estimate of 7±2 items, which subsequent research
+has shown conflates chunking with raw capacity (Cowan 2010). Cortext’s
+production slots are larger, application-level memory units rather than
+a direct cognitive-chunk implementation: the shipped F/S-derived
+capacity is 15–27 slots, with 21 at neutral knobs, selected from the
+product evaluation reported in
+<a href="#sec-experimental" class="quarto-xref">Section 11</a>. The
+biological result motivates boundedness and competition, not a claim
+that the software reproduces human span numerically.
 
 Baddeley (2000) multicomponent model informs our treatment of
 maintenance and rehearsal processes, though we adopt a more unified
@@ -274,8 +279,11 @@ For an episodic memory `m_i`, the event timestamp is:
     t_event(m_i) = created_at(m_i)
 
 Retrieval and consolidation consume this event time through recency
-windows, temporal context vectors, association ordering, and explicit
-replay timestamps:
+windows, association ordering, and explicit replay timestamps. The
+accumulator’s temporal-context vector is used separately for
+boundary/topic-shift state and is persisted with memories; as noted in
+<a href="#sec-temporal-context" class="quarto-xref">Section 8.2</a>, it
+is not yet a production retrieval-score term.
 
     t_retrieve(q, m_i) = q.timestamp - t_event(m_i)
 
@@ -407,13 +415,14 @@ reachable:
 
     seed_k(F) = round(lerp(96, 8, FocusBias(F)))
 
-The prompt-facing output is then narrowed after graph, event-time
-recency, affect, procedural, source-confidence, and context scoring:
+The prompt-facing output is then narrowed after vector-seed relevance,
+event-time recency, graph expansion, same-source/turn-neighbor
+expansion, and supersession demotion:
 
     selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
 
 Candidate ranking includes an event-time temporal prior in addition to
-source confidence freshness:
+vector relevance and graph/source-neighbor evidence:
 
     temporal_rank(m) = exp(-age_s(m) / tau_rank(F,S,T))
     score(m) += weight_rank(F,S,T) * temporal_rank(m)
@@ -428,10 +437,13 @@ reliability prior instead of relying on a fixed storage default:
 
 This split lets low Focus explore many source/blob seeds while still
 keeping the application prompt bounded by a compact final surface. The
-intermediate graph boosts, source-confidence weights, durable-source
-floors, and text seed thresholds are likewise derived from Focus,
-Sensitivity, and Stability in the implementation rather than exposed as
-additional user settings.
+intermediate graph boosts, durable-source floors, and text seed
+thresholds are likewise derived from Focus, Sensitivity, and Stability
+in the implementation rather than exposed as additional user settings.
+The stored `source_reliability` and `source_contradiction_count` fields
+are not currently consumed by production ranking;
+<a href="#sec-advanced" class="quarto-xref">Section 8</a> distinguishes
+that metadata from the proposed confidence gate.
 
 ### Experiential Mass and Maturity
 
@@ -569,8 +581,9 @@ variables:
 
 When emotion category centroids are available, the system projects input
 embeddings onto a discrete emotion space C = {anger, fear, joy, love,
-sadness, surprise}. categories inspired by Russell (1980) circumplex
-model are projected onto the valence-arousal plane:coordinates:
+sadness, surprise}. Categories inspired by Russell (1980) circumplex
+model are projected onto the valence-arousal plane with the following
+coordinates:
 
     v_map = {anger: −0.9, fear: −0.8, sadness: −0.9,
              joy: +0.9, love: +0.8, surprise: 0.0}
@@ -596,8 +609,9 @@ The projection procedure:
         arousal_t ← clamp(Σ_c p_c × a_map[c], 0, 1)
 
 The emotion intensity combines peak probability with distributional
-confidence via geometric mean, providing a measure that is high only
-when a single emotion dominates with high certainty.
+confidence through a Sensitivity-dependent power transform of their
+product. It is high only when a category dominates and the distribution
+has high confidence.
 
 ### Threshold Modulation from Emotion
 
@@ -609,8 +623,10 @@ moments:
                             (0.5 + 0.5 × arousal_t)
 
 The emotional state acts as a modulator for memory
-encoding/consolidation, following McGaugh (2004). High arousal and
-valence magnitude increase the likelihood of threshold crossings.
+encoding/consolidation, following McGaugh (2004). High emotion intensity
+and arousal increase the likelihood of threshold crossings; valence is
+recorded as a separate metric but does not enter this threshold delta
+directly.
 
 ### Mood Integration
 
@@ -724,12 +740,15 @@ signals:
     NE_t  ← clamp(NE_base  + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)
     DA_t  ← clamp(DA_base  + max(0, δ_reward_t), 0, 1)
 
-Where `retrieval_pressure` is the normalized retrieval queue depth, and
-`δ_reward_t` is a reward prediction error derived from downstream
-outcome signals (see
+Where `retrieval_pressure` is the normalized retrieval queue-depth
+input, and `δ_reward_t` is a reward prediction error derived from
+downstream outcome signals (see
 <a href="#sec-structural-metrics" class="quarto-xref">Section 5</a>).
-These modulators drive internal gates without introducing new
-user-facing parameters:
+The production operation context does not currently populate queue
+depth, so this term is zero in the shipped full pipeline; tests and
+experiment hooks can supply it. The other phasic terms are live. These
+modulators drive internal gates without introducing new user-facing
+parameters:
 
     encode_bias ← ACh_t × (0.7 + 0.3S)
     retrieve_bias ← 1 − encode_bias
@@ -1419,14 +1438,14 @@ accumulator centroid (μ_acc), so write decisions are driven by the
 accumulated group rather than any single raw signal. This section
 introduces memory-level accumulation that groups signals into natural
 units before storage decisions, inspired by Event Segmentation Theory
-(Zacks & Swallow, 2007).
+(Zacks and Swallow 2007).
 
-This approach draws from EM-LLM (Fountas et al., 2024), which segments
+This approach draws from EM-LLM (Fountas et al. 2024), which segments
 token sequences into episodic events using surprise-based boundary
 detection refined by graph-theoretic cohesion metrics. Their work shows
 that combining prediction error signals with within-segment coherence
-produces boundaries strongly correlated with human event perception. Our
-adaptation uses EMA prediction error (surprisal_t) for surprise and
+produces boundaries correlated with human event perception. Our
+adaptation uses EMA prediction error (`surprisal_t`) for surprise and
 cosine similarity for cohesion, while drift provides auxiliary boundary
 pressure, enabling modality-agnostic operation across text tokens, audio
 chunks, video frames, or any signal stream.
@@ -1566,7 +1585,7 @@ cohesion drop, drift, and temporal gaps, with a coherence/topic
     topic_shift ← 1 − map01(cos(e_t, c_t))
 
     # Likelihood of a boundary given observations
-    support_policy ← BoundarySupportPolicy(F,S,T, coĥ, topiĉ)
+    support_policy ← BoundarySupportPolicyForKnobs(F,S,T, coĥ, topiĉ)
     support ← support_policy.support
     support_gate ← support_policy.support_gate   # downweight isolated spikes
     gap_gate ← support_policy.gap_gate
@@ -1579,7 +1598,7 @@ cohesion drop, drift, and temporal gaps, with a coherence/topic
     [w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
                                           w_c×support_boost, w_t×support_boost, w_g×gap_gate])
     z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
-    change_point_policy ← BoundaryChangePointPolicy(S,T,support)
+    change_point_policy ← BoundaryChangePointPolicyForKnobs(S,T,support)
     z_center_eff ← change_point_policy.z_center_eff
     z_t ← w_s×(surprisal̂ − z_center_eff) +
           w_d×(drift̂ − z_center_eff) +
@@ -1602,7 +1621,7 @@ Boundary threshold and limits:
 Pressure-capacity ratio (continuous flush trigger derived from knobs):
 
     capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
-    [capacity, pressure] ← BoundaryPressurePolicy(S,T, drift_acc)
+    [capacity, pressure] ← BoundaryPressurePolicyForKnobs(S,T, drift_acc)
     saturation_ratio ← pressure / max(capacity, ε)
     k_flush(S,T) = k_surprise(S,T)
     pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
@@ -1676,7 +1695,7 @@ We avoid hard timeouts for episode boundaries. Instead, when the stream
 becomes quiet and natural indicators are weak, inactivity softly boosts
 the boundary score:
 
-    inactivity_policy ← BoundaryInactivityPolicy(S,T)
+    inactivity_policy ← BoundaryInactivityPolicyForKnobs(S,T)
     support_relax = exp(−inactivity_policy.support_relax_rate × gap_z⁺)
     gap_ratio = signal_gap_s / max(dt_ema, ε)
     gap_z_inact = log1p(max(gap_ratio − 1, 0))
@@ -1716,6 +1735,11 @@ Implementation note: `Δt_write` is treated as a signed elapsed duration
 and clamped at zero. Backward event timestamps therefore receive the
 maximum refractory multiplier instead of underflowing into an
 effectively infinite elapsed interval.
+
+The same defensive rule applies to boundary gaps and retrieval pacing:
+non-increasing timestamps produce a zero elapsed interval. They cannot
+create an unsigned wraparound boundary or bypass the adjacent-retrieval
+limiter.
 
 Final write decision:
 
@@ -1761,11 +1785,22 @@ Each memory maintains **multi-timescale traces** rather than a single
 leaky bucket. A mixture of fast/medium/slow/ultra-slow traces yields a
 power-law forgetting curve while preserving plasticity.
 
-    N_traces(T) = 2 + round(2T)  # 2..4 coupled traces
-    τ_fast  = 0.10 × half_life
-    τ_med   = 0.50 × half_life
-    τ_slow  = 2.00 × half_life
-    τ_ultra = 8.00 × half_life
+Let `f = FocusBias(F)`, `s = SensitivityBias(S)`, and let `f0` and `s0`
+be their values at the neutral knobs. The active trace count is:
+
+    N_traces(F,S,T) = clamp(round((2 + 2T) ×
+                             (1 + 0.08(f-f0) + 0.06(s-s0))), 1, 4)
+
+The familiar `0.10/0.50/2.00/8.00` half-life multipliers are the neutral
+baseline, not universal constants. Production applies bounded F/S/T
+policy scales:
+
+    reactive = 1 + 0.14(s-s0) - 0.08(f-f0) + 0.06(T-0.5)
+    stable   = 1 + 0.24(T-0.5) - 0.06(s-s0)
+    τ_fast  = clamp(0.10 × reactive, 0.05, 0.20) × half_life
+    τ_med   = clamp(0.50 × (1 + 0.12(T-0.5) - 0.06(f-f0)), 0.30, 0.80) × half_life
+    τ_slow  = clamp(2.00 × stable, 1.20, 3.20) × half_life
+    τ_ultra = clamp(8.00 × stable × (1 + 0.10(f-f0)), 4.00, 12.00) × half_life
     τ_list = [τ_fast, τ_med, τ_slow, τ_ultra]
 
     α_min_S = 0.05; α_span_S = 0.35
@@ -1776,9 +1811,9 @@ Trace updates combine exponential decay, EWMA learning, and knob-scaled
 reinforcement (for i in 1..N_traces):
 
     λ_i ← ln(2) / τ_list[i]
-    reinforcement ← clamp(S_eff × used_flag(m) +
-                           F_eff × clamp(influence_factor, 0, 1), 0, 1)
-                    × serial_position_mult
+    reinforcement ← clamp((S_eff × used_flag(m) +
+                           F_eff × clamp(influence_factor, 0, 1))
+                           × serial_position_mult, 0, 1)
     increment_i ← (α_S(t) × used_flag(m) + reinforcement) / N_traces
     trace_i ← clamp(trace_i × exp(−λ_i × Δt) + increment_i, 0, 1)
 
@@ -1791,13 +1826,21 @@ used.
 Trace coupling encourages long-lived knowledge without freezing
 plasticity:
 
-    coupling = 0.05 + 0.10T
+    coupling = clamp((0.05 + 0.10T) ×
+                     (1 - 0.10(f-f0) + 0.12(s-s0)), 0.02, 0.20)
     trace_{i+1} ← clamp(trace_{i+1} + coupling × trace_i, 0, 1)
 
 Combined strength uses a knob-shaped mixture that favors slow traces as
 Stability increases:
 
-    w_raw ← [0.40 − 0.25T, 0.25, 0.20 + 0.15T, 0.15 + 0.10T]
+    w_fast  = clamp((0.40 - 0.25T) ×
+                    (1 - 0.08(f-f0) - 0.10(s-s0)), 0.05, 0.50)
+    w_med   = clamp(0.25 × (1 - 0.04(f-f0) - 0.04(T-0.5)), 0.12, 0.35)
+    w_slow  = clamp((0.20 + 0.15T) ×
+                    (1 + 0.08(f-f0) + 0.06(s-s0)), 0.12, 0.45)
+    w_ultra = clamp((0.15 + 0.10T) ×
+                    (1 + 0.10(f-f0) + 0.06(s-s0)), 0.08, 0.35)
+    w_raw ← [w_fast, w_med, w_slow, w_ultra]
     w ← normalize(w_raw[1..N_traces])
     strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
 
@@ -1821,6 +1864,14 @@ pruned during explicit consolidation.
        AND strength_t < periphery_cutoff(T)
        AND m.created_at < last_consolidation_ts:
          evict(m)
+
+Eviction removes the memory’s signal rows, reconstruction rows, graph
+edges, and object payloads in the same transaction. The cleanup
+candidate set includes the representative embedding and every embedding
+owned by its signals and reconstructions; an embedding is deleted only
+when no surviving row references it. This makes storage-pressure
+eviction reclaim the dominant vector payloads without a later global
+orphan sweep.
 
 The v1 hard cut removed the structured fact-evidence floor. Retention
 now depends on the trace strength, the storage-pressure gate, and the
@@ -2055,17 +2106,20 @@ section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
 
 ## Working Memory Gates
 
-Following Cowan (2001) capacity constraints, working memory maintains a
-limited number of active items. Working memory holds coherent memories
-as defined in
+Motivated by bounded working-memory models such as Cowan (2001), Cortext
+maintains a limited number of active application-level memory units.
+These slots are not asserted to be human cognitive chunks. Working
+memory holds coherent memories as defined in
 <a href="#sec-write-pacing" class="quarto-xref">Section 6.4</a>,
 preserving the full content and signal sequence:
 
-    base_capacity = round(lerp(5, 3, S) + lerp(−1, 1, F))
+    base_capacity = round(3 × (lerp(8, 6, S̃) + lerp(−1, 1, F̃)))
 
-This yields a range of approximately 2-6 memories, broadening the 4±1
-chunk limit to accommodate task-dependent requirements. High Sensitivity
-reduces capacity (faster turnover), while high Focus modulates breadth.
+This yields 15–27 slots and 21 at neutral knobs. High Sensitivity
+reduces capacity (faster turnover), while high Focus increases the slot
+budget. The operating point comes from the capacity study in
+<a href="#sec-experimental" class="quarto-xref">Section 11</a> rather
+than from a direct numerical fit to human span.
 
 ### Active Memory Structure
 
@@ -2096,12 +2150,18 @@ Beyond the accumulator centroid μ_acc, Cortext maintains a slowly
 drifting temporal context vector `c_t`. This provides ordered recall and
 reduces topic-collision errors by enabling **context reinstatement**.
 
-    α_c(T) = lerp(0.06, 0.01, T)  # slow drift at high Stability
-    c_t ← l2_normalize((1 − α_c(T)) × c_{t−1} + α_c(T) × μ_acc + ξ_t)
+    α_c(S,T) = AccumulatorTemporalContextAlpha(S,T)
+    c_t ← l2_normalize((1 − α_c(S,T)) × c_{t−1} + α_c(S,T) × μ_acc)
 
-where ξ_t is small isotropic noise (or a deterministic phase vector) to
-prevent collapse. Each memory stores `(e_rep, c_t)`. Retrieval combines
-content match and context match:
+At neutral Sensitivity, `α_c` follows `lerp(0.06, 0.01, T)`; the
+production policy applies a bounded Sensitivity adjustment. Each memory
+stores `(e_rep, c_t)`. The current runtime uses `c_t` as the topic-shift
+anchor in boundary detection and persists it with the memory. Production
+graph retrieval does not currently add a separate `cos(c_t, m.context)`
+score or reinstate `c_t` from a retrieved memory; it queries from the
+current accumulator and recent-context surfaces instead. The following
+context-score/reinstatement rule is therefore a proposed extension, not
+shipped behavior:
 
     w_ctx(F,S,T) = lerp(0.15, 0.45, F) × lerp(1.0, 0.85, S)
     association_boost(F,S,T) = lerp(0.015, 0.06, S) × lerp(1.0, 0.7, F) × lerp(1.0, 0.9, T)
@@ -2109,15 +2169,42 @@ content match and context match:
                           w_ctx × cos(c_t, m.context) +
                           association_boost(F,S,T) × I[m.kind = ASSOCIATION]
 
-Reinstatement: retrieving a memory updates `c_t` toward `m.context`,
-improving ordered recall within the same episode.
+Proposed reinstatement would update `c_t` toward `m.context` after
+retrieval.
 
 ### Maintenance Cost
 
 Maintenance incurs cognitive cost:
 
-    maintenance_cost_per_memory = lerp(0.05, 0.15, S)
+    maintenance_budget = 7 × lerp(0.05, 0.15, S̃)
+    maintenance_cost_per_memory = maintenance_budget / max(base_capacity, 1)
     complexity_penalty = manifold_complexity × lerp(0.5, 1.5, S)
+
+The legacy seven-slot normalization keeps the total cost of a full
+configured working-memory window invariant across capacity settings; it
+does not mean the shipped capacity is seven.
+
+Passive strength decay is incremental. Access recency and decay
+accounting use separate timestamps so repeated maintenance passes charge
+each elapsed interval once without making an untouched slot appear
+recently accessed:
+
+    Δt_decay ← now_s() − strength_ts
+    if Δt_decay > 0:
+      strength ← max(strength_floor(F,S,T),
+                     strength − maintenance_cost_per_memory × Δt_decay)
+      strength_ts ← now_s()
+    # last_ts changes only on chunking, rehearsal, or insertion
+
+The active floor is applied only while charging positive elapsed time. A
+same-time or out-of-order signal therefore cannot recharge a slot that
+was legitimately persisted below the current floor under an earlier knob
+setting.
+
+Persisted working-memory rows mirror `strength_ts` as
+`strength_updated_at`. Load-time decay advances the same timestamp and
+leaves changed slot metadata dirty so the next normal process persists
+both values.
 
 The manifold_complexity is defined as a normalized local variability
 proxy (see Appendix B): manifold_complexity ← clamp((1 −
@@ -2464,21 +2551,18 @@ The expected monotonic behavior is:
       fewer label flips
       no cross-boundary durable overreach
 
-Current experimental evidence is in
-<a href="#sec-experimental" class="quarto-xref">Section 11</a>. The Soft
-Anchor v1 benchmark preserves useful top-k continuity while holding
-hard/durable false binds at zero on the repaired slice, but it is not
-yet finished human subject anchoring because wrong-active
-distinct-anchor preservation remains incomplete. The engine integration
-follows the same formation rule: `UpdateSoftAnchor` runs at ingress
-after memory storage and writes soft anchor state and links by default.
-Production retrieval does not rank from these links yet, and application
-surfacing is limited to optional continuity hints in chat and benchmark
-context snapshots. The next open question is consumption: formed anchors
-may become useful uncertain context only after replay and manual-review
-experiments show that possible-continuity hints help more often than
-they harm, without converting tentative or ambiguous evidence into
-durable assertions.
+Current checked-in evidence is limited to deterministic formation,
+ambiguity, promotion, persistence, and hydration tests;
+<a href="#sec-experimental" class="quarto-xref">Section 11</a> does not
+report a human-subject anchoring benchmark. `UpdateSoftAnchor` runs at
+ingress after memory storage and writes soft-anchor state and links by
+default. Production retrieval does not rank from these links yet, and
+application surfacing is limited to hydrated memory metadata and
+experiment/benchmark utilities. The next open question is consumption:
+formed anchors may become useful uncertain context only after replay and
+manual-review experiments show that possible-continuity hints help more
+often than they harm, without converting tentative or ambiguous evidence
+into durable assertions.
 
 ## Retrieval Uncertainty
 
@@ -2514,14 +2598,22 @@ decay:
 
     ripple_decay = lerp(0.5, 0.1, T)  # per semantic hop
 
-## Source Monitoring and Reality Constraints
+## Stored Source Metadata and Supersession
 
-Each memory carries a provenance model that tracks its origin,
-reliability, and contradiction history. Retrieval returns **content +
-source confidence**, enabling downstream gating and auditability.
+Each memory stores opaque `source_id` provenance plus `source_origin`,
+`source_reliability`, and `source_contradiction_count`. The current
+writer uses the constant origin class `"source"`; the actual application
+provenance remains in `source_id`. Reliability receives an F/S/T-derived
+prior and supersession can increment contradiction history. These fields
+are retained metadata, but the public hydrated memory surface does not
+currently expose a computed source confidence and production graph
+retrieval does not gate or rank on it.
+
+The following confidence rule is a proposed consumption policy, not
+shipped behavior:
 
     source_model = {origin, reliability, contradiction_count, last_verified_ts}
-    source_prior(origin, F, S, T) = SourceReliabilityPrior(F,S,T,origin)
+    source_prior(F, S, T) = SourceReliabilityPrior(F,S,T)
     freshness_weight = RetrievalSourceFreshnessWeight(F,S,T)
     freshness(m) = exp(−age(m) / RetrievalSourceFreshnessTauSeconds(F,S,T))
     source_confidence(m) ← clamp(source_prior(m.origin,F,S,T) ×
@@ -2529,18 +2621,17 @@ source confidence**, enabling downstream gating and auditability.
                                  ((1 − freshness_weight) + freshness_weight × freshness(m)),
                                  0, 1)
 
-Contradictions reduce `reliability`, and user corrections directly
-update `contradiction_count`. Source confidence gates injection into
-active context:
+If implemented, contradiction history would reduce computed confidence
+and the threshold would gate injection into active context:
 
     if source_confidence(m) < lerp(0.15, 0.45, T):
         downrank_or_hold(m)
 
-Belief revision is graph-native and modality-agnostic. On a durable
-memory write, the stored embedding is compared with a knob-bounded
-nearest-neighbor set of prior memory embeddings. If pairwise similarity
-lands in the supersession band, the runtime writes a directed
-`supersedes` edge from the new memory to the older memory:
+The shipped belief-revision path is graph-native and modality-agnostic.
+On a durable memory write, the stored embedding is compared with a
+knob-bounded nearest-neighbor set of prior memory embeddings. If
+pairwise similarity lands in the supersession band, the runtime writes a
+directed `supersedes` edge from the new memory to the older memory:
 
     θ_topic ← SupersessionSimilarityThreshold(F,S,T)
     θ_dup   ← SupersessionDuplicateThreshold(F,S,T)
@@ -2625,17 +2716,19 @@ rate of pre-activation:
 
     update_rate_on_surprise = lerp(0.2, 0.02, T) × S
 
-Current implementation note: predictive pre-activation is now consumed
-directly by retrieval rather than only being written to the database.
-`pre_activation` decays every turn via `pre_activation_decay(T)` and
-contributes a bounded retrieval prior,
+Current implementation note: the shipped pipeline updates and decays the
+persisted `pre_activation` field, but production graph retrieval does
+not read that field. The following bounded retrieval prior describes the
+experimental ranking variant, not current runtime behavior:
 
     predictive_weight(F,T) = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T)
     predictive_bonus = predictive_weight × pre_activation
 
-which is added to the normal retrieval score. High-surprise updates
-therefore both refresh the latent predictive state and make that state
-behaviorally visible at the next retrieval.
+In the current runtime, high-surprise updates refresh latent predictive
+state without changing the next retrieval score. The historical ablation
+in <a href="#sec-experimental" class="quarto-xref">Section 11</a>
+evaluates the earlier research variant and must not be read as a
+measurement of this hard-cutover implementation.
 
 ## Serial Position Effects
 
@@ -2702,6 +2795,12 @@ during memory formation and stored with the memory
 
     cascade_radius = round(lerp(1, 5, S))
     cascade_decay = lerp(0.7, 0.3, S)
+    cascade_source_window_ms = 1000 × consolidation_interval_seconds(T)
+
+Only flashbulb sources created within `cascade_source_window_ms` of the
+current signal participate. The explicit conversion preserves the
+intended five- to sixty-minute window while stored timestamps remain
+milliseconds since epoch.
 
 ## Synaptic Tagging and Capture
 
@@ -2726,34 +2825,37 @@ Tagged memories receive a consolidation bonus:
 
 ## Pattern Separation Sparse Index
 
-Pattern separation is the lightweight sparse-key side channel used to
-keep nearby dense embeddings addressable without adding a decoder,
-taxonomy, or fact layer. For an accumulator or stored memory embedding
-`x`, Cortext selects the `k` largest-magnitude dimensions, preserves
-each selected dimension’s sign, sorts the selected indices, and
-serializes the result as a stable sparse key:
+Pattern separation is a lightweight sparse-key side channel maintained
+for experimental indexing and procedural-value updates without adding a
+decoder, taxonomy, or fact layer. For an accumulator or stored memory
+embedding `x`, Cortext selects the `k` largest-magnitude dimensions,
+preserves each selected dimension’s sign, sorts the selected indices,
+and serializes the result as a stable sparse key:
 
     k_sparse(F,S,T) = RetrievalSparseKeySize(F,S,T)
     top_k(x) = indices of the k_sparse largest |x_i|
     sparse_key(x) = join(sort({ i || sign(x_i) : i in top_k(x) }))
 
 The write path stores each committed memory id under
-`index_store[sparse_key(e_rep)]`. The procedural lane reuses the same
-keying function but stores values rather than membership lists:
+`index_store[sparse_key(e_rep)]`. The procedural update lane reuses the
+same keying function but stores values rather than membership lists:
 
     index_store[sparse_key(e_rep)] += memory_id
     procedural_store[sparse_key(μ_acc)][memory_id] = Q(proc_key, memory_id)
 
-Thus `index_store` is a sparse content-addressed memory bucket, while
-`procedural_store` is a sparse context-to-memory value table. Empty
-embeddings or non-positive key sizes produce no key and therefore do not
-update either store.
+Thus `index_store` is a processor-local sparse content-addressed bucket,
+while `procedural_store` is a processor-local sparse context-to-memory
+value table. Empty embeddings or non-positive key sizes produce no key
+and therefore do not update either store. Neither map is currently
+persisted, and production graph retrieval does not consume
+`index_store`; dense SQLite/vector discovery remains the active seed
+path.
 
 ## Procedural Memory Lane (Habit/Skill Memory)
 
-In addition to declarative memory, Cortext maintains a procedural store
-for **which previously successful routine memory to surface in a
-context**, learned from repeated successful use.
+In addition to declarative memory, Cortext maintains experimental
+procedural values for which previously successful routine memory could
+be surfaced in a context, learned from repeated successful use.
 
     proc_key ← sparse_key(μ_acc)  # same sparsification as @sec-pattern-separation
     Q(proc_key, memory_id) ← routine value
@@ -2763,14 +2865,13 @@ downstream outcome signals are positive:
 
     Q ← Q + value_update_gain × δ_reward_t × (1 − Q)
 
-Procedural retrieval runs in parallel with declarative retrieval. In the
-current implementation, high-confidence routine memories are added as
-**proactive retrieval seeds** for the current sparse context even before
-a strong semantic match would have selected them; they still pass
-through the same interrupt gate and final retrieval ranking. This is
-intentionally narrower than a free-standing action policy: the
-procedural lane surfaces likely next-step routines as memories, not
-separate action tokens.
+The current implementation updates this processor-local table but does
+not read it in production graph retrieval, so it does not yet add
+proactive seeds or surface action tokens. The historical
+`procedural_proactive` ablation in
+<a href="#sec-experimental" class="quarto-xref">Section 11</a> evaluated
+an earlier research-branch path and was an exact null; it is not
+evidence that proactive procedural retrieval ships today.
 
 # Consolidation and Graph Integration
 
@@ -2830,12 +2931,13 @@ commands.
 Consolidation operates on stored memory representatives, not raw
 signals. Candidates are restricted to eligible `LONG_TERM` source
 memories that have not already been assigned to the current
-consolidation cluster. The gate and cluster breadth derive from F/S/T:
+consolidation cluster. The clustering threshold, minimum size, and batch
+cap derive from F/S/T:
 
 ``` text
-merge_threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
-min_cluster_size = ConsolidationMinClusterSize(F,S,T)
-source_span = ConsolidationClusterSourceSpan(F,S,T)
+merge_threshold = MergeThreshold(F)
+min_cluster_size = MinClusterSize(F)
+max_clusters = ConsolidationMaxClusters(F,S,T)
 ```
 
 When a forced consolidation has too few low-strength candidates, the
@@ -2884,8 +2986,8 @@ nodes are treated as graph evidence only.
 
 After shallow replay, `BuildGraphFromConsolidation` reinforces durable
 graph structure among the cluster products and sources. The graph
-builder remains bounded by knob-derived edge weights, relation fanout,
-and source-span limits. The graph products are useful for later
+builder remains bounded by the candidate/cluster cap and knob-derived
+edge conditions and weights. The graph products are useful for later
 retrieval because graph expansion can recover clustered source memories
 through `derived_from`, co-occurrence, similarity, reinforcement, and
 causal edges.
@@ -3152,7 +3254,9 @@ where cosine_dist(u, v) = 1 − cos(u, v).
     max_wait_drift(F) = lerp(1.2, 0.30, F)
     adjacent_window(F) = round(lerp(6, 1, F))
 
-    since_last_s ← if last_retrieval_ts == 0 then +∞ else (now_ms() − last_retrieval_ts) / 1000
+    since_last_s ← if last_retrieval_ts == 0 then +∞
+                   else if now_ms() <= last_retrieval_ts then 0
+                   else (now_ms() − last_retrieval_ts) / 1000
     min_gap_s ← adjacent_window(F) × dt_ema
     adjacent_ok ← (since_last_s ≥ min_gap_s)
     force_check ← (drift_acc_pacing > max_wait_drift(F))
@@ -3275,8 +3379,8 @@ be selected.
 
 ## Regression Results
 
-The current branch passed the following local verification commands
-after the cutover:
+The following commands and counts are the historical hard-cutover
+verification record:
 
 ``` bash
 cmake -S . -B build/codex-hardcut-check \
@@ -3300,6 +3404,15 @@ test case** and **2 assertions**.
 
 An examples-enabled build also completed after configuring with
 `CORTEXT_BUILD_EXAMPLES=ON`.
+
+After the July 12 safety fixes documented below, the current
+warnings-as-errors debug tree passed the complete default native suite:
+**509 test cases** and **4,510 assertions** in 483.53 seconds. The
+source lists 510 cases; one hidden Catch2 case is intentionally excluded
+from the default invocation. Focused regression, store/binding,
+performance, and model-backed C API filters also passed, as did Go tests
+and vet, Dart analysis and tests, Python validation, the Node addon
+build, and the WebAssembly bundle build.
 
 On 2026-07-07, the belief-revision supersession patch added focused
 modality-agnostic regression/evals. The storage probe uses an
@@ -3346,6 +3459,10 @@ supersession write path is active in a normal harness run. This is a
 local no-regression smoke screen for retrieval mechanics, not a
 blind-judge quality result.
 
+The mechanism-eval directory above was local run output and is not
+checked into this repository; the numerical result is retained as a
+historical run record, not a checkout-reproducible aggregate artifact.
+
 On 2026-07-08, the public retention path was re-screened after fixing
 `Retention::Ephemeral` to force a processing boundary without granting
 durable write permission. The focused regression suite verified that
@@ -3363,9 +3480,42 @@ edge only), and `Ephemeral` (no-store query). Binding surfaces expose
 retention through process options; CLI remember continues to use
 `Durable` and recall uses `Ephemeral`.
 
-The same patch was run through the normalized memory-eval smoke slice
-with all configured benchmark adapters, using durable history ingestion
-and ephemeral queries through the public API:
+On 2026-07-12, a safety regression screen covered the retained ingress
+and storage paths. Focused tests injected a root-transaction commit
+failure and verified that a retry persisted the same working-memory
+signal record; applied two passive WM maintenance passes and verified
+linear rather than compounded decay; replayed a backward timestamp
+without a forced gap boundary; retained an emotional source sixty
+seconds old inside the five-minute cascade window; evicted a memory with
+a distinct signal embedding and verified the vector row was reclaimed;
+and verified supersession/graph writes invalidate cached fanout. Binding
+checks reject undersized images before native inference, legacy media
+JSON entry points remain Durable, and WASM text ingress now exposes all
+four retention policies with Natural as its default.
+
+The same patch ran the deterministic steady-state live-loop harness for
+1,000 synthetic signals in a warnings-as-errors debug build. It
+completed in 25.809 s (38.746 signals/s) with 238 writes, 239
+boundaries, 231 interrupts, 5,461 total candidates, 253 final memories,
+46 associations, and 1,355 embeddings. The performance-tag regression
+tests also passed. A matched AppleClang Release comparison against the
+unchanged parent tree then alternated five 1,000-signal runs per build.
+Median throughput was 180.140 signals/s for the parent and 179.580
+signals/s for the patched tree (-0.31%); means were 177.919 and 177.354
+signals/s (-0.32%), respectively. Every run produced identical writes,
+boundaries, interrupts, candidate totals, threshold and effective-focus
+sums, and final memory, association, and embedding counts. The observed
+throughput difference is within run-to-run variation. This comparison
+covers the core operation and persistence loop with synthetic
+embeddings, not model inference or language-runtime overhead. At that
+measured head, the implemented checks added no per-signal query or eager
+graph rebuild. The later passive-decay durability repair adds at most
+one bounded memory-row update per changed live slot during normal
+persistence and is outside this historical measurement.
+
+Separately, the July 8 retention work was run through the normalized
+memory-eval smoke slice with all configured benchmark adapters, using
+durable history ingestion and ephemeral queries through the public API:
 
 ``` bash
 scripts/run_memory_evals.py --profile smoke --benchmarks all --no-prepare \
@@ -3383,6 +3533,11 @@ Packet-answer accuracy stayed at 0.0 over the scored slice, while the
 Codex, Grok, and Antigravity adapters each scored 0.2 over five scored
 queries. This is a regression check for public ephemeral retrieval and
 harness wiring, not a state-of-the-art quality claim.
+
+That `logs/memory_evals/...` directory is local-only and is not included
+in the paper artifact bundle. The checked-in manuscript therefore treats
+these smoke numbers as a historical harness record rather than
+independently auditable raw evidence.
 
 ## Retrieval Behavior After Removal
 
@@ -3746,7 +3901,11 @@ be read as a production TencentDB benchmark: the TencentDB run used the
 local Qwen model for both memory extraction and judging, ran without a
 TencentDB embedding service, and logged several extraction/LLM parse
 failures. The aggregate artifact is
-`eval_runs/msc_tencentdb_qwen_20260706T213907Z/judge_vllm_qwen_omni.json`.
+`eval_runs/msc_tencentdb_qwen_20260706T213907Z/judge_vllm_qwen_omni.json`,
+a local-only path that is not checked into this repository. Consequently
+this table is a historical comparator record and cannot be independently
+audited from the PR checkout; the checked-in artifact-backed MSC results
+below and above carry stronger provenance.
 
 ### 128k RAG-Ablation Probe
 
@@ -4051,7 +4210,10 @@ judgments and passed the prompt-fit and context-leak gates. The
 aggregate artifact is
 `docs/paper/artifacts/neuromodulator_mechanism_sweep_20260706T232135Z/mechanism_sweep_summary.json`.
 
-The June removal arms below are read only against the June control.
+The June removal arms below are read only against the June control. The
+`reading` column records the decision made in that research branch at
+the time; it is not an inventory of mechanisms consumed by the current
+production ranker.
 
 <table>
 <colgroup>
@@ -4087,7 +4249,8 @@ The June removal arms below are read only against the June control.
 <td style="text-align: right;">3.79</td>
 <td style="text-align: right;">0.86</td>
 <td style="text-align: right;">655</td>
-<td>30% packet bloat, ties triple; retained</td>
+<td>30% packet bloat, ties triple; historical retain, absent from
+current ranker</td>
 </tr>
 <tr>
 <td>metacognitive</td>
@@ -4172,14 +4335,17 @@ The June removal arms below are read only against the June control.
 </tbody>
 </table>
 
-In the June removal set, temporal retrieval and predictive
+In the June research branch, temporal retrieval and predictive
 pre-activation stayed because their removal cost measurable packet
-quality or packet size. Removing the metacognitive layer was mildly
-positive and had no long-horizon story to defer to, which supported
-cutting it in v1. Removing daily consolidation was also mildly positive
-at this horizon, but we deferred that arm because consolidation-family
-verdicts require long-horizon runs. The remaining removal arms were null
-or long-horizon deferred as labeled.
+quality or packet size. The hard-cutover production graph ranker retains
+temporal scoring but no longer reads `pre_activation`, so that
+predictive verdict does not describe current runtime behavior. Removing
+the metacognitive layer was mildly positive and had no long-horizon
+story to defer to, which supported cutting it in v1. Removing daily
+consolidation was also mildly positive at this horizon, but we deferred
+that arm because consolidation-family verdicts require long-horizon
+runs. The remaining removal arms were null or long-horizon deferred as
+labeled.
 
 The July single-repetition follow-up rows below are read only against
 the July 6 measured control and are treated as a preliminary screen.
@@ -4820,6 +4986,15 @@ modalities, maintenance commands, or consolidation behavior from
 reserved source strings. Explicit maintenance is driven by API calls and
 `Signal::force_consolidation`, not magic source identifiers.
 
+SQLite parameters are checked at bind time, including exact
+statement/argument counts, so `SQLITE_TOOBIG`, `SQLITE_RANGE`, and
+allocation failures cannot be silently converted into NULL values.
+`Process()` and `Flush()` both snapshot mutable processor state until
+the database transaction commits; rollback restores working-memory dirty
+flags and persisted-record cursors. Association writers invalidate the
+fanout cache in constant time and rebuild it lazily on the next
+traversal.
+
 ## Current Operation Pipeline
 
 The production operation chain is:
@@ -4872,19 +5047,22 @@ edges, not a batch semantic extraction job.
 ## Retrieval Implementation
 
 Production retrieval discovers a broad but bounded vector seed set from
-durable memory embeddings, expands through retained graph edges, applies
-temporal rank and source-backed ordering signals, and returns a compact
-selected set. Current writes are excluded by timestamp, and
-working-memory overlap filters prevent the retrieval result from echoing
-the active memory tail. Association edges are used as graph evidence;
-they do not bypass final scoring or output caps.
+durable memory embeddings, expands through retained graph edges and
+source/turn neighbors, applies temporal rank and supersession demotion,
+and returns a compact selected set. Current writes are excluded by
+timestamp, and working-memory overlap filters prevent the retrieval
+result from echoing the active memory tail. Association edges are used
+as graph evidence; they do not bypass final scoring or output caps.
 
 The retrieval trace path records a ranking ledger for selected and
-rejected candidates. The trace schema reports the active scalar
-components that still exist in the implementation: relevance, processor
-score, predictive bonus, pre-activation, durable-source boost,
-temporal/evidence annotations, and the ACT-R-inspired activation ledger.
-Deleted label-graph and fact-layer fields are not emitted.
+rejected candidates. Production graph retrieval populates composite
+score, seed relevance, temporal score, and the
+base/spreading/supersession fields of the activation ledger. The shared
+trace structure still contains reserved processor, predictive,
+pre-activation, durable-source, and evidence fields, but this path
+leaves them at zero; their presence is not evidence that those terms
+participate in ranking. Deleted label-graph and fact-layer fields are
+not emitted.
 
 ## Soft Anchor Implementation Status
 
@@ -4920,24 +5098,49 @@ soft_anchor_links(memory_id, anchor_id, anchor_strength, anchor_label,
 
 Hydrated memories expose up to three soft-anchor entries through
 `Context::Memory::soft_anchors`, and the C API JSON mirrors those
-entries under each returned memory. The chat demo emits matching
-`<soft_anchor>` elements in the prompt snapshot.
+entries under each returned memory. Production retrieval does not use
+those links as ranking features, and no bundled chat renderer is part of
+this claim.
 
 ## Computational Complexity
 
-The dominant per-signal cost is retrieval over the durable SQLite
-embedding and association surface. With `N` stored memories, naive
-vector seed discovery is `O(N)` before sqlite-vec pruning; graph
-expansion is bounded by F/S/T-derived row and fanout limits.
-Working-memory and soft-anchor updates operate over bounded live state
-and remain independent of total store size.
+The dominant per-signal cost is exact candidate discovery over the
+durable embedding and association surface. With `N` stored memories and
+embedding dimension `d`, the current write path computes exact
+current/base distances in `O(Nd)` and performs `O(N)` bounded-top-k
+selection before writing a knob-capped number of supersession edges.
+Graph expansion after seed discovery is bounded by F/S/T-derived row and
+fanout limits. Working-memory and soft-anchor updates operate over
+bounded live state and remain independent of total store size.
+
+The safety checks preserve these bounds: bind-result validation is one
+branch per existing parameter, working-memory decay advances one
+timestamp per bounded slot and schedules at most one memory-row update
+per changed slot during normal persistence, and graph writes perform
+only O(1) cache invalidation. None adds a store-size-dependent query or
+eager graph reconstruction; working-memory persistence remains bounded
+by the configured live-slot capacity.
 
 The retained long-horizon optimization target is that mean process
-latency stays approximately flat as the database grows. Recent profiling
-moved the largest known costs out of per-row reconstruction, repeated
-parse work, and unbounded deleted feature paths. Further gains now
-primarily depend on SQLite row-materialization overhead, vector blob
-copies, and vector-index internals rather than hidden decoder calls.
+latency stays approximately flat as the database grows. The July 2026
+exact-replay audit did not prove that target. At the end of the
+2,636-event replay, the private historical surface contained 6,762
+embedding entries but only 6,622 bit-identical vector groups. Exact
+grouping could therefore remove at most 140 distance evaluations
+(2.0704%); 97.9296% of the population still had to be evaluated. A
+non-selecting previous-query triangle-bound probe likewise evaluated
+99.975% of historical candidates on average over 1,000 events and
+99.804% in the final 100.
+
+The retained implementation removes repeated SQL, row decoding,
+duplicate ranking, and redundant query-norm work, but the exact
+current/base population and tie contract leave candidate discovery
+linear in durable history on this corpus. Further asymptotic gains
+require an approved change to candidate semantics,
+consolidation/tiering/eviction semantics, storage/index backend, or
+public state ownership. They do not depend on hidden decoder calls, and
+the current result must not be described as flat storage or flat
+throughput.
 
 # Performance Optimization
 
@@ -4978,9 +5181,11 @@ configuration choices.
 
 The engine is optimized around three constraints:
 
--   **Bounded online work:** F/S/T-derived limits cap retrieval fanout,
-    reconstruction history, consolidation breadth, working-memory size,
-    and graph updates.
+-   **Bounded online outputs:** F/S/T-derived limits cap retrieval
+    fanout, reconstruction history, consolidation breadth,
+    working-memory size, graph updates, and written supersession edges.
+    These caps do not by themselves bound exact candidate discovery as
+    stored history grows.
 -   **Current-state retrieval surfaces:** retrieval scores the current
     durable representative for each memory instead of scanning every
     historical embedding version.
@@ -4988,9 +5193,10 @@ The engine is optimized around three constraints:
     after the ranked packet is selected, not while discovering
     candidates.
 
-This keeps latency tied to selected memories, bounded graph
-neighborhoods, and SQLite/vector-index costs rather than source text
-length or hidden decoder calls.
+This keeps post-selection latency tied to selected memories and bounded
+graph neighborhoods rather than source text length or hidden decoder
+calls. Exact write-time and retrieval-seed discovery can still scale
+with the durable embedding surface.
 
 ## Implemented Optimizations
 
@@ -5032,11 +5238,13 @@ scans</td>
 </tr>
 <tr>
 <td>graph expansion</td>
-<td>retained edge types only: <code>co_occurs</code>,
+<td>retained traversal types: <code>co_occurs</code>,
 <code>similar_to</code>, <code>reinforces</code>, <code>causes</code>,
-<code>derived_from</code></td>
-<td>removed fact, label-bank, and temporal-retrieval side paths cannot
-influence rank</td>
+<code>derived_from</code>, <code>next_in_episode</code>,
+<code>prev_in_episode</code>, <code>within_same_event</code>, and
+<code>supersedes</code></td>
+<td>removed fact and label-bank paths cannot influence rank; stored
+maintenance-only edge types are not traversed</td>
 </tr>
 <tr>
 <td>reconstruction</td>
@@ -5049,6 +5257,41 @@ cleanly</td>
 <td>avoid redundant object-store writes for single-signal memory
 payloads</td>
 <td>durable payload identity is preserved</td>
+</tr>
+<tr>
+<td>exact durable-neighbor ranking</td>
+<td>maintain private current/base embedding surfaces in a process-wide
+lifecycle registry, including signal-only rows that affect the
+sqlite-vec population; rank into typed borrowed/owned candidates; reuse
+the query norm across exact cosine checks</td>
+<td>the registry follows processor teardown across sequential thread
+migration and mirrors authoritative SQL write decisions; the same
+candidate population, K, filters, tie order, cosine results, thresholds,
+and supersession edges are retained; SQL remains the fallback and no
+public header or API layout changes</td>
+</tr>
+<tr>
+<td>graph retrieval</td>
+<td>share certified exact neighbor rows from the immediately preceding
+write, refresh current representatives from the processor surface, and
+apply supersession demotion from a transactionally coherent fanout
+cache</td>
+<td>the SQL paths remain fallbacks; retrieved order and penalties remain
+identical</td>
+</tr>
+<tr>
+<td>rollback snapshots</td>
+<td>detach rebuildable durable caches before copying processor state and
+reload them after a failed transaction</td>
+<td>generic rollback still restores durable and volatile processor state
+exactly</td>
+</tr>
+<tr>
+<td>synaptic tagging</td>
+<td>use indexed temporal candidate supersets with boundary ties before
+applying the original exact score and order</td>
+<td>the same nearest source-backed memories are tagged without a
+whole-source group scan</td>
 </tr>
 <tr>
 <td>live replay ingress</td>
@@ -5075,6 +5318,170 @@ saved baseline. At 1,000-event progress checkpoints,
 81.6-303.6 ms in the baseline. The verification artifact is
 `docs/paper/artifacts/graph_profile/full_msc_verify_final/summary_slim.json`.
 
+## Durable-Ingestion Scaling Audit
+
+On 2026-07-14, a fixed 2,636-event private replay was used to profile
+the sequential durable-ingestion path. Durable artifacts contain only
+aggregate timings, counts, and cryptographic behavior/database digests;
+no message text, identifiers, or local paths are published. The baseline
+and every retained candidate produced the same event-by-event behavior
+digest and the same canonical logical database digest, ending with 2,657
+memories, 2,657 signals, and 57,643 associations.
+
+The exact origin/main baseline averaged 1,022.552 ms of process time and
+2,720,276 ms wall time. Its final-five/first-five 100-event-window
+ratios were 9.808 for `MemoryStorage`, 9.821 for supersession-edge work,
+9.318 for process latency, and 0.101 for sequential messages per second.
+
+The retained Candidate 34 computes the typed supersession query norm
+once and reuses the exact `double` across the candidate loop. It
+produced the same event-by-event behavior digest
+`4e728353eab989086481217cd140930875b112dcccb1fe372acdefc9b16c6bb8` and
+canonical logical-database digest
+`a2a538e619b9b10b1a5f2892993a168e7b0f8be31cd0eaa912937f9d26a2ddfe`. The
+sanitized, content-bound aggregate supporting this retained candidate is
+`artifacts/flat_storage_cost/candidate_34_summary.json`; raw profiles
+and databases remain private proof inputs. The final current-source run,
+after making the private pre-filter population mirror every runtime
+reconstruction and working-memory embedding and repairing restart
+hydration of the latest reconstruction, including base-only ablation
+parity, averaged 8.560 ms process time, 14.551 ms total latency, and
+39,338 ms wall time. It had the same behavior/database digests and
+57,643/2,657/2,657 association/memory/signal counts. Its fixed gate
+results were:
+
+Earlier Candidate 34 timing samples omitted runtime reconstruction
+embeddings from the private pre-filter mirror. Their behavior and
+database digests remain valid, but their scan-cost measurements are
+superseded by this corrected run.
+
+<table>
+<thead>
+<tr>
+<th>Gate metric</th>
+<th style="text-align: right;">Candidate 34 observed</th>
+<th style="text-align: right;">Required</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MemoryStorage</code> final-five/first-five</td>
+<td style="text-align: right;">2.063758</td>
+<td style="text-align: right;">≤ 1.05</td>
+</tr>
+<tr>
+<td><code>MemoryStorage</code> Theil–Sen slope (ms/message)</td>
+<td style="text-align: right;">0.000684779</td>
+<td style="text-align: right;">≤ 0.01</td>
+</tr>
+<tr>
+<td><code>MemoryStorage</code> bootstrap 95% upper slope</td>
+<td style="text-align: right;">0.000703932</td>
+<td style="text-align: right;">≤ 0.02</td>
+</tr>
+<tr>
+<td>supersession final-five/first-five</td>
+<td style="text-align: right;">2.528664</td>
+<td style="text-align: right;">≤ 1.05</td>
+</tr>
+<tr>
+<td>supersession Theil–Sen slope (ms/message)</td>
+<td style="text-align: right;">0.000686189</td>
+<td style="text-align: right;">≤ 0.01</td>
+</tr>
+<tr>
+<td>supersession bootstrap 95% upper slope</td>
+<td style="text-align: right;">0.000694684</td>
+<td style="text-align: right;">≤ 0.02</td>
+</tr>
+<tr>
+<td>process final-five/first-five</td>
+<td style="text-align: right;">1.739414</td>
+<td style="text-align: right;">0.90–1.10</td>
+</tr>
+<tr>
+<td>messages/s final-five/first-five</td>
+<td style="text-align: right;">0.692262</td>
+<td style="text-align: right;">0.90–1.10</td>
+</tr>
+</tbody>
+</table>
+
+The small absolute slopes pass their loose ceilings, but both storage
+ratios and both throughput ratios fail. Candidate 34 is therefore a
+material improvement over the baseline and earlier exact candidates,
+**not** proof of flat storage cost or flat end-to-end throughput.
+
+A separate current-source 1,000-event durable SQLite-profile sensitivity
+run used 50-event audit windows. It matched the established 1,000-event
+behavior and logical-database digests and ended with 19,845
+associations, 1,021 memories, and 1,021 signals. The final
+current-source run also failed the ratio gates: 1.633813 for
+`MemoryStorage`, 2.070751 for supersession, 1.414776 for process
+latency, and 0.844665 for messages/s. This confirms that the non-flat
+conclusion is not an artifact of the realtime SQLite benchmark profile.
+
+Explicit consolidation required a separate lifecycle proof because force
+persistence broadly prunes and rewrites embedding rows. Candidate 34 now
+rebuilds the historical search registry from authoritative SQL only
+after a successful force commit; a failed commit restores the
+rolled-back registry. On the same 1,500-message prefix with forced
+consolidations at messages 750 and 1,500, the exact pre-repair
+SQL-fallback tree and the repaired tree produced the same event-behavior
+digest
+`a86d5aa3ed1ae945a794fd6b071f3d80bdada008a66cc2076313d7da404c6a5a` and
+logical-database digest
+`4751e7d7b6711d7e968ff7c31761150a22fab9735dbd4c961b3227f4bfa3bf81`.
+Across the 750 messages after the midpoint consolidation, mean process
+time was 8.098 ms with the rebuild versus 496.352 ms on the fallback;
+mean `MemoryStorage` time was 1.117 versus 485.853 ms, and total replay
+wall time was 19,586 versus 388,127 ms. A repaired full 2,636-message
+midpoint run also completed two consolidations in 38,929 ms and retained
+a 10.088 ms post-midpoint mean process time. The corresponding full
+pre-repair comparator was intentionally stopped incomplete after 1,906
+messages because the demonstrated fallback made it disproportionate; it
+has no final digest or audit and is not counted as full baseline
+evidence.
+
+The fixed diminishing-returns audit then evaluated three distinct
+behavior-exact, database-exact, warning-clean full-corpus changes:
+caching target norms, retaining typed-container capacity, and
+serializing the SQL query only when fallback was used. All three missed
+every predeclared flatness-breakthrough threshold and were reverted.
+Direct validated append and reusable assembly scratch also regressed at
+their bounded exact gates. Chronological blocks, a sparse grid, a
+matrix-vector kernel, persistent rank populations, rank refill,
+cross-operation exact memoization, and previous-query triangle bounds
+had already failed their exact gates or feasibility conditions.
+
+At 2,636 events, the historical surface held 6,762 entries but 6,622
+exact vector groups, so grouping removes only 140 evaluations (2.0704%).
+The triangle-bound probe evaluated 99.975% of 256-dimensional candidates
+on average over 1,000 events and 99.804% in its final 100. Under the
+current observable candidate semantics, the retained scan remains
+`O(Nd)` on this corpus. Another narrow constant-factor repair is not
+expected to flatten it. Changing the candidate contract,
+consolidation/tiering/eviction semantics, storage/index backend, public
+processor-state ownership, or fixed proof gate requires separate
+approval.
+
+## Standard Eviction-Frontier Estimate
+
+The standard file-backed pressure gate is 500,000,000 bytes. Exact
+databases occupied 10,014,720 bytes at 500 messages, 18,169,856 bytes at
+1,000, and 48,857,088 bytes at 2,636. The full-span storage slope
+projects the gate at approximately 27,445 messages; the observed
+interval slopes give a planning range of roughly 26,700–30,500 messages.
+
+Projecting Candidate 34’s corrected post-warmup trends to 27,445
+messages gives 89.8 ms of engine process time (11.1 writes/s) and 103.7
+ms sequential end-to-end latency (9.6 messages/s). This is a
+pre-frontier estimate extrapolated about 10.4 times beyond the measured
+corpus, not a direct run or post-eviction claim. Storage pressure only
+permits eviction: a memory must also satisfy the consolidation-age and
+strength predicates. The measured corpus has `last_consolidation_ts=0`,
+so it would not evict at the pressure frontier as-is.
+
 ## Verification Gates
 
 The optimization and cutover work is gated by:
@@ -5093,11 +5500,34 @@ cmake --build build/codex-hardcut-check -j
   '[operations][graph][retrieval],[operations][constructive_recall][graph],[state_persistence][working_memory][decay]'
 ```
 
-The broad filtered test suite passed **429 test cases** and **2,489
-assertions**. The targeted graph/reconstruction/state suite passed **5
-test cases** and **16 assertions**. Python experiment helpers that
-remain in the tree compile, and JSON config files that remain in the
-tree validate.
+Those hard-cutover commands historically passed **429 test cases** and
+**2,489 assertions** in the broad filter and **5 test cases** and **16
+assertions** in the targeted graph/reconstruction/state filter. The July
+12 safety tree passed the complete default native suite with **509 test
+cases** and **4,510 assertions**, plus Python validation, Go tests and
+vet, Dart analysis and tests, the Node addon build, and the WebAssembly
+bundle build. Candidate 34 separately completed a warning-clean native
+build, passed the complete registered CTest suite (1/1), matched the
+retained exact behavior and logical-database digests at 500 and 2,636
+events, and matched the established 1,000-event digests under the
+durable SQLite profile. After integration onto the current
+runtime-safety branch, the combined tree passed the complete registered
+CTest suite (1/1) and the focused rollback, cache, state-persistence,
+memory-storage, graph-retrieval, graph-cache, and reconsolidation
+groups. A fresh 500-event comparison against the exact pre-integration
+branch head produced the same event-behavior digest, the same canonical
+logical-database digest, and the same 9,091/521/521
+association/memory/signal counts. Mean process latency was 9.492 ms on
+the combined tree versus 47.846 ms on the control, and mean sequential
+end-to-end latency was 17.297 versus 55.919 ms. The 500-event comparison
+is an integration equivalence and bounded performance check, not a
+flatness result; the full audit above remains the source of truth for
+non-flat storage cost and throughput. The merged rollback path also has
+an injected failed-`Flush()` regression: it asserts that working-memory
+dirty state and the private historical-search registry are restored,
+then performs a normal write before any successful flush to prove that
+the exact accelerator remains available during the previously untested
+post-failure interval.
 
 ## Remaining Bottlenecks
 
@@ -5160,10 +5590,11 @@ outside the repository. Recommended reported metrics are:
 </tbody>
 </table>
 
-The hard-cut branch is therefore optimized enough to resume
-product-quality experiments, but not declared theoretically optimal.
-Further gains should come from profiling the retained
-SQLite/vector/object-store path rather than rebuilding deleted decoder
+The hard-cut branch is therefore suitable for continued product-quality
+experiments, but the measured durable-ingestion path is explicitly
+non-flat. Further asymptotic gains require an approved semantics,
+lifecycle, backend, or state-ownership change rather than another
+unproven narrow hot-loop rewrite or the restoration of deleted decoder
 features.
 
 # Conclusion and Future Directions
@@ -5216,6 +5647,9 @@ Sciences* 24 (1): 87–114.
 Limited, and Why?” *Current Directions in Psychological Science* 19 (1):
 51–57.
 
+Fountas, Zafeirios et al. 2024. “EM-LLM: Episodic Memory in Large
+Language Models.” *arXiv Preprint*.
+
 Hunt, R Reed. 1995. “The Subtlety of Distinctiveness: What von Restorff
 Really Did.” *Psychonomic Bulletin & Review* 2 (1): 105–12.
 
@@ -5231,9 +5665,9 @@ McClelland, James L, Bruce L McNaughton, and Randall C O’Reilly. 1995.
 Neocortex: Insights from the Successes and Failures of Connectionist
 Models of Learning and Memory.” *Psychological Review* 102 (3): 419.
 
-McCloskey, Michael, and Neal J Cohen. 1989. *Catastrophic Interference
-in Connectionist Networks: The Sequential Learning Problem*. Vol. 24.
-Elsevier.
+McCloskey, Michael, and Neal J Cohen. 1989. “Catastrophic Interference
+in Connectionist Networks: The Sequential Learning Problem.” In *The
+Psychology of Learning and Motivation*, 24:109–65. Elsevier.
 
 McGaugh, James L. 2004. “The Amygdala Modulates the Consolidation of
 Memories of Emotionally Arousing Experiences.” *Annual Review of
@@ -5256,8 +5690,11 @@ Retrieval.” *Nature* 406 (6797): 722–26.
 Russell, James A. 1980. “A Circumplex Model of Affect.” *Journal of
 Personality and Social Psychology* 39 (6): 1161.
 
-Tulving, Endel. 1972. “Episodic and Semantic Memory.” *Organization of
-Memory* 1: 381–403.
+Tulving, Endel. 1972. “Episodic and Semantic Memory.” In *Organization
+of Memory*, 1:381–403. Academic Press.
+
+Zacks, Jeffrey M, and Kymberly M Swallow. 2007. “Event Segmentation.”
+*Current Directions in Psychological Science* 16 (2): 80–84.
 
 # Appendix A. State Variables Map
 
@@ -5301,14 +5738,16 @@ On cold start (no persisted state), initialize retained state as follows
     `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`,
     `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`,
     `context = 0_vector`,
-    `source_model = {origin: source_origin(signal), reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`.
+    `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`.
+    Application provenance remains in the separate opaque `source_id`.
     SQLite defaults remain migration/backstop values for legacy rows.
     Evidence packets live in ordered `signals` rows, and the
     constructive-recall ledger starts empty until the initial
     reconstruction row is appended in `memory_reconstructions`.
 
--   **RLS defaults:** `w_* = w_bootstrap`, `P = diag(1000)`,
-    `blender_ready = false`, `blender_update_count = 0`.
+-   **RLS defaults:** `w_* = w_bootstrap`, `P = diag(P_init(T))` with
+    `P_init(T) = lerp(500, 2000, 1 − T)`, `blender_ready = false`,
+    `blender_update_count = 0`.
 
 -   **Knob-derived control parameters (initialized from priors):**
     `weight_relevance`, `attention_width`, `coverage_gain_floor`,

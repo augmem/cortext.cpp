@@ -69,7 +69,10 @@ score_gain = exp(2S)
 
 ### Emotional Projection {#sec-emotional-projection}
 
-When emotion category centroids are available, the system projects input embeddings onto a discrete emotion space C = {anger, fear, joy, love, sadness, surprise}. categories inspired by @russell1980circumplex circumplex model are projected onto the valence-arousal plane:coordinates:
+When emotion category centroids are available, the system projects input
+embeddings onto a discrete emotion space C = {anger, fear, joy, love, sadness,
+surprise}. Categories inspired by @russell1980circumplex circumplex model are
+projected onto the valence-arousal plane with the following coordinates:
 
 ```
 v_map = {anger: −0.9, fear: −0.8, sadness: −0.9,
@@ -98,7 +101,9 @@ else:
     arousal_t ← clamp(Σ_c p_c × a_map[c], 0, 1)
 ```
 
-The emotion intensity combines peak probability with distributional confidence via geometric mean, providing a measure that is high only when a single emotion dominates with high certainty.
+The emotion intensity combines peak probability with distributional confidence
+through a Sensitivity-dependent power transform of their product. It is high
+only when a category dominates and the distribution has high confidence.
 
 ### Threshold Modulation from Emotion {#sec-emotional-threshold}
 
@@ -110,7 +115,10 @@ Emotional activation loosens write thresholds to capture salient moments:
                         (0.5 + 0.5 × arousal_t)
 ```
 
-The emotional state acts as a modulator for memory encoding/consolidation, following @mcgaugh2004amygdala. High arousal and valence magnitude increase the likelihood of threshold crossings.
+The emotional state acts as a modulator for memory encoding/consolidation,
+following @mcgaugh2004amygdala. High emotion intensity and arousal increase the
+likelihood of threshold crossings; valence is recorded as a separate metric but
+does not enter this threshold delta directly.
 
 ### Mood Integration {#sec-mood}
 Distinct from instantaneous emotion, the mood state M_t ∈ ℝ⁶ maintains a persistent background affective tone as a 6-dimensional vector (one component per emotion category from @sec-emotional-projection):
@@ -227,7 +235,13 @@ NE_t  ← clamp(NE_base  + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)
 DA_t  ← clamp(DA_base  + max(0, δ_reward_t), 0, 1)
 ```
 
-Where `retrieval_pressure` is the normalized retrieval queue depth, and `δ_reward_t` is a reward prediction error derived from downstream outcome signals (see @sec-structural-metrics). These modulators drive internal gates without introducing new user-facing parameters:
+Where `retrieval_pressure` is the normalized retrieval queue-depth input, and
+`δ_reward_t` is a reward prediction error derived from downstream outcome
+signals (see @sec-structural-metrics). The production operation context does not
+currently populate queue depth, so this term is zero in the shipped full
+pipeline; tests and experiment hooks can supply it. The other phasic terms are
+live. These modulators drive internal gates without introducing new user-facing
+parameters:
 
 ```
 encode_bias ← ACh_t × (0.7 + 0.3S)

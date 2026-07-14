@@ -1,0 +1,166 @@
+{
+  "schema": "cortext_flat_storage_cost_summary_v2",
+  "candidate": 34,
+  "claim": "best exact candidate; flatness not proven",
+  "measurement_note": "final timings include runtime reconstruction and working-memory embeddings in the exact sqlite-vec pre-filter mirror, restart hydration of the latest reconstruction, base-only disabled-ablation parity, and authoritative historical-surface rebuild after successful force commits with rollback restoration after failed commits; earlier Candidate 34 timing samples are superseded",
+  "git_base_sha": "70ab11520b12e28f49fcc5c5019f3a0c80b57dfc",
+  "content_identity": {
+    "tracked_diff_sha256_excluding_this_artifact": "38cfef2571937cd76cea6276683bc7559ec558cd8669b9e3b21a937849bbe685",
+    "untracked_historical_surface_cache_sha256": "a828d25f4da5ff04a8cff7aff84597b8ff95cf97b179aeaf07d642bfbed13904",
+    "untracked_audit_tool_sha256": "4e02878d0b04ee2183be59853f79b42ec104a3be329ff54f12bf0016f6697f66",
+    "optimization_section_sha256": "14175a391f1b1b167fe7c9aed8503ef311959a7ef1ed201fe8914ca651e99742",
+    "generated_manuscript_sha256": "e2b305a7cf7812c54386adc9d05107f2a7b1a468a7474eb1ef3131d8dd458da2"
+  },
+  "corpus": {
+    "full_event_count": 2636,
+    "private_content_included": false
+  },
+  "realtime_500": {
+    "behavior_sha256": "e03608f44c470951e58c1e414dd6b015e742317e6cdbb6b2e5122bb7ab62be7f",
+    "logical_database_sha256": "508d06031973cf593939bd44a6d9e37c921c67467fe815cf7e828e6f385b9a74",
+    "logical_table_counts": {
+      "associations": 9091,
+      "memories": 521,
+      "signals": 521
+    },
+    "mean_process_ms": 4.539976482,
+    "mean_total_ms": 10.693155648,
+    "wall_ms": 5529,
+    "private_profile_sha256": "0ab62e4ea8d42a10469e117d18f273a295930627066fe3a7f2adf57b7942704a",
+    "private_database_file_sha256": "c3ab3ead7609c001de191ed4d9a7d9aed20a29e9a442b66466c6ead0273097c3",
+    "audit_sha256": "4368fb1550547c7d721aaa8820d72b2d290f6370b685addb7614cfef22b0a592"
+  },
+  "realtime_2636": {
+    "behavior_sha256": "4e728353eab989086481217cd140930875b112dcccb1fe372acdefc9b16c6bb8",
+    "logical_database_sha256": "a2a538e619b9b10b1a5f2892993a168e7b0f8be31cd0eaa912937f9d26a2ddfe",
+    "logical_table_counts": {
+      "associations": 57643,
+      "memories": 2657,
+      "signals": 2657
+    },
+    "mean_process_ms": 8.56041844688923,
+    "mean_total_ms": 14.550963581942321,
+    "wall_ms": 39338,
+    "memory_storage_late_early_ratio": 2.0637580798306874,
+    "memory_storage_theil_sen_ms_per_message": 0.0006847791920168069,
+    "memory_storage_bootstrap_95_upper_ms_per_message": 0.0007039323847373954,
+    "supersession_late_early_ratio": 2.5286640702899343,
+    "supersession_theil_sen_ms_per_message": 0.0006861894281249999,
+    "supersession_bootstrap_95_upper_ms_per_message": 0.0006946835751420457,
+    "process_late_early_ratio": 1.7394144434401446,
+    "messages_per_second_late_early_ratio": 0.6922616419820202,
+    "private_profile_sha256": "c9aca1d263ebeffe3241f5c5ba7fe679442a8279d508c1e12107b78edb594ad4",
+    "private_database_file_sha256": "477e01bbafee145fbdc79440bea634d7dca43935248dbba9df2d6978e78ae20b",
+    "audit_sha256": "5208e981886d251d06532d9925142a55c1a584592fd4d504d21cb5c16c293db3"
+  },
+  "durable_1000": {
+    "behavior_sha256": "44965174958b968ca2672a4baed0e68b2c65c770ffa0477a235672d9282a42b9",
+    "logical_database_sha256": "673a73733aefc6739ec3b6160850c7ec08d68cb2712be4ddf397541458a96df5",
+    "logical_table_counts": {
+      "associations": 19845,
+      "memories": 1021,
+      "signals": 1021
+    },
+    "mean_process_ms": 6.509920871,
+    "mean_total_ms": 12.456616908,
+    "wall_ms": 12827,
+    "memory_storage_late_early_ratio": 1.6338130397,
+    "supersession_late_early_ratio": 2.0707513586,
+    "process_late_early_ratio": 1.4147756438,
+    "messages_per_second_late_early_ratio": 0.8446645486,
+    "private_profile_sha256": "b95d527370f0a3d766bc37c4e9eb1a8749aa01e313a931f294c7bdc60d6b3a03",
+    "private_database_file_sha256": "8e22e9e1b4d14b984488b335213919d2430cdb5e4358feba92e984832e2c5e9c",
+    "audit_sha256": "c08b966819329792af43717d58f3b39f056326947971873de5baee31896c58b2"
+  },
+  "midpoint_consolidation_1500": {
+    "event_count": 1500,
+    "forced_consolidations": 2,
+    "consolidation_messages": [750, 1500],
+    "behavior_sha256": "a86d5aa3ed1ae945a794fd6b071f3d80bdada008a66cc2076313d7da404c6a5a",
+    "logical_database_sha256": "4751e7d7b6711d7e968ff7c31761150a22fab9735dbd4c961b3227f4bfa3bf81",
+    "logical_table_counts": {
+      "associations": 3500,
+      "memories": 1524,
+      "signals": 1523
+    },
+    "pre_repair": {
+      "mean_process_ms": 250.744265,
+      "mean_total_ms": 257.707038,
+      "wall_ms": 388127,
+      "consolidation_total_ms": 1085.133,
+      "post_midpoint_mean_process_ms": 496.352139,
+      "post_midpoint_mean_total_ms": 504.693886,
+      "post_midpoint_memory_storage_ms": 485.852829,
+      "post_midpoint_supersession_ms": 485.492936,
+      "private_profile_sha256": "b4707eb343450d47f75d204fc1ee23dbfeb8c97803ff2cd3cb7b7319fa4c9d84",
+      "private_database_file_sha256": "8c0f841967d1e9d0bd4869c58c9c40158c9e61ce05af770029f3e042e57d3f73",
+      "audit_sha256": "2afa8e0e469423a68f1a90ce361b9a3b3ac96cc0124d5688ca4f87082705caf2"
+    },
+    "post_repair": {
+      "mean_process_ms": 6.518981,
+      "mean_total_ms": 12.506988,
+      "wall_ms": 19586,
+      "consolidation_total_ms": 294.829,
+      "post_midpoint_mean_process_ms": 8.097541,
+      "post_midpoint_mean_total_ms": 14.470518,
+      "post_midpoint_memory_storage_ms": 1.116600,
+      "post_midpoint_supersession_ms": 0.791841,
+      "private_profile_sha256": "3b9e7203769b01c94b290eee62ffbd1879b38c20ff97baeac4e0b3a7230b544f",
+      "private_database_file_sha256": "dafc08954f15bd31abf01fdf100a287439654b39a790cfefc8222360a1dfcc1f",
+      "audit_sha256": "391ef9de875ef56d1d66171549cb91593c298270c7ea2908c0dde3c664c3cdca"
+    }
+  },
+  "current_midpoint_consolidation_2636": {
+    "event_count": 2636,
+    "forced_consolidations": 2,
+    "consolidation_messages": [1318, 2636],
+    "behavior_sha256": "8f0fcdaeb223fa0bb032bcc7c0c8e386547ec0f64b7c8d7503d32846936506ec",
+    "logical_database_sha256": "b44de2500403fbf9a73486ddb3580f126b93bc49e4fb08018c0cbc20540df25d",
+    "logical_table_counts": {
+      "associations": 6052,
+      "memories": 2660,
+      "signals": 2659
+    },
+    "mean_process_ms": 8.189805,
+    "mean_total_ms": 14.198027,
+    "wall_ms": 38929,
+    "consolidation_total_ms": 542.213,
+    "post_midpoint_mean_process_ms": 10.088494,
+    "post_midpoint_mean_total_ms": 16.255952,
+    "post_midpoint_memory_storage_ms": 1.587111,
+    "post_midpoint_supersession_ms": 1.249826,
+    "private_profile_sha256": "53464b4ce300e9455d54684450fda93315190a620ffbcc13fa0cd39c630fa44f",
+    "private_database_file_sha256": "9e2bab4bd05857a48b6da35881aee4aa8fc4abc8e4e42640851cb42fc9061aae",
+    "audit_sha256": "6e4f1e0e42d6099cb6ba319f96e4b3259a8b07c08f9f56a0804ecdec89f5675d",
+    "full_pre_repair_comparator_available": false
+  },
+  "standard_eviction_frontier_estimate": {
+    "pressure_gate_bytes": 500000000,
+    "central_message_count": 27445,
+    "planning_range_messages": [26687, 30542],
+    "extrapolation_multiple_over_measured_corpus": 10.4,
+    "projected_engine_process_ms": 89.77907474012856,
+    "projected_engine_writes_per_second": 11.138452951,
+    "projected_sequential_total_ms": 103.66147944884663,
+    "projected_sequential_messages_per_second": 9.646784952,
+    "actual_eviction_measured": false,
+    "reason_actual_eviction_not_measured": "pressure only permits eviction; age and strength predicates also apply, and the measured corpus has last_consolidation_ts=0"
+  },
+  "gates": {
+    "behavior_exact": true,
+    "logical_database_exact": true,
+    "storage_slope": true,
+    "storage_late_early_ratio": false,
+    "throughput": false,
+    "flatness_proven": false
+  },
+  "proof_not_claimed": [
+    "flat storage cost",
+    "flat end-to-end throughput",
+    "complete full-corpus pre-repair midpoint-consolidation comparison",
+    "post-eviction throughput",
+    "other corpora or hardware",
+    "production deployment",
+    "merge or release readiness"
+  ]
+}

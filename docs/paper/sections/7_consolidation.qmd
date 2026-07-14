@@ -50,13 +50,13 @@ start it. `source_id` strings are never interpreted as maintenance commands.
 
 Consolidation operates on stored memory representatives, not raw signals.
 Candidates are restricted to eligible `LONG_TERM` source memories that have not
-already been assigned to the current consolidation cluster. The gate and cluster
-breadth derive from F/S/T:
+already been assigned to the current consolidation cluster. The clustering
+threshold, minimum size, and batch cap derive from F/S/T:
 
 ```text
-merge_threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
-min_cluster_size = ConsolidationMinClusterSize(F,S,T)
-source_span = ConsolidationClusterSourceSpan(F,S,T)
+merge_threshold = MergeThreshold(F)
+min_cluster_size = MinClusterSize(F)
+max_clusters = ConsolidationMaxClusters(F,S,T)
 ```
 
 When a forced consolidation has too few low-strength candidates, the path
@@ -105,7 +105,8 @@ evidence only.
 
 After shallow replay, `BuildGraphFromConsolidation` reinforces durable graph
 structure among the cluster products and sources. The graph builder remains
-bounded by knob-derived edge weights, relation fanout, and source-span limits.
+bounded by the candidate/cluster cap and knob-derived edge conditions and
+weights.
 The graph products are useful for later retrieval because graph expansion can
 recover clustered source memories through `derived_from`, co-occurrence,
 similarity, reinforcement, and causal edges.

@@ -824,6 +824,18 @@ def _coerce_retention(retention: Retention | int | None) -> int:
     return value
 
 
+def _validate_image_buffer(
+    data: bytes, width: int, height: int, channels: int
+) -> None:
+    if width <= 0 or height <= 0 or channels <= 0:
+        raise ValueError("width, height, and channels must be positive")
+    if width > 2_147_483_647 or height > 2_147_483_647 or channels > 2_147_483_647:
+        raise ValueError("image dimensions exceed the native int range")
+    expected = width * height * channels
+    if len(data) < expected:
+        raise ValueError("image buffer is smaller than width * height * channels")
+
+
 def _native_process_json_options(
     include_embedding: bool,
     retention: Retention | int | None = None,
@@ -1428,6 +1440,7 @@ class Cortext:
         retention: Retention | int | None = None,
     ) -> str:
         blob = bytes(data)
+        _validate_image_buffer(blob, width, height, channels)
         raw = (ctypes.c_uint8 * len(blob)).from_buffer_copy(blob)
         options = _native_process_json_options(include_embedding, retention)
         return self._call_json(
@@ -1453,6 +1466,7 @@ class Cortext:
         retention: Retention | int | None = None,
     ) -> str:
         blob = bytes(data)
+        _validate_image_buffer(blob, width, height, channels)
         raw = (ctypes.c_uint8 * len(blob)).from_buffer_copy(blob)
         native_media, media_buffer, mimetype_buffer = _native_media(
             media, media_mimetype
@@ -1526,6 +1540,7 @@ class Cortext:
         channels: int,
     ) -> str:
         blob = bytes(data)
+        _validate_image_buffer(blob, width, height, channels)
         raw = (ctypes.c_uint8 * len(blob)).from_buffer_copy(blob)
         return self._call_json(
             self._lib.cortext_embed_image_json,

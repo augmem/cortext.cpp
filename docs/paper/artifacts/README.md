@@ -18,8 +18,12 @@ Included files:
 | `msc_gemma4_temporal_fix_20260701T204155Z/no_compaction_judge/judge_vllm_gemma4_12b_awq_ctx262k_nocomp_rep1.json` | Temporal-score local A/B fix | Aggregate judge JSON |
 | `replay_v8_context_blowout/judge_gemma4_12b_local_context128_prioronly.json` | Long-horizon context-blowout stress run | Aggregate judge JSON |
 | `graph_profile/full_msc_verify_final/summary_slim.json` | Full MSC graph-profile verification | Slim tracked summary with packet text and large local-only fields removed |
+| `neuromodulator_mechanism_sweep_20260706T232135Z/mechanism_sweep_summary.json` | July neuromodulator single-repetition sweep | Aggregate arm summary |
+| `neuromodulator_mechanism_confirm_20260707T002126Z/mechanism_sweep_summary.json` | July neuromodulator three-repetition confirmation | Aggregate arm summary |
+| `long_horizon_mechanism_sweep_20260707T022225Z/mechanism_sweep_summary.json` | Long-horizon deferred-mechanism sweep | Aggregate arm summary |
 
 The aggregate JSON files preserve their original run metadata, including
 historical `eval_runs/` paths for local databases, input directories, and row
-checkpoints. Those heavy local inputs are not required for the manuscript
-claims reproduced here.
+checkpoints. Those heavy local inputs are not tracked. Claims tied only to an
+untracked local path are labeled as such in the manuscript; the files listed
+above are the checkout-auditable aggregate evidence.

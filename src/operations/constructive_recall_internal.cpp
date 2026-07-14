@@ -1,4 +1,5 @@
 #include "constructive_recall_internal.hpp"
+#include "historical_surface_search_cache_internal.hpp"
 
 #include "cortext/core/utils.hpp"
 #include "cortext/store/utils.hpp"
@@ -18,6 +19,13 @@ template <typename Executor>
 std::optional<ReconstructionRecord>
 LoadLatestReconstructionImpl (Executor &executor, long long memory_id);
 
+bool
+CurrentSurfaceWritesDisabled ()
+{
+  return internal::experimental_env::Flag (
+      "CORTEXT_DISABLE_CURRENT_MEMORY_SURFACE_WRITES");
+}
+
 namespace
 {
 template <typename Executor>
@@ -26,13 +34,6 @@ Exec (Executor &executor, const std::string &query,
       const std::vector<std::any> &params = {})
 {
   return executor.Execute (query, params);
-}
-
-bool
-CurrentSurfaceWritesDisabled ()
-{
-  return internal::experimental_env::Flag (
-      "CORTEXT_DISABLE_CURRENT_MEMORY_SURFACE_WRITES");
 }
 
 long long
@@ -225,7 +226,8 @@ ShouldSkipReconstructionUpdateImpl (Executor &executor, long long memory_id,
 template <typename Executor>
 void
 PruneReconstructionHistory (Executor &executor, long long memory_id,
-                            ReconstructionUpdatePolicy policy)
+                            ReconstructionUpdatePolicy policy,
+                            ProcessorContext *p_ctx = nullptr)
 {
   const int history_limit = ResolveHistoryLimit (policy);
   if (memory_id <= 0 || history_limit <= 0)
@@ -306,6 +308,35 @@ PruneReconstructionHistory (Executor &executor, long long memory_id,
               "    WHERE mr.embedding_id = embeddings.embedding_id"
               "  )",
         embedding_ids);
+  if (p_ctx != nullptr)
+    {
+      auto retained_rows = Exec (
+          executor,
+          std::string ("SELECT embedding_id FROM embeddings "
+                       "WHERE embedding_id IN (")
+              + Placeholders (embedding_ids.size ()) + ")",
+          embedding_ids);
+      std::vector<long long> retained_ids;
+      retained_ids.reserve (retained_rows.size ());
+      for (const auto &row : retained_rows)
+        {
+          const auto it = row.find ("embedding_id");
+          if (it != row.end ())
+            {
+              retained_ids.push_back (AnyToInt64 (it->second));
+            }
+        }
+      for (const long long embedding_id : seen_embeddings)
+        {
+          if (std::find (retained_ids.begin (), retained_ids.end (),
+                        embedding_id)
+              == retained_ids.end ())
+            {
+              historical_surface_search_cache_internal::RemoveEmbedding (
+                  *p_ctx, embedding_id);
+            }
+        }
+    }
 }
 
 template <typename Executor>
@@ -669,7 +700,8 @@ AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,
                                    std::string_view trigger,
                                    double source_confidence,
                                    double context_similarity,
-                                   ReconstructionUpdatePolicy policy)
+                                   ReconstructionUpdatePolicy policy,
+                                   ProcessorContext *p_ctx)
 {
   if (memory_id <= 0 || embedding.size () == 0)
     {
@@ -683,7 +715,7 @@ AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,
 
   return AppendReconstructionWithEmbeddingUnchecked (
       tx, memory_id, embedding, blob_id, created_at, uncertainty, trigger,
-      source_confidence, context_similarity, policy);
+      source_confidence, context_similarity, policy, nullptr, p_ctx);
 }
 
 long long
@@ -695,7 +727,7 @@ AppendReconstructionWithEmbeddingUnchecked (
 {
   return AppendReconstructionWithEmbeddingUnchecked (
       tx, memory_id, embedding, blob_id, created_at, uncertainty, trigger,
-      source_confidence, context_similarity, policy, nullptr);
+      source_confidence, context_similarity, policy, nullptr, nullptr);
 }
 
 long long
@@ -704,7 +736,7 @@ AppendReconstructionWithEmbeddingUnchecked (
     const std::vector<unsigned char> &blob_id, long long created_at,
     double uncertainty, std::string_view trigger, double source_confidence,
     double context_similarity, ReconstructionUpdatePolicy policy,
-    ReconstructionAppendTimings *timings)
+    ReconstructionAppendTimings *timings, ProcessorContext *p_ctx)
 {
   if (memory_id <= 0 || embedding.size () == 0)
     {
@@ -726,6 +758,12 @@ AppendReconstructionWithEmbeddingUnchecked (
   if (embedding_id <= 0)
     {
       return 0;
+    }
+  if (p_ctx != nullptr)
+    {
+      historical_surface_search_cache_internal::Append (
+          *p_ctx,
+          { embedding_id, 0, 0, std::string (), std::string (), embedding });
     }
 
   t_start = std::chrono::steady_clock::now ();
@@ -758,7 +796,7 @@ AppendReconstructionWithEmbeddingUnchecked (
         }
     }
   t_start = std::chrono::steady_clock::now ();
-  PruneReconstructionHistory (tx, memory_id, policy);
+  PruneReconstructionHistory (tx, memory_id, policy, p_ctx);
   if (timings)
     {
       timings->prune_ms += ElapsedMs (

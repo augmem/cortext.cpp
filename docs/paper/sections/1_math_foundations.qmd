@@ -87,7 +87,10 @@ t_event(m_i) = created_at(m_i)
 ```
 
 Retrieval and consolidation consume this event time through recency windows,
-temporal context vectors, association ordering, and explicit replay timestamps:
+association ordering, and explicit replay timestamps. The accumulator's
+temporal-context vector is used separately for boundary/topic-shift state and
+is persisted with memories; as noted in @sec-temporal-context, it is not yet a
+production retrieval-score term.
 
 ```
 t_retrieve(q, m_i) = q.timestamp - t_event(m_i)
@@ -187,15 +190,16 @@ candidate discovery pass stays broad so source memories remain reachable:
 seed_k(F) = round(lerp(96, 8, FocusBias(F)))
 ```
 
-The prompt-facing output is then narrowed after graph, event-time recency,
-affect, procedural, source-confidence, and context scoring:
+The prompt-facing output is then narrowed after vector-seed relevance,
+event-time recency, graph expansion, same-source/turn-neighbor expansion, and
+supersession demotion:
 
 ```
 selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
 ```
 
-Candidate ranking includes an event-time temporal prior in addition to source
-confidence freshness:
+Candidate ranking includes an event-time temporal prior in addition to vector
+relevance and graph/source-neighbor evidence:
 
 ```
 temporal_rank(m) = exp(-age_s(m) / tau_rank(F,S,T))
@@ -214,9 +218,12 @@ source_reliability_0(F,S,T)
 
 This split lets low Focus explore many source/blob seeds while still keeping the
 application prompt bounded by a compact final surface. The intermediate graph
-boosts, source-confidence weights, durable-source floors, and text seed
-thresholds are likewise derived from Focus, Sensitivity, and Stability in the
-implementation rather than exposed as additional user settings.
+boosts, durable-source floors, and text seed thresholds are likewise derived
+from Focus, Sensitivity, and Stability in the implementation rather than
+exposed as additional user settings. The stored `source_reliability` and
+`source_contradiction_count` fields are not currently consumed by production
+ranking; @sec-advanced distinguishes that metadata from the proposed confidence
+gate.
 
 ### Experiential Mass and Maturity
 

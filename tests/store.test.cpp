@@ -3,6 +3,7 @@
 // tests/store.test.cpp
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
 #include <algorithm>
@@ -24,6 +25,18 @@ std::string
 create_temp_db ()
 {
   return cortext::testing::UniqueTempPath ("test_store_", ".db").string ();
+}
+
+TEST_CASE ("SQLiteStore rejects bind parameter count mismatches",
+           "[store][binding][regression]")
+{
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  REQUIRE_THROWS_WITH (
+      store->Execute ("SELECT ? AS value", { 1LL, 2LL }),
+      Catch::Matchers::ContainsSubstring ("parameter count mismatch"));
+  REQUIRE_THROWS_WITH (
+      store->Execute ("SELECT ? AS value", {}),
+      Catch::Matchers::ContainsSubstring ("parameter count mismatch"));
 }
 
 // Helper function to clean up temporary database file
@@ -99,9 +112,51 @@ public:
                       store.statement_cache_fifo_.end (), query)
            != store.statement_cache_fifo_.end ();
   }
+
+  static int
+  SetLengthLimit (SQLiteStore &store, int value)
+  {
+    return sqlite3_limit (store.connection_->GetConnection (),
+                          SQLITE_LIMIT_LENGTH, value);
+  }
+};
+
+class ScopedSQLiteLengthLimit
+{
+public:
+  ScopedSQLiteLengthLimit (SQLiteStore &store, int value)
+      : store_ (store),
+        old_limit_ (
+            SQLiteStoreStatementCacheInspector::SetLengthLimit (store, value))
+  {
+  }
+
+  ScopedSQLiteLengthLimit (const ScopedSQLiteLengthLimit &) = delete;
+  ScopedSQLiteLengthLimit &
+  operator= (const ScopedSQLiteLengthLimit &)
+      = delete;
+
+  ~ScopedSQLiteLengthLimit ()
+  {
+    SQLiteStoreStatementCacheInspector::SetLengthLimit (store_, old_limit_);
+  }
+
+private:
+  SQLiteStore &store_;
+  int old_limit_;
 };
 
 } // namespace cortext::internal
+
+TEST_CASE ("SQLiteStore propagates SQLite bind failures",
+           "[store][binding][regression]")
+{
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  const cortext::internal::ScopedSQLiteLengthLimit length_limit (*store, 32);
+  REQUIRE_THROWS_WITH (
+      store->Execute ("SELECT ? AS value", { std::string (128, 'x') }),
+      Catch::Matchers::ContainsSubstring ("Failed to bind SQLite parameter"));
+}
 
 TEST_CASE ("Store any numeric double conversion", "[store][utils]")
 {

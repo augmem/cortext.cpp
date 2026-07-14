@@ -795,6 +795,15 @@ GetCoreMigrations ()
               "WHERE pre_activation > 0.0",
           },
       },
+      {
+          24,
+          "Track working-memory strength decay timestamp",
+          {
+              "ALTER TABLE memories ADD COLUMN strength_updated_at INTEGER",
+              "UPDATE memories SET strength_updated_at = last_access "
+              "WHERE kind = 'WORKING' AND strength_updated_at IS NULL",
+          },
+      },
   };
 }
 

@@ -8,13 +8,20 @@ reconsolidation dynamics, and serial position effects.
 
 ## Working Memory Gates
 
-Following @cowan2001magical capacity constraints, working memory maintains a limited number of active items. Working memory holds coherent memories as defined in @sec-write-pacing, preserving the full content and signal sequence:
+Motivated by bounded working-memory models such as @cowan2001magical, Cortext
+maintains a limited number of active application-level memory units. These
+slots are not asserted to be human cognitive chunks. Working memory holds
+coherent memories as defined in @sec-write-pacing, preserving the full content
+and signal sequence:
 
 ```
-base_capacity = round(lerp(5, 3, S) + lerp(−1, 1, F))
+base_capacity = round(3 × (lerp(8, 6, S̃) + lerp(−1, 1, F̃)))
 ```
 
-This yields a range of approximately 2-6 memories, broadening the 4±1 chunk limit to accommodate task-dependent requirements. High Sensitivity reduces capacity (faster turnover), while high Focus modulates breadth.
+This yields 15--27 slots and 21 at neutral knobs. High Sensitivity reduces
+capacity (faster turnover), while high Focus increases the slot budget. The
+operating point comes from the capacity study in @sec-experimental rather than
+from a direct numerical fit to human span.
 
 ### Active Memory Structure
 
@@ -42,11 +49,18 @@ The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memo
 Beyond the accumulator centroid μ_acc, Cortext maintains a slowly drifting temporal context vector `c_t`. This provides ordered recall and reduces topic-collision errors by enabling **context reinstatement**.
 
 ```
-α_c(T) = lerp(0.06, 0.01, T)  # slow drift at high Stability
-c_t ← l2_normalize((1 − α_c(T)) × c_{t−1} + α_c(T) × μ_acc + ξ_t)
+α_c(S,T) = AccumulatorTemporalContextAlpha(S,T)
+c_t ← l2_normalize((1 − α_c(S,T)) × c_{t−1} + α_c(S,T) × μ_acc)
 ```
 
-where ξ_t is small isotropic noise (or a deterministic phase vector) to prevent collapse. Each memory stores `(e_rep, c_t)`. Retrieval combines content match and context match:
+At neutral Sensitivity, `α_c` follows `lerp(0.06, 0.01, T)`; the production
+policy applies a bounded Sensitivity adjustment. Each memory stores
+`(e_rep, c_t)`. The current runtime uses `c_t` as the topic-shift anchor in
+boundary detection and persists it with the memory. Production graph retrieval
+does not currently add a separate `cos(c_t, m.context)` score or reinstate
+`c_t` from a retrieved memory; it queries from the current accumulator and
+recent-context surfaces instead. The following context-score/reinstatement rule
+is therefore a proposed extension, not shipped behavior:
 
 ```
 w_ctx(F,S,T) = lerp(0.15, 0.45, F) × lerp(1.0, 0.85, S)
@@ -56,16 +70,42 @@ score_retrieval(m) ← (1 − w_ctx) × cos(q, m.embedding) +
                       association_boost(F,S,T) × I[m.kind = ASSOCIATION]
 ```
 
-Reinstatement: retrieving a memory updates `c_t` toward `m.context`, improving ordered recall within the same episode.
+Proposed reinstatement would update `c_t` toward `m.context` after retrieval.
 
 ### Maintenance Cost
 
 Maintenance incurs cognitive cost:
 
 ```
-maintenance_cost_per_memory = lerp(0.05, 0.15, S)
+maintenance_budget = 7 × lerp(0.05, 0.15, S̃)
+maintenance_cost_per_memory = maintenance_budget / max(base_capacity, 1)
 complexity_penalty = manifold_complexity × lerp(0.5, 1.5, S)
 ```
+
+The legacy seven-slot normalization keeps the total cost of a full configured
+working-memory window invariant across capacity settings; it does not mean the
+shipped capacity is seven.
+
+Passive strength decay is incremental. Access recency and decay accounting use
+separate timestamps so repeated maintenance passes charge each elapsed interval
+once without making an untouched slot appear recently accessed:
+
+```
+Δt_decay ← now_s() − strength_ts
+if Δt_decay > 0:
+  strength ← max(strength_floor(F,S,T),
+                 strength − maintenance_cost_per_memory × Δt_decay)
+  strength_ts ← now_s()
+# last_ts changes only on chunking, rehearsal, or insertion
+```
+
+The active floor is applied only while charging positive elapsed time. A
+same-time or out-of-order signal therefore cannot recharge a slot that was
+legitimately persisted below the current floor under an earlier knob setting.
+
+Persisted working-memory rows mirror `strength_ts` as `strength_updated_at`.
+Load-time decay advances the same timestamp and leaves changed slot metadata
+dirty so the next normal process persists both values.
 
 The manifold_complexity is defined as a normalized local variability proxy (see Appendix B): manifold_complexity ← clamp((1 − mean_cos_window) / 2, 0, 1).
 
@@ -417,18 +457,16 @@ Stability ↑:
   no cross-boundary durable overreach
 ```
 
-Current experimental evidence is in @sec-experimental. The Soft Anchor v1
-benchmark preserves useful top-k continuity while holding hard/durable false
-binds at zero on the repaired slice, but it is not yet finished human subject
-anchoring because wrong-active distinct-anchor preservation remains incomplete.
-The engine integration follows the same formation rule: `UpdateSoftAnchor` runs
-at ingress after memory storage and writes soft anchor state and links by
-default. Production retrieval does not rank from these links yet, and
-application surfacing is limited to optional continuity hints in chat and
-benchmark context snapshots. The next open question is consumption: formed
-anchors may become useful uncertain context only after replay and manual-review
-experiments show that possible-continuity hints help more often than they harm,
-without converting tentative or ambiguous evidence into durable assertions.
+Current checked-in evidence is limited to deterministic formation, ambiguity,
+promotion, persistence, and hydration tests; @sec-experimental does not report a
+human-subject anchoring benchmark. `UpdateSoftAnchor` runs at ingress after
+memory storage and writes soft-anchor state and links by default. Production
+retrieval does not rank from these links yet, and application surfacing is
+limited to hydrated memory metadata and experiment/benchmark utilities. The
+next open question is consumption: formed anchors may become useful uncertain
+context only after replay and manual-review experiments show that
+possible-continuity hints help more often than they harm, without converting
+tentative or ambiguous evidence into durable assertions.
 
 ## Retrieval Uncertainty
 
@@ -469,13 +507,22 @@ Reconsolidation effects propagate to semantically related memories with decay:
 ripple_decay = lerp(0.5, 0.1, T)  # per semantic hop
 ```
 
-## Source Monitoring and Reality Constraints
+## Stored Source Metadata and Supersession
 
-Each memory carries a provenance model that tracks its origin, reliability, and contradiction history. Retrieval returns **content + source confidence**, enabling downstream gating and auditability.
+Each memory stores opaque `source_id` provenance plus `source_origin`,
+`source_reliability`, and `source_contradiction_count`. The current writer uses
+the constant origin class `"source"`; the actual application provenance remains
+in `source_id`. Reliability receives an F/S/T-derived prior and supersession can
+increment contradiction history. These fields are retained metadata, but the
+public hydrated memory surface does not currently expose a computed source
+confidence and production graph retrieval does not gate or rank on it.
+
+The following confidence rule is a proposed consumption policy, not shipped
+behavior:
 
 ```
 source_model = {origin, reliability, contradiction_count, last_verified_ts}
-source_prior(origin, F, S, T) = SourceReliabilityPrior(F,S,T,origin)
+source_prior(F, S, T) = SourceReliabilityPrior(F,S,T)
 freshness_weight = RetrievalSourceFreshnessWeight(F,S,T)
 freshness(m) = exp(−age(m) / RetrievalSourceFreshnessTauSeconds(F,S,T))
 source_confidence(m) ← clamp(source_prior(m.origin,F,S,T) ×
@@ -484,14 +531,15 @@ source_confidence(m) ← clamp(source_prior(m.origin,F,S,T) ×
                              0, 1)
 ```
 
-Contradictions reduce `reliability`, and user corrections directly update `contradiction_count`. Source confidence gates injection into active context:
+If implemented, contradiction history would reduce computed confidence and the
+threshold would gate injection into active context:
 
 ```
 if source_confidence(m) < lerp(0.15, 0.45, T):
     downrank_or_hold(m)
 ```
 
-Belief revision is graph-native and modality-agnostic. On a durable memory
+The shipped belief-revision path is graph-native and modality-agnostic. On a durable memory
 write, the stored embedding is compared with a knob-bounded nearest-neighbor
 set of prior memory embeddings. If pairwise similarity lands in the
 supersession band, the runtime writes a directed `supersedes` edge from the new
@@ -576,14 +624,20 @@ When predictions fail (high surprise), the system increases the refresh rate of 
 update_rate_on_surprise = lerp(0.2, 0.02, T) × S
 ```
 
-Current implementation note: predictive pre-activation is now consumed directly by retrieval rather than only being written to the database. `pre_activation` decays every turn via `pre_activation_decay(T)` and contributes a bounded retrieval prior,
+Current implementation note: the shipped pipeline updates and decays the
+persisted `pre_activation` field, but production graph retrieval does not read
+that field. The following bounded retrieval prior describes the experimental
+ranking variant, not current runtime behavior:
 
 ```
 predictive_weight(F,T) = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T)
 predictive_bonus = predictive_weight × pre_activation
 ```
 
-which is added to the normal retrieval score. High-surprise updates therefore both refresh the latent predictive state and make that state behaviorally visible at the next retrieval.
+In the current runtime, high-surprise updates refresh latent predictive state
+without changing the next retrieval score. The historical ablation in
+@sec-experimental evaluates the earlier research variant and must not be read as
+a measurement of this hard-cutover implementation.
 
 ## Serial Position Effects
 
@@ -653,7 +707,12 @@ The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memo
 ```
 cascade_radius = round(lerp(1, 5, S))
 cascade_decay = lerp(0.7, 0.3, S)
+cascade_source_window_ms = 1000 × consolidation_interval_seconds(T)
 ```
+
+Only flashbulb sources created within `cascade_source_window_ms` of the current
+signal participate. The explicit conversion preserves the intended five- to
+sixty-minute window while stored timestamps remain milliseconds since epoch.
 
 ## Synaptic Tagging and Capture
 
@@ -679,9 +738,9 @@ if m.tagged and now_s() < m.tag_expires_at:
 
 ## Pattern Separation Sparse Index {#sec-pattern-separation}
 
-Pattern separation is the lightweight sparse-key side channel used to keep
-nearby dense embeddings addressable without adding a decoder, taxonomy, or
-fact layer. For an accumulator or stored memory embedding `x`, Cortext selects
+Pattern separation is a lightweight sparse-key side channel maintained for
+experimental indexing and procedural-value updates without adding a decoder,
+taxonomy, or fact layer. For an accumulator or stored memory embedding `x`, Cortext selects
 the `k` largest-magnitude dimensions, preserves each selected dimension's sign,
 sorts the selected indices, and serializes the result as a stable sparse key:
 
@@ -691,23 +750,27 @@ top_k(x) = indices of the k_sparse largest |x_i|
 sparse_key(x) = join(sort({ i || sign(x_i) : i in top_k(x) }))
 ```
 
-The write path stores each committed memory id under `index_store[sparse_key(e_rep)]`.
-The procedural lane reuses the same keying function but stores values rather
-than membership lists:
+The write path stores each committed memory id under
+`index_store[sparse_key(e_rep)]`. The procedural update lane reuses the same
+keying function but stores values rather than membership lists:
 
 ```
 index_store[sparse_key(e_rep)] += memory_id
 procedural_store[sparse_key(μ_acc)][memory_id] = Q(proc_key, memory_id)
 ```
 
-Thus `index_store` is a sparse content-addressed memory bucket, while
-`procedural_store` is a sparse context-to-memory value table. Empty embeddings
-or non-positive key sizes produce no key and therefore do not update either
-store.
+Thus `index_store` is a processor-local sparse content-addressed bucket, while
+`procedural_store` is a processor-local sparse context-to-memory value table.
+Empty embeddings or non-positive key sizes produce no key and therefore do not
+update either store. Neither map is currently persisted, and production graph
+retrieval does not consume `index_store`; dense SQLite/vector discovery remains
+the active seed path.
 
 ## Procedural Memory Lane (Habit/Skill Memory)
 
-In addition to declarative memory, Cortext maintains a procedural store for **which previously successful routine memory to surface in a context**, learned from repeated successful use.
+In addition to declarative memory, Cortext maintains experimental procedural
+values for which previously successful routine memory could be surfaced in a
+context, learned from repeated successful use.
 
 ```
 proc_key ← sparse_key(μ_acc)  # same sparsification as @sec-pattern-separation
@@ -719,4 +782,8 @@ Updates occur when a retrieved memory is used successfully and downstream outcom
 Q ← Q + value_update_gain × δ_reward_t × (1 − Q)
 ```
 
-Procedural retrieval runs in parallel with declarative retrieval. In the current implementation, high-confidence routine memories are added as **proactive retrieval seeds** for the current sparse context even before a strong semantic match would have selected them; they still pass through the same interrupt gate and final retrieval ranking. This is intentionally narrower than a free-standing action policy: the procedural lane surfaces likely next-step routines as memories, not separate action tokens.
+The current implementation updates this processor-local table but does not read
+it in production graph retrieval, so it does not yet add proactive seeds or
+surface action tokens. The historical `procedural_proactive` ablation in
+@sec-experimental evaluated an earlier research-branch path and was an exact
+null; it is not evidence that proactive procedural retrieval ships today.

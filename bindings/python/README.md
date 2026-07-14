@@ -152,6 +152,8 @@ needed in the returned packet.
 
 ## Audio and Image
 
+<!-- audio/image input contracts matching bindings/python/augmem/cortext/__init__.py -->
+
 Audio input is 16 kHz mono float PCM:
 
 ```python
@@ -160,6 +162,9 @@ ctx = memory.process_audio(pcm, "mic/main", include_embedding=False)
 ```
 
 Image input is row-major RGB or RGBA bytes:
+
+The binding rejects non-positive dimensions and buffers smaller than
+`width * height * channels` before entering native inference.
 
 ```python
 rgb = bytes([0, 0, 0] * 64 * 64)

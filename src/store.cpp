@@ -258,8 +258,30 @@ PrepareStatement (sqlite3 *db, const std::string &query, int &prepare_rc)
 }
 
 void
+CheckBindResult (sqlite3_stmt *stmt, int param_index, int rc)
+{
+  if (rc == SQLITE_OK)
+    {
+      return;
+    }
+  sqlite3 *db = sqlite3_db_handle (stmt);
+  throw StoreError (
+      "Failed to bind SQLite parameter " + std::to_string (param_index)
+      + ": " + (db ? std::string (sqlite3_errmsg (db))
+                        : std::string (sqlite3_errstr (rc))));
+}
+
+void
 BindParameters (sqlite3_stmt *stmt, const std::vector<std::any> &params)
 {
+  const int expected_count = sqlite3_bind_parameter_count (stmt);
+  if (params.size () != static_cast<std::size_t> (expected_count))
+    {
+      throw StoreError (
+          "SQLite parameter count mismatch: statement expects "
+          + std::to_string (expected_count) + ", received "
+          + std::to_string (params.size ()));
+    }
   for (size_t i = 0; i < params.size (); ++i)
     {
       int param_index = static_cast<int> (i + 1);
@@ -268,73 +290,100 @@ BindParameters (sqlite3_stmt *stmt, const std::vector<std::any> &params)
         {
           if (param.type () == typeid (int))
             {
-              sqlite3_bind_int (stmt, param_index, std::any_cast<int> (param));
+              CheckBindResult (stmt, param_index,
+                               sqlite3_bind_int (
+                                   stmt, param_index,
+                                   std::any_cast<int> (param)));
             }
           else if (param.type () == typeid (long))
             {
-              sqlite3_bind_int64 (stmt, param_index,
-                                  std::any_cast<long> (param));
+              CheckBindResult (
+                  stmt, param_index,
+                  sqlite3_bind_int64 (stmt, param_index,
+                                      std::any_cast<long> (param)));
             }
           else if (param.type () == typeid (long long))
             {
-              sqlite3_bind_int64 (stmt, param_index,
-                                  std::any_cast<long long> (param));
+              CheckBindResult (
+                  stmt, param_index,
+                  sqlite3_bind_int64 (stmt, param_index,
+                                      std::any_cast<long long> (param)));
             }
           else if (param.type () == typeid (double))
             {
-              sqlite3_bind_double (stmt, param_index,
-                                   std::any_cast<double> (param));
+              CheckBindResult (
+                  stmt, param_index,
+                  sqlite3_bind_double (stmt, param_index,
+                                       std::any_cast<double> (param)));
             }
           else if (param.type () == typeid (float))
             {
-              sqlite3_bind_double (stmt, param_index,
-                                   static_cast<double> (std::any_cast<float> (param)));
+              CheckBindResult (
+                  stmt, param_index,
+                  sqlite3_bind_double (
+                      stmt, param_index,
+                      static_cast<double> (std::any_cast<float> (param))));
             }
           else if (param.type () == typeid (std::string))
             {
               const std::string &str = std::any_cast<std::string> (param);
-              sqlite3_bind_text (stmt, param_index, str.c_str (),
-                                 static_cast<int> (str.size ()),
-                                 SQLITE_TRANSIENT);
+              CheckBindResult (
+                  stmt, param_index,
+                  sqlite3_bind_text64 (
+                      stmt, param_index, str.c_str (),
+                      static_cast<sqlite3_uint64> (str.size ()),
+                      SQLITE_TRANSIENT, SQLITE_UTF8));
             }
           else if (param.type () == typeid (const char *))
             {
               const char *str = std::any_cast<const char *> (param);
-              sqlite3_bind_text (stmt, param_index, str, -1, SQLITE_TRANSIENT);
+              CheckBindResult (
+                  stmt, param_index,
+                  sqlite3_bind_text (stmt, param_index, str, -1,
+                                     SQLITE_TRANSIENT));
             }
           else if (param.type () == typeid (std::vector<char>))
             {
               const auto &vec
                   = std::any_cast<const std::vector<char> &> (param);
-              sqlite3_bind_blob (
-                  stmt, param_index, vec.empty () ? nullptr : vec.data (),
-                  static_cast<int> (vec.size ()), SQLITE_TRANSIENT);
+              CheckBindResult (
+                  stmt, param_index,
+                  sqlite3_bind_blob64 (
+                      stmt, param_index, vec.empty () ? nullptr : vec.data (),
+                      static_cast<sqlite3_uint64> (vec.size ()),
+                      SQLITE_TRANSIENT));
             }
           else if (param.type () == typeid (std::vector<unsigned char>))
             {
               const auto &vec
                   = std::any_cast<const std::vector<unsigned char> &> (param);
-              sqlite3_bind_blob (
+              CheckBindResult (
                   stmt, param_index,
-                  vec.empty () ? nullptr
-                               : reinterpret_cast<const void *> (vec.data ()),
-                  static_cast<int> (vec.size ()), SQLITE_TRANSIENT);
+                  sqlite3_bind_blob64 (
+                      stmt, param_index,
+                      vec.empty () ? nullptr
+                                   : reinterpret_cast<const void *> (vec.data ()),
+                      static_cast<sqlite3_uint64> (vec.size ()),
+                      SQLITE_TRANSIENT));
             }
           else if (param.type () == typeid (std::vector<float>))
             {
               const auto &vec
                   = std::any_cast<const std::vector<float> &> (param);
-              sqlite3_bind_blob (
+              CheckBindResult (
                   stmt, param_index,
-                  vec.empty () ? nullptr
-                               : reinterpret_cast<const void *> (vec.data ()),
-                  static_cast<int> (vec.size () * sizeof (float)),
-                  SQLITE_TRANSIENT);
+                  sqlite3_bind_blob64 (
+                      stmt, param_index,
+                      vec.empty () ? nullptr
+                                   : reinterpret_cast<const void *> (vec.data ()),
+                      static_cast<sqlite3_uint64> (vec.size ()) * sizeof (float),
+                      SQLITE_TRANSIENT));
             }
           else if (!param.has_value ()
                    || param.type () == typeid (std::nullptr_t))
             {
-              sqlite3_bind_null (stmt, param_index);
+              CheckBindResult (stmt, param_index,
+                               sqlite3_bind_null (stmt, param_index));
             }
           else
             {
