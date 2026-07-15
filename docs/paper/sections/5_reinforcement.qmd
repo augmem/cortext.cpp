@@ -160,47 +160,20 @@ This replaces the earlier front-loaded boost that applied 60%/30%/10% to fast/me
 
 ## Reinforcement Graph Maintenance
 
-Co-retrieved memories also form *reinforces* edges in the ASSOCIATIONS graph.
-These edges are strengthened during retrieval/use and **only decayed during
-explicit consolidation cycles** (triggered externally via `Consolidate()` or
-`cortext_consolidate`),
-matching the system’s “idle-time consolidation” policy. This prevents per-turn
-decay from erasing fresh reinforcement and keeps runtime retrieval updates
-stable while still allowing long-term pruning during consolidation.
+The normal interrupt gate injects at most one selected memory into active
+context per dispatch. Production retrieval therefore does not synthesize a
+pairwise *reinforces* edge from its broader retrieved packet: packet
+co-occurrence is not evidence that two memories were used together. This also
+prevents repeated noisy packets from turning boilerplate into durable graph
+hubs.
 
-The online edge update is intentionally slower than per-memory trace
-reinforcement because it changes the durable graph topology. The current
-runtime derives the co-retrieval edge increment from the three knobs and the
-retrieved-packet shape rather than using a fixed constant:
-
-```
-base_edge_step(F,S,T) =
-  clamp(lerp(0.015, 0.055, S~) *
-        lerp(1.20, 0.70, F~) *
-        lerp(0.75, 1.15, T), 0.005, 0.08)
-
-unselected_scale(F,S,T) =
-  clamp(lerp(0.10, 0.35, S~) *
-        lerp(0.85, 0.65, F~) *
-        lerp(0.80, 1.05, T), 0.05, 0.40)
-
-fanout_damping(F,S,T,n) =
-  1, if n <= 2
-  clamp(sqrt(reference_fanout(F,S,T) / n), 0.25, 1.0), otherwise
-
-pair_step(i,j) =
-  base_edge_step * fanout_damping *
-  sqrt(clamp(contextual_support_i,0,1) *
-       clamp(contextual_support_j,0,1)) *
-  (1.0 if either endpoint was the selected/used memory
-   else unselected_scale)
-```
-
-Thus a pair anchored by an actually used memory can still learn from repeated
-co-activation, while pairs that merely co-occur inside a broad or noisy
-retrieval packet update much more slowly. This is the production replacement
-for the earlier fixed `0.1` co-retrieval increment, which could saturate
-repeated noisy packets into durable graph hubs after only a few retrievals.
+Existing *reinforces* edges remain valid association inputs for stores and
+explicit graph workflows that already contain them. They are decayed and
+pruned only during explicit consolidation cycles (triggered externally via
+`Consolidate()` or `cortext_consolidate`), matching the system's idle-time
+consolidation policy. At retrieval time their weight is degree-normalized before
+the bounded graph bonus is applied, preventing high-degree hubs from dominating
+candidate rank.
 
 ## Causal Feedback Loop {#sec-feedback}
 

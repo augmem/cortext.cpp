@@ -52,7 +52,7 @@ to_s(ts_ms) = ts_ms / 1000       # ms → seconds conversion
 
 **Stored timestamps:** All stored timestamps are milliseconds since Unix epoch.
 
-**Naming contract (canonical):** Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check. Global variables: signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, retention_ema, last_embedding, x_pred_ema. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.
+**Naming contract (canonical):** Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check. Global variables: signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, retention_ema, consolidation_rate_floor, consolidation_rate_peak, last_embedding, x_pred_ema. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.
 
 **Drift naming note:** `drift_step_t` (also called *drift_increment*) is the instantaneous cosine distance between consecutive accumulator centroids μ_acc(t) and μ_acc(t−1). `drift_acc` accumulates drift_step_t within the current memory unit for boundary decisions; `drift_accum` tracks cumulative centroid drift used for interrupt refractory pressure. Treat these as distinct signals.
 
@@ -184,26 +184,41 @@ These ranges are canonical knob maps for memory behavior: admission thresholds, 
 ### Retrieval Breadth
 
 Retrieval uses two F/S/T-derived breadths rather than one global top-k. The
-candidate discovery pass stays broad so source memories remain reachable:
+candidate discovery pass stays broad so durable memories remain reachable:
 
 ```
 seed_k(F) = round(lerp(96, 8, FocusBias(F)))
 ```
 
-The prompt-facing output is then narrowed after vector-seed relevance,
-event-time recency, graph expansion, same-source/turn-neighbor expansion, and
-supersession demotion:
+Before the vector-seed cap is applied, superseded targets and near-duplicate
+embedding families are collapsed to one current representative. Family lookup
+normalizes each embedding and partitions its coordinates into 32 deterministic
+blocks. For a candidate `x` and representative `y`, Cauchy--Schwarz gives the
+recall-safe upper bound
+
+```
+cos(x, y) <= sum_b ||x_b||_2 ||y_b||_2
+```
+
+When that bound is below the cosine family threshold, the pair cannot be a
+duplicate and the full dot product is skipped. All remaining pairs receive an
+exact cosine check, so the screen cannot introduce a false-negative partition
+while avoiding broad exact comparisons on diverse vectors. The
+prompt-facing output is then narrowed after vector relevance and bounded graph
+expansion:
 
 ```
 selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
 ```
 
-Candidate ranking includes an event-time temporal prior in addition to vector
-relevance and graph/source-neighbor evidence:
+Vector relevance is the primary rank. Event-time recency is restricted to a
+bounded tie-break so an old semantic match cannot be displaced by a recent but
+unrelated memory. Graph evidence contributes only a bounded residual bonus:
 
 ```
-temporal_rank(m) = exp(-age_s(m) / tau_rank(F,S,T))
-score(m) += weight_rank(F,S,T) * temporal_rank(m)
+semantic(m) = map01(cos(q, embedding(m)))
+base(m) = semantic(m) + (1 - semantic(m)) * 10^-6 * temporal_rank(m)
+score(m) = base(m) + (1 - base(m)) * min(0.08, w_graph * graph(m))
 ```
 
 New source-backed memories also receive a knob-derived source reliability prior
@@ -216,11 +231,12 @@ source_reliability_0(F,S,T)
                + 0.08(T - 0.5), 0.50, 0.90)
 ```
 
-This split lets low Focus explore many source/blob seeds while still keeping the
+This split lets low Focus explore many durable-memory seeds while keeping the
 application prompt bounded by a compact final surface. The intermediate graph
-boosts, durable-source floors, and text seed thresholds are likewise derived
-from Focus, Sensitivity, and Stability in the implementation rather than
-exposed as additional user settings. The stored `source_reliability` and
+breadth and score weights are likewise derived from Focus, Sensitivity, and
+Stability in the implementation rather than exposed as additional user
+settings. Neither `source_id` nor modality participates in candidate discovery,
+family collapse, scoring, graph expansion, or final selection. The stored `source_reliability` and
 `source_contradiction_count` fields are not currently consumed by production
 ranking; @sec-advanced distinguishes that metadata from the proposed confidence
 gate.

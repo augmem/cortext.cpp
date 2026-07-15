@@ -55,10 +55,10 @@ try {
   );
 
   for (const item of ctx.retrieved_memory ?? []) {
-    console.log(item.text, item.rel);
+    console.log(item.text, item.relevance, item.composite_score);
   }
 
-  if (ctx.consolidation_recommended) {
+  if (ctx.consolidation_state !== "none") {
     memory.consolidate();
   }
 } finally {
@@ -126,7 +126,7 @@ export async function answer(conversationId: string, userMessage: string) {
     ],
   });
 
-  if (ctx.consolidation_recommended) {
+  if (ctx.consolidation_state !== "none") {
     memory.consolidate();
   }
 
@@ -148,13 +148,15 @@ the native context packet. Common fields:
 - `working_memory`: short-term active context.
 - `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior
   flags.
-- `consolidation_recommended`, `consolidation_required`: maintenance hints.
+- `consolidation_state`: ordered `"none"`, `"recommended"`, or `"required"`
+  maintenance urgency derived from the current throughput range.
 - `output`: scores, storage decisions, filter status, and operation timings.
 - `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
 - `embedding`, `embedding_dimension`: present only when requested.
 
 Memory entries commonly include `text`, `source_id`, `timestamp`, `modality`,
-`mimetype`, `rel`, usage counts, scores, and soft-anchor metadata. For prompt
+`mimetype`, `relevance`, `composite_score`, usage counts, and soft-anchor
+metadata. For prompt
 assembly, pass `{ includeEmbedding: false }`; embeddings are large and rarely
 needed in the returned packet.
 

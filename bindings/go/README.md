@@ -44,6 +44,7 @@ func main() {
 		panic(err)
 	}
 	fmt.Println(ctx["should_interrupt"])
+	fmt.Println(ctx["consolidation_state"]) // none, recommended, or required
 
 	embedding, err := engine.EmbedText("embed without storing")
 	if err != nil {
@@ -63,6 +64,8 @@ func main() {
   `cortext.Ptr(value)` in struct literals, or pass `nil` to `New` for all
   native defaults.
 - `ProcessText`, `ProcessAudio`, `ProcessImage`: decoded JSON context maps.
+  Their `consolidation_state` entry is the stable string `none`, `recommended`,
+  or `required`.
 - `ProcessTextJSON`, `ProcessAudioJSON`, `ProcessImageJSON`: raw JSON bytes.
 - `EmbedText`, `EmbedAudio`, `EmbedImage`: embed-only helpers.
 - `Consolidate`, `Flush`, `Reset`, `Close`.

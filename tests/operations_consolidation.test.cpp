@@ -5,6 +5,7 @@
 #include <catch2/catch_approx.hpp>
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
+#include <cortext/consolidation_state.hpp>
 #include <cortext/core/knobs.hpp>
 #include <cortext/operations/consolidation.hpp>
 #include <cortext/processor.hpp>
@@ -12,6 +13,7 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/schema.hpp>
+#include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include <string>
 
 using namespace cortext;
@@ -55,6 +57,52 @@ struct SetupConsolidationInputsOp : IOperation
   std::optional<uint64_t> last_consolidation_ts_;
 };
 
+struct SetupConsolidationHintOp : IOperation
+{
+  SetupConsolidationHintOp (double floor_in, double peak_in,
+                            double current_rate_in, int backlog_in)
+      : floor (floor_in), peak (peak_in), current_rate (current_rate_in),
+        backlog (backlog_in)
+  {
+  }
+
+  double floor = 0.0;
+  double peak = 0.0;
+  double current_rate = 0.0;
+  int backlog = 0;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &pctx = ctx.GetProcessorContext ();
+    pctx.m_rate = current_rate;
+    pctx.memories_since_consolidation = backlog;
+    operations::consolidation_throughput_state_internal::Reset (
+        pctx, { floor, peak, true });
+  }
+};
+
+SignalProcessor::Output
+RunConsolidationHint (const SignalProcessor::Config &cfg,
+                      const SetupConsolidationHintOp &setup,
+                      std::string source_id = "test/source",
+                      std::string modality = "text",
+                      bool force_consolidation = false)
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<SetupConsolidationHintOp> (setup));
+  SignalProcessor processor (cfg, store, std::move (ops));
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Ones (4);
+  signal.timestamp = 1'000'000ULL;
+  signal.source_id = std::move (source_id);
+  signal.modality = std::move (modality);
+  signal.force_consolidation = force_consolidation;
+  return processor.Process (signal);
+}
+
 static Signal
 MakeSignal (uint64_t ts)
 {
@@ -75,6 +123,215 @@ MakeConsolidationSignal (uint64_t ts)
 }
 
 } // namespace
+
+TEST_CASE ("Consolidation throughput trigger fraction is monotonic in F/S/T",
+           "[operations][consolidation][hint]")
+{
+  namespace throughput
+      = operations::consolidation_throughput_state_internal;
+  REQUIRE (throughput::TriggerFraction (0.8, 0.5, 0.5)
+           < throughput::TriggerFraction (0.2, 0.5, 0.5));
+  REQUIRE (throughput::TriggerFraction (0.5, 0.8, 0.5)
+           > throughput::TriggerFraction (0.5, 0.2, 0.5));
+  REQUIRE (throughput::TriggerFraction (0.5, 0.5, 0.8)
+           < throughput::TriggerFraction (0.5, 0.5, 0.2));
+  REQUIRE (throughput::RequiredTriggerFraction (0.5, 0.5, 0.5)
+           < throughput::TriggerFraction (0.5, 0.5, 0.5));
+}
+
+TEST_CASE ("Consolidation throughput observation tracks moving floor and peak",
+           "[operations][consolidation][hint]")
+{
+  namespace throughput
+      = operations::consolidation_throughput_state_internal;
+  ProcessorContext pctx;
+  throughput::Reset (pctx);
+  throughput::Observe (pctx, 5.0, 0.5, 0.5, 0.5);
+  auto state = throughput::Find (pctx);
+  REQUIRE (state.floor == 5.0);
+  REQUIRE (state.peak == 5.0);
+
+  throughput::Observe (pctx, 10.0, 0.5, 0.5, 0.5);
+  state = throughput::Find (pctx);
+  REQUIRE (state.floor > 5.0);
+  REQUIRE (state.floor < 10.0);
+  REQUIRE (state.peak == 10.0);
+
+  throughput::Observe (pctx, 2.0, 0.5, 0.5, 0.5);
+  state = throughput::Find (pctx);
+  REQUIRE (state.floor == 2.0);
+  REQUIRE (state.peak == 10.0);
+
+  throughput::Reset (pctx);
+  throughput::Observe (pctx, 0.0, 0.5, 0.5, 0.5);
+  state = throughput::Find (pctx);
+  REQUIRE (state.initialized);
+  REQUIRE (state.floor == 0.0);
+  REQUIRE (state.peak == 0.0);
+
+  throughput::Observe (pctx, 10.0, 0.5, 0.5, 0.5);
+  state = throughput::Find (pctx);
+  REQUIRE (state.initialized);
+  REQUIRE (state.floor > 0.0);
+  REQUIRE (state.floor < 10.0);
+  REQUIRE (state.peak == 10.0);
+  throughput::Erase (pctx);
+}
+
+TEST_CASE ("Consolidation state boundaries are inclusive and required-first",
+           "[operations][consolidation][hint]")
+{
+  namespace throughput
+      = operations::consolidation_throughput_state_internal;
+  constexpr double focus = 0.5;
+  constexpr double sensitivity = 0.5;
+  constexpr double stability = 0.5;
+  const throughput::State state { 0.0, 1.0, true };
+  const double recommended
+      = throughput::TriggerFraction (focus, sensitivity, stability);
+  const double required
+      = throughput::RequiredTriggerFraction (focus, sensitivity, stability);
+
+  REQUIRE (throughput::Classify (
+               state, std::nextafter (recommended, 1.0), 1,
+               focus, sensitivity, stability)
+           == ConsolidationState::None);
+  REQUIRE (throughput::Classify (
+               state, recommended, 1, focus, sensitivity, stability)
+           == ConsolidationState::Recommended);
+  REQUIRE (throughput::Classify (
+               state, std::nextafter (required, 1.0), 1,
+               focus, sensitivity, stability)
+           == ConsolidationState::Recommended);
+  REQUIRE (throughput::Classify (
+               state, required, 1, focus, sensitivity, stability)
+           == ConsolidationState::Required);
+}
+
+TEST_CASE ("Consolidation state follows the ordered throughput drawdown",
+           "[operations][consolidation][hint]")
+{
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  SECTION ("bootstrap has no range")
+    {
+      const auto output = RunConsolidationHint (
+          cfg, { 4.0, 4.0, 4.0, 3 });
+      REQUIRE (output.consolidation_state == ConsolidationState::None);
+    }
+
+  SECTION ("rate above recommendation boundary is none")
+    {
+      const auto output = RunConsolidationHint (
+          cfg, { 2.0, 10.0, 7.0, 3 });
+      REQUIRE (output.consolidation_state == ConsolidationState::None);
+    }
+
+  SECTION ("drawdown enters recommended band")
+    {
+      const auto output = RunConsolidationHint (
+          cfg, { 2.0, 10.0, 5.0, 3 });
+      REQUIRE (output.consolidation_state
+               == ConsolidationState::Recommended);
+    }
+
+  SECTION ("deeper drawdown enters required band")
+    {
+      const auto output = RunConsolidationHint (
+          cfg, { 2.0, 10.0, 3.0, 3 });
+      REQUIRE (output.consolidation_state == ConsolidationState::Required);
+    }
+
+  SECTION ("no backlog suppresses throughput state")
+    {
+      const auto output = RunConsolidationHint (
+          cfg, { 2.0, 10.0, 2.0, 0 });
+      REQUIRE (output.consolidation_state == ConsolidationState::None);
+    }
+
+  SECTION ("large backlog cannot replace a throughput range")
+    {
+      const auto output = RunConsolidationHint (
+          cfg, { 4.0, 4.0, 4.0, 100'000 });
+      REQUIRE (output.consolidation_state == ConsolidationState::None);
+    }
+
+  SECTION ("explicit consolidation input emits none")
+    {
+      const auto output = RunConsolidationHint (
+          cfg, { 2.0, 10.0, 2.0, 3 }, "test/source", "text", true);
+      REQUIRE (output.consolidation_state == ConsolidationState::None);
+    }
+}
+
+TEST_CASE ("Consolidation recommendation rearms after a lower throughput regime",
+           "[operations][consolidation][hint]")
+{
+  namespace throughput
+      = operations::consolidation_throughput_state_internal;
+  constexpr double focus = 0.5;
+  constexpr double sensitivity = 0.5;
+  constexpr double stability = 0.5;
+  ProcessorContext pctx;
+  throughput::Reset (pctx, { 2.0, 100.0, true, true });
+
+  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
+                                 sensitivity, stability)
+           != ConsolidationState::None);
+  throughput::Acknowledge (pctx, 3.0);
+  REQUIRE_FALSE (throughput::Find (pctx).armed);
+  REQUIRE (throughput::Find (pctx).floor == 3.0);
+  REQUIRE (throughput::Find (pctx).peak == 3.0);
+  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
+                                 sensitivity, stability)
+           == ConsolidationState::None);
+
+  // The next recovery is far below the old 100-unit spike but establishes a
+  // new event-derived range and rearms the classifier.
+  throughput::Observe (pctx, 20.0, focus, sensitivity, stability);
+  REQUIRE (throughput::Find (pctx).armed);
+  throughput::Observe (pctx, 3.0, focus, sensitivity, stability);
+  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
+                                 sensitivity, stability)
+           != ConsolidationState::None);
+
+  // A second acknowledgment and still-lower regime can rearm independently.
+  throughput::Acknowledge (pctx, 3.0);
+  throughput::Observe (pctx, 12.0, focus, sensitivity, stability);
+  REQUIRE (throughput::Find (pctx).armed);
+  throughput::Observe (pctx, 3.0, focus, sensitivity, stability);
+  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
+                                 sensitivity, stability)
+           != ConsolidationState::None);
+  throughput::Erase (pctx);
+}
+
+TEST_CASE ("Elapsed time alone does not recommend consolidation",
+           "[operations][consolidation][hint]")
+{
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const auto output = RunConsolidationHint (
+      cfg, { 4.0, 4.0, 4.0, 1 });
+  REQUIRE (output.consolidation_state == ConsolidationState::None);
+}
+
+TEST_CASE ("Consolidation throughput hint ignores source and modality",
+           "[operations][consolidation][hint][invariance]")
+{
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const SetupConsolidationHintOp setup { 2.0, 10.0, 5.0, 3 };
+  const auto text = RunConsolidationHint (
+      cfg, setup, "one/source", "text");
+  const auto image = RunConsolidationHint (
+      cfg, setup, "unrelated/provenance", "image");
+  REQUIRE (text.consolidation_state == image.consolidation_state);
+}
 
 // Helper op to verify consolidation start flag after execution.
 struct AssertConsolidationStartedOp : IOperation
@@ -102,7 +359,7 @@ struct AssertConsolidationNotStartedOp : IOperation
   }
 };
 
-TEST_CASE ("Alg28 rate trigger starts when idle",
+TEST_CASE ("Alg28 explicit force starts regardless of rate and idle inputs",
            "[operations][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -115,24 +372,17 @@ TEST_CASE ("Alg28 rate trigger starts when idle",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  // Compute the knob-derived rate target
-  // rate_consolidate = (1/interval) * (0.3+0.7T) * (1-0.5S)
-  // At T=0.5, S=0.5: rate ≈ 0.00025
-  const double rate_target = core::ConsolidationRate (cfg.stability, cfg.sensitivity);
-
   // Timestamps are in milliseconds
   const uint64_t now_ts = 100'000ULL; // 100 seconds in ms
-  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
-  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required_s) * 1000ULL;
-
-  // Set m_rate below half of the knob-derived rate to trigger
-  const double m_rate = rate_target * 0.4; // Below 50% threshold
+  const uint64_t last_ret = 50'000ULL;
+  const double rate_target = 2.0;
+  const double m_rate = 0.8;
 
   auto setup = std::make_unique<SetupConsolidationInputsOp> (
       /*tokens_in_flight=*/0,
       /*queue_depth=*/0,
       /*m_rate=*/m_rate,
-      /*rate_target=*/rate_target, // Not used anymore, but kept for setup
+      /*rate_target=*/rate_target,
       /*last_retrieval_ts=*/last_ret,
       /*last_consolidation_ts=*/std::nullopt);
   auto eval = std::make_unique<EvaluateConsolidation> ();
@@ -146,7 +396,7 @@ TEST_CASE ("Alg28 rate trigger starts when idle",
   processor.Flush ();
 }
 
-TEST_CASE ("Alg28 explicit consolidation signal starts even when busy",
+TEST_CASE ("Alg28 explicit force starts regardless of busy inputs",
            "[operations][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -159,16 +409,11 @@ TEST_CASE ("Alg28 explicit consolidation signal starts even when busy",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  // Compute the knob-derived rate target
-  const double rate_target = core::ConsolidationRate (cfg.stability, cfg.sensitivity);
-
   // Timestamps are in milliseconds
   const uint64_t now_ts = 100'000ULL; // 100 seconds in ms
-  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
-  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required_s) * 1000ULL;
-
-  // Set m_rate below threshold to trigger rate check, but busy so should defer
-  const double m_rate = rate_target * 0.4;
+  const uint64_t last_ret = 50'000ULL;
+  const double rate_target = 2.0;
+  const double m_rate = 0.8;
 
   auto setup = std::make_unique<SetupConsolidationInputsOp> (
       /*tokens_in_flight=*/3,
@@ -188,7 +433,7 @@ TEST_CASE ("Alg28 explicit consolidation signal starts even when busy",
   processor.Flush ();
 }
 
-TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
+TEST_CASE ("Alg28 explicit force starts regardless of interval inputs",
            "[operations][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -201,13 +446,9 @@ TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
 
-  // Timestamps in milliseconds, interval/idle in seconds
-  const int interval_s = core::ConsolidationIntervalSeconds (cfg.stability);
-  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
-  const uint64_t now_ts = static_cast<uint64_t>(interval_s + 10) * 1000ULL; // enough time passed
-  const uint64_t last_cons = now_ts - static_cast<uint64_t> (interval_s + 1) * 1000ULL;
-  const uint64_t last_ret
-      = now_ts - static_cast<uint64_t> (idle_required_s + 1) * 1000ULL; // ensure idle OK
+  const uint64_t now_ts = 4'000'000ULL;
+  const uint64_t last_cons = 1'000ULL;
+  const uint64_t last_ret = 2'000ULL;
 
   auto setup = std::make_unique<SetupConsolidationInputsOp> (
       /*tokens_in_flight=*/0,
@@ -227,76 +468,7 @@ TEST_CASE ("Alg28 interval trigger starts when elapsed exceeds interval",
   processor.Flush ();
 }
 
-// Helper op that seeds embeddings and memories with test data.
-struct SeedVecEmbeddingsOp : IOperation
-{
-  SeedVecEmbeddingsOp (long long count) : count_ (count) {}
-  void
-  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
-  {
-    auto *store = ctx.GetStore ();
-    std::vector<float> emb (256, 0.0f);
-    emb[0] = 1.0f;
-    for (long long i = 1; i <= count_; ++i)
-      {
-        // v2: Insert into embeddings (minimal vec0 table)
-        store->Execute (
-            "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES (?,?,?)",
-            { i, emb, 0LL });
-        // v2: Insert into memories (capacity check counts memories)
-        store->Execute (
-            "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-            "n_signals, modality, s_max, s_avg, strength, created_at) "
-            "VALUES (?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, 1.0, 0)",
-            { i, i });
-      }
-  }
-  long long count_;
-};
-
-TEST_CASE ("Alg28 capacity trigger starts when db_size exceeds threshold",
-           "[operations][consolidation][capacity]")
-{
-  auto unique_store = SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<Store> (std::move (unique_store));
-
-  // Use low stability to keep threshold small-ish.
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.0;
-
-  const long long threshold = core::ConsolidationThresholdCount (cfg.stability);
-  const long long want = threshold + 1;
-
-  // Timestamps in milliseconds, idle_required in seconds
-  const int idle_required_s = core::IdleRequiredSeconds (cfg.stability);
-  const uint64_t now_ts = static_cast<uint64_t>(idle_required_s + 10) * 1000ULL;
-  const uint64_t last_ret = now_ts - static_cast<uint64_t> (idle_required_s + 1) * 1000ULL;
-
-  // Seed data first, then set up consolidation inputs, then eval.
-  auto seed = std::make_unique<SeedVecEmbeddingsOp> (want);
-  auto setup = std::make_unique<SetupConsolidationInputsOp> (
-      /*tokens_in_flight=*/0,
-      /*queue_depth=*/0,
-      /*m_rate=*/3.0,
-      /*rate_target=*/2.0,
-      /*last_retrieval_ts=*/last_ret,
-      /*last_consolidation_ts=*/std::nullopt);
-  auto eval = std::make_unique<EvaluateConsolidation> ();
-  auto assert_op = std::make_unique<AssertConsolidationStartedOp> (now_ts);
-  auto ops = std::make_unique<DynamicOperationSet> (std::move (seed),
-                                              std::move (setup),
-                                              std::move (eval),
-                                              std::move (assert_op));
-  SignalProcessor processor (cfg, store, std::move (ops));
-
-  processor.Process (MakeConsolidationSignal (now_ts));
-  processor.Flush ();
-}
-
-TEST_CASE ("Alg28 no trigger does not set start flag",
+TEST_CASE ("Alg28 ordinary signal does not start consolidation",
            "[operations][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -310,7 +482,7 @@ TEST_CASE ("Alg28 no trigger does not set start flag",
   cfg.stability = 0.5;
 
   const uint64_t now_ts = 40'000ULL;
-  const uint64_t last_cons = now_ts; // no interval trigger
+  const uint64_t last_cons = now_ts;
 
   auto setup = std::make_unique<SetupConsolidationInputsOp> (
       /*tokens_in_flight=*/0,
@@ -330,7 +502,7 @@ TEST_CASE ("Alg28 no trigger does not set start flag",
   processor.Flush ();
 }
 
-TEST_CASE ("Alg28 start does not advance completion frontier before persistence",
+TEST_CASE ("Alg28 explicit start does not advance completion frontier before persistence",
            "[operations][consolidation]")
 {
   SignalProcessor::Config cfg;
@@ -393,8 +565,12 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
           "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
           "n_signals, modality, s_max, s_avg, strength, stability, created_at) "
           "VALUES(?, ?, 'test', 'LONG_TERM', 0, 1, 'text', 0.5, 0.5, ?, ?, 0)",
-          { id, id, strength, 0.0 });
+        { id, id, strength, 0.0 });
     }
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, "
+      "edge_type, weight) VALUES(4, 4, 'reinforces', 1.0)",
+      {});
 
   // Run ScoreConsolidation
   ScoreConsolidation op;
@@ -412,9 +588,14 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
   // Verify embedding loaded correctly
   REQUIRE (candidates[0].embedding.size() == 256);
   REQUIRE (candidates[0].embedding(0) == Catch::Approx(1.0f));
+  const auto connectivity_rows = tx->Execute (
+      "SELECT COUNT(*) AS c FROM memories "
+      "WHERE ABS(COALESCE(connectivity, 0.0)) > 1e-12",
+      {});
+  REQUIRE (std::any_cast<long long> (connectivity_rows[0].at ("c")) == 0);
 }
 
-TEST_CASE ("ScoreConsolidation forced mode broadens partial candidate sets",
+TEST_CASE ("ScoreConsolidation forced mode preserves eligibility threshold",
            "[operations][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -462,8 +643,7 @@ TEST_CASE ("ScoreConsolidation forced mode broadens partial candidate sets",
   op.Execute (ctx, *tx);
 
   const auto &candidates = ctx.GetConsolidationCandidates ();
-  REQUIRE (candidates.size () >= static_cast<size_t> (core::MinClusterSize (cfg.focus)));
-  REQUIRE (candidates.size () == 6);
+  REQUIRE (candidates.size () == 1);
   REQUIRE (candidates[0].embedding_id == 1LL);
 }
 
@@ -526,7 +706,7 @@ TEST_CASE ("ScoreConsolidation uses current memory embedding surface",
   REQUIRE (candidates[0].embedding (1) == Catch::Approx (0.0f));
 }
 
-TEST_CASE ("ScoreConsolidation forced mode includes memories without blobs",
+TEST_CASE ("ScoreConsolidation eligibility does not depend on blobs",
            "[operations][consolidation]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -571,7 +751,6 @@ TEST_CASE ("ScoreConsolidation forced mode includes memories without blobs",
   op.Execute (ctx, *tx);
 
   const auto &candidates = ctx.GetConsolidationCandidates ();
-  REQUIRE (candidates.size () >= static_cast<size_t> (core::MinClusterSize (cfg.focus)));
-  REQUIRE (candidates.size () == 4);
+  REQUIRE (candidates.size () == 1);
   REQUIRE (candidates[0].embedding_id == 1LL);
 }

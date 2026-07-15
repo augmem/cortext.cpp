@@ -125,14 +125,168 @@ The mechanism-eval directory above was local run output and is not checked into
 this repository; the numerical result is retained as a historical run record,
 not a checkout-reproducible aggregate artifact.
 
-On 2026-07-08, the public retention path was re-screened after fixing
-`Retention::Ephemeral` to force a processing boundary without granting durable
-write permission. The focused regression suite verified that public ephemeral
-queries retrieve durable API memories, expose a boundary packet, and leave
-memory and signal counts unchanged. A CLI smoke test stored "The garage door
+On 2026-07-14, the public retention path was re-screened after making
+`Retention::Ephemeral` transactionally read-only. The focused regression suite
+verified that public ephemeral queries retrieve durable API memories, expose a
+boundary packet, and leave memories, signals, current embeddings, associations,
+reconstructions, retrieval/use counters, lability, suppression, strength,
+episodes, and persisted processor state unchanged. A prior CLI smoke test stored "The garage door
 code is 8841.", ran an ephemeral `recall "garage door code"`, retrieved the
 stored memory, and confirmed the SQLite memory/signal counts were unchanged
 before and after recall.
+
+The same 2026-07-14 screen exercised a deterministic 512-message agent-style
+corpus with repeated tool acknowledgements and sixteen buried copies of the
+sentence "The same-session recall test returned teal." A packaged JavaScript
+ephemeral query returned four family representatives, with needle-bearing
+memories at ranks 0 and 1. Every returned item exposed numeric `relevance` and
+`composite_score`; the runtime object shape remained unchanged and did not add
+the undocumented `rel` alias. This is a deterministic source-health probe, not
+a claim about the unavailable reporter corpus.
+
+The family screen also places 430 cosine-near distractors ahead of a distinctive
+target. The distractors deliberately swap their eighth- and ninth-strongest
+coordinates, reproducing the false-negative boundary of a lossy top-feature
+fingerprint. Both the cached path and a cache-absent SQL fallback retain the
+target after a sound block-norm upper bound and exact cosine family checks. A
+separate 256-vector orthogonal-basis test exercises the broad non-duplicate
+surface and requires exact family comparisons to remain below one quarter of
+the all-pairs count.
+
+Performance was compared against the exact 1.2.1 macOS arm64 prebuild using two
+unmeasured warm-up pairs and 36 measured pairs. Each pair alternated
+baseline-first/candidate-first order with seed 20260714 and used fresh processes
+and fresh databases. The zero-margin paired-median gate and one-sided 95%
+bootstrap upper bound passed for all eight metrics. The schema-v4 artifact binds
+the result to the exact baseline addon, candidate addon, candidate core runtime,
+full CMake-cache digest, actual candidate build configuration and compiler,
+candidate build-source digest, final review tree, and exact base-to-tree patch
+digest. Every measured worker also records the core runtime it actually loaded
+and verifies its path and SHA-256 against that candidate runtime; final binding
+fails if any measured binary, build input, build configuration, or source
+changes:
+
+| Metric | Baseline median | Candidate median | Paired median difference | 95% upper bound |
+|---|---:|---:|---:|---:|
+| retrieval p50 (ms) | 8.075 | 4.267 | -3.857 | -3.516 |
+| retrieval p95 (ms) | 12.844 | 10.239 | -3.104 | -2.112 |
+| ingestion p50 (ms) | 17.203 | 8.248 | -9.084 | -8.841 |
+| ingestion p95 (ms) | 30.196 | 12.811 | -17.339 | -16.764 |
+| retrieval throughput (ops/s) | 107.035 | 202.343 | -93.938[^perf-direction] | -91.472 |
+| ingestion throughput (ops/s) | 55.580 | 122.221 | -66.737[^perf-direction] | -65.809 |
+| peak resident bytes | 1,055,965,184 | 786,432,000 | -269,623,296 | -268,828,672 |
+| database bytes | 8,982,528 | 6,008,832 | -2,973,696 | -2,973,696 |
+
+[^perf-direction]: For higher-is-better throughput metrics, the registered
+    difference is baseline minus candidate; for all other metrics it is
+    candidate minus baseline. Non-positive values pass the zero-margin gate.
+
+### Reporter-Corpus Consolidate-on-Recommend Control
+
+On 2026-07-15, the 1,915-message whole-message durable replay was rerun on
+fresh isolated databases with the exact seven-query manifest. Every arm used
+the same generic source id, default text modality, and `F=0.45`, `S=0.5`,
+`T=0.5`. The policy treatment called explicit consolidation exactly once after
+each durable result whose consolidation state was `recommended` or `required`;
+ephemeral query results never triggered consolidation, and there was no
+unconditional final call.
+
+| Arm | Recommendation outputs | Consolidations | Top-12 hits | Ingest wall time | Seven-query wall time |
+|---|---:|---:|---:|---:|---:|
+| released 1.2.1 policy | 0 | 0 | 1/7 | 167.313 s | 340.468 ms |
+| current candidate, no consolidation | 1,546 | 0 | 2/7 | 52.085 s | 251.387 ms |
+| current candidate, consolidate on recommendation | 124 | 124 | 1/7 | 70.593 s | 277.151 ms |
+
+The released booleans did not fire on any of the 1,915 writes, so that arm
+reproduced the old never-consolidated behavior. The current no-consolidation
+control emitted 28 `recommended` and 1,518 `required` results. In the treatment,
+the first call occurred at write 371. Calls then clustered into six consecutive
+bursts at writes 371--417, 689--711, 947--965, 1228--1239, 1547--1558, and
+1885--1895. Each explicit call returned state `none`, but the next durable write
+could immediately emit `required`; the policy therefore produced 6 recommended
+calls followed by 118 required calls rather than one call per throughput event.
+The 124 calls consumed 8.372 s in aggregate (median 59.846 ms, p95 135.009 ms,
+maximum 164.979 ms).
+
+Against the matched current-candidate control, the treatment lost the
+`alice_gate_launch_code` top-12 hit and gained no top-12 hit. It did return the
+`pre_llm_plugin_hook` needle at rank 14, so the full variable-length packets
+contained two needles in both arms while the fixed top-12 score regressed from
+2/7 to 1/7. All seven needle counts remained byte-content-equivalent and all
+needle-bearing rows remained `LONG_TERM`; the failure is not retention.
+
+The treatment also produced 37 additional long-term rows, 130 association
+memories, 167 additional current-memory embedding rows, 5,365 additional graph
+edges, 90 additional signal rows, and 1,867,776 additional database bytes before
+the queries. Its ingest wall time was 18.509 s (+35.54%) above the matched
+control, and its query wall time was 25.764 ms (+10.25%) higher. This is one
+paired local run, not a statistical production-latency estimate, but it fails
+the requested non-regression gate and shows that callers must not treat every
+non-`none` output as an unlatched level-triggered command.
+
+The earlier 3/7 logical replay remains useful retrieval evidence but is not the
+matched causal control for this experiment: candidate retrieval queried a
+byte-identical copy of the released-ingested database. The sanitized control
+artifact has SHA-256
+`69db0e3337b708ce14c11dbc5a91883b2a4b825023df602206b543f8917f8909`.
+It contains only labels and hashes, not transcript text, query plaintext,
+needles, or memory content. This experiment added no source-id-specific or
+modality-specific behavior and does not establish seven-of-seven recall,
+production performance, issue closure, or release readiness.
+
+### Consolidation Integrity Repair
+
+The same matched replay was repeated after making recommendation consumption
+edge-triggered, isolating forced maintenance from normal ingestion, removing
+forced candidate/cluster fallbacks, limiting graph construction to newly
+persisted clusters, preserving direct long-term family representatives before
+graph expansion can compete, and relevance-ordering linked sources before the
+compact hydration limit. Both arms used fresh databases and the same 1,915
+messages, seven queries, source metadata, retention settings, model, runtime,
+and F/S/T values.
+
+| Arm | Non-`none` outputs | Consolidations | Top-12 hits | Ingest wall time | Seven-query wall time |
+|---|---:|---:|---:|---:|---:|
+| repaired candidate, no consolidation | 1,546 | 0 | 2/7 | 49.314 s | 179.811 ms |
+| repaired candidate, consolidate on recommendation | 1 | 1 | 2/7 | 49.919 s | 193.602 ms |
+
+The treatment emitted one `recommended` result at write 376, ran one 24.354 ms
+maintenance transaction, and then emitted `none` for the remaining durable
+writes. The call changed only the persisted acknowledgment latch and
+event-derived floor/peak: it added zero memory rows, long-term rows, working
+rows, current embeddings, graph edges, association memories, signal rows,
+or processed-signal count. SQLite allocated one 4 KiB page at the call
+boundary, but both arms finished at the identical 23,060,480-byte file size.
+The hashed raw snapshots include the armed latch and nonzero-connectivity count
+before the call, after the call, and at final query boundaries. They record
+`armed` changing from one to zero and zero memories with nonzero persisted
+connectivity in both arms, closing the hidden global-write path found during the
+first repair replay. All seven needle counts remained `LONG_TERM` with counts
+12, 21, 44, 2, 11, 2, and 7. Both arms retained the same two top-12 hits and
+ended with 1,915 long-term memories, 1,915 current embeddings, and 1,915
+processed signals. Every ephemeral-query durable delta remained zero.
+
+The reporter replay is a functional matched control, not a latency estimator.
+Performance was therefore checked separately against the frozen released
+baseline with two warm-up pairs and 18 measured fresh-process, fresh-database
+pairs, alternating order at the registered zero non-inferiority margin. All
+eight gates passed. Candidate-minus-baseline latency medians and one-sided 95%
+upper bounds were -4.370/-4.150 ms for retrieval p50,
+-1.719/-1.325 ms for retrieval p95, -7.242/-7.171 ms for ingestion p50, and
+-16.012/-15.627 ms for ingestion p95. Higher-is-better throughput uses
+baseline minus candidate and was likewise negative at both point and upper
+bound; peak RSS and database bytes also passed.
+
+The JavaScript binding contract now loads the measured native addon, executes
+an ephemeral text request, and checks the serialized runtime object as well as
+the TypeScript declaration: `consolidation_state` is present and the two old
+boolean fields are absent. The sanitized repair artifact contains no transcript
+text, query plaintext, needle plaintext, or memory content. Its content address
+is recorded in the project proof ledger rather than embedded here, avoiding a
+self-reference between the artifact's reviewed-tree identity and this
+manuscript. This repair remains generic: it adds no
+source-id or modality branch and does not claim seven-of-seven recall,
+production latency, merge readiness, or release readiness.
 
 On 2026-07-11, retention was expanded to four policies:
 `Natural` (default when omitted: `force_boundary=false`, `force_write=false`
