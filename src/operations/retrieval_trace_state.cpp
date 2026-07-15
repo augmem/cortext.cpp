@@ -11,6 +11,9 @@ thread_local std::vector<RankedCandidate> g_last_ranked_candidates;
 thread_local std::vector<RejectedCandidate> g_last_rejected_candidates;
 thread_local std::vector<EvidencePacket> g_last_evidence_packets;
 thread_local RetrievalSummary g_last_retrieval_summary;
+#ifdef CORTEXT_TESTING
+thread_local std::size_t g_last_family_exact_comparison_count = 0;
+#endif
 thread_local bool g_capture_enabled = true;
 
 } // namespace
@@ -103,6 +106,32 @@ RetrievalSummary
 GetLastRetrievalSummary ()
 {
   return g_last_retrieval_summary;
+}
+
+void
+ClearLastFamilyExactComparisonCount ()
+{
+#ifdef CORTEXT_TESTING
+  g_last_family_exact_comparison_count = 0;
+#endif
+}
+
+void
+IncrementLastFamilyExactComparisonCount ()
+{
+#ifdef CORTEXT_TESTING
+  ++g_last_family_exact_comparison_count;
+#endif
+}
+
+std::size_t
+GetLastFamilyExactComparisonCount ()
+{
+#ifdef CORTEXT_TESTING
+  return g_last_family_exact_comparison_count;
+#else
+  return 0;
+#endif
 }
 
 bool

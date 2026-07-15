@@ -555,11 +555,11 @@ if θ_topic ≤ cos(e_new, e_old) < θ_dup:
     contradiction_count(e_old) += 1
 ```
 
-Retrieval traverses `supersedes` edges so a replacement can surface when a
-query first hits the stale assertion. The superseded target is demoted by
-`RetrievalSupersededMemoryPenalty(F,S,T) × edge_weight`, but remains retrievable
-as historical evidence. The number of written supersession edges is capped by
-`SupersessionMaxEdges(F,S,T)`.
+Retrieval treats `supersedes` as a directional family relation rather than a
+traversable activation edge. Superseded targets are removed before the vector
+seed cap, leaving the replacement eligible as the family representative and
+preventing obsolete members from consuming prompt slots. The number of written
+supersession edges is capped by `SupersessionMaxEdges(F,S,T)`.
 
 ## Constructive Recall and Controlled Distortion
 

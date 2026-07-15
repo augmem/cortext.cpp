@@ -13,6 +13,7 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
+#include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include <string>
 #include <vector>
 
@@ -353,8 +354,7 @@ TEST_CASE ("ConsolidationCluster excludes mixed-dimension candidates from "
   processor.Flush ();
 }
 
-TEST_CASE ("ConsolidationCluster forced fallback skips empty lowest-score "
-           "anchor",
+TEST_CASE ("ConsolidationCluster does not manufacture a forced cluster",
            "[operations][consolidation_cluster][robustness]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -376,8 +376,7 @@ TEST_CASE ("ConsolidationCluster forced fallback skips empty lowest-score "
   auto seed = std::make_unique<SeedCandidatesOp> (candidates);
   auto enable = std::make_unique<EnableConsolidationOp> ();
   auto cluster = std::make_unique<ConsolidationCluster> ();
-  auto assert_op = std::make_unique<AssertSingleClusterOp> (
-      std::vector<long long>{ 2LL, 3LL, 4LL }, 256, 0, 1.0 / 3.0);
+  auto assert_op = std::make_unique<AssertClustersOp> (0);
 
   auto ops = std::make_unique<DynamicOperationSet> (
       std::move (seed), std::move (enable), std::move (cluster),
@@ -505,6 +504,9 @@ TEST_CASE ("ConsolidationShallow advances completion state only after persistenc
   pctx.consolidation_count = 2;
   pctx.memories_since_consolidation = 5;
   pctx.association_fanout_cache.valid = true;
+  pctx.m_rate = 3.5;
+  operations::consolidation_throughput_state_internal::Reset (
+      pctx, { 1.0, 9.0, true });
   auto signal = MakeSignal (5000);
   OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetConsolidationShouldStart (true);
@@ -527,6 +529,10 @@ TEST_CASE ("ConsolidationShallow advances completion state only after persistenc
   REQUIRE (pctx.consolidation_count == 3);
   REQUIRE (pctx.memories_since_consolidation == 0);
   REQUIRE_FALSE (pctx.association_fanout_cache.valid);
+  const auto throughput
+      = operations::consolidation_throughput_state_internal::Find (pctx);
+  REQUIRE (throughput.floor == 1.0);
+  REQUIRE (throughput.peak == 9.0);
 
   auto assoc_rows = store->Execute (
       "SELECT memory_id, embedding_id, source_id FROM memories "
@@ -556,6 +562,7 @@ TEST_CASE ("ConsolidationShallow advances completion state only after persistenc
   REQUIRE (surface.embedding_id == assoc_embedding_id);
   REQUIRE (surface.kind == "ASSOCIATION");
   REQUIRE (surface.is_association);
+  REQUIRE_FALSE (surface.vector_seed_eligible);
   REQUIRE (surface.embedding.size () == 256);
   REQUIRE (surface.embedding[0] == Catch::Approx (1.0f));
   REQUIRE (pctx.retrieval_surface_embedding_index.at (assoc_embedding_id)
@@ -566,4 +573,37 @@ TEST_CASE ("ConsolidationShallow advances completion state only after persistenc
   const auto &assoc_cache = pctx.association_cache[assoc_cache_it->second];
   REQUIRE (assoc_cache.embedding_id == assoc_embedding_id);
   REQUIRE (assoc_cache.is_association);
+  operations::consolidation_throughput_state_internal::Erase (pctx);
+}
+
+TEST_CASE ("ConsolidationShallow preserves throughput range without persistence",
+           "[operations][consolidation_shallow]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  pctx.m_rate = 3.5;
+  pctx.memories_since_consolidation = 4;
+  operations::consolidation_throughput_state_internal::Reset (
+      pctx, { 1.0, 9.0, true });
+  auto signal = MakeSignal (5000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetConsolidationShouldStart (true);
+
+  ConsolidationShallow shallow;
+  auto tx = store->Begin ();
+  shallow.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE_FALSE (ctx.GetConsolidationPersisted ());
+  REQUIRE (pctx.memories_since_consolidation == 4);
+  const auto throughput
+      = operations::consolidation_throughput_state_internal::Find (pctx);
+  REQUIRE (throughput.floor == 1.0);
+  REQUIRE (throughput.peak == 9.0);
+  operations::consolidation_throughput_state_internal::Erase (pctx);
 }

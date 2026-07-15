@@ -105,6 +105,9 @@ const std::vector<EvidencePacket> &GetLastEvidencePackets ();
 void ClearLastRetrievalSummary ();
 void SetLastRetrievalSummary (const RetrievalSummary &summary);
 RetrievalSummary GetLastRetrievalSummary ();
+void ClearLastFamilyExactComparisonCount ();
+void IncrementLastFamilyExactComparisonCount ();
+std::size_t GetLastFamilyExactComparisonCount ();
 
 bool CaptureEnabled ();
 

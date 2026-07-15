@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cortext/consolidation_state.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/processor/operation.hpp"
 #include "cortext/processor/processor_context.hpp"
@@ -110,8 +111,7 @@ public:
     std::optional<double> boundary_score;
     /// @brief Boundary trigger label when at_boundary (e.g. explicit_turn).
     std::optional<std::string> boundary_type;
-    bool consolidation_recommended = false;
-    bool consolidation_required = false;
+    ConsolidationState consolidation_state = ConsolidationState::None;
 
     // Composite score and serial-position application (if provided)
     std::optional<double> composite_score;

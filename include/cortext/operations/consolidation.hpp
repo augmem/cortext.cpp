@@ -6,11 +6,11 @@
 namespace cortext::operations
 {
 
-/// @brief Algorithm 28/28b: Consolidation Triggers & Scheduling.
+/// @brief Algorithm 28: Explicit consolidation execution gate.
 ///
-/// Evaluates whether background consolidation should start based on
-/// rate/interval triggers (Alg 28) and idle gating (Alg 28b). Emits an
-/// event row into `consolidation_events` for start/defer actions.
+/// Starts the consolidation pipeline only for a non-ephemeral signal whose
+/// caller set `force_consolidation`. Throughput-derived maintenance urgency is
+/// reported separately through `consolidation_state`; it never starts work.
 class EvaluateConsolidation
     : public Operation<Requires<>, Satisfies<tags::ConsolidationShouldStart, tags::ConsolidationCandidates> >
 {

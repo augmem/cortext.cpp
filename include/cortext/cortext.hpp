@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cortext/export.hpp"
+#include "cortext/consolidation_state.hpp"
 #include "cortext/retention.hpp"
 #include "cortext/stop_token.hpp"
 
@@ -120,8 +121,7 @@ public:
     bool should_interrupt = false;
     bool interrupt_aborted = false;
     bool at_boundary = false;
-    bool consolidation_recommended = false;
-    bool consolidation_required = false;
+    ConsolidationState consolidation_state = ConsolidationState::None;
     bool interrupt_gate_has_candidates = false;
     bool interrupt_gate_blocked_no_store = false;
     bool interrupt_gate_rel_pass = false;

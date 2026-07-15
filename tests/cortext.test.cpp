@@ -1,6 +1,9 @@
 #include "test_helpers.hpp"
+#include "../src/capi_internal.hpp"
+#include "../src/operations/retrieval_trace_state.hpp"
 #include <array>
 #include <any>
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <cmath>
@@ -21,6 +24,21 @@
 
 namespace
 {
+struct ScopedRankedCandidates
+{
+  void
+  Set (std::vector<cortext::operations::retrieval_trace::RankedCandidate>
+           candidates)
+  {
+    cortext::operations::retrieval_trace::SetLastRankedCandidates (candidates);
+  }
+
+  ~ScopedRankedCandidates ()
+  {
+    cortext::operations::retrieval_trace::ClearLastRankedCandidates ();
+  }
+};
+
 std::string
 MakeTempDbPath ()
 {
@@ -79,6 +97,76 @@ AnyToLongLong (const std::any &value)
   return 0;
 }
 
+struct DurableRetrievalState
+{
+  long long memories = 0;
+  long long retrieved = 0;
+  long long used = 0;
+  long long accessed = 0;
+  long long lability_nanos = 0;
+  long long suppression_nanos = 0;
+  long long strength_nanos = 0;
+  long long associations = 0;
+  long long association_weight_nanos = 0;
+  long long reconstructions = 0;
+  long long state_signals_processed = 0;
+  long long episodes = 0;
+
+  bool
+  operator== (const DurableRetrievalState &) const = default;
+};
+
+DurableRetrievalState
+SnapshotDurableRetrievalState (cortext::Store &store)
+{
+  DurableRetrievalState out;
+  const auto memories = store.Execute (
+      "SELECT COUNT(*) AS memories, "
+      "COALESCE(SUM(retrieved_count), 0) AS retrieved, "
+      "COALESCE(SUM(used_count), 0) AS used, "
+      "COALESCE(SUM(CASE WHEN last_access IS NOT NULL THEN 1 ELSE 0 END), 0) "
+      "  AS accessed, "
+      "COALESCE(CAST(ROUND(SUM(lability_state) * 1000000000.0) AS INTEGER), 0) "
+      "  AS lability_nanos, "
+      "COALESCE(CAST(ROUND(SUM(suppression) * 1000000000.0) AS INTEGER), 0) "
+      "  AS suppression_nanos, "
+      "COALESCE(CAST(ROUND(SUM(strength) * 1000000000.0) AS INTEGER), 0) "
+      "  AS strength_nanos FROM memories");
+  REQUIRE (memories.size () == 1);
+  out.memories = AnyToLongLong (memories[0].at ("memories"));
+  out.retrieved = AnyToLongLong (memories[0].at ("retrieved"));
+  out.used = AnyToLongLong (memories[0].at ("used"));
+  out.accessed = AnyToLongLong (memories[0].at ("accessed"));
+  out.lability_nanos = AnyToLongLong (memories[0].at ("lability_nanos"));
+  out.suppression_nanos
+      = AnyToLongLong (memories[0].at ("suppression_nanos"));
+  out.strength_nanos = AnyToLongLong (memories[0].at ("strength_nanos"));
+
+  const auto associations = store.Execute (
+      "SELECT COUNT(*) AS associations, "
+      "COALESCE(CAST(ROUND(SUM(weight) * 1000000000.0) AS INTEGER), 0) "
+      "  AS weight_nanos FROM associations");
+  REQUIRE (associations.size () == 1);
+  out.associations = AnyToLongLong (associations[0].at ("associations"));
+  out.association_weight_nanos
+      = AnyToLongLong (associations[0].at ("weight_nanos"));
+  const auto reconstructions = store.Execute (
+      "SELECT COUNT(*) AS reconstructions FROM memory_reconstructions");
+  REQUIRE (reconstructions.size () == 1);
+  out.reconstructions
+      = AnyToLongLong (reconstructions[0].at ("reconstructions"));
+  const auto state = store.Execute (
+      "SELECT COALESCE(MAX(signals_processed), 0) AS signals_processed "
+      "FROM state");
+  REQUIRE (state.size () == 1);
+  out.state_signals_processed
+      = AnyToLongLong (state[0].at ("signals_processed"));
+  const auto episodes = store.Execute ("SELECT COUNT(*) AS episodes FROM episodes");
+  REQUIRE (episodes.size () == 1);
+  out.episodes = AnyToLongLong (episodes[0].at ("episodes"));
+  return out;
+}
+
 class ScopedTempDb
 {
 public:
@@ -126,6 +214,13 @@ RepoModelsDir ()
   return (root / "models").string ();
 }
 } // namespace
+
+TEST_CASE ("Cortext context defaults to one consolidation state",
+           "[cortext][consolidation][api]")
+{
+  cortext::Cortext::Context context;
+  REQUIRE (context.consolidation_state == cortext::ConsolidationState::None);
+}
 
 TEST_CASE ("Cortext C++ stub can be created and used",
            "[cortext][stub][aist]")
@@ -240,6 +335,7 @@ TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
       = store->Execute ("SELECT COUNT(*) AS n FROM memories");
   const auto before_signals
       = store->Execute ("SELECT COUNT(*) AS n FROM signals");
+  const auto before_durable_state = SnapshotDurableRetrievalState (*store);
   REQUIRE (before_memories.size () == 1);
   REQUIRE (before_signals.size () == 1);
 
@@ -267,6 +363,7 @@ TEST_CASE ("Cortext ephemeral text query retrieves without storing input",
            == AnyToLongLong (before_memories[0].at ("n")));
   REQUIRE (AnyToLongLong (after_signals[0].at ("n"))
            == AnyToLongLong (before_signals[0].at ("n")));
+  REQUIRE (SnapshotDurableRetrievalState (*store) == before_durable_state);
 }
 
 TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
@@ -778,6 +875,31 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
     }
   ctx->Flush ();
 
+  long long signal_count_before = 0;
+  long long processed_count_before = 0;
+  long long long_term_count_before = 0;
+  {
+    auto eligibility_store = cortext::SQLiteStore::Create (db_path.c_str ());
+    signal_count_before = AnyToLongLong (
+        eligibility_store->Execute ("SELECT COUNT(*) AS c FROM signals", {})
+            [0]
+            .at ("c"));
+    processed_count_before = AnyToLongLong (
+        eligibility_store->Execute (
+            "SELECT signals_processed AS c FROM state WHERE id = 1", {})
+            [0]
+            .at ("c"));
+    long_term_count_before = AnyToLongLong (
+        eligibility_store->Execute (
+            "SELECT COUNT(*) AS c FROM memories WHERE kind = 'LONG_TERM'", {})
+            [0]
+            .at ("c"));
+    eligibility_store->Execute (
+        "UPDATE memories SET strength = 0.0, redundancy = 1.0 "
+        "WHERE kind = 'LONG_TERM'",
+        {});
+  }
+
   const std::uint64_t consolidation_ts = source_ts + 86400000ULL;
   REQUIRE_NOTHROW (
       cortext::internal::ReplayIngress::ConsolidateAt (*ctx, consolidation_ts));
@@ -785,6 +907,23 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
 
   auto unique_store = cortext::SQLiteStore::Create (db_path.c_str ());
   auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  REQUIRE (AnyToLongLong (
+               store->Execute ("SELECT COUNT(*) AS c FROM signals", {})[0]
+                   .at ("c"))
+           == signal_count_before);
+  REQUIRE (AnyToLongLong (
+               store->Execute (
+                   "SELECT signals_processed AS c FROM state WHERE id = 1",
+                   {})[0]
+                   .at ("c"))
+           == processed_count_before);
+  REQUIRE (AnyToLongLong (
+               store->Execute (
+                   "SELECT COUNT(*) AS c FROM memories "
+                   "WHERE kind = 'LONG_TERM'",
+                   {})[0]
+                   .at ("c"))
+           == long_term_count_before);
   auto rows = store->Execute (
       "SELECT start_ts, created_at, source_id, kind FROM memories "
       "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'association_%' "
@@ -796,6 +935,29 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
            == static_cast<long long> (consolidation_ts));
   REQUIRE (std::any_cast<std::string> (rows[0].at ("kind"))
            == "ASSOCIATION");
+
+  const long long association_count = AnyToLongLong (
+      store->Execute (
+          "SELECT COUNT(*) AS c FROM memories WHERE kind = 'ASSOCIATION'",
+          {})[0]
+          .at ("c"));
+  const long long edge_count = AnyToLongLong (
+      store->Execute ("SELECT COUNT(*) AS c FROM associations", {})[0]
+          .at ("c"));
+  REQUIRE_NOTHROW (
+      cortext::internal::ReplayIngress::ConsolidateAt (*ctx, consolidation_ts));
+  ctx->Flush ();
+  REQUIRE (AnyToLongLong (
+               store->Execute (
+                   "SELECT COUNT(*) AS c FROM memories "
+                   "WHERE kind = 'ASSOCIATION'",
+                   {})[0]
+                   .at ("c"))
+           == association_count);
+  REQUIRE (AnyToLongLong (
+               store->Execute ("SELECT COUNT(*) AS c FROM associations", {})[0]
+                   .at ("c"))
+           == edge_count);
 }
 
 TEST_CASE ("Cortext::Create can resolve AIST from env",
@@ -1170,10 +1332,46 @@ TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
   auto ctx = cortext::Cortext::Create (cfg, db_path);
   REQUIRE (ctx != nullptr);
 
-  auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
+  cortext::operations::retrieval_trace::RankedCandidate association_trace;
+  association_trace.memory_id = 200LL;
+  association_trace.score = 0.72;
+  association_trace.relevance = 0.81;
+  ScopedRankedCandidates ranked_candidates;
+  ranked_candidates.Set ({ association_trace });
+
+  auto no_query_score = ctx->DebugHydrateForTest ({ 200LL }, {});
+  REQUIRE (no_query_score.retrieved_memory.size () == 1);
+  REQUIRE_FALSE (no_query_score.retrieved_memory[0].composite_score);
+  REQUIRE_FALSE (no_query_score.retrieved_memory[0].relevance);
+
+  auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {}, embedding);
   REQUIRE (cue_hydrated.retrieved_memory.size () == 1);
   REQUIRE (cue_hydrated.retrieved_memory[0].id == 100LL);
   REQUIRE (TextFromMemory (cue_hydrated.retrieved_memory[0]) == source_text);
+  REQUIRE (cue_hydrated.retrieved_memory[0].composite_score
+           == Catch::Approx (1.0));
+  REQUIRE (cue_hydrated.retrieved_memory[0].relevance
+           == Catch::Approx (1.0));
+
+  const auto binding_json = nlohmann::json::parse (
+      cortext::internal::ContextToJsonForTest (cue_hydrated));
+  REQUIRE (binding_json.at ("retrieved_memory").at (0).at ("composite_score")
+           == Catch::Approx (1.0));
+  REQUIRE (binding_json.at ("retrieved_memory").at (0).at ("relevance")
+           == Catch::Approx (1.0));
+
+  cortext::operations::retrieval_trace::RankedCandidate source_trace;
+  source_trace.memory_id = 100LL;
+  source_trace.score = 0.93;
+  source_trace.relevance = 0.94;
+  ranked_candidates.Set ({ association_trace, source_trace });
+  auto independently_ranked_source
+      = ctx->DebugHydrateForTest ({ 200LL }, {}, embedding);
+  REQUIRE (independently_ranked_source.retrieved_memory.size () == 1);
+  REQUIRE (independently_ranked_source.retrieved_memory[0].composite_score
+           == Catch::Approx (0.93));
+  REQUIRE (independently_ranked_source.retrieved_memory[0].relevance
+           == Catch::Approx (0.94));
 
   auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {});
   REQUIRE (label_hydrated.retrieved_memory.size () == 1);
@@ -1393,7 +1591,7 @@ TEST_CASE ("Cortext orders durable label source hydration by query similarity",
   }
 }
 
-TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit",
+TEST_CASE ("Cortext ranks complete linked family before compact limit",
            "[cortext][hydration][retrieval][aist]")
 {
   ScopedTempDb temp_db;
@@ -1407,13 +1605,20 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
   constexpr int kEmbeddingDim = 256;
   std::vector<float> embedding (kEmbeddingDim, 0.0f);
   embedding[0] = 1.0f;
+  std::vector<float> unrelated_embedding (kEmbeddingDim, 0.0f);
+  unrelated_embedding[1] = 1.0f;
 
   constexpr long long kAssociationId = 200LL;
+  constexpr long long kSecondAssociationId = 201LL;
   constexpr long long kLabelId = 300LL;
+  // The centroid and oldest source are exact query matches. More-recent
+  // unrelated sources exceed the compact cap and must not truncate that source
+  // before relevance ordering.
   store->Execute (
       "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?), (?, ?, ?)",
-      { kAssociationId, embedding, 1000LL, kLabelId, embedding, 1000LL });
+      "VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+      { kAssociationId, embedding, 1000LL, kSecondAssociationId, embedding,
+        1000LL, kLabelId, embedding, 1000LL });
   store->Execute (
       "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
       "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
@@ -1422,6 +1627,13 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
       "(?, ?, 'dense label', 'LABEL', 'dense label', 1000, 1, 'text', "
       "0.5, 0.5, 1.0, 1000)",
       { kAssociationId, kAssociationId, kLabelId, kLabelId });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
+      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
+      "VALUES (?, ?, 'second_associative_cue_test', 'ASSOCIATION', "
+      "'second associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, "
+      "1000)",
+      { kSecondAssociationId, kSecondAssociationId });
 
   std::vector<long long> source_ids;
   for (long long i = 0; i < 5; ++i)
@@ -1437,10 +1649,12 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
       const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
       REQUIRE (!blob_id.empty ());
 
+      const auto &source_embedding
+          = i == 0 ? embedding : unrelated_embedding;
       store->Execute (
           "INSERT INTO embeddings (embedding_id, embedding, created_at) "
           "VALUES (?, ?, ?)",
-          { memory_id, embedding, ts });
+          { memory_id, source_embedding, ts });
       store->Execute (
           "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
           "blob_id, start_ts, end_ts, n_signals, modality, s_max, s_avg, "
@@ -1461,8 +1675,11 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
     }
   store->Execute (
       "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, "
-      "weight) VALUES (?, ?, 'has_label', 1.0)",
-      { kAssociationId, kLabelId });
+      "weight) VALUES (?, ?, 'has_label', 1.0), "
+      "               (?, ?, 'has_label', 1.0), "
+      "               (?, ?, 'derived_from', 1.0)",
+      { kAssociationId, kLabelId, kSecondAssociationId, kLabelId,
+        kSecondAssociationId, source_ids.front () });
 
   cortext::Cortext::Config cfg;
   auto ctx = cortext::Cortext::Create (cfg, db_path);
@@ -1476,6 +1693,7 @@ TEST_CASE ("Cortext caps linked source hydration with knob-derived compact limit
   auto hydrated = ctx->DebugHydrateForTest ({ kLabelId }, {}, embedding);
   REQUIRE (static_cast<int> (hydrated.retrieved_memory.size ())
            == expected_limit);
+  REQUIRE (hydrated.retrieved_memory.front ().id == source_ids.front ());
   for (const auto &memory : hydrated.retrieved_memory)
     {
       REQUIRE (std::find (source_ids.begin (), source_ids.end (), memory.id)
@@ -1924,6 +2142,9 @@ TEST_CASE ("C API handles NULL inputs correctly",
     REQUIRE (parsed.at ("output").contains ("stored_signal_id"));
     REQUIRE (parsed.at ("output").at ("stored_memory_id").is_number_integer ());
     REQUIRE (parsed.at ("output").at ("stored_signal_id").is_number_integer ());
+    REQUIRE (parsed.at ("consolidation_state") == "none");
+    REQUIRE_FALSE (parsed.contains ("consolidation_recommended"));
+    REQUIRE_FALSE (parsed.contains ("consolidation_required"));
     REQUIRE (parsed.contains ("embedding"));
     REQUIRE (parsed.contains ("embedding_dimension"));
     REQUIRE (parsed.at ("embedding").is_array ());

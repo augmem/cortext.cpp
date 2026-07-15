@@ -54,9 +54,10 @@ with cortext.Cortext("memory.sqlite", config=cfg) as memory:
     )
 
     for item in ctx.get("retrieved_memory", []):
-        print(item.get("text"), item.get("rel"))
+        print(item.get("text"), item.get("relevance"),
+              item.get("composite_score"))
 
-    if ctx.get("consolidation_recommended"):
+    if ctx.get("consolidation_state") in {"recommended", "required"}:
         memory.consolidate()
 
     memory.flush()
@@ -120,7 +121,7 @@ def answer(conversation_id: str, user_message: str) -> str:
         ],
     )
 
-    if ctx.get("consolidation_recommended"):
+    if ctx.get("consolidation_state") in {"recommended", "required"}:
         memory.consolidate()
 
     return completion.choices[0].message.content or ""
@@ -140,13 +141,15 @@ fields:
 - `working_memory`: short-term active context.
 - `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior
   flags.
-- `consolidation_recommended`, `consolidation_required`: maintenance hints.
+- `consolidation_state`: ordered `"none"`, `"recommended"`, or `"required"`
+  maintenance urgency derived from the current throughput range.
 - `output`: scores, storage decisions, filter status, and operation timings.
 - `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
 - `embedding`, `embedding_dimension`: present only when requested.
 
 Memory entries commonly include `text`, `source_id`, `timestamp`, `modality`,
-`mimetype`, `rel`, usage counts, scores, and soft-anchor metadata. For prompt
+`mimetype`, `relevance`, `composite_score`, usage counts, and soft-anchor
+metadata. For prompt
 assembly, pass `include_embedding=False`; embeddings are large and rarely
 needed in the returned packet.
 

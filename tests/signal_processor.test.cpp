@@ -6,6 +6,7 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
+#include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include <thread>
 
 using namespace cortext;
@@ -204,6 +205,107 @@ struct ExerciseWholeContextRollbackOp : IOperation
   mutable int call_count = 0;
 };
 
+struct ExerciseThroughputRollbackOp : IOperation
+{
+  explicit ExerciseThroughputRollbackOp (bool *restored_in)
+      : restored (restored_in)
+  {
+  }
+
+  bool *restored = nullptr;
+  mutable int call_count = 0;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    namespace throughput
+        = operations::consolidation_throughput_state_internal;
+    auto &pctx = ctx.GetProcessorContext ();
+    ++call_count;
+    if (call_count == 1)
+      {
+        throughput::Reset (pctx, { 2.0, 10.0, true });
+        return;
+      }
+    if (call_count == 2)
+      {
+        throughput::Reset (pctx, { 8.0, 9.0, true });
+        throw std::runtime_error ("force throughput rollback");
+      }
+    const auto state = throughput::Find (pctx);
+    if (restored)
+      {
+        *restored = state.floor == 2.0 && state.peak == 10.0
+                    && state.initialized;
+      }
+  }
+};
+
+struct ExerciseThroughputEphemeralOp : IOperation
+{
+  explicit ExerciseThroughputEphemeralOp (bool *restored_in)
+      : restored (restored_in)
+  {
+  }
+
+  bool *restored = nullptr;
+  mutable int call_count = 0;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    namespace throughput
+        = operations::consolidation_throughput_state_internal;
+    auto &pctx = ctx.GetProcessorContext ();
+    ++call_count;
+    if (call_count == 1)
+      {
+        throughput::Reset (pctx, { 3.0, 12.0, true });
+        return;
+      }
+    if (call_count == 2)
+      {
+        throughput::Reset (pctx, { 9.0, 9.5, true });
+        return;
+      }
+    const auto state = throughput::Find (pctx);
+    if (restored)
+      {
+        *restored = state.floor == 3.0 && state.peak == 12.0
+                    && state.initialized;
+      }
+  }
+};
+
+struct SetOrCaptureThroughputOp : IOperation
+{
+  std::optional<operations::consolidation_throughput_state_internal::State>
+      state_to_set;
+  operations::consolidation_throughput_state_internal::State *captured
+      = nullptr;
+  ProcessorContext **context_address = nullptr;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    namespace throughput
+        = operations::consolidation_throughput_state_internal;
+    auto &pctx = ctx.GetProcessorContext ();
+    if (context_address)
+      {
+        *context_address = &pctx;
+      }
+    if (state_to_set)
+      {
+        throughput::Reset (pctx, *state_to_set);
+      }
+    if (captured)
+      {
+        *captured = throughput::Find (pctx);
+      }
+  }
+};
+
 TEST_CASE ("SignalProcessor processes and flushes to SQLite", "[processor]")
 {
   auto uniq = SQLiteStore::Create (":memory:");
@@ -321,6 +423,119 @@ TEST_CASE ("SignalProcessor restores exact durable and cache-only state after "
   proc.Process (signal);
   REQUIRE (retrieval_restored);
   REQUIRE (volatile_restored);
+}
+
+TEST_CASE ("SignalProcessor restores consolidation throughput after rollback",
+           "[processor][rollback][consolidation]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  bool restored = false;
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ExerciseThroughputRollbackOp> (&restored));
+  SignalProcessor processor (cfg, store, std::move (pipeline));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "test";
+  signal.timestamp = 1000;
+  processor.Process (signal);
+  signal.timestamp = 2000;
+  REQUIRE_THROWS (processor.Process (signal));
+  signal.timestamp = 3000;
+  processor.Process (signal);
+  REQUIRE (restored);
+}
+
+TEST_CASE ("Ephemeral processing restores consolidation throughput exactly",
+           "[processor][ephemeral][consolidation]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  bool restored = false;
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ExerciseThroughputEphemeralOp> (&restored));
+  SignalProcessor processor (cfg, store, std::move (pipeline));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "test";
+  signal.timestamp = 1000;
+  processor.Process (signal);
+  signal.timestamp = 2000;
+  signal.retention = Retention::Ephemeral;
+  processor.Process (signal);
+  signal.timestamp = 3000;
+  signal.retention = Retention::Natural;
+  processor.Process (signal);
+  REQUIRE (restored);
+}
+
+TEST_CASE ("Consolidation throughput registry isolates processor stores and "
+           "cleans up on recreation",
+           "[processor][consolidation][lifecycle]")
+{
+  namespace throughput
+      = operations::consolidation_throughput_state_internal;
+  const std::size_t baseline_size = throughput::RegistrySizeForTest ();
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+
+  auto first_store_unique = SQLiteStore::Create (":memory:");
+  auto second_store_unique = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> first_store (std::move (first_store_unique));
+  std::shared_ptr<Store> second_store (std::move (second_store_unique));
+  ProcessorContext *first_address = nullptr;
+  ProcessorContext *second_address = nullptr;
+
+  auto first_op = std::make_unique<SetOrCaptureThroughputOp> ();
+  first_op->state_to_set = throughput::State { 1.0, 8.0, true };
+  first_op->context_address = &first_address;
+  auto second_op = std::make_unique<SetOrCaptureThroughputOp> ();
+  second_op->state_to_set = throughput::State { 4.0, 14.0, true };
+  second_op->context_address = &second_address;
+  auto first = std::make_unique<SignalProcessor> (
+      cfg, first_store,
+      std::make_unique<DynamicOperationSet> (std::move (first_op)));
+  auto second = std::make_unique<SignalProcessor> (
+      cfg, second_store,
+      std::make_unique<DynamicOperationSet> (std::move (second_op)));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "test";
+  signal.timestamp = 1000;
+  first->Process (signal);
+  second->Process (signal);
+  REQUIRE (first_address != second_address);
+  REQUIRE (throughput::Find (*first_address).floor == 1.0);
+  REQUIRE (throughput::Find (*first_address).peak == 8.0);
+  REQUIRE (throughput::Find (*second_address).floor == 4.0);
+  REQUIRE (throughput::Find (*second_address).peak == 14.0);
+  REQUIRE (throughput::RegistrySizeForTest () == baseline_size + 2);
+
+  first.reset ();
+  second.reset ();
+  REQUIRE (throughput::RegistrySizeForTest () == baseline_size);
+
+  auto third_store_unique = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> third_store (std::move (third_store_unique));
+  throughput::State fresh_state { -1.0, -1.0 };
+  auto third_op = std::make_unique<SetOrCaptureThroughputOp> ();
+  third_op->captured = &fresh_state;
+  auto third = std::make_unique<SignalProcessor> (
+      cfg, third_store,
+      std::make_unique<DynamicOperationSet> (std::move (third_op)));
+  signal.timestamp = 2000;
+  third->Process (signal);
+  REQUIRE (fresh_state.floor == 0.0);
+  REQUIRE (fresh_state.peak == 0.0);
+  third.reset ();
+  REQUIRE (throughput::RegistrySizeForTest () == baseline_size);
 }
 
 TEST_CASE ("SignalProcessor reuses lifecycle-owned exact rollback storage",
