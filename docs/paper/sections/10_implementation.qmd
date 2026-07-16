@@ -225,8 +225,11 @@ snapshot, successful state persistence writes both values, and processor
 teardown erases its lifecycle-owned entry. A committed maintenance request
 disarms the hint and resets the next event-derived floor and peak to the
 acknowledged rate; ordinary rate recovery establishes a new range and rearms at
-the F/S/T-derived threshold. This event boundary lets a lower throughput regime
-recover independently of an old spike without a count or wall-clock horizon.
+the F/S/T-derived threshold. A material relative drawdown can also rearm at the
+lower envelope edge, so sustained slow degradation cannot follow the moving
+floor indefinitely; the same material-range threshold suppresses rearming from
+ordinary jitter. This event boundary lets a lower throughput regime recover
+independently of an old spike without a count or wall-clock horizon.
 Empty replay is acknowledged, while a rolled-back request restores the exact
 prior latch and range. State-row restoration does not depend on a nonzero
 processed-signal counter, so a maintenance-only disarmed state survives restart.

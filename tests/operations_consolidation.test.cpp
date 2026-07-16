@@ -137,6 +137,13 @@ TEST_CASE ("Consolidation throughput trigger fraction is monotonic in F/S/T",
            < throughput::TriggerFraction (0.5, 0.5, 0.2));
   REQUIRE (throughput::RequiredTriggerFraction (0.5, 0.5, 0.5)
            < throughput::TriggerFraction (0.5, 0.5, 0.5));
+  REQUIRE (throughput::DriftRearmFraction (0.8, 0.5, 0.5)
+           > throughput::DriftRearmFraction (0.2, 0.5, 0.5));
+  REQUIRE (throughput::DriftRearmFraction (0.5, 0.8, 0.5)
+           < throughput::DriftRearmFraction (0.5, 0.2, 0.5));
+  REQUIRE (throughput::DriftRearmFraction (0.5, 0.5, 0.8)
+           > throughput::DriftRearmFraction (0.5, 0.5, 0.2));
+  REQUIRE (throughput::DriftRearmFraction (0.5, 0.5, 1.0) >= 0.30);
 }
 
 TEST_CASE ("Consolidation throughput observation tracks moving floor and peak",
@@ -307,6 +314,81 @@ TEST_CASE ("Consolidation recommendation rearms after a lower throughput regime"
   REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
                                  sensitivity, stability)
            != ConsolidationState::None);
+  throughput::Erase (pctx);
+}
+
+TEST_CASE ("Sustained throughput drift rearms consolidation after acknowledgment",
+           "[operations][consolidation][hint][drift]")
+{
+  namespace throughput
+      = operations::consolidation_throughput_state_internal;
+  ProcessorContext pctx;
+  const double knob_values[] = { 0.0, 0.5, 1.0 };
+  for (const double focus : knob_values)
+    {
+      for (const double sensitivity : knob_values)
+        {
+          for (const double stability : knob_values)
+            {
+              CAPTURE (focus, sensitivity, stability);
+              throughput::Reset (pctx, { 20.0, 100.0, true, true });
+              REQUIRE (throughput::Classify (throughput::Find (pctx), 20.0,
+                                             1, focus, sensitivity, stability)
+                       != ConsolidationState::None);
+              throughput::Acknowledge (pctx, 100.0);
+
+              ConsolidationState later_hint = ConsolidationState::None;
+              for (int rate = 99; rate >= 0; --rate)
+                {
+                  throughput::Observe (pctx, static_cast<double> (rate), focus,
+                                       sensitivity, stability);
+                  later_hint = throughput::Classify (
+                      throughput::Find (pctx), static_cast<double> (rate), 1,
+                      focus, sensitivity, stability);
+                  if (later_hint != ConsolidationState::None)
+                    {
+                      break;
+                    }
+                }
+
+              REQUIRE (later_hint != ConsolidationState::None);
+            }
+        }
+    }
+  throughput::Erase (pctx);
+}
+
+TEST_CASE ("Stable noisy throughput stays disarmed after acknowledgment",
+           "[operations][consolidation][hint][drift]")
+{
+  namespace throughput
+      = operations::consolidation_throughput_state_internal;
+  ProcessorContext pctx;
+  const double knob_values[] = { 0.0, 0.5, 1.0 };
+  const double ordinary_noise[] = { 99.999, 97.0, 100.0, 98.0, 96.0,
+                                    99.0,   95.0, 98.0,  100.0 };
+  for (const double focus : knob_values)
+    {
+      for (const double sensitivity : knob_values)
+        {
+          for (const double stability : knob_values)
+            {
+              CAPTURE (focus, sensitivity, stability);
+              throughput::Reset (pctx, { 20.0, 100.0, true, true });
+              throughput::Acknowledge (pctx, 100.0);
+              for (const double rate : ordinary_noise)
+                {
+                  throughput::Observe (pctx, rate, focus, sensitivity,
+                                       stability);
+                  REQUIRE (throughput::Classify (
+                               throughput::Find (pctx), rate, 1, focus,
+                               sensitivity, stability)
+                           == ConsolidationState::None);
+                }
+              REQUIRE_FALSE (throughput::Find (pctx).armed);
+            }
+        }
+    }
   throughput::Erase (pctx);
 }
 

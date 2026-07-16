@@ -73,6 +73,7 @@ z = (m_rate - r_floor) / range
 p_required(F,S,T) = p(F,S,T) / consolidation_escalation(T)
 p_rearm(F,S,T) = p(F,S,T)
                  + (1 - p(F,S,T)) * T
+p_drift(F,S,T) = 1 - p(F,S,T)
 
 consolidation_state =
   None,        if armed = false
@@ -94,9 +95,16 @@ A committed forced request acknowledges the active excursion by persisting
 the next event-derived range to the current rate: both floor and peak become
 that rate. This prevents a historical spike from suppressing recommendations
 after a throughput regime shift. Ordinary throughput observations establish a
-new peak and rearm the classifier only after normalized position $z$ reaches
-$p_{rearm}$; failed transactions restore the prior armed state and range. No
-count or elapsed-time horizon controls the reset. The floor, peak,
+new peak and rearm the classifier only after the observed relative range is
+material: $(r_{peak}-r_{floor})/\max(r_{peak}, \epsilon) \ge p_{drift}$.
+Because $p$ is clamped to $[0.20, 0.70]$, the material drawdown remains
+between $0.30$ and $0.80$ across the complete knob domain, including $T=1$.
+Once material, either recovery to $z \ge p_{rearm}$ or sustained degradation
+to $z \le p$ rearms the classifier. The lower branch prevents a gradually
+falling write rate from remaining permanently silent after acknowledgment,
+while the material-range guard keeps stable jitter from repeatedly rearming.
+Failed transactions restore the prior armed state and range. No count or
+elapsed-time horizon controls the reset. The floor, peak,
 initialization, and armed fields are stored in the singleton processor state row and
 participate in rollback, restart, and ephemeral-query snapshot restoration.
 The engine can recommend consolidation, but the API call is the only way to
