@@ -92,6 +92,12 @@ RearmFraction (double focus, double sensitivity, double stability)
          + (1.0 - recommended) * core::Clamp (stability, 0.0, 1.0);
 }
 
+inline double
+DriftRearmFraction (double focus, double sensitivity, double stability)
+{
+  return 1.0 - TriggerFraction (focus, sensitivity, stability);
+}
+
 inline void
 Observe (const ProcessorContext &ctx, double rate, double focus,
          double sensitivity, double stability)
@@ -129,7 +135,14 @@ Observe (const ProcessorContext &ctx, double rate, double focus,
   if (!state.armed && range > kRangeEpsilon)
     {
       const double position = (rate - state.floor) / range;
-      if (position >= RearmFraction (focus, sensitivity, stability))
+      const double relative_range
+          = range / std::max (state.peak, kRangeEpsilon);
+      const bool material_excursion
+          = relative_range
+            >= DriftRearmFraction (focus, sensitivity, stability);
+      if (material_excursion
+          && (position >= RearmFraction (focus, sensitivity, stability)
+              || position <= TriggerFraction (focus, sensitivity, stability)))
         {
           state.armed = true;
         }

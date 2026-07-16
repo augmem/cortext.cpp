@@ -2945,6 +2945,7 @@ z = (m_rate - r_floor) / range
 p_required(F,S,T) = p(F,S,T) / consolidation_escalation(T)
 p_rearm(F,S,T) = p(F,S,T)
                  + (1 - p(F,S,T)) * T
+p_drift(F,S,T) = 1 - p(F,S,T)
 
 consolidation_state =
   None,        if armed = false
@@ -2967,12 +2968,20 @@ cluster exists. The acknowledgment resets the next event-derived range
 to the current rate: both floor and peak become that rate. This prevents
 a historical spike from suppressing recommendations after a throughput
 regime shift. Ordinary throughput observations establish a new peak and
-rearm the classifier only after normalized position *z* reaches
-*p*<sub>*r**e**a**r**m*</sub>; failed transactions restore the prior
-armed state and range. No count or elapsed-time horizon controls the
-reset. The floor, peak, initialization, and armed fields are stored in
-the singleton processor state row and participate in rollback, restart,
-and ephemeral-query snapshot restoration. The engine can recommend
+rearm the classifier only after the observed relative range is material:
+(*r*<sub>*p**e**a**k*</sub> − *r*<sub>*f**l**o**o**r*</sub>)/max (*r*<sub>*p**e**a**k*</sub>, *ϵ*) ≥ *p*<sub>*d**r**i**f**t*</sub>.
+Because *p* is clamped to \[0.20, 0.70\], the material drawdown remains
+between 0.30 and 0.80 across the complete knob domain, including
+*T* = 1. Once material, either recovery to
+*z* ≥ *p*<sub>*r**e**a**r**m*</sub> or sustained degradation to
+*z* ≤ *p* rearms the classifier. The lower branch prevents a gradually
+falling write rate from remaining permanently silent after
+acknowledgment, while the material-range guard keeps stable jitter from
+repeatedly rearming. Failed transactions restore the prior armed state
+and range. No count or elapsed-time horizon controls the reset. The
+floor, peak, initialization, and armed fields are stored in the
+singleton processor state row and participate in rollback, restart, and
+ephemeral-query snapshot restoration. The engine can recommend
 consolidation, but the API call is the only way to start it. `source_id`
 and modality are never hint inputs or maintenance commands.
 
@@ -5635,12 +5644,16 @@ snapshot, successful state persistence writes both values, and processor
 teardown erases its lifecycle-owned entry. A committed maintenance
 request disarms the hint and resets the next event-derived floor and
 peak to the acknowledged rate; ordinary rate recovery establishes a new
-range and rearms at the F/S/T-derived threshold. This event boundary
-lets a lower throughput regime recover independently of an old spike
-without a count or wall-clock horizon. Empty replay is acknowledged,
-while a rolled-back request restores the exact prior latch and range.
-State-row restoration does not depend on a nonzero processed-signal
-counter, so a maintenance-only disarmed state survives restart.
+range and rearms at the F/S/T-derived threshold. A material relative
+drawdown can also rearm at the lower envelope edge, so sustained slow
+degradation cannot follow the moving floor indefinitely; the same
+material-range threshold suppresses rearming from ordinary jitter. This
+event boundary lets a lower throughput regime recover independently of
+an old spike without a count or wall-clock horizon. Empty replay is
+acknowledged, while a rolled-back request restores the exact prior latch
+and range. State-row restoration does not depend on a nonzero
+processed-signal counter, so a maintenance-only disarmed state survives
+restart.
 
 ## Soft Anchor Implementation Status
 
