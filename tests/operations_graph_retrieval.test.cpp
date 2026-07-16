@@ -1,5 +1,6 @@
 #include "test_helpers.hpp"
 #include "../src/operations/constructive_recall_internal.hpp"
+#include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -1032,6 +1033,10 @@ TEST_CASE ("Graph retrieval SQL fallback collapses families before candidate cap
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   ProcessorContext pctx;
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx);
+  const auto recovery_state
+      = operations::historical_surface_search_cache_internal::Find (pctx);
   auto signal = MakeSignal (family_first, 100000);
   OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetShouldCheckRetrieval (true);
@@ -1048,4 +1053,202 @@ TEST_CASE ("Graph retrieval SQL fallback collapses families before candidate cap
                            return candidate.memory_id == kTargetMemoryId;
                          })
            != candidates.end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+  REQUIRE (
+      operations::historical_surface_search_cache_internal::Find (pctx)
+      == recovery_state);
+  REQUIRE (recovery_state->embedding_dim == 0);
+  REQUIRE (recovery_state->entries.empty ());
+  REQUIRE (recovery_state->current_entries.empty ());
+
+  OperationContext second_ctx (signal, pctx, cfg, store.get ());
+  second_ctx.SetShouldCheckRetrieval (true);
+  second_ctx.SetWriteExclusionTs (signal.timestamp);
+  auto second_tx = store->Begin ();
+  operation.Execute (second_ctx, *second_tx);
+  second_tx->Rollback ();
+  REQUIRE (
+      operations::historical_surface_search_cache_internal::Find (pctx)
+      == recovery_state);
+  const auto second_target = std::find_if (
+      second_ctx.GetRetrievedMemoryCandidates ().begin (),
+      second_ctx.GetRetrievedMemoryCandidates ().end (),
+      [] (const auto &candidate) {
+        return candidate.memory_id == kTargetMemoryId;
+      });
+  REQUIRE (second_target
+           != second_ctx.GetRetrievedMemoryCandidates ().end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval SQL fallback filters ineligible nearest rows before K",
+           "[operations][graph][retrieval][sql][eligibility]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kTargetMemoryId = 9000;
+  SeedMemory (*store, kTargetMemoryId, 19000,
+              VectorWithCosineToDim0 (0.90f), 1000, "eligible");
+  for (long long offset = 0; offset < 160; ++offset)
+    {
+      const long long memory_id = 1000 + offset;
+      SeedMemory (*store, memory_id, 10000 + offset, UnitVec (0), 1000,
+                  "ineligible");
+      store->Execute ("UPDATE memories SET kind = 'WORKING' "
+                      "WHERE memory_id = ?",
+                      { memory_id });
+    }
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx);
+  auto signal = MakeSignal (UnitVec (0), 100000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  REQUIRE (std::find_if (
+               ctx.GetRetrievedMemoryCandidates ().begin (),
+               ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) {
+                 return candidate.memory_id == kTargetMemoryId;
+               })
+           != ctx.GetRetrievedMemoryCandidates ().end ());
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval ephemeral SQL fallback does not install cache",
+           "[operations][graph][retrieval][sql][ephemeral]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  auto signal = MakeSignal (UnitVec (0), 100000);
+  signal.retention = Retention::Ephemeral;
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  REQUIRE_FALSE (ctx.GetRetrievedMemoryCandidates ().empty ());
+  REQUIRE (
+      operations::historical_surface_search_cache_internal::Find (pctx)
+      == nullptr);
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+}
+
+TEST_CASE ("Graph retrieval cache rebuild accepts shared base embeddings",
+           "[operations][graph][retrieval][cache][shared-embedding]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+  store->Execute ("UPDATE memories SET kind = 'WORKING' WHERE memory_id = 10");
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+      "start_ts, created_at) VALUES(?, ?, ?, 'LONG_TERM', ?, ?)",
+      { 20LL, 100LL, std::string ("shared"), 500LL, 500LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  auto signal = MakeSignal (UnitVec (0), 100000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  const auto state
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (state != nullptr);
+  REQUIRE_FALSE (state->recovery_failed);
+  REQUIRE (std::find_if (
+               ctx.GetRetrievedMemoryCandidates ().begin (),
+               ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) { return candidate.memory_id == 20; })
+           != ctx.GetRetrievedMemoryCandidates ().end ());
+  const auto shared_entry = std::find_if (
+      state->entries.begin (), state->entries.end (),
+      [] (const auto &entry) { return entry.embedding_id == 100; });
+  REQUIRE (shared_entry != state->entries.end ());
+  REQUIRE (shared_entry->memory_references.size () == 1);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval keeps eligible sibling of superseded shared embedding",
+           "[operations][graph][retrieval][cache][shared-embedding][supersession]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+      "start_ts, created_at) VALUES(?, ?, ?, 'LONG_TERM', ?, ?)",
+      { 11LL, 100LL, std::string ("shared"), 1100LL, 1100LL });
+  SeedMemory (*store, 20, 200, VectorWithCosineToDim0 (0.92f), 2000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, "
+      "weight, last_reinforced) VALUES(?, ?, 'supersedes', ?, ?)",
+      { 20LL, 10LL, 1.0, 2000LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  const auto out = processor.Process (MakeSignal (UnitVec (0), 3000));
+  REQUIRE (std::find (out.candidate_memory_ids.begin (),
+                      out.candidate_memory_ids.end (), 10LL)
+           == out.candidate_memory_ids.end ());
+  REQUIRE (std::find (out.candidate_memory_ids.begin (),
+                      out.candidate_memory_ids.end (), 11LL)
+           != out.candidate_memory_ids.end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 0);
+}
+
+TEST_CASE ("Historical search cache append retains memory alternative",
+           "[operations][graph][retrieval][cache][append]")
+{
+  ProcessorContext pctx;
+  REQUIRE (
+      operations::historical_surface_search_cache_internal::Reset (pctx, {}));
+  operations::historical_surface_search_cache_internal::Append (
+      pctx, { 100, 10, 1000, "LONG_TERM", "opaque", UnitVec (0) });
+
+  const auto state
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (state != nullptr);
+  REQUIRE (state->entries.size () == 1);
+  REQUIRE (state->entries.front ().memory_references.size () == 1);
+  REQUIRE (state->entries.front ().memory_references.front ().memory_id == 10);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
 }

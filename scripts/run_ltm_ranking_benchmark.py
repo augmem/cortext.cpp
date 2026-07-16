@@ -18,10 +18,7 @@ import tempfile
 import re
 from typing import Any
 
-import jsonschema
-
-
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 METRIC_DIRECTIONS = {
     "retrieval_p50_ms": "lower-is-better",
     "retrieval_p95_ms": "lower-is-better",
@@ -40,6 +37,7 @@ CANDIDATE_BUILD_KEYS = (
     "CORTEXT_BUILD_EXAMPLES",
     "CORTEXT_BUILD_NODE_BINDINGS",
 )
+PACKAGE_RUNTIME_FILES = ("index.js", "model-bootstrap.js", "package.json")
 WORKER_SOURCE = r'''"use strict";
 
 const crypto = require("node:crypto");
@@ -183,12 +181,28 @@ def script_sha256() -> str:
     return sha256_file(Path(__file__).resolve())
 
 
+def package_runtime_sha256(package_root: Path) -> str:
+    digest = hashlib.sha256()
+    for relative in PACKAGE_RUNTIME_FILES:
+        path = package_root / relative
+        if not path.is_file():
+            raise RuntimeError(f"package runtime file does not exist: {path}")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def candidate_source_sha256(source_root: Path) -> str:
     pathspecs = [
         "CMakeLists.txt",
         "cmake",
         "include",
         "src",
+        "bindings/javascript/index.js",
+        "bindings/javascript/model-bootstrap.js",
+        "bindings/javascript/package.json",
         "bindings/javascript/src",
         "third_party",
     ]
@@ -255,7 +269,14 @@ def resolve_addon(package_root: Path, addon: str | None) -> Path:
     if addon:
         path = Path(addon).expanduser().resolve()
     else:
-        tag = f"{sys.platform.replace('darwin', 'darwin')}-{platform.machine()}"
+        architecture = platform.machine().lower()
+        node_architecture = {
+            "aarch64": "arm64",
+            "arm64": "arm64",
+            "amd64": "x64",
+            "x86_64": "x64",
+        }.get(architecture, architecture)
+        tag = f"{sys.platform}-{node_architecture}"
         path = package_root / "prebuilds" / tag / "cortext.node"
     if not path.is_file():
         raise RuntimeError(f"Node addon does not exist: {path}")
@@ -377,15 +398,14 @@ def run_sample(
         worker.write_text(WORKER_SOURCE, encoding="utf-8")
         db_path = root / "sample.sqlite"
         environment = os.environ.copy()
-        if expected_runtime is not None:
-            for key in (
-                "DYLD_LIBRARY_PATH",
-                "DYLD_FALLBACK_LIBRARY_PATH",
-                "DYLD_INSERT_LIBRARIES",
-                "LD_LIBRARY_PATH",
-                "LD_PRELOAD",
-            ):
-                environment.pop(key, None)
+        for key in (
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "LD_LIBRARY_PATH",
+            "LD_PRELOAD",
+        ):
+            environment.pop(key, None)
         environment.update(
             {
                 "CORTEXT_BENCH_PACKAGE_ROOT": str(package_root),
@@ -497,7 +517,7 @@ def schema_path(output_path: Path) -> Path:
     configured = os.environ.get("CORTEXT_LTM_BENCHMARK_SCHEMA")
     if configured:
         return Path(configured).expanduser().resolve()
-    return output_path.parent / "ltm-ranking-performance.schema.json"
+    return Path(__file__).resolve().with_name("ltm-ranking-performance.schema.json")
 
 
 def validate_artifact(artifact: dict[str, Any], output_path: Path) -> None:
@@ -505,6 +525,16 @@ def validate_artifact(artifact: dict[str, Any], output_path: Path) -> None:
     if not schema_file.is_file():
         raise RuntimeError(f"performance schema does not exist: {schema_file}")
     schema = json.loads(schema_file.read_text(encoding="utf-8"))
+    try:
+        import jsonschema
+    except ModuleNotFoundError as error:
+        requirements = Path(__file__).resolve().with_name(
+            "requirements-ltm-ranking-benchmark.txt"
+        )
+        raise RuntimeError(
+            "install the benchmark validator dependency with "
+            f"'{sys.executable} -m pip install -r {requirements}'"
+        ) from error
     jsonschema.Draft202012Validator(schema).validate(artifact)
 
 
@@ -541,6 +571,7 @@ def capture(args: argparse.Namespace) -> None:
         "benchmark_script_sha256": script_sha256(),
         "artifact_identity": {
             "baseline_addon_sha256": sha256_file(addon),
+            "baseline_package_sha256": package_runtime_sha256(package_root),
         },
         "environment": environment_record(identity),
         "protocol": protocol_record(args),
@@ -567,9 +598,20 @@ def compare(args: argparse.Namespace) -> None:
     candidate_cmake_cache = Path(args.candidate_cmake_cache).expanduser().resolve()
     candidate_build_config = cmake_cache_record(candidate_cmake_cache)
     candidate_source_root = Path(args.candidate_source_root).expanduser().resolve()
+    candidate_package_root = candidate_source_root / "bindings" / "javascript"
+    if not (candidate_package_root / "package.json").is_file():
+        raise RuntimeError(
+            f"candidate JavaScript package does not exist: {candidate_package_root}"
+        )
     baseline_addon_sha256 = sha256_file(baseline_addon)
     if baseline["artifact_identity"]["baseline_addon_sha256"] != baseline_addon_sha256:
         raise RuntimeError("baseline addon digest differs from the frozen baseline")
+    baseline_package_sha256 = package_runtime_sha256(package_root)
+    if (
+        baseline["artifact_identity"]["baseline_package_sha256"]
+        != baseline_package_sha256
+    ):
+        raise RuntimeError("baseline JavaScript package differs from the frozen baseline")
     model = resolve_model_path()
     identity = None
     baseline_first = initial_order(args.order_seed)
@@ -580,14 +622,20 @@ def compare(args: argparse.Namespace) -> None:
         order = "baseline-first" if order_baseline_first else "candidate-first"
         samples: dict[str, dict[str, Any]] = {}
         targets = (
-            [("baseline", baseline_addon), ("candidate", candidate_addon)]
+            [
+                ("baseline", package_root, baseline_addon),
+                ("candidate", candidate_package_root, candidate_addon),
+            ]
             if order_baseline_first
-            else [("candidate", candidate_addon), ("baseline", baseline_addon)]
+            else [
+                ("candidate", candidate_package_root, candidate_addon),
+                ("baseline", package_root, baseline_addon),
+            ]
         )
-        for label, addon in targets:
+        for label, sample_package_root, addon in targets:
             expected_runtime = candidate_runtime if label == "candidate" else None
             sample, observed, runtime_identity = run_sample(
-                package_root, addon, model, expected_runtime
+                sample_package_root, addon, model, expected_runtime
             )
             identity = assert_identity(identity, observed)
             samples[label] = sample
@@ -619,7 +667,11 @@ def compare(args: argparse.Namespace) -> None:
         "benchmark_script_sha256": current_script,
         "artifact_identity": {
             "baseline_addon_sha256": baseline_addon_sha256,
+            "baseline_package_sha256": baseline_package_sha256,
             "candidate_addon_sha256": sha256_file(candidate_addon),
+            "candidate_package_sha256": package_runtime_sha256(
+                candidate_package_root
+            ),
             "candidate_runtime_sha256": sha256_file(candidate_runtime),
             "candidate_runtime_dependency": candidate_runtime_dependency,
             "candidate_cmake_cache_sha256": sha256_file(candidate_cmake_cache),
@@ -649,12 +701,18 @@ def bind(args: argparse.Namespace) -> None:
         raise RuntimeError("candidate artifact benchmark script digest changed")
 
     source_root = Path(args.candidate_source_root).expanduser().resolve()
+    candidate_package_root = source_root / "bindings" / "javascript"
     addon = Path(args.candidate_addon).expanduser().resolve()
     runtime = Path(args.candidate_runtime).expanduser().resolve()
     cmake_cache = Path(args.candidate_cmake_cache).expanduser().resolve()
     identity = artifact["artifact_identity"]
     if sha256_file(addon) != identity["candidate_addon_sha256"]:
         raise RuntimeError("candidate addon changed after measurement")
+    if (
+        package_runtime_sha256(candidate_package_root)
+        != identity["candidate_package_sha256"]
+    ):
+        raise RuntimeError("candidate JavaScript package changed after measurement")
     source_digest = candidate_source_sha256(source_root)
     if source_digest != identity["candidate_source_sha256"]:
         raise RuntimeError("candidate build sources changed after measurement")

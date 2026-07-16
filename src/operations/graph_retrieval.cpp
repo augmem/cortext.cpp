@@ -484,7 +484,8 @@ LoadHistoricalSeedRowsFromCache (
       = historical_surface_search_cache_internal::Find (p_ctx);
   const std::size_t embedding_count = state ? state->entries.size () : 0;
   const int embedding_dim = static_cast<int> (query_embedding.size ());
-  if (!state || embedding_dim <= 0 || candidate_limit <= 0
+  if (!state || state->recovery_failed || embedding_dim <= 0
+      || candidate_limit <= 0
       || state->embedding_dim != embedding_dim
       || state->search.size ()
              != embedding_count * static_cast<std::size_t> (embedding_dim))
@@ -514,10 +515,18 @@ LoadHistoricalSeedRowsFromCache (
         {
           return std::nullopt;
         }
-      if (entry.memory_id <= 0 || entry.kind != "LONG_TERM"
-          || entry.start_ts >= exclusion_ts
-          || state->current_memory_index.count (entry.memory_id) != 0
-          || superseded_memory_ids.count (entry.memory_id) != 0)
+      const auto eligible_reference = std::find_if (
+          entry.memory_references.begin (), entry.memory_references.end (),
+          [&] (const auto &reference) {
+            return reference.memory_id > 0
+                   && reference.kind == "LONG_TERM"
+                   && reference.start_ts < exclusion_ts
+                   && state->current_memory_index.count (
+                          reference.memory_id)
+                          == 0
+                   && superseded_memory_ids.count (reference.memory_id) == 0;
+          });
+      if (eligible_reference == entry.memory_references.end ())
         {
           continue;
         }
@@ -546,10 +555,25 @@ LoadHistoricalSeedRowsFromCache (
   for (const auto &candidate : ranked)
     {
       const auto &entry = state->entries[candidate.index];
+      const auto eligible_reference = std::find_if (
+          entry.memory_references.begin (), entry.memory_references.end (),
+          [&] (const auto &reference) {
+            return reference.memory_id > 0
+                   && reference.kind == "LONG_TERM"
+                   && reference.start_ts < exclusion_ts
+                   && state->current_memory_index.count (
+                          reference.memory_id)
+                          == 0
+                   && superseded_memory_ids.count (reference.memory_id) == 0;
+          });
+      if (eligible_reference == entry.memory_references.end ())
+        {
+          continue;
+        }
       rows.push_back (
-          { { "memory_id", entry.memory_id },
+          { { "memory_id", eligible_reference->memory_id },
             { "embedding_id", entry.embedding_id },
-            { "start_ts", entry.start_ts },
+            { "start_ts", eligible_reference->start_ts },
             { "embedding", ToFloatVector (entry.embedding) } });
     }
   return rows;
@@ -566,7 +590,8 @@ LoadCurrentSeedRowsFromCache (
       = historical_surface_search_cache_internal::Find (p_ctx);
   const std::size_t entry_count = state ? state->current_entries.size () : 0;
   const int embedding_dim = static_cast<int> (query_embedding.size ());
-  if (!state || embedding_dim <= 0 || candidate_limit <= 0
+  if (!state || state->recovery_failed || embedding_dim <= 0
+      || candidate_limit <= 0
       || state->embedding_dim != embedding_dim
       || state->current_search.size ()
              != entry_count * static_cast<std::size_t> (embedding_dim))
@@ -655,6 +680,154 @@ LoadCurrentSeedRowsFromCache (
             { "embedding", ToFloatVector (entry.embedding) } });
     }
   return rows;
+}
+
+bool
+RebuildSurfaceSearchCache (Transaction &tx, ProcessorContext &p_ctx,
+                           int embedding_dim)
+{
+  try
+    {
+      auto embedding_rows = tx.Execute (
+          "SELECT e.embedding_id, e.embedding, "
+          "       COALESCE(m.memory_id, 0) AS memory_id, "
+          "       COALESCE(m.start_ts, 0) AS start_ts, "
+          "       COALESCE(m.kind, '') AS kind, "
+          "       COALESCE(m.source_id, '') AS source_id "
+          "FROM embeddings e "
+          "LEFT JOIN memories m ON m.embedding_id = e.embedding_id "
+          "  AND m.kind = 'LONG_TERM' "
+          "ORDER BY e.embedding_id, COALESCE(m.start_ts, 0), m.memory_id");
+      std::vector<historical_surface_search_cache_internal::Entry>
+          historical_entries;
+      historical_entries.reserve (embedding_rows.size ());
+      for (const auto &row : embedding_rows)
+        {
+          const auto embedding_it = row.find ("embedding");
+          Eigen::VectorXf embedding;
+          if (embedding_it == row.end ()
+              || !AnyToEmbedding (embedding_it->second, embedding_dim,
+                                  embedding))
+            {
+              return false;
+            }
+          const auto string_value = [&row] (const std::string &key) {
+            const auto it = row.find (key);
+            return it != row.end () && it->second.type () == typeid (std::string)
+                       ? std::any_cast<std::string> (it->second)
+                       : std::string ();
+          };
+          historical_entries.push_back (
+              { AnyLongLong (row, "embedding_id"),
+                AnyLongLong (row, "memory_id"),
+                AnyLongLong (row, "start_ts"), string_value ("kind"),
+                string_value ("source_id"), std::move (embedding) });
+        }
+
+      auto current_rows = tx.Execute (
+          "SELECT memory_id, embedding_id, embedding "
+          "FROM current_memory_embeddings ORDER BY memory_id");
+      std::vector<historical_surface_search_cache_internal::Entry>
+          current_entries;
+      current_entries.reserve (current_rows.size ());
+      for (const auto &row : current_rows)
+        {
+          const auto embedding_it = row.find ("embedding");
+          Eigen::VectorXf embedding;
+          if (embedding_it == row.end ()
+              || !AnyToEmbedding (embedding_it->second, embedding_dim,
+                                  embedding))
+            {
+              return false;
+            }
+          current_entries.push_back (
+              { AnyLongLong (row, "embedding_id"),
+                AnyLongLong (row, "memory_id"), 0, std::string (),
+                std::string (), std::move (embedding) });
+        }
+      return historical_surface_search_cache_internal::Reset (
+          p_ctx, std::move (historical_entries), std::move (current_entries));
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogDebug (
+          "cortext.graph_retrieval.cache_rebuild_unavailable",
+          { telemetry::Attribute::String ("error", e.what ()) });
+      return false;
+    }
+}
+
+std::vector<std::map<std::string, std::any>>
+LoadEligibleSeedRowsFromSqlFallback (
+    Transaction &tx, const Eigen::VectorXf &query_embedding,
+    long long exclusion_ts, int candidate_limit,
+    const std::unordered_set<long long> &superseded_memory_ids,
+    double duplicate_threshold)
+{
+  std::vector<std::map<std::string, std::any>> selected;
+  selected.reserve (static_cast<std::size_t> (std::max (0, candidate_limit)));
+  if (candidate_limit <= 0 || query_embedding.size () <= 0)
+    {
+      return selected;
+    }
+
+  std::unordered_set<long long> seen_memory_ids;
+  FamilyRepresentativeIndex families (duplicate_threshold);
+  auto rows = tx.Execute (
+      "SELECT memory_id, embedding_id, start_ts, embedding "
+      "FROM ("
+      "  SELECT m.memory_id, cme.embedding_id, m.start_ts, "
+      "         cme.embedding, "
+      "         vec_distance_l2(cme.embedding, ?) AS distance "
+      "  FROM current_memory_embeddings cme "
+      "  JOIN memories m ON m.memory_id = cme.memory_id "
+      "  WHERE m.kind = 'LONG_TERM' "
+      "    AND COALESCE(m.start_ts, 0) < ? "
+      "  UNION ALL "
+      "  SELECT m.memory_id, m.embedding_id, m.start_ts, e.embedding, "
+      "         vec_distance_l2(e.embedding, ?) AS distance "
+      "  FROM memories m "
+      "  JOIN embeddings e ON e.embedding_id = m.embedding_id "
+      "  WHERE m.kind = 'LONG_TERM' "
+      "    AND COALESCE(m.start_ts, 0) < ? "
+      "    AND NOT EXISTS ("
+      "      SELECT 1 FROM current_memory_embeddings cme2 "
+      "      WHERE cme2.memory_id = m.memory_id"
+      "    )"
+      ") eligible "
+      "ORDER BY distance ASC, memory_id ASC, embedding_id ASC",
+      { ToFloatVector (query_embedding), exclusion_ts,
+        ToFloatVector (query_embedding), exclusion_ts });
+#ifdef CORTEXT_TESTING
+  retrieval_trace::IncrementLastSqlFallbackQueryCount ();
+#endif
+  for (auto &row : rows)
+    {
+      const long long memory_id = AnyLongLong (row, "memory_id");
+      const auto embedding_it = row.find ("embedding");
+      Eigen::VectorXf embedding;
+      if (memory_id <= 0 || superseded_memory_ids.count (memory_id) != 0
+          || !seen_memory_ids.insert (memory_id).second
+          || embedding_it == row.end ()
+          || !AnyToEmbedding (
+              embedding_it->second, static_cast<int> (query_embedding.size ()),
+              embedding))
+        {
+          continue;
+        }
+      auto features = BuildFamilyEmbeddingFeatures (embedding);
+      if (families.IsDuplicate (features))
+        {
+          continue;
+        }
+      families.Add (std::move (features));
+      selected.push_back (std::move (row));
+      if (static_cast<int> (selected.size ()) >= candidate_limit)
+        {
+          break;
+        }
+    }
+  return selected;
 }
 
 double
@@ -844,6 +1017,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   retrieval_trace::ClearLastRetrievalSummary ();
 #ifdef CORTEXT_TESTING
   retrieval_trace::ClearLastFamilyExactComparisonCount ();
+  retrieval_trace::ClearLastSqlFallbackQueryCount ();
 #endif
 
   if (!context.GetShouldCheckRetrieval ())
@@ -927,45 +1101,55 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
     }
   profile_timing ("GraphRetrieve.seed_knn_cache", section_start);
 
+  if (!cache_search_available
+      && signal.retention != Retention::Ephemeral
+      && !historical_surface_search_cache_internal::RecoveryFailed (p_ctx))
+    {
+      start_profile_timing ();
+      if (RebuildSurfaceSearchCache (tx, p_ctx, embedding_dim))
+        {
+          if (auto current_knn_rows = LoadCurrentSeedRowsFromCache (
+                  p_ctx, signal.embedding,
+                  static_cast<long long> (exclusion_ts), seed_search_limit,
+                  superseded_memory_ids, duplicate_threshold))
+            {
+              cache_search_available = true;
+              AppendUniqueRows (rows, std::move (*current_knn_rows),
+                                seen_seed_memory_ids);
+            }
+          if (auto historical_knn_rows = LoadHistoricalSeedRowsFromCache (
+                  p_ctx, signal.embedding,
+                  static_cast<long long> (exclusion_ts), seed_search_limit,
+                  superseded_memory_ids, duplicate_threshold))
+            {
+              cache_search_available = true;
+              AppendUniqueRows (rows, std::move (*historical_knn_rows),
+                                seen_seed_memory_ids);
+            }
+        }
+      else
+        {
+          historical_surface_search_cache_internal::MarkRecoveryFailed (
+              p_ctx);
+        }
+      profile_timing ("GraphRetrieve.seed_knn_cache_rebuild", section_start);
+    }
+
   if (!cache_search_available)
     {
       start_profile_timing ();
       try
         {
-          auto current_knn_rows = tx.Execute (
-              "SELECT m.memory_id, cme.embedding_id, m.start_ts, "
-              "       cme.embedding "
-              "FROM current_memory_embeddings cme "
-              "JOIN memories m ON m.memory_id = cme.memory_id "
-              "WHERE m.kind = 'LONG_TERM' "
-              "  AND COALESCE(m.start_ts, 0) < ?",
-              { static_cast<long long> (exclusion_ts) });
-          AppendUniqueRows (rows, std::move (current_knn_rows),
+          auto fallback_rows = LoadEligibleSeedRowsFromSqlFallback (
+              tx, signal.embedding, static_cast<long long> (exclusion_ts),
+              seed_search_limit, superseded_memory_ids, duplicate_threshold);
+          AppendUniqueRows (rows, std::move (fallback_rows),
                             seen_seed_memory_ids);
         }
       catch (const std::exception &e)
         {
           telemetry::LogDebug (
-              "cortext.graph_retrieval.current_knn_unavailable",
-              { telemetry::Attribute::String ("error", e.what ()) });
-        }
-      try
-        {
-          auto historical_knn_rows = tx.Execute (
-              "SELECT m.memory_id, m.embedding_id, m.start_ts, e.embedding "
-              "FROM embeddings e "
-              "JOIN memories m ON m.embedding_id = e.embedding_id "
-              "WHERE m.embedding_id IS NOT NULL "
-              "  AND m.kind = 'LONG_TERM' "
-              "  AND COALESCE(m.start_ts, 0) < ?",
-              { static_cast<long long> (exclusion_ts) });
-          AppendUniqueRows (rows, std::move (historical_knn_rows),
-                            seen_seed_memory_ids);
-        }
-      catch (const std::exception &e)
-        {
-          telemetry::LogDebug (
-              "cortext.graph_retrieval.knn_unavailable",
+              "cortext.graph_retrieval.eligible_knn_unavailable",
               { telemetry::Attribute::String ("error", e.what ()) });
         }
       profile_timing ("GraphRetrieve.seed_knn_sql", section_start);

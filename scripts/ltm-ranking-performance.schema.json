@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cortext LTM ranking paired performance artifact",
+  "type": "object",
+  "required": ["schema_version", "phase", "target_sha", "benchmark_script_sha256", "artifact_identity", "environment", "protocol"],
+  "properties": {
+    "schema_version": {"const": 5},
+    "phase": {"enum": ["baseline", "candidate"]},
+    "target_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "benchmark_script_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_identity": {
+      "type": "object",
+      "required": ["baseline_addon_sha256", "baseline_package_sha256"],
+      "properties": {
+        "baseline_addon_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "baseline_package_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_addon_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_package_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_runtime_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_runtime_dependency": {"type": "string", "minLength": 1},
+        "candidate_cmake_cache_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_compiler_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_build_config": {
+          "type": "object",
+          "required": ["BUILD_SHARED_LIBS", "BUILD_TESTING", "CMAKE_BUILD_TYPE", "CMAKE_CXX_COMPILER", "CORTEXT_BUILD_EXAMPLES", "CORTEXT_BUILD_NODE_BINDINGS"],
+          "properties": {
+            "BUILD_SHARED_LIBS": {"type": "string"},
+            "BUILD_TESTING": {"type": "string"},
+            "CMAKE_BUILD_TYPE": {"type": "string"},
+            "CMAKE_CXX_COMPILER": {"type": "string"},
+            "CORTEXT_BUILD_EXAMPLES": {"type": "string"},
+            "CORTEXT_BUILD_NODE_BINDINGS": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        "candidate_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "candidate_patch_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "required": ["model_sha256", "corpus_sha256", "machine_id", "node_version"],
+      "properties": {
+        "model_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "corpus_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "machine_id": {"type": "string"},
+        "node_version": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "protocol": {
+      "type": "object",
+      "required": ["warmup_pairs", "measured_pairs", "order_seed", "confidence", "non_inferiority_margin", "fresh_process", "fresh_database", "candidate_runtime_verified_per_sample"],
+      "properties": {
+        "warmup_pairs": {"const": 2},
+        "measured_pairs": {"enum": [9, 18, 36, 72]},
+        "order_seed": {"const": 20260714},
+        "confidence": {"const": 0.95},
+        "non_inferiority_margin": {"const": 0},
+        "fresh_process": {"const": true},
+        "fresh_database": {"const": true},
+        "candidate_runtime_verified_per_sample": {"const": true}
+      },
+      "additionalProperties": false
+    },
+    "raw_pairs": {
+      "type": "array", "minItems": 9, "maxItems": 72,
+      "items": {
+        "type": "object",
+        "required": ["pair", "order", "baseline", "candidate", "candidate_runtime"],
+        "properties": {
+          "pair": {"type": "integer", "minimum": 1},
+          "order": {"enum": ["baseline-first", "candidate-first"]},
+          "baseline": {"$ref": "#/$defs/sample"},
+          "candidate": {"$ref": "#/$defs/sample"},
+          "candidate_runtime": {"$ref": "#/$defs/runtime_identity"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "raw_samples": {"type": "array", "minItems": 9, "maxItems": 72, "items": {"$ref": "#/$defs/sample"}},
+    "metrics": {
+      "type": "array", "minItems": 8, "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["name", "direction", "paired_median_difference", "one_sided_95_upper_bound", "margin", "pass"],
+        "properties": {
+          "name": {"enum": ["retrieval_p50_ms", "retrieval_p95_ms", "ingestion_p50_ms", "ingestion_p95_ms", "retrieval_ops_per_second", "ingestion_ops_per_second", "peak_rss_bytes", "database_bytes"]},
+          "direction": {"enum": ["lower-is-better", "higher-is-better"]},
+          "paired_median_difference": {"type": "number"},
+          "one_sided_95_upper_bound": {"type": "number"},
+          "margin": {"const": 0},
+          "pass": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "oneOf": [
+    {"properties": {"phase": {"const": "baseline"}}, "required": ["raw_samples"]},
+    {
+      "properties": {"phase": {"const": "candidate"}},
+      "required": ["raw_pairs", "metrics"],
+      "allOf": [{"properties": {"artifact_identity": {"required": ["baseline_addon_sha256", "baseline_package_sha256", "candidate_addon_sha256", "candidate_package_sha256", "candidate_runtime_sha256", "candidate_runtime_dependency", "candidate_cmake_cache_sha256", "candidate_build_config", "candidate_compiler_sha256", "candidate_tree", "candidate_patch_sha256", "candidate_source_sha256"]}}}]
+    }
+  ],
+  "$defs": {
+    "runtime_identity": {
+      "type": "object", "required": ["path", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+      "additionalProperties": false
+    },
+    "sample": {
+      "type": "object",
+      "required": ["retrieval_p50_ms", "retrieval_p95_ms", "ingestion_p50_ms", "ingestion_p95_ms", "retrieval_ops_per_second", "ingestion_ops_per_second", "peak_rss_bytes", "database_bytes"],
+      "properties": {
+        "retrieval_p50_ms": {"type": "number", "minimum": 0},
+        "retrieval_p95_ms": {"type": "number", "minimum": 0},
+        "ingestion_p50_ms": {"type": "number", "minimum": 0},
+        "ingestion_p95_ms": {"type": "number", "minimum": 0},
+        "retrieval_ops_per_second": {"type": "number", "exclusiveMinimum": 0},
+        "ingestion_ops_per_second": {"type": "number", "exclusiveMinimum": 0},
+        "peak_rss_bytes": {"type": "integer", "minimum": 0},
+        "database_bytes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

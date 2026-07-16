@@ -3555,25 +3555,39 @@ about the unavailable reporter corpus.
 The family screen also places 430 cosine-near distractors ahead of a
 distinctive target. The distractors deliberately swap their eighth- and
 ninth-strongest coordinates, reproducing the false-negative boundary of
-a lossy top-feature fingerprint. Both the cached path and a cache-absent
-SQL fallback retain the target after a sound block-norm upper bound and
-exact cosine family checks. A separate 256-vector orthogonal-basis test
-exercises the broad non-duplicate surface and requires exact family
-comparisons to remain below one quarter of the all-pairs count.
+a lossy top-feature fingerprint. Both the normal cached path and the
+cache-rebuild path retain the target after a sound block-norm upper
+bound and exact cosine family checks. The rebuild installs the recovered
+surface so subsequent requests do not repeat the full SQL scan. A failed
+rebuild installs a failure sentinel so later requests do not retry the
+two complete surface scans. Shared base vectors keep all long-term
+memory metadata alternatives behind one stored vector so a superseded
+sibling cannot hide an eligible sibling. Retrieval fallback executes one
+eligibility-filtered, scalar-distance-ordered query, then applies
+supersession and exact family collapse in memory until the knob-derived
+candidate budget is filled or the eligible durable surface is exhausted.
+An ephemeral request never installs recovery state in the process
+registry. A separate 256-vector orthogonal-basis test exercises the
+broad non-duplicate surface and requires exact family comparisons to
+remain below one quarter of the all-pairs count.
 
 Performance was compared against the exact 1.2.1 macOS arm64 prebuild
-using two unmeasured warm-up pairs and 36 measured pairs. Each pair
+using two unmeasured warm-up pairs and 18 measured pairs. Each pair
 alternated baseline-first/candidate-first order with seed 20260714 and
 used fresh processes and fresh databases. The zero-margin paired-median
 gate and one-sided 95% bootstrap upper bound passed for all eight
-metrics. The schema-v4 artifact binds the result to the exact baseline
-addon, candidate addon, candidate core runtime, full CMake-cache digest,
-actual candidate build configuration and compiler, candidate
-build-source digest, final review tree, and exact base-to-tree patch
-digest. Every measured worker also records the core runtime it actually
-loaded and verifies its path and SHA-256 against that candidate runtime;
-final binding fails if any measured binary, build input, build
-configuration, or source changes:
+metrics. The schema-v5 artifact binds the result to the exact baseline
+addon and executed package wrapper, candidate addon and executed package
+wrapper, candidate core runtime, full CMake-cache digest, actual
+candidate build configuration and compiler, candidate build-source
+digest, final review tree, and exact base-to-tree patch digest. Every
+measured worker also records the core runtime it actually loaded and
+verifies its path and SHA-256 against that candidate runtime; final
+binding fails if any measured binary, build input, build configuration,
+package-level JavaScript wrapper, or source changes. The validator
+schema and dependency manifest ship beside the benchmark, baseline and
+candidate workers both scrub runtime-loader overrides, and packaged
+prebuild discovery uses Node architecture tags:
 
 <table>
 <colgroup>
@@ -3595,56 +3609,56 @@ configuration, or source changes:
 <tbody>
 <tr>
 <td>retrieval p50 (ms)</td>
-<td style="text-align: right;">8.075</td>
-<td style="text-align: right;">4.267</td>
-<td style="text-align: right;">-3.857</td>
-<td style="text-align: right;">-3.516</td>
+<td style="text-align: right;">7.532</td>
+<td style="text-align: right;">3.258</td>
+<td style="text-align: right;">-4.236</td>
+<td style="text-align: right;">-3.978</td>
 </tr>
 <tr>
 <td>retrieval p95 (ms)</td>
-<td style="text-align: right;">12.844</td>
-<td style="text-align: right;">10.239</td>
-<td style="text-align: right;">-3.104</td>
-<td style="text-align: right;">-2.112</td>
+<td style="text-align: right;">11.885</td>
+<td style="text-align: right;">8.707</td>
+<td style="text-align: right;">-3.124</td>
+<td style="text-align: right;">-2.267</td>
 </tr>
 <tr>
 <td>ingestion p50 (ms)</td>
-<td style="text-align: right;">17.203</td>
-<td style="text-align: right;">8.248</td>
-<td style="text-align: right;">-9.084</td>
-<td style="text-align: right;">-8.841</td>
+<td style="text-align: right;">16.538</td>
+<td style="text-align: right;">7.819</td>
+<td style="text-align: right;">-8.622</td>
+<td style="text-align: right;">-8.523</td>
 </tr>
 <tr>
 <td>ingestion p95 (ms)</td>
-<td style="text-align: right;">30.196</td>
-<td style="text-align: right;">12.811</td>
-<td style="text-align: right;">-17.339</td>
-<td style="text-align: right;">-16.764</td>
+<td style="text-align: right;">28.662</td>
+<td style="text-align: right;">11.980</td>
+<td style="text-align: right;">-16.435</td>
+<td style="text-align: right;">-16.092</td>
 </tr>
 <tr>
 <td>retrieval throughput (ops/s)</td>
-<td style="text-align: right;">107.035</td>
-<td style="text-align: right;">202.343</td>
-<td style="text-align: right;">-93.938<a href="#fn1"
+<td style="text-align: right;">111.853</td>
+<td style="text-align: right;">249.574</td>
+<td style="text-align: right;">-140.172<a href="#fn1"
 class="footnote-ref" id="fnref1"
 role="doc-noteref"><sup>1</sup></a></td>
-<td style="text-align: right;">-91.472</td>
+<td style="text-align: right;">-130.781</td>
 </tr>
 <tr>
 <td>ingestion throughput (ops/s)</td>
-<td style="text-align: right;">55.580</td>
-<td style="text-align: right;">122.221</td>
-<td style="text-align: right;">-66.737<a href="#fn2"
+<td style="text-align: right;">57.936</td>
+<td style="text-align: right;">132.363</td>
+<td style="text-align: right;">-74.318<a href="#fn2"
 class="footnote-ref" id="fnref2"
 role="doc-noteref"><sup>2</sup></a></td>
-<td style="text-align: right;">-65.809</td>
+<td style="text-align: right;">-70.880</td>
 </tr>
 <tr>
 <td>peak resident bytes</td>
-<td style="text-align: right;">1,055,965,184</td>
-<td style="text-align: right;">786,432,000</td>
-<td style="text-align: right;">-269,623,296</td>
-<td style="text-align: right;">-268,828,672</td>
+<td style="text-align: right;">1,056,464,896</td>
+<td style="text-align: right;">788,086,784</td>
+<td style="text-align: right;">-267,804,672</td>
+<td style="text-align: right;">-267,206,656</td>
 </tr>
 <tr>
 <td>database bytes</td>
@@ -3803,40 +3817,40 @@ values.
 <tbody>
 <tr>
 <td>repaired candidate, no consolidation</td>
-<td style="text-align: right;">1,546</td>
+<td style="text-align: right;">1,519</td>
 <td style="text-align: right;">0</td>
 <td style="text-align: right;">2/7</td>
-<td style="text-align: right;">49.314 s</td>
-<td style="text-align: right;">179.811 ms</td>
+<td style="text-align: right;">47.650 s</td>
+<td style="text-align: right;">179.378 ms</td>
 </tr>
 <tr>
 <td>repaired candidate, consolidate on recommendation</td>
 <td style="text-align: right;">1</td>
 <td style="text-align: right;">1</td>
 <td style="text-align: right;">2/7</td>
-<td style="text-align: right;">49.919 s</td>
-<td style="text-align: right;">193.602 ms</td>
+<td style="text-align: right;">48.000 s</td>
+<td style="text-align: right;">184.338 ms</td>
 </tr>
 </tbody>
 </table>
 
-The treatment emitted one `recommended` result at write 376, ran one
-24.354 ms maintenance transaction, and then emitted `none` for the
+The treatment emitted one `recommended` result at write 372, ran one
+24.395 ms maintenance transaction, and then emitted `none` for the
 remaining durable writes. The call changed only the persisted
 acknowledgment latch and event-derived floor/peak: it added zero memory
 rows, long-term rows, working rows, current embeddings, graph edges,
 association memories, signal rows, or processed-signal count. SQLite
-allocated one 4 KiB page at the call boundary, but both arms finished at
-the identical 23,060,480-byte file size. The hashed raw snapshots
-include the armed latch and nonzero-connectivity count before the call,
-after the call, and at final query boundaries. They record `armed`
-changing from one to zero and zero memories with nonzero persisted
-connectivity in both arms, closing the hidden global-write path found
-during the first repair replay. All seven needle counts remained
-`LONG_TERM` with counts 12, 21, 44, 2, 11, 2, and 7. Both arms retained
-the same two top-12 hits and ended with 1,915 long-term memories, 1,915
-current embeddings, and 1,915 processed signals. Every ephemeral-query
-durable delta remained zero.
+allocated four 4 KiB pages at the call boundary; final treatment storage
+was two 4 KiB pages larger than the matched control (23,068,672 versus
+23,060,480 bytes). The hashed raw snapshots include the armed latch and
+nonzero-connectivity count before the call, after the call, and at final
+query boundaries. They record `armed` changing from one to zero and zero
+memories with nonzero persisted connectivity in both arms, closing the
+hidden global-write path found during the first repair replay. All seven
+needle counts remained `LONG_TERM` with counts 12, 21, 44, 2, 11, 2, and
+7. Both arms retained the same two top-12 hits and ended with 1,915
+long-term memories, 1,915 current embeddings, and 1,915 processed
+signals. Every ephemeral-query durable delta remained zero.
 
 The reporter replay is a functional matched control, not a latency
 estimator. Performance was therefore checked separately against the
@@ -3844,8 +3858,8 @@ frozen released baseline with two warm-up pairs and 18 measured
 fresh-process, fresh-database pairs, alternating order at the registered
 zero non-inferiority margin. All eight gates passed.
 Candidate-minus-baseline latency medians and one-sided 95% upper bounds
-were -4.370/-4.150 ms for retrieval p50, -1.719/-1.325 ms for retrieval
-p95, -7.242/-7.171 ms for ingestion p50, and -16.012/-15.627 ms for
+were -4.236/-3.978 ms for retrieval p50, -3.124/-2.267 ms for retrieval
+p95, -8.622/-8.523 ms for ingestion p50, and -16.435/-16.092 ms for
 ingestion p95. Higher-is-better throughput uses baseline minus candidate
 and was likewise negative at both point and upper bound; peak RSS and
 database bytes also passed.
@@ -5469,29 +5483,40 @@ upper bound is sound, so taking their minimum cannot exclude a pair
 meeting the cosine threshold. The complementary bases avoid broad exact
 pairwise work for both sparse coordinate-aligned vectors and dense
 Hadamard-aligned vectors; arbitrary adversarial surfaces may still reach
-the exact fallback. If the private vector cache is unavailable, the SQL
-fallback loads the complete eligible embedding surface and applies the
-same family and supersession filters before truncation. It then expands
-through retained structural graph edges and returns a compact selected
-set. Vector similarity owns the rank; recency is a tie-break and graph
-activation is a bounded residual bonus. `source_id` and modality are
-metadata, not ranking inputs. Direct vector seeds are source `LONG_TERM`
-memories; derived `ASSOCIATION` centroids enter through graph expansion.
-Direct families are ranked and the protected direct prefix is committed
-before expanded families are admitted; expanded candidates are then
-deduplicated against those protected representatives. When a current
-embedding exists, its redundant historical base embedding is omitted
-from the historical seed search because the authoritative surface was
-already searched. Current writes are excluded by timestamp, and
-working-memory overlap filters prevent the retrieval result from echoing
-the active memory tail. Association edges are used as graph evidence;
-they do not bypass final scoring or output caps. One dispatch exposes at
-most one actually used retrieval candidate, so retrieval does not
-synthesize reinforcement pair edges from the packet. Existing
-`reinforces` edges remain eligible for decay, pruning, degree
-normalization, and graph evidence. Historical public knob helpers for
-the removed packet-pair writer remain source-compatible calibrations;
-only the step calibration still feeds the production pruning floor.
+the exact fallback. If the private vector cache is unavailable, durable
+processing rebuilds it once from the complete persisted surface and
+immediately applies the same family and supersession filters before
+truncation. A failed rebuild installs a failure sentinel rather than
+repeating the two complete surface scans on every request. A unique
+cached vector retains every long-term memory metadata alternative that
+shares its base embedding, and query-time eligibility chooses a
+nonsuperseded sibling without duplicating vector storage. The fallback
+executes one scalar-distance-ordered query after kind, timestamp, and
+current-surface precedence are filtered in SQL; superseded and exact
+near-duplicate families are then skipped in memory until the
+knob-derived budget is filled or the eligible surface is exhausted.
+Ephemeral retrieval uses that fallback without installing volatile
+registry state. It then expands through retained structural graph edges
+and returns a compact selected set. Vector similarity owns the rank;
+recency is a tie-break and graph activation is a bounded residual bonus.
+`source_id` and modality are metadata, not ranking inputs. Direct vector
+seeds are source `LONG_TERM` memories; derived `ASSOCIATION` centroids
+enter through graph expansion. Direct families are ranked and the
+protected direct prefix is committed before expanded families are
+admitted; expanded candidates are then deduplicated against those
+protected representatives. When a current embedding exists, its
+redundant historical base embedding is omitted from the historical seed
+search because the authoritative surface was already searched. Current
+writes are excluded by timestamp, and working-memory overlap filters
+prevent the retrieval result from echoing the active memory tail.
+Association edges are used as graph evidence; they do not bypass final
+scoring or output caps. One dispatch exposes at most one actually used
+retrieval candidate, so retrieval does not synthesize reinforcement pair
+edges from the packet. Existing `reinforces` edges remain eligible for
+decay, pruning, degree normalization, and graph evidence. Historical
+public knob helpers for the removed packet-pair writer remain
+source-compatible calibrations; only the step calibration still feeds
+the production pruning floor.
 
 The retrieval trace path records a ranking ledger for selected and
 rejected candidates. Production graph retrieval populates composite
@@ -5693,13 +5718,17 @@ path</td>
 <td>retrieval seed surface</td>
 <td>current-memory embedding lookup with pre-cap supersession filtering
 and complementary sound 32-block Cauchy–Schwarz bounds in the stored and
-Walsh–Hadamard bases followed by exact cosine family checks; the SQL
-fallback scans the complete eligible surface before the same
-collapse</td>
-<td>latest reconstruction remains visible, duplicate boilerplate cannot
-consume the candidate cap, sparse and dense orthogonal vector families
-avoid broad exact cosine work, adversarial surfaces retain an exact
-fallback, fallback truncation cannot hide a family representative, and
+Walsh–Hadamard bases followed by exact cosine family checks; shared
+vectors retain all long-term metadata alternatives; cache loss performs
+one persisted-surface rebuild, while rebuild failure is latched and uses
+one eligibility-filtered scalar-distance ordering before in-memory
+family selection</td>
+<td>latest reconstruction and eligible shared-embedding siblings remain
+visible, duplicate boilerplate or ineligible nearest rows cannot consume
+the knob-derived candidate cap, sparse and dense orthogonal vector
+families avoid broad exact cosine work, adversarial surfaces retain an
+exact fallback, failed recovery does not repeat complete scans or full
+ordering per page, ephemeral recovery does not mutate the registry, and
 source/modality metadata cannot influence rank</td>
 </tr>
 <tr>
