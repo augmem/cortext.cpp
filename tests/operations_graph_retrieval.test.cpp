@@ -17,6 +17,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -45,6 +46,28 @@ VectorWithCosineToDim0 (float cosine)
   Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
   v[0] = cosine;
   v[1] = std::sqrt (std::max (0.0f, 1.0f - cosine * cosine));
+  return v;
+}
+
+Eigen::VectorXf
+VectorWithCosineAndDiverseResidual (float cosine, std::uint64_t seed)
+{
+  Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
+  v[0] = cosine;
+  const float residual_scale
+      = std::sqrt (std::max (0.0f, 1.0f - cosine * cosine))
+        / std::sqrt (static_cast<float> (kEmbeddingDim - 1));
+  std::uint64_t state = seed + 0x9e3779b97f4a7c15ULL;
+  for (int dimension = 1; dimension < kEmbeddingDim; ++dimension)
+    {
+      state += 0x9e3779b97f4a7c15ULL;
+      std::uint64_t mixed = state;
+      mixed = (mixed ^ (mixed >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+      mixed = (mixed ^ (mixed >> 27U)) * 0x94d049bb133111ebULL;
+      mixed ^= mixed >> 31U;
+      v[dimension] = (mixed & 1ULL) != 0 ? residual_scale
+                                         : -residual_scale;
+    }
   return v;
 }
 
@@ -726,6 +749,59 @@ TEST_CASE ("Graph retrieval reloads base embedding when constructive recall is "
   REQUIRE (out.candidate_memory_ids.front () == 10LL);
 }
 
+TEST_CASE ("Graph retrieval cache rebuild uses base embedding when constructive "
+           "recall is disabled",
+           "[operations][graph][retrieval][constructive_recall][cache_rebuild]"
+           "[ablation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+  cortext::testing::SeedEmbeddingV2 (*store, 101, UnitVec (1), 1250);
+  auto reconstruction_tx = store->Begin ();
+  const long long reconstruction_id
+      = operations::constructive_recall::AppendReconstructionWithEmbedding (
+          *reconstruction_tx, 10, UnitVec (2), {}, 1500, 0.1, "retrieval",
+          1.0, 1.0);
+  REQUIRE (reconstruction_id > 0);
+  reconstruction_tx->Commit ();
+  cortext::testing::SeedCurrentMemoryEmbeddingV2 (*store, 10, 101);
+
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  if (!operations::constructive_recall::Disabled ())
+    {
+      SKIP ("constructive-recall disable hook is disabled in this build");
+    }
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  pctx.UpsertRetrievalSurface (
+      { 10, 100, 1000, 1000, 0, 0, 0, 0, "LONG_TERM", "test", "", -1.0,
+        0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+  auto signal = MakeSignal (UnitVec (0), 2000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  const auto ranked = operations::retrieval_trace::GetLastRankedCandidates ();
+  const auto target = std::find_if (
+      ranked.begin (), ranked.end (), [] (const auto &candidate) {
+        return candidate.memory_id == 10LL;
+      });
+  REQUIRE (target != ranked.end ());
+  REQUIRE (target->embedding_id == 100LL);
+  REQUIRE (target->score > 0.99);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
 TEST_CASE ("Graph retrieval returns refreshed output after reconstruction",
            "[operations][graph][retrieval]")
 {
@@ -1150,31 +1226,87 @@ TEST_CASE ("Graph retrieval SQL fallback performance probe",
 {
   const char *row_count_env = std::getenv ("LTM_FALLBACK_BENCH_ROWS");
   const char *repeats_env = std::getenv ("LTM_FALLBACK_BENCH_REPEATS");
+  const char *reconstruct_every_env
+      = std::getenv ("LTM_FALLBACK_BENCH_RECONSTRUCT_EVERY");
+  const char *processor_complete_env
+      = std::getenv ("LTM_FALLBACK_BENCH_PROCESSOR_COMPLETE");
   const long long row_count
       = row_count_env == nullptr ? 1915 : std::stoll (row_count_env);
   const int repeats = repeats_env == nullptr ? 12 : std::stoi (repeats_env);
+  const long long reconstruct_every
+      = reconstruct_every_env == nullptr
+            ? 0
+            : std::stoll (reconstruct_every_env);
+  const bool processor_surface_complete
+      = processor_complete_env != nullptr
+        && std::string (processor_complete_env) == "1";
   REQUIRE (row_count > 0);
   REQUIRE (repeats > 0);
+  REQUIRE (reconstruct_every >= 0);
 
   auto unique_store = SQLiteStore::Create (":memory:");
   auto store = std::shared_ptr<Store> (std::move (unique_store));
   cortext::testing::InitializeCoreSchema (*store);
+  ProcessorContext pctx;
   for (long long offset = 0; offset < row_count; ++offset)
     {
       Eigen::VectorXf embedding = UnitVec (static_cast<int> (offset % 255));
       embedding[255]
           = static_cast<float> ((offset % 97) + 1) / 10000.0f;
       embedding.normalize ();
-      SeedMemory (*store, 1000 + offset, 10000 + offset, embedding,
-                  1000 + offset);
+      const long long memory_id = 1000 + offset;
+      const long long embedding_id = 10000 + offset;
+      const long long timestamp = 1000 + offset;
+      SeedMemory (*store, memory_id, embedding_id, embedding, timestamp);
+      pctx.UpsertRetrievalSurface (
+          { memory_id, embedding_id, timestamp, timestamp, 0, 0, 0, 0,
+            "LONG_TERM", "benchmark", "", -1.0, 0, 0.0, 0.0, 0.0,
+            false, true, embedding });
+    }
+
+  long long reconstruction_count = 0;
+  if (reconstruct_every > 0)
+    {
+      operations::constructive_recall::ReconstructionUpdatePolicy policy;
+      policy.update_current_surface = false;
+      auto reconstruction_tx = store->Begin ();
+      for (long long offset = 0; offset < row_count;
+           offset += reconstruct_every)
+        {
+          Eigen::VectorXf embedding
+              = UnitVec (static_cast<int> (offset % 255));
+          embedding[255]
+              = static_cast<float> ((offset % 97) + 1) / 10000.0f;
+          embedding.normalize ();
+          const long long memory_id = 1000 + offset;
+          REQUIRE (operations::constructive_recall::
+                       AppendReconstructionWithEmbedding (
+                           *reconstruction_tx, memory_id, embedding, {},
+                           100000 + offset, 0.1, "benchmark", 1.0, 1.0,
+                           policy)
+                   > 0);
+          const auto latest = operations::constructive_recall::
+              LoadLatestReconstruction (*reconstruction_tx, memory_id);
+          REQUIRE (latest.has_value ());
+          pctx.UpsertRetrievalSurface (
+              { memory_id, latest->embedding_id, 1000 + offset,
+                1000 + offset, 0, 0, 0, 0, "LONG_TERM", "benchmark", "",
+                -1.0, 0, 0.0, 0.0, 0.0, false, true, embedding });
+          ++reconstruction_count;
+        }
+      reconstruction_tx->Commit ();
     }
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  ProcessorContext pctx;
+  operations::historical_surface_search_cache_internal::
+      SetCurrentSurfaceDatabaseCurrent (pctx, reconstruction_count == 0);
+  operations::historical_surface_search_cache_internal::
+      SetProcessorSurfaceComplete (pctx, processor_surface_complete);
   operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
       pctx);
   auto signal = MakeSignal (UnitVec (0), 1000000000);
+  signal.retention = Retention::Ephemeral;
   std::vector<double> elapsed_ms;
   elapsed_ms.reserve (static_cast<std::size_t> (repeats));
   for (int repeat = 0; repeat < repeats; ++repeat)
@@ -1202,6 +1334,11 @@ TEST_CASE ("Graph retrieval SQL fallback performance probe",
     return elapsed_ms[index];
   };
   std::cout << "CORTEXT_FALLBACK_BENCH {\"rows\":" << row_count
+            << ",\"reconstructions\":" << reconstruction_count
+            << ",\"current_surface_database_current\":"
+            << (reconstruction_count == 0 ? "true" : "false")
+            << ",\"processor_surface_complete\":"
+            << (processor_surface_complete ? "true" : "false")
             << ",\"repeats\":" << repeats
             << ",\"p50_ms\":" << percentile (0.50)
             << ",\"p95_ms\":" << percentile (0.95) << "}" << std::endl;
@@ -1381,6 +1518,277 @@ TEST_CASE ("Graph retrieval fallback pages past cosine family saturation",
   REQUIRE (materialized > static_cast<std::size_t> (page_limit));
   REQUIRE (materialized
            <= static_cast<std::size_t> (2 * page_limit));
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval fallback preserves overfetch after surface refresh",
+           "[operations][graph][retrieval][sql][pagination][reconstruction]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const int seed_limit = std::max (1, core::RetrievalMaxResults (cfg.focus));
+  ProcessorContext pctx;
+  operations::constructive_recall::ReconstructionUpdatePolicy policy;
+  policy.update_current_surface = false;
+  operations::historical_surface_search_cache_internal::
+      SetCurrentSurfaceDatabaseCurrent (pctx, true);
+  for (int offset = 0; offset < seed_limit; ++offset)
+    {
+      Eigen::VectorXf base = Eigen::VectorXf::Zero (kEmbeddingDim);
+      constexpr float cosine = 0.90f;
+      base[0] = cosine;
+      base[1 + offset]
+          = std::sqrt (std::max (0.0f, 1.0f - cosine * cosine));
+      const long long memory_id = 1000 + offset;
+      const long long embedding_id = 10000 + offset * 100;
+      SeedMemory (*store, memory_id, embedding_id, base, 1000 + offset,
+                  "reconstructed-family");
+      auto reconstruction_tx = store->Begin ();
+      REQUIRE (operations::constructive_recall::
+                   AppendReconstructionWithEmbedding (
+                       *reconstruction_tx, memory_id, UnitVec (0), {},
+                       5000 + offset, 0.1, "surface-refresh", 1.0, 1.0,
+                       policy, &pctx)
+               > 0);
+      const auto latest = operations::constructive_recall::
+          LoadLatestReconstruction (*reconstruction_tx, memory_id);
+      REQUIRE (latest.has_value ());
+      reconstruction_tx->Commit ();
+      pctx.UpsertRetrievalSurface (
+          { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset,
+            0, 0, 0, 0, "LONG_TERM", "reconstructed-family", "", -1.0,
+            0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+    }
+  REQUIRE_FALSE (operations::historical_surface_search_cache_internal::
+                     CurrentSurfaceDatabaseCurrent (pctx));
+
+  constexpr long long kTargetMemoryId = 9000;
+  SeedMemory (*store, kTargetMemoryId, 30000,
+              VectorWithCosineToDim0 (0.75f), 2000, "target");
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx);
+
+  auto signal = MakeSignal (UnitVec (0), 100000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  REQUIRE (std::find_if (
+               ctx.GetRetrievedMemoryCandidates ().begin (),
+               ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) {
+                 return candidate.memory_id == kTargetMemoryId;
+               })
+           != ctx.GetRetrievedMemoryCandidates ().end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval fallback preserves overfetch after database reconstruction refresh",
+           "[operations][graph][retrieval][sql][pagination][reconstruction]")
+{
+  cortext::testing::ScopedEnvVar disable_current (
+      "CORTEXT_DISABLE_CURRENT_MEMORY_SURFACE_WRITES", "1");
+  if (!operations::constructive_recall::CurrentSurfaceWritesDisabled ())
+    {
+      SKIP ("current-surface write hook is disabled in this build");
+    }
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const int seed_limit = std::max (1, core::RetrievalMaxResults (cfg.focus));
+  ProcessorContext pctx;
+  pctx.UpsertRetrievalSurface (
+      { 99999, 99999, 1, 1, 0, 0, 0, 0, "LONG_TERM", "unrelated", "",
+        -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (4) });
+
+  for (int offset = 0; offset < seed_limit; ++offset)
+    {
+      Eigen::VectorXf base = Eigen::VectorXf::Zero (kEmbeddingDim);
+      constexpr float cosine = 0.90f;
+      base[0] = cosine;
+      base[1 + offset]
+          = std::sqrt (std::max (0.0f, 1.0f - cosine * cosine));
+      const long long memory_id = 1000 + offset;
+      SeedMemory (*store, memory_id, 10000 + offset, base, 1000 + offset,
+                  "database-reconstructed-family");
+    }
+  for (int offset = 0; offset < seed_limit; ++offset)
+    {
+      auto reconstruction_tx = store->Begin ();
+      REQUIRE (operations::constructive_recall::
+                   AppendReconstructionWithEmbedding (
+                       *reconstruction_tx, 1000 + offset, UnitVec (0), {},
+                       5000 + offset, 0.1, "review", 1.0, 1.0)
+               > 0);
+      reconstruction_tx->Commit ();
+    }
+
+  constexpr long long kTargetMemoryId = 9000;
+  SeedMemory (*store, kTargetMemoryId, 30000,
+              VectorWithCosineToDim0 (0.75f), 2000, "target");
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx);
+
+  auto signal = MakeSignal (UnitVec (0), 100000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  REQUIRE (std::find_if (
+               ctx.GetRetrievedMemoryCandidates ().begin (),
+               ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) {
+                 return candidate.memory_id == kTargetMemoryId;
+               })
+           != ctx.GetRetrievedMemoryCandidates ().end ());
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstructions",
+           "[operations][graph][retrieval][cache][sql][reconstruction]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const int seed_limit = std::max (1, core::RetrievalMaxResults (cfg.focus));
+  const int seed_search_limit = core::RetrievalSeedSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, seed_limit);
+  ProcessorContext pctx;
+  std::vector<operations::historical_surface_search_cache_internal::Entry>
+      historical_entries;
+  std::vector<operations::historical_surface_search_cache_internal::Entry>
+      current_entries;
+  historical_entries.reserve (static_cast<std::size_t> (seed_search_limit + 1));
+  current_entries.reserve (static_cast<std::size_t> (seed_search_limit + 1));
+
+  for (int offset = 0; offset < seed_search_limit; ++offset)
+    {
+      Eigen::VectorXf base = VectorWithCosineAndDiverseResidual (
+          0.90f, static_cast<std::uint64_t> (offset));
+      const long long memory_id = 1000 + offset;
+      const long long embedding_id = 10000 + offset;
+      SeedMemory (*store, memory_id, embedding_id, base, 1000 + offset,
+                  "stale-cache-family");
+      pctx.UpsertRetrievalSurface (
+          { memory_id, embedding_id, 1000 + offset, 1000 + offset, 0, 0,
+            0, 0, "LONG_TERM", "stale-cache-family", "", -1.0, 0, 0.0,
+            0.0, 0.0, false, true, base });
+      historical_entries.push_back (
+          { embedding_id, memory_id, 1000 + offset, "LONG_TERM",
+            "stale-cache-family", base });
+      current_entries.push_back (
+          { embedding_id, memory_id, 0, std::string (), std::string (),
+            base });
+    }
+
+  constexpr long long kTargetMemoryId = 9000;
+  constexpr long long kTargetEmbeddingId = 30000;
+  const Eigen::VectorXf target = VectorWithCosineToDim0 (0.75f);
+  SeedMemory (*store, kTargetMemoryId, kTargetEmbeddingId, target, 2000,
+              "target");
+  pctx.UpsertRetrievalSurface (
+      { kTargetMemoryId, kTargetEmbeddingId, 2000, 2000, 0, 0, 0, 0,
+        "LONG_TERM", "target", "", -1.0, 0, 0.0, 0.0, 0.0, false, true,
+        target });
+  historical_entries.push_back (
+      { kTargetEmbeddingId, kTargetMemoryId, 2000, "LONG_TERM", "target",
+        target });
+  current_entries.push_back (
+      { kTargetEmbeddingId, kTargetMemoryId, 0, std::string (),
+        std::string (), target });
+
+  REQUIRE (operations::historical_surface_search_cache_internal::Reset (
+      pctx, std::move (historical_entries), std::move (current_entries)));
+  operations::historical_surface_search_cache_internal::
+      SetCurrentSurfaceDatabaseCurrent (pctx, true);
+
+  operations::constructive_recall::ReconstructionUpdatePolicy policy;
+  policy.update_current_surface = false;
+  for (int offset = 0; offset < seed_search_limit; ++offset)
+    {
+      auto reconstruction_tx = store->Begin ();
+      const long long memory_id = 1000 + offset;
+      REQUIRE (operations::constructive_recall::
+                   AppendReconstructionWithEmbedding (
+                       *reconstruction_tx, memory_id, UnitVec (0), {},
+                       5000 + offset, 0.1, "stale-cache", 1.0, 1.0, policy,
+                       &pctx)
+               > 0);
+      const auto latest = operations::constructive_recall::
+          LoadLatestReconstruction (*reconstruction_tx, memory_id);
+      REQUIRE (latest.has_value ());
+      reconstruction_tx->Commit ();
+      pctx.UpsertRetrievalSurface (
+          { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset,
+            0, 0, 0, 0, "LONG_TERM", "stale-cache-family", "", -1.0, 0,
+            0.0, 0.0, 0.0, false, true, UnitVec (0) });
+    }
+  const auto stale_state
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (stale_state != nullptr);
+  REQUIRE_FALSE (stale_state->recovery_failed);
+  REQUIRE_FALSE (stale_state->current_surface_database_current);
+
+  auto signal = MakeSignal (UnitVec (0), 100000);
+  signal.retention = Retention::Ephemeral;
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  REQUIRE (std::find_if (
+               ctx.GetRetrievedMemoryCandidates ().begin (),
+               ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) {
+                 return candidate.memory_id == kTargetMemoryId;
+               })
+           != ctx.GetRetrievedMemoryCandidates ().end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 0);
+
+  operations::historical_surface_search_cache_internal::
+      SetProcessorSurfaceComplete (pctx, true);
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx);
+  OperationContext recovery_ctx (signal, pctx, cfg, store.get ());
+  recovery_ctx.SetShouldCheckRetrieval (true);
+  recovery_ctx.SetWriteExclusionTs (signal.timestamp);
+  auto recovery_tx = store->Begin ();
+  operation.Execute (recovery_ctx, *recovery_tx);
+  recovery_tx->Rollback ();
+  REQUIRE (std::find_if (
+               recovery_ctx.GetRetrievedMemoryCandidates ().begin (),
+               recovery_ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) {
+                 return candidate.memory_id == kTargetMemoryId;
+               })
+           != recovery_ctx.GetRetrievedMemoryCandidates ().end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 0);
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 

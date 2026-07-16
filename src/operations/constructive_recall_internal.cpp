@@ -764,6 +764,15 @@ AppendReconstructionWithEmbeddingUnchecked (
       historical_surface_search_cache_internal::Append (
           *p_ctx,
           { embedding_id, 0, 0, std::string (), std::string (), embedding });
+      const auto surface_it = p_ctx->retrieval_surface_index.find (memory_id);
+      if (surface_it != p_ctx->retrieval_surface_index.end ()
+          && surface_it->second < p_ctx->retrieval_surface_cache.size ())
+        {
+          historical_surface_search_cache_internal::UpsertCurrent (
+              *p_ctx,
+              { embedding_id, memory_id, 0, std::string (), std::string (),
+                embedding });
+        }
     }
 
   t_start = std::chrono::steady_clock::now ();
@@ -794,6 +803,12 @@ AppendReconstructionWithEmbeddingUnchecked (
           timings->current_surface_ms += ElapsedMs (
               t_start, std::chrono::steady_clock::now ());
         }
+    }
+  if (p_ctx != nullptr
+      && (!policy.update_current_surface || CurrentSurfaceWritesDisabled ()))
+    {
+      historical_surface_search_cache_internal::
+          SetCurrentSurfaceDatabaseCurrent (*p_ctx, false);
     }
   t_start = std::chrono::steady_clock::now ();
   PruneReconstructionHistory (tx, memory_id, policy, p_ctx);
