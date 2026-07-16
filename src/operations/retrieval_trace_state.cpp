@@ -13,6 +13,7 @@ thread_local std::vector<EvidencePacket> g_last_evidence_packets;
 thread_local RetrievalSummary g_last_retrieval_summary;
 #ifdef CORTEXT_TESTING
 thread_local std::size_t g_last_family_exact_comparison_count = 0;
+thread_local std::size_t g_last_sql_fallback_query_count = 0;
 #endif
 thread_local bool g_capture_enabled = true;
 
@@ -129,6 +130,32 @@ GetLastFamilyExactComparisonCount ()
 {
 #ifdef CORTEXT_TESTING
   return g_last_family_exact_comparison_count;
+#else
+  return 0;
+#endif
+}
+
+void
+ClearLastSqlFallbackQueryCount ()
+{
+#ifdef CORTEXT_TESTING
+  g_last_sql_fallback_query_count = 0;
+#endif
+}
+
+void
+IncrementLastSqlFallbackQueryCount ()
+{
+#ifdef CORTEXT_TESTING
+  ++g_last_sql_fallback_query_count;
+#endif
+}
+
+std::size_t
+GetLastSqlFallbackQueryCount ()
+{
+#ifdef CORTEXT_TESTING
+  return g_last_sql_fallback_query_count;
 #else
   return 0;
 #endif

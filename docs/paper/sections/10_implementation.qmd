@@ -135,9 +135,18 @@ by exact cosine checks. Each upper bound is sound, so taking their minimum
 cannot exclude a pair meeting the cosine threshold. The complementary bases
 avoid broad exact pairwise work for both sparse coordinate-aligned vectors and
 dense Hadamard-aligned vectors; arbitrary adversarial surfaces may still reach
-the exact fallback. If the private vector cache is unavailable,
-the SQL fallback loads the complete eligible embedding surface and applies the
-same family and supersession filters before truncation.
+the exact fallback. If the private vector cache is unavailable, durable
+processing rebuilds it once from the complete persisted surface and immediately
+applies the same family and supersession filters before truncation. A failed
+rebuild installs a failure sentinel rather than repeating the two complete
+surface scans on every request. A unique cached vector retains every long-term
+memory metadata alternative that shares its base embedding, and query-time
+eligibility chooses a nonsuperseded sibling without duplicating vector storage.
+The fallback executes one scalar-distance-ordered query after kind, timestamp,
+and current-surface precedence are filtered in SQL; superseded and exact
+near-duplicate families are then skipped in memory until the knob-derived
+budget is filled or the eligible surface is exhausted. Ephemeral retrieval uses
+that fallback without installing volatile registry state.
 It then expands through retained structural graph edges and returns a compact
 selected set. Vector similarity owns the rank; recency is a tie-break and graph
 activation is a bounded residual bonus. `source_id` and modality are metadata,

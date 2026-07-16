@@ -1460,7 +1460,8 @@ LoadHistoricalSurfaceSearchCache (Store &store, ProcessorContext &ctx)
           "       COALESCE(m.source_id, '') AS source_id "
           "FROM embeddings e "
           "LEFT JOIN memories m ON m.embedding_id = e.embedding_id "
-          "ORDER BY e.embedding_id");
+          "  AND m.kind = 'LONG_TERM' "
+          "ORDER BY e.embedding_id, COALESCE(m.start_ts, 0), m.memory_id");
       std::vector<
           operations::historical_surface_search_cache_internal::Entry>
           search_entries;

@@ -147,34 +147,47 @@ a claim about the unavailable reporter corpus.
 The family screen also places 430 cosine-near distractors ahead of a distinctive
 target. The distractors deliberately swap their eighth- and ninth-strongest
 coordinates, reproducing the false-negative boundary of a lossy top-feature
-fingerprint. Both the cached path and a cache-absent SQL fallback retain the
-target after a sound block-norm upper bound and exact cosine family checks. A
+fingerprint. Both the normal cached path and the cache-rebuild path retain the
+target after a sound block-norm upper bound and exact cosine family checks. The
+rebuild installs the recovered surface so subsequent requests do not repeat
+the full SQL scan. A failed rebuild installs a failure sentinel so later
+requests do not retry the two complete surface scans. Shared base vectors keep
+all long-term memory metadata alternatives behind one stored vector so a
+superseded sibling cannot hide an eligible sibling. Retrieval fallback executes
+one eligibility-filtered, scalar-distance-ordered query, then applies
+supersession and exact family collapse in memory until the knob-derived
+candidate budget is filled or the eligible durable surface is exhausted. An
+ephemeral request never installs recovery state in the process registry. A
 separate 256-vector orthogonal-basis test exercises the broad non-duplicate
 surface and requires exact family comparisons to remain below one quarter of
 the all-pairs count.
 
 Performance was compared against the exact 1.2.1 macOS arm64 prebuild using two
-unmeasured warm-up pairs and 36 measured pairs. Each pair alternated
+unmeasured warm-up pairs and 18 measured pairs. Each pair alternated
 baseline-first/candidate-first order with seed 20260714 and used fresh processes
 and fresh databases. The zero-margin paired-median gate and one-sided 95%
-bootstrap upper bound passed for all eight metrics. The schema-v4 artifact binds
-the result to the exact baseline addon, candidate addon, candidate core runtime,
+bootstrap upper bound passed for all eight metrics. The schema-v5 artifact binds
+the result to the exact baseline addon and executed package wrapper, candidate
+addon and executed package wrapper, candidate core runtime,
 full CMake-cache digest, actual candidate build configuration and compiler,
 candidate build-source digest, final review tree, and exact base-to-tree patch
 digest. Every measured worker also records the core runtime it actually loaded
 and verifies its path and SHA-256 against that candidate runtime; final binding
-fails if any measured binary, build input, build configuration, or source
-changes:
+fails if any measured binary, build input, build configuration, package-level
+JavaScript wrapper, or source changes. The validator schema and dependency
+manifest ship beside the benchmark, baseline and candidate workers both scrub
+runtime-loader overrides, and packaged prebuild discovery uses Node architecture
+tags:
 
 | Metric | Baseline median | Candidate median | Paired median difference | 95% upper bound |
 |---|---:|---:|---:|---:|
-| retrieval p50 (ms) | 8.075 | 4.267 | -3.857 | -3.516 |
-| retrieval p95 (ms) | 12.844 | 10.239 | -3.104 | -2.112 |
-| ingestion p50 (ms) | 17.203 | 8.248 | -9.084 | -8.841 |
-| ingestion p95 (ms) | 30.196 | 12.811 | -17.339 | -16.764 |
-| retrieval throughput (ops/s) | 107.035 | 202.343 | -93.938[^perf-direction] | -91.472 |
-| ingestion throughput (ops/s) | 55.580 | 122.221 | -66.737[^perf-direction] | -65.809 |
-| peak resident bytes | 1,055,965,184 | 786,432,000 | -269,623,296 | -268,828,672 |
+| retrieval p50 (ms) | 7.532 | 3.258 | -4.236 | -3.978 |
+| retrieval p95 (ms) | 11.885 | 8.707 | -3.124 | -2.267 |
+| ingestion p50 (ms) | 16.538 | 7.819 | -8.622 | -8.523 |
+| ingestion p95 (ms) | 28.662 | 11.980 | -16.435 | -16.092 |
+| retrieval throughput (ops/s) | 111.853 | 249.574 | -140.172[^perf-direction] | -130.781 |
+| ingestion throughput (ops/s) | 57.936 | 132.363 | -74.318[^perf-direction] | -70.880 |
+| peak resident bytes | 1,056,464,896 | 788,086,784 | -267,804,672 | -267,206,656 |
 | database bytes | 8,982,528 | 6,008,832 | -2,973,696 | -2,973,696 |
 
 [^perf-direction]: For higher-is-better throughput metrics, the registered
@@ -247,16 +260,17 @@ and F/S/T values.
 
 | Arm | Non-`none` outputs | Consolidations | Top-12 hits | Ingest wall time | Seven-query wall time |
 |---|---:|---:|---:|---:|---:|
-| repaired candidate, no consolidation | 1,546 | 0 | 2/7 | 49.314 s | 179.811 ms |
-| repaired candidate, consolidate on recommendation | 1 | 1 | 2/7 | 49.919 s | 193.602 ms |
+| repaired candidate, no consolidation | 1,519 | 0 | 2/7 | 47.650 s | 179.378 ms |
+| repaired candidate, consolidate on recommendation | 1 | 1 | 2/7 | 48.000 s | 184.338 ms |
 
-The treatment emitted one `recommended` result at write 376, ran one 24.354 ms
+The treatment emitted one `recommended` result at write 372, ran one 24.395 ms
 maintenance transaction, and then emitted `none` for the remaining durable
 writes. The call changed only the persisted acknowledgment latch and
 event-derived floor/peak: it added zero memory rows, long-term rows, working
 rows, current embeddings, graph edges, association memories, signal rows,
-or processed-signal count. SQLite allocated one 4 KiB page at the call
-boundary, but both arms finished at the identical 23,060,480-byte file size.
+or processed-signal count. SQLite allocated four 4 KiB pages at the call
+boundary; final treatment storage was two 4 KiB pages larger than the matched
+control (23,068,672 versus 23,060,480 bytes).
 The hashed raw snapshots include the armed latch and nonzero-connectivity count
 before the call, after the call, and at final query boundaries. They record
 `armed` changing from one to zero and zero memories with nonzero persisted
@@ -271,9 +285,9 @@ Performance was therefore checked separately against the frozen released
 baseline with two warm-up pairs and 18 measured fresh-process, fresh-database
 pairs, alternating order at the registered zero non-inferiority margin. All
 eight gates passed. Candidate-minus-baseline latency medians and one-sided 95%
-upper bounds were -4.370/-4.150 ms for retrieval p50,
--1.719/-1.325 ms for retrieval p95, -7.242/-7.171 ms for ingestion p50, and
--16.012/-15.627 ms for ingestion p95. Higher-is-better throughput uses
+upper bounds were -4.236/-3.978 ms for retrieval p50,
+-3.124/-2.267 ms for retrieval p95, -8.622/-8.523 ms for ingestion p50, and
+-16.435/-16.092 ms for ingestion p95. Higher-is-better throughput uses
 baseline minus candidate and was likewise negative at both point and upper
 bound; peak RSS and database bytes also passed.
 

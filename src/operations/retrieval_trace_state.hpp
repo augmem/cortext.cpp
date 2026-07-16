@@ -108,6 +108,9 @@ RetrievalSummary GetLastRetrievalSummary ();
 void ClearLastFamilyExactComparisonCount ();
 void IncrementLastFamilyExactComparisonCount ();
 std::size_t GetLastFamilyExactComparisonCount ();
+void ClearLastSqlFallbackQueryCount ();
+void IncrementLastSqlFallbackQueryCount ();
+std::size_t GetLastSqlFallbackQueryCount ();
 
 bool CaptureEnabled ();
 

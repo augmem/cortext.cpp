@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -19,12 +20,33 @@ namespace cortext::operations::historical_surface_search_cache_internal
 
 struct Entry
 {
+  struct MemoryReference
+  {
+    long long memory_id = 0;
+    long long start_ts = 0;
+    std::string kind;
+    std::string source_id;
+  };
+
   long long embedding_id = 0;
   long long memory_id = 0;
   long long start_ts = 0;
   std::string kind;
   std::string source_id;
   Eigen::VectorXf embedding;
+  std::vector<MemoryReference> memory_references;
+
+  Entry () = default;
+
+  Entry (long long embedding_id_value, long long memory_id_value,
+         long long start_ts_value, std::string kind_value,
+         std::string source_id_value, Eigen::VectorXf embedding_value)
+      : embedding_id (embedding_id_value), memory_id (memory_id_value),
+        start_ts (start_ts_value), kind (std::move (kind_value)),
+        source_id (std::move (source_id_value)),
+        embedding (std::move (embedding_value))
+  {
+  }
 };
 
 struct RankedEntry
@@ -35,6 +57,7 @@ struct RankedEntry
 
 struct State
 {
+  bool recovery_failed = false;
   int embedding_dim = 0;
   std::vector<Entry> entries;
   std::vector<float> search;
@@ -115,6 +138,23 @@ Find (const ProcessorContext &ctx)
   return FindMutable (ctx);
 }
 
+inline bool
+RecoveryFailed (const ProcessorContext &ctx)
+{
+  const auto state = Find (ctx);
+  return state && state->recovery_failed;
+}
+
+inline void
+MarkRecoveryFailed (const ProcessorContext &ctx)
+{
+  auto state = std::make_shared<State> ();
+  state->recovery_failed = true;
+  auto &registry = Registry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  registry.states[&ctx] = std::move (state);
+}
+
 inline void
 Erase (const ProcessorContext &ctx)
 {
@@ -128,7 +168,55 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
        std::vector<Entry> current_entries = {})
 {
   auto state = std::make_shared<State> ();
-  state->entries = std::move (entries);
+  std::unordered_map<long long, std::size_t> unique_embedding_index;
+  state->entries.reserve (entries.size ());
+  for (auto &entry : entries)
+    {
+      if (entry.memory_id > 0)
+        {
+          entry.memory_references.push_back (
+              { entry.memory_id, entry.start_ts, entry.kind,
+                entry.source_id });
+        }
+      const auto existing = unique_embedding_index.find (entry.embedding_id);
+      if (existing == unique_embedding_index.end ())
+        {
+          unique_embedding_index.emplace (entry.embedding_id,
+                                          state->entries.size ());
+          state->entries.push_back (std::move (entry));
+          continue;
+        }
+      auto &representative = state->entries[existing->second];
+      if (entry.embedding.size () != representative.embedding.size ()
+          || !entry.embedding.isApprox (representative.embedding, 0.0f))
+        {
+          Erase (ctx);
+          return false;
+        }
+      representative.memory_references.insert (
+          representative.memory_references.end (),
+          std::make_move_iterator (entry.memory_references.begin ()),
+          std::make_move_iterator (entry.memory_references.end ()));
+    }
+  for (auto &entry : state->entries)
+    {
+      std::sort (entry.memory_references.begin (),
+                 entry.memory_references.end (), [] (const auto &a,
+                                                      const auto &b) {
+                   if (a.start_ts != b.start_ts)
+                     {
+                       return a.start_ts < b.start_ts;
+                     }
+                   return a.memory_id < b.memory_id;
+                 });
+      entry.memory_references.erase (
+          std::unique (entry.memory_references.begin (),
+                       entry.memory_references.end (), [] (const auto &a,
+                                                           const auto &b) {
+                         return a.memory_id == b.memory_id;
+                       }),
+          entry.memory_references.end ());
+    }
   if (state->entries.empty ())
     {
       auto &registry = Registry ();
@@ -195,6 +283,10 @@ UpsertCurrent (const ProcessorContext &ctx, Entry entry)
       return;
     }
   auto &state = *state_owner;
+  if (state.recovery_failed)
+    {
+      return;
+    }
   if (entry.memory_id <= 0 || entry.embedding_id <= 0
       || entry.embedding.size () != state.embedding_dim)
     {
@@ -232,6 +324,10 @@ RemoveCurrent (const ProcessorContext &ctx, long long memory_id)
       return;
     }
   auto &state = *state_owner;
+  if (state.recovery_failed)
+    {
+      return;
+    }
   const auto index_it = state.current_memory_index.find (memory_id);
   if (index_it == state.current_memory_index.end ())
     {
@@ -268,6 +364,10 @@ Append (const ProcessorContext &ctx, Entry entry)
       return;
     }
   auto &state = *state_owner;
+  if (state.recovery_failed)
+    {
+      return;
+    }
   if (entry.embedding_id <= 0 || entry.embedding.size () <= 0
       || (state.embedding_dim != 0
           && entry.embedding.size () != state.embedding_dim)
@@ -279,6 +379,11 @@ Append (const ProcessorContext &ctx, Entry entry)
   if (state.embedding_dim == 0)
     {
       state.embedding_dim = static_cast<int> (entry.embedding.size ());
+    }
+  if (entry.memory_id > 0 && entry.memory_references.empty ())
+    {
+      entry.memory_references.push_back (
+          { entry.memory_id, entry.start_ts, entry.kind, entry.source_id });
     }
   state.embedding_index.emplace (entry.embedding_id, state.entries.size ());
   state.search.insert (state.search.end (), entry.embedding.data (),
@@ -295,6 +400,10 @@ RemoveEmbedding (const ProcessorContext &ctx, long long embedding_id)
       return;
     }
   auto &state = *state_owner;
+  if (state.recovery_failed)
+    {
+      return;
+    }
   const auto index_it = state.embedding_index.find (embedding_id);
   if (index_it == state.embedding_index.end ())
     {
