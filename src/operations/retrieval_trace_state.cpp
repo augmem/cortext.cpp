@@ -14,6 +14,7 @@ thread_local RetrievalSummary g_last_retrieval_summary;
 #ifdef CORTEXT_TESTING
 thread_local std::size_t g_last_family_exact_comparison_count = 0;
 thread_local std::size_t g_last_sql_fallback_query_count = 0;
+thread_local std::size_t g_last_sql_fallback_materialized_row_count = 0;
 #endif
 thread_local bool g_capture_enabled = true;
 
@@ -156,6 +157,34 @@ GetLastSqlFallbackQueryCount ()
 {
 #ifdef CORTEXT_TESTING
   return g_last_sql_fallback_query_count;
+#else
+  return 0;
+#endif
+}
+
+void
+ClearLastSqlFallbackMaterializedRowCount ()
+{
+#ifdef CORTEXT_TESTING
+  g_last_sql_fallback_materialized_row_count = 0;
+#endif
+}
+
+void
+SetLastSqlFallbackMaterializedRowCount (std::size_t count)
+{
+#ifdef CORTEXT_TESTING
+  g_last_sql_fallback_materialized_row_count = count;
+#else
+  (void)count;
+#endif
+}
+
+std::size_t
+GetLastSqlFallbackMaterializedRowCount ()
+{
+#ifdef CORTEXT_TESTING
+  return g_last_sql_fallback_materialized_row_count;
 #else
   return 0;
 #endif

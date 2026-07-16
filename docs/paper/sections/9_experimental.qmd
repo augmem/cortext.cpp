@@ -154,13 +154,42 @@ the full SQL scan. A failed rebuild installs a failure sentinel so later
 requests do not retry the two complete surface scans. Shared base vectors keep
 all long-term memory metadata alternatives behind one stored vector so a
 superseded sibling cannot hide an eligible sibling. Retrieval fallback executes
-one eligibility-filtered, scalar-distance-ordered query, then applies
-supersession and exact family collapse in memory until the knob-derived
-candidate budget is filled or the eligible durable surface is exhausted. An
-ephemeral request never installs recovery state in the process registry. A
-separate 256-vector orthogonal-basis test exercises the broad non-duplicate
-surface and requires exact family comparisons to remain below one quarter of
-the all-pairs count.
+demand-driven ordered pages over the current and historical vector surfaces.
+Every SQL page applies kind, timestamp, and supersession eligibility before
+distance ordering and a knob-derived top-k page limit; one C++ cosine-family
+index spans the pages until the ordinary seed budget is full or the surface is
+exhausted. A dedicated invalid-neighbor regression places 900
+closer `WORKING` rows before the eligible long-term target and still requires
+the target to surface. Another regression inserts 600 eligible historical
+memories with distinct embedding identifiers and byte-distinct normalized
+vectors inside one cosine family before a distinct target. The first 477-row
+page cannot fill the semantic-family budget, so the fallback requests a
+second page and the target surfaces. Current per-memory reconstructions remain
+distinct from the historical family selection. The
+adversarial fallback regression contains 430 cosine-near distractors plus 900
+distant rows: the distinctive target remains selected while returned SQL rows
+stay at or below the second-stage knob-derived bound (477 for the test knobs),
+rather than materializing all 1,331 eligible rows. An ephemeral request never
+installs recovery state in the process registry. A separate 256-vector
+orthogonal-basis test exercises the broad non-duplicate surface and requires
+exact family comparisons to remain below one quarter of the all-pairs count.
+
+The fallback performance probe directly forces the failed-cache sentinel and
+compares the repaired statement with pull-request head `19a53132` under the
+same warning-clean Debug build, test objects, store generator, and query vector.
+At 1,915 rows, six paired processes with five timed requests per process
+produced a median process p50 of 43.244 ms for the repaired query versus
+295.397 ms for the head comparator (85.36% lower). At 8,000 rows, six paired
+processes with five requests per process produced 138.709 versus 1,221.390 ms
+(88.64% lower). Candidate-first and comparator-first order each owned half of
+the pairs at both sizes; median 8,000-row process p95 values were 141.450 versus
+1,235.425 ms. The probe isolates query execution from database seeding and
+verifies a nonempty retrieved set on every timed request. This is direct
+cache-loss latency/scaling evidence, not an ANN claim: sqlite-vec remains a
+brute-force linear scan, while each SQL `LIMIT` bounds only the rows returned to
+C++ and decoded downstream. The historical window partition may still sort and
+materialize the full eligible history internally before the limit. The measured
+unique-vector populations fill the semantic seed budget in one page.
 
 Performance was compared against the exact 1.2.1 macOS arm64 prebuild using two
 unmeasured warm-up pairs and 18 measured pairs. Each pair alternated
@@ -181,13 +210,13 @@ tags:
 
 | Metric | Baseline median | Candidate median | Paired median difference | 95% upper bound |
 |---|---:|---:|---:|---:|
-| retrieval p50 (ms) | 7.532 | 3.258 | -4.236 | -3.978 |
-| retrieval p95 (ms) | 11.885 | 8.707 | -3.124 | -2.267 |
-| ingestion p50 (ms) | 16.538 | 7.819 | -8.622 | -8.523 |
-| ingestion p95 (ms) | 28.662 | 11.980 | -16.435 | -16.092 |
-| retrieval throughput (ops/s) | 111.853 | 249.574 | -140.172[^perf-direction] | -130.781 |
-| ingestion throughput (ops/s) | 57.936 | 132.363 | -74.318[^perf-direction] | -70.880 |
-| peak resident bytes | 1,056,464,896 | 788,086,784 | -267,804,672 | -267,206,656 |
+| retrieval p50 (ms) | 7.376 | 3.179 | -4.238 | -4.125 |
+| retrieval p95 (ms) | 11.438 | 8.485 | -3.168 | -2.648 |
+| ingestion p50 (ms) | 16.359 | 6.482 | -9.913 | -9.711 |
+| ingestion p95 (ms) | 28.168 | 10.794 | -17.233 | -16.847 |
+| retrieval throughput (ops/s) | 113.529 | 262.075 | -147.782[^perf-direction] | -142.909 |
+| ingestion throughput (ops/s) | 58.849 | 152.692 | -93.690[^perf-direction] | -90.676 |
+| peak resident bytes | 1,057,677,312 | 787,349,504 | -270,139,392 | -268,058,624 |
 | database bytes | 8,982,528 | 6,008,832 | -2,973,696 | -2,973,696 |
 
 [^perf-direction]: For higher-is-better throughput metrics, the registered
@@ -260,17 +289,17 @@ and F/S/T values.
 
 | Arm | Non-`none` outputs | Consolidations | Top-12 hits | Ingest wall time | Seven-query wall time |
 |---|---:|---:|---:|---:|---:|
-| repaired candidate, no consolidation | 1,519 | 0 | 2/7 | 47.650 s | 179.378 ms |
-| repaired candidate, consolidate on recommendation | 1 | 1 | 2/7 | 48.000 s | 184.338 ms |
+| repaired candidate, no consolidation | 1,546 | 0 | 2/7 | 47.494 s | 180.230 ms |
+| repaired candidate, consolidate on recommendation | 1 | 1 | 2/7 | 45.603 s | 199.968 ms |
 
-The treatment emitted one `recommended` result at write 372, ran one 24.395 ms
+The treatment emitted one `recommended` result at write 372, ran one 22.807 ms
 maintenance transaction, and then emitted `none` for the remaining durable
 writes. The call changed only the persisted acknowledgment latch and
 event-derived floor/peak: it added zero memory rows, long-term rows, working
 rows, current embeddings, graph edges, association memories, signal rows,
 or processed-signal count. SQLite allocated four 4 KiB pages at the call
-boundary; final treatment storage was two 4 KiB pages larger than the matched
-control (23,068,672 versus 23,060,480 bytes).
+boundary, and both independently built fresh databases finished at
+23,064,576 bytes.
 The hashed raw snapshots include the armed latch and nonzero-connectivity count
 before the call, after the call, and at final query boundaries. They record
 `armed` changing from one to zero and zero memories with nonzero persisted
@@ -285,9 +314,9 @@ Performance was therefore checked separately against the frozen released
 baseline with two warm-up pairs and 18 measured fresh-process, fresh-database
 pairs, alternating order at the registered zero non-inferiority margin. All
 eight gates passed. Candidate-minus-baseline latency medians and one-sided 95%
-upper bounds were -4.236/-3.978 ms for retrieval p50,
--3.124/-2.267 ms for retrieval p95, -8.622/-8.523 ms for ingestion p50, and
--16.435/-16.092 ms for ingestion p95. Higher-is-better throughput uses
+upper bounds were -4.238/-4.125 ms for retrieval p50,
+-3.168/-2.648 ms for retrieval p95, -9.913/-9.711 ms for ingestion p50, and
+-17.233/-16.847 ms for ingestion p95. Higher-is-better throughput uses
 baseline minus candidate and was likewise negative at both point and upper
 bound; peak RSS and database bytes also passed.
 

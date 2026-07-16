@@ -760,22 +760,38 @@ RebuildSurfaceSearchCache (Transaction &tx, ProcessorContext &p_ctx,
 std::vector<std::map<std::string, std::any>>
 LoadEligibleSeedRowsFromSqlFallback (
     Transaction &tx, const Eigen::VectorXf &query_embedding,
-    long long exclusion_ts, int candidate_limit,
+    long long exclusion_ts, int candidate_limit, int materialization_limit,
     const std::unordered_set<long long> &superseded_memory_ids,
     double duplicate_threshold)
 {
   std::vector<std::map<std::string, std::any>> selected;
   selected.reserve (static_cast<std::size_t> (std::max (0, candidate_limit)));
-  if (candidate_limit <= 0 || query_embedding.size () <= 0)
+  if (candidate_limit <= 0 || materialization_limit <= 0
+      || query_embedding.size () <= 0)
     {
       return selected;
     }
 
+  std::vector<long long> ordered_superseded_ids (
+      superseded_memory_ids.begin (), superseded_memory_ids.end ());
+  std::sort (ordered_superseded_ids.begin (), ordered_superseded_ids.end ());
+  std::string superseded_membership = ",";
+  for (const long long memory_id : ordered_superseded_ids)
+    {
+      superseded_membership += std::to_string (memory_id);
+      superseded_membership += ',';
+    }
+
   std::unordered_set<long long> seen_memory_ids;
   FamilyRepresentativeIndex families (duplicate_threshold);
-  auto rows = tx.Execute (
-      "SELECT memory_id, embedding_id, start_ts, embedding "
-      "FROM ("
+  std::size_t row_offset = 0;
+#ifdef CORTEXT_TESTING
+  std::size_t materialized_row_count = 0;
+#endif
+  while (static_cast<int> (selected.size ()) < candidate_limit)
+    {
+      std::string query
+          = "WITH current_eligible AS ("
       "  SELECT m.memory_id, cme.embedding_id, m.start_ts, "
       "         cme.embedding, "
       "         vec_distance_l2(cme.embedding, ?) AS distance "
@@ -783,50 +799,94 @@ LoadEligibleSeedRowsFromSqlFallback (
       "  JOIN memories m ON m.memory_id = cme.memory_id "
       "  WHERE m.kind = 'LONG_TERM' "
       "    AND COALESCE(m.start_ts, 0) < ? "
-      "  UNION ALL "
-      "  SELECT m.memory_id, m.embedding_id, m.start_ts, e.embedding, "
+      "    AND instr(?, ',' || CAST(m.memory_id AS TEXT) || ',') = 0"
+      "), historical_eligible AS ("
+      "  SELECT m.memory_id, m.embedding_id, m.start_ts, "
+      "         e.embedding, "
       "         vec_distance_l2(e.embedding, ?) AS distance "
       "  FROM memories m "
       "  JOIN embeddings e ON e.embedding_id = m.embedding_id "
       "  WHERE m.kind = 'LONG_TERM' "
       "    AND COALESCE(m.start_ts, 0) < ? "
+      "    AND instr(?, ',' || CAST(m.memory_id AS TEXT) || ',') = 0 "
       "    AND NOT EXISTS ("
       "      SELECT 1 FROM current_memory_embeddings cme2 "
       "      WHERE cme2.memory_id = m.memory_id"
       "    )"
-      ") eligible "
-      "ORDER BY distance ASC, memory_id ASC, embedding_id ASC",
-      { ToFloatVector (query_embedding), exclusion_ts,
-        ToFloatVector (query_embedding), exclusion_ts });
+      "), historical_ranked AS ("
+      "  SELECT memory_id, embedding_id, start_ts, embedding, distance, "
+      "         ROW_NUMBER() OVER ("
+      "           PARTITION BY embedding "
+      "           ORDER BY start_ts ASC, memory_id ASC"
+      "         ) AS reference_rank "
+      "  FROM historical_eligible"
+      "), eligible AS ("
+      "  SELECT memory_id, embedding_id, start_ts, embedding, distance "
+      "  FROM current_eligible "
+      "  UNION ALL "
+      "  SELECT memory_id, embedding_id, start_ts, embedding, distance "
+      "  FROM historical_ranked WHERE reference_rank = 1"
+      ") "
+      "SELECT memory_id, embedding_id, start_ts, embedding "
+      "FROM eligible ";
+      std::vector<std::any> params = {
+        ToFloatVector (query_embedding), exclusion_ts, superseded_membership,
+        ToFloatVector (query_embedding), exclusion_ts, superseded_membership
+      };
+      query += "ORDER BY distance ASC, memory_id ASC, embedding_id ASC "
+               "LIMIT ?";
+      params.push_back (static_cast<long long> (materialization_limit));
+      if (row_offset > 0)
+        {
+          query += " OFFSET ?";
+          params.push_back (static_cast<long long> (row_offset));
+        }
+      auto rows = tx.Execute (query, params);
 #ifdef CORTEXT_TESTING
-  retrieval_trace::IncrementLastSqlFallbackQueryCount ();
+      retrieval_trace::IncrementLastSqlFallbackQueryCount ();
+      materialized_row_count += rows.size ();
 #endif
-  for (auto &row : rows)
-    {
-      const long long memory_id = AnyLongLong (row, "memory_id");
-      const auto embedding_it = row.find ("embedding");
-      Eigen::VectorXf embedding;
-      if (memory_id <= 0 || superseded_memory_ids.count (memory_id) != 0
-          || !seen_memory_ids.insert (memory_id).second
-          || embedding_it == row.end ()
-          || !AnyToEmbedding (
-              embedding_it->second, static_cast<int> (query_embedding.size ()),
-              embedding))
+      if (rows.empty ())
         {
-          continue;
+          break;
         }
-      auto features = BuildFamilyEmbeddingFeatures (embedding);
-      if (families.IsDuplicate (features))
+      row_offset += rows.size ();
+
+      for (auto &row : rows)
         {
-          continue;
+          const long long memory_id = AnyLongLong (row, "memory_id");
+          const auto embedding_it = row.find ("embedding");
+          Eigen::VectorXf embedding;
+          if (memory_id <= 0 || superseded_memory_ids.count (memory_id) != 0
+              || !seen_memory_ids.insert (memory_id).second
+              || embedding_it == row.end ()
+              || !AnyToEmbedding (embedding_it->second,
+                                  static_cast<int> (query_embedding.size ()),
+                                  embedding))
+            {
+              continue;
+            }
+          auto features = BuildFamilyEmbeddingFeatures (embedding);
+          if (families.IsDuplicate (features))
+            {
+              continue;
+            }
+          families.Add (std::move (features));
+          selected.push_back (std::move (row));
+          if (static_cast<int> (selected.size ()) >= candidate_limit)
+            {
+              break;
+            }
         }
-      families.Add (std::move (features));
-      selected.push_back (std::move (row));
-      if (static_cast<int> (selected.size ()) >= candidate_limit)
+      if (rows.size () < static_cast<std::size_t> (materialization_limit))
         {
           break;
         }
     }
+#ifdef CORTEXT_TESTING
+  retrieval_trace::SetLastSqlFallbackMaterializedRowCount (
+      materialized_row_count);
+#endif
   return selected;
 }
 
@@ -1018,6 +1078,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
 #ifdef CORTEXT_TESTING
   retrieval_trace::ClearLastFamilyExactComparisonCount ();
   retrieval_trace::ClearLastSqlFallbackQueryCount ();
+  retrieval_trace::ClearLastSqlFallbackMaterializedRowCount ();
 #endif
 
   if (!context.GetShouldCheckRetrieval ())
@@ -1036,6 +1097,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       1, core::RetrievalGraphExpandedRagMaxItems (F, T));
   const int seed_search_limit
       = core::RetrievalSeedSearchK (F, S, T, seed_limit);
+  const int fallback_materialization_limit
+      = core::RetrievalSeedSearchK (F, S, T, seed_search_limit);
   const int fanout = std::max (
       0, core::RetrievalGraphExpansionFanout (F, S, T));
   const std::uint64_t exclusion_ts
@@ -1142,7 +1205,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         {
           auto fallback_rows = LoadEligibleSeedRowsFromSqlFallback (
               tx, signal.embedding, static_cast<long long> (exclusion_ts),
-              seed_search_limit, superseded_memory_ids, duplicate_threshold);
+              seed_limit, fallback_materialization_limit,
+              superseded_memory_ids, duplicate_threshold);
           AppendUniqueRows (rows, std::move (fallback_rows),
                             seen_seed_memory_ids);
         }

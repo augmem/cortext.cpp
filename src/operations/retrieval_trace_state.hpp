@@ -111,6 +111,9 @@ std::size_t GetLastFamilyExactComparisonCount ();
 void ClearLastSqlFallbackQueryCount ();
 void IncrementLastSqlFallbackQueryCount ();
 std::size_t GetLastSqlFallbackQueryCount ();
+void ClearLastSqlFallbackMaterializedRowCount ();
+void SetLastSqlFallbackMaterializedRowCount (std::size_t count);
+std::size_t GetLastSqlFallbackMaterializedRowCount ();
 
 bool CaptureEnabled ();
 
