@@ -13,6 +13,7 @@
 #include "operations/constructive_recall_internal.hpp"
 #include "operations/consolidation_throughput_state_internal.hpp"
 #include "operations/historical_surface_search_cache_internal.hpp"
+#include "operations/signal_record_rollback_internal.hpp"
 #include "working_memory_time_internal.hpp"
 #include <algorithm>
 #include <atomic>
@@ -241,10 +242,398 @@ struct ProcessorRollbackSnapshot
   bool initialized = false;
 };
 
+struct DetachedWorkingMemoryRecords
+{
+  struct SlotRecords
+  {
+    std::size_t slot_index = 0;
+    std::vector<SignalRecord> records;
+    std::vector<std::vector<unsigned char>> blob_ids;
+  };
+
+  std::vector<SlotRecords> slots;
+};
+
+DetachedWorkingMemoryRecords
+DetachWorkingMemoryRecords (ProcessorContext &context)
+{
+  DetachedWorkingMemoryRecords detached;
+  detached.slots.reserve (context.wm_slots.size ());
+  for (std::size_t index = 0; index < context.wm_slots.size (); ++index)
+    {
+      auto &slot = context.wm_slots[index];
+      detached.slots.push_back (
+          { index, std::move (slot.signal_records),
+            std::move (slot.blob_ids) });
+      slot.signal_records.clear ();
+      slot.blob_ids.clear ();
+    }
+  return detached;
+}
+
+void
+AttachWorkingMemoryRecords (ProcessorContext &context,
+                            DetachedWorkingMemoryRecords &detached)
+{
+  for (auto &entry : detached.slots)
+    {
+      if (entry.slot_index < context.wm_slots.size ())
+        {
+          context.wm_slots[entry.slot_index].signal_records
+              = std::move (entry.records);
+          context.wm_slots[entry.slot_index].blob_ids
+              = std::move (entry.blob_ids);
+        }
+    }
+}
+
 #if defined(CORTEXT_TESTING)
 std::atomic_size_t g_processor_rollback_snapshot_owner_count { 0 };
 std::atomic_size_t g_processor_rollback_snapshot_reuse_count { 0 };
+std::atomic_size_t g_signal_record_rollback_backup_count { 0 };
+std::atomic_size_t g_signal_record_rollback_copied_record_count { 0 };
+std::atomic_int g_signal_record_snapshot_setup_throw_stage { 0 };
 #endif
+
+class SignalRecordRollbackJournal
+{
+public:
+  SignalRecordRollbackJournal (ProcessorContext &context,
+                               std::string source_id, bool journal_aware)
+      : context_ (context), source_id_ (std::move (source_id)),
+        journal_aware_ (journal_aware)
+  {
+  }
+
+  void
+  CopyScalarSnapshotTo (ProcessorContext &snapshot)
+  {
+    if (!journal_aware_)
+      {
+        snapshot = context_;
+        return;
+      }
+    working_memory_sizes_.clear ();
+    working_memory_sizes_.reserve (context_.wm_slots.size ());
+    working_memory_live_to_original_.clear ();
+    working_memory_live_to_original_.reserve (context_.wm_slots.size ());
+    preserved_working_memory_.slots.clear ();
+    preserved_working_memory_.slots.reserve (context_.wm_slots.size ());
+    for (std::size_t index = 0; index < context_.wm_slots.size (); ++index)
+      {
+        working_memory_live_to_original_.push_back (index);
+      }
+
+    std::vector<SignalRecord> current_records;
+    std::vector<std::vector<unsigned char>> current_blob_ids;
+    std::unordered_map<std::string, AccumulatorState> accumulators;
+    DetachedWorkingMemoryRecords detached;
+    bool current_records_detached = false;
+    bool accumulators_detached = false;
+    bool working_memory_detached = false;
+    try
+      {
+        auto current_it = context_.accumulator_states.find (source_id_);
+        if (current_it != context_.accumulator_states.end ())
+          {
+            current_existed_ = true;
+            original_record_size_ = current_it->second.signals.size ();
+            original_blob_id_size_ = current_it->second.blob_ids.size ();
+            current_records = std::move (current_it->second.signals);
+            current_blob_ids = std::move (current_it->second.blob_ids);
+            current_records_detached = true;
+            MaybeThrowDuringSnapshotSetup (1);
+            current_before_ = current_it->second;
+            current_it->second.signals = std::move (current_records);
+            current_it->second.blob_ids = std::move (current_blob_ids);
+            current_records_detached = false;
+          }
+        accumulators = std::move (context_.accumulator_states);
+        context_.accumulator_states.clear ();
+        accumulators_detached = true;
+        MaybeThrowDuringSnapshotSetup (2);
+        detached = DetachWorkingMemoryRecords (context_);
+        working_memory_detached = true;
+        MaybeThrowDuringSnapshotSetup (3);
+        for (const auto &entry : detached.slots)
+          {
+            working_memory_sizes_.push_back (
+                { entry.records.size (), entry.blob_ids.size () });
+          }
+        snapshot = context_;
+        context_.accumulator_states = std::move (accumulators);
+        accumulators_detached = false;
+        AttachWorkingMemoryRecords (context_, detached);
+        working_memory_detached = false;
+      }
+    catch (...)
+      {
+        if (working_memory_detached)
+          {
+            AttachWorkingMemoryRecords (context_, detached);
+          }
+        if (accumulators_detached)
+          {
+            context_.accumulator_states = std::move (accumulators);
+          }
+        if (current_records_detached)
+          {
+            auto current_it = context_.accumulator_states.find (source_id_);
+            if (current_it != context_.accumulator_states.end ())
+              {
+                current_it->second.signals = std::move (current_records);
+                current_it->second.blob_ids = std::move (current_blob_ids);
+              }
+          }
+        throw;
+      }
+  }
+
+  void
+  RestoreRecordsInto (ProcessorContext &snapshot)
+  {
+    if (!journal_aware_)
+      {
+        return;
+      }
+    if (full_accumulator_backup_)
+      {
+        snapshot.accumulator_states = std::move (*full_accumulator_backup_);
+        full_accumulator_backup_.reset ();
+      }
+    else if (destructive_backup_)
+      {
+        if (current_existed_)
+          {
+            context_.accumulator_states.insert_or_assign (
+                source_id_, std::move (*current_accumulator_backup_));
+          }
+        else
+          {
+            context_.accumulator_states.erase (source_id_);
+          }
+        snapshot.accumulator_states = std::move (context_.accumulator_states);
+        current_accumulator_backup_.reset ();
+      }
+    else
+      {
+        RestoreCurrentAccumulator (context_.accumulator_states);
+        snapshot.accumulator_states = std::move (context_.accumulator_states);
+      }
+    RestoreWorkingMemoryRecordsInto (snapshot);
+  }
+
+  void
+  EnsureBackedUp ()
+  {
+    if (destructive_backup_ || full_accumulator_backup_)
+      {
+        return;
+      }
+    if (current_existed_)
+      {
+        current_accumulator_backup_ = CopyCurrentAccumulatorBefore ();
+      }
+#if defined(CORTEXT_TESTING)
+    std::size_t copied_records = current_accumulator_backup_
+                                     ? current_accumulator_backup_->signals.size ()
+                                     : 0;
+    g_signal_record_rollback_backup_count.fetch_add (
+        1, std::memory_order_relaxed);
+    g_signal_record_rollback_copied_record_count.fetch_add (
+        copied_records, std::memory_order_relaxed);
+#endif
+    destructive_backup_ = true;
+  }
+
+  void
+  EnsureAllBackedUp ()
+  {
+    if (full_accumulator_backup_)
+      {
+        return;
+      }
+    auto accumulator_backup = context_.accumulator_states;
+    RestoreCurrentAccumulator (accumulator_backup);
+    if (current_accumulator_backup_)
+      {
+        accumulator_backup.insert_or_assign (
+            source_id_, *current_accumulator_backup_);
+      }
+#if defined(CORTEXT_TESTING)
+    std::size_t copied_records = 0;
+    for (const auto &[_, accumulator] : accumulator_backup)
+      {
+        copied_records += accumulator.signals.size ();
+      }
+    g_signal_record_rollback_backup_count.fetch_add (
+        1, std::memory_order_relaxed);
+    g_signal_record_rollback_copied_record_count.fetch_add (
+        copied_records, std::memory_order_relaxed);
+#endif
+    full_accumulator_backup_ = std::move (accumulator_backup);
+    current_accumulator_backup_.reset ();
+    destructive_backup_ = false;
+  }
+
+  static void
+  EnsureBackedUpThunk (void *owner)
+  {
+    static_cast<SignalRecordRollbackJournal *> (owner)->EnsureBackedUp ();
+  }
+
+  static void
+  EnsureAllBackedUpThunk (void *owner)
+  {
+    static_cast<SignalRecordRollbackJournal *> (owner)->EnsureAllBackedUp ();
+  }
+
+  void
+  PreserveWorkingMemorySlotBeforeErase (std::size_t slot_index)
+  {
+    if (slot_index >= context_.wm_slots.size ()
+        || slot_index >= working_memory_live_to_original_.size ())
+      {
+        return;
+      }
+    auto &slot = context_.wm_slots[slot_index];
+    preserved_working_memory_.slots.push_back (
+        { working_memory_live_to_original_[slot_index],
+          std::move (slot.signal_records), std::move (slot.blob_ids) });
+    slot.signal_records.clear ();
+    slot.blob_ids.clear ();
+    working_memory_live_to_original_.erase (
+        working_memory_live_to_original_.begin ()
+        + static_cast<std::ptrdiff_t> (slot_index));
+  }
+
+  static void
+  PreserveWorkingMemorySlotBeforeEraseThunk (void *owner,
+                                             std::size_t slot_index)
+  {
+    static_cast<SignalRecordRollbackJournal *> (owner)
+        ->PreserveWorkingMemorySlotBeforeErase (slot_index);
+  }
+
+private:
+  static void
+  MaybeThrowDuringSnapshotSetup (int stage)
+  {
+#if defined(CORTEXT_TESTING)
+    int expected = stage;
+    if (g_signal_record_snapshot_setup_throw_stage.compare_exchange_strong (
+            expected, 0, std::memory_order_relaxed))
+      {
+        throw std::runtime_error ("injected snapshot setup failure");
+      }
+#else
+    (void)stage;
+#endif
+  }
+
+  struct RecordVectorSizes
+  {
+    std::size_t records = 0;
+    std::size_t blob_ids = 0;
+  };
+
+  AccumulatorState
+  CopyCurrentAccumulatorBefore () const
+  {
+    const auto current_it = context_.accumulator_states.find (source_id_);
+    AccumulatorState copied = current_it->second;
+    copied.signals.resize (
+        std::min (copied.signals.size (), original_record_size_));
+    copied.blob_ids.resize (
+        std::min (copied.blob_ids.size (), original_blob_id_size_));
+    AccumulatorState restored = *current_before_;
+    restored.signals = std::move (copied.signals);
+    restored.blob_ids = std::move (copied.blob_ids);
+    return restored;
+  }
+
+  void
+  RestoreCurrentAccumulator (
+      std::unordered_map<std::string, AccumulatorState> &accumulators) const
+  {
+    if (!current_existed_)
+      {
+        accumulators.erase (source_id_);
+        return;
+      }
+    auto current_it = accumulators.find (source_id_);
+    std::vector<SignalRecord> records;
+    std::vector<std::vector<unsigned char>> blob_ids;
+    if (current_it != accumulators.end ())
+      {
+        records = std::move (current_it->second.signals);
+        blob_ids = std::move (current_it->second.blob_ids);
+      }
+    records.resize (std::min (records.size (), original_record_size_));
+    blob_ids.resize (std::min (blob_ids.size (), original_blob_id_size_));
+    AccumulatorState restored = *current_before_;
+    restored.signals = std::move (records);
+    restored.blob_ids = std::move (blob_ids);
+    accumulators.insert_or_assign (source_id_, std::move (restored));
+  }
+
+  void
+  TrimWorkingMemoryToOriginalSizes (
+      DetachedWorkingMemoryRecords &records) const
+  {
+    for (auto &entry : records.slots)
+      {
+        const RecordVectorSizes original
+            = entry.slot_index < working_memory_sizes_.size ()
+                  ? working_memory_sizes_[entry.slot_index]
+                  : RecordVectorSizes{};
+        entry.records.resize (
+            std::min (entry.records.size (), original.records));
+        entry.blob_ids.resize (
+            std::min (entry.blob_ids.size (), original.blob_ids));
+      }
+  }
+
+  void
+  RestoreWorkingMemoryRecordsInto (ProcessorContext &snapshot)
+  {
+    auto live_records = DetachWorkingMemoryRecords (context_);
+    DetachedWorkingMemoryRecords restored;
+    restored.slots.reserve (working_memory_sizes_.size ());
+    const std::size_t retained_count = std::min (
+        live_records.slots.size (), working_memory_live_to_original_.size ());
+    for (std::size_t index = 0; index < retained_count; ++index)
+      {
+        auto &entry = live_records.slots[index];
+        restored.slots.push_back (
+            { working_memory_live_to_original_[index],
+              std::move (entry.records), std::move (entry.blob_ids) });
+      }
+    for (auto &entry : preserved_working_memory_.slots)
+      {
+        restored.slots.push_back (
+            { entry.slot_index, std::move (entry.records),
+              std::move (entry.blob_ids) });
+      }
+    TrimWorkingMemoryToOriginalSizes (restored);
+    AttachWorkingMemoryRecords (snapshot, restored);
+  }
+
+  ProcessorContext &context_;
+  std::string source_id_;
+  bool current_existed_ = false;
+  bool journal_aware_ = false;
+  std::size_t original_record_size_ = 0;
+  std::size_t original_blob_id_size_ = 0;
+  std::optional<AccumulatorState> current_before_;
+  std::vector<RecordVectorSizes> working_memory_sizes_;
+  std::vector<std::size_t> working_memory_live_to_original_;
+  DetachedWorkingMemoryRecords preserved_working_memory_;
+  bool destructive_backup_ = false;
+  std::optional<AccumulatorState> current_accumulator_backup_;
+  std::optional<std::unordered_map<std::string, AccumulatorState>>
+      full_accumulator_backup_;
+};
 
 /// Owns the caller-provided operation and the rollback storage for its
 /// SignalProcessor. A single handle already requires external synchronization;
@@ -293,7 +682,11 @@ public:
   };
 
   explicit SnapshotOwningOperation (std::unique_ptr<IOperation> operation)
-      : operation_ (std::move (operation))
+      : journal_aware_ (
+            dynamic_cast<operations::signal_record_rollback_internal::
+                             JournalAwareOperation *> (operation.get ())
+            != nullptr),
+        operation_ (std::move (operation))
   {
 #if defined(CORTEXT_TESTING)
     g_processor_rollback_snapshot_owner_count.fetch_add (
@@ -328,6 +721,12 @@ public:
     return Lease (*this, snapshot);
   }
 
+  bool
+  IsJournalAware () const
+  {
+    return journal_aware_;
+  }
+
   void
   Execute (OperationContext &ctx, Transaction &tx) const override
   {
@@ -341,6 +740,7 @@ private:
     --active_depth_;
   }
 
+  bool journal_aware_ = false;
   std::unique_ptr<IOperation> operation_;
   std::vector<std::unique_ptr<ProcessorRollbackSnapshot>> snapshots_;
   std::size_t active_depth_ = 0;
@@ -2021,6 +2421,27 @@ ProcessorRollbackSnapshotReuseCountForTest ()
   return g_processor_rollback_snapshot_reuse_count.load (
       std::memory_order_relaxed);
 }
+
+std::size_t
+SignalRecordRollbackBackupCountForTest ()
+{
+  return g_signal_record_rollback_backup_count.load (
+      std::memory_order_relaxed);
+}
+
+std::size_t
+SignalRecordRollbackCopiedRecordCountForTest ()
+{
+  return g_signal_record_rollback_copied_record_count.load (
+      std::memory_order_relaxed);
+}
+
+void
+SetSignalRecordSnapshotSetupThrowStageForTest (int stage)
+{
+  g_signal_record_snapshot_setup_throw_stage.store (
+      stage, std::memory_order_relaxed);
+}
 } // namespace testing
 #endif
 
@@ -2128,11 +2549,14 @@ SignalProcessor::Process (const Signal &signal)
       = static_cast<SnapshotOwningOperation &> (*root_operation_);
   auto snapshot_lease = snapshot_owner.Acquire ();
   auto &rollback_snapshot = snapshot_lease.Get ();
+  SignalRecordRollbackJournal signal_record_journal (
+      *context_, signal.source_id, snapshot_owner.IsJournalAware ());
   {
     auto detached_caches = DetachRebuildableProcessorCaches (*context_);
     try
       {
-        rollback_snapshot.context = *context_;
+        signal_record_journal.CopyScalarSnapshotTo (
+            rollback_snapshot.context);
         rollback_snapshot.caches = detached_caches;
         rollback_snapshot.consolidation_throughput
             = operations::consolidation_throughput_state_internal::Find (
@@ -2151,6 +2575,12 @@ SignalProcessor::Process (const Signal &signal)
 
   OperationContext op_context (signal, *context_, config_, store_.get (),
                                object_tx.get ());
+  operations::signal_record_rollback_internal::Scope
+      signal_record_rollback_scope (
+          *context_, &signal_record_journal,
+          &SignalRecordRollbackJournal::EnsureBackedUpThunk,
+          &SignalRecordRollbackJournal::EnsureAllBackedUpThunk,
+          &SignalRecordRollbackJournal::PreserveWorkingMemorySlotBeforeEraseThunk);
   if (tx)
     {
       op_context.AddOperationTiming ("SignalProcessor.begin_transaction",
@@ -2174,6 +2604,7 @@ SignalProcessor::Process (const Signal &signal)
   };
   auto restore_context_snapshot = [&] {
     operations::historical_surface_search_cache_internal::Erase (*context_);
+    signal_record_journal.RestoreRecordsInto (rollback_snapshot.context);
     *context_ = std::move (rollback_snapshot.context);
     operations::consolidation_throughput_state_internal::Reset (
         *context_, rollback_snapshot.consolidation_throughput);
@@ -2187,6 +2618,7 @@ SignalProcessor::Process (const Signal &signal)
       }
   };
   auto restore_read_only_context_snapshot = [&] {
+    signal_record_journal.RestoreRecordsInto (rollback_snapshot.context);
     *context_ = std::move (rollback_snapshot.context);
     operations::consolidation_throughput_state_internal::Reset (
         *context_, rollback_snapshot.consolidation_throughput);

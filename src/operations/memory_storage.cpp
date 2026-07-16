@@ -1,6 +1,7 @@
 #include "cortext/operations/memory_storage.hpp"
 #include "constructive_recall_internal.hpp"
 #include "historical_surface_search_cache_internal.hpp"
+#include "signal_record_rollback_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -621,6 +622,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
     }
 
   auto &p_ctx = context.GetProcessorContext ();
+  signal_record_rollback_internal::EnsureBackedUp (p_ctx);
 
   // Get accumulator state for this source
   auto acc_it = p_ctx.accumulator_states.find (signal.source_id);

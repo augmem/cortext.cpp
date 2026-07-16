@@ -7,6 +7,7 @@
 #include <cortext/store/sqlite_store.hpp>
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "../src/operations/consolidation_throughput_state_internal.hpp"
+#include "../src/operations/signal_record_rollback_internal.hpp"
 #include <thread>
 
 using namespace cortext;
@@ -15,6 +16,9 @@ namespace cortext::testing
 {
 std::size_t ProcessorRollbackSnapshotOwnerCountForTest ();
 std::size_t ProcessorRollbackSnapshotReuseCountForTest ();
+std::size_t SignalRecordRollbackBackupCountForTest ();
+std::size_t SignalRecordRollbackCopiedRecordCountForTest ();
+void SetSignalRecordSnapshotSetupThrowStageForTest (int stage);
 }
 
 struct InsertOp : IOperation
@@ -163,6 +167,12 @@ struct ExerciseWholeContextRollbackOp : IOperation
     ++call_count;
     if (call_count == 1)
       {
+        AccumulatorState active;
+        active.n_signals = 1;
+        SignalRecord active_record;
+        active_record.payload.assign (8, 0x11);
+        active.signals.push_back (std::move (active_record));
+        processor_context.accumulator_states["test"] = std::move (active);
         AccumulatorState foreign;
         foreign.n_signals = 7;
         foreign.mu_acc = Eigen::VectorXf::Constant (256, 0.125f);
@@ -175,6 +185,9 @@ struct ExerciseWholeContextRollbackOp : IOperation
       }
     if (call_count == 2)
       {
+        processor_context.accumulator_states.at ("test")
+            .signals.front ().payload.assign (8, 0xFF);
+        processor_context.accumulator_states.at ("test").signals.clear ();
         processor_context.accumulator_states.erase ("foreign/source");
         processor_context.accumulator_states["unexpected/source"].n_signals
             = 99;
@@ -193,6 +206,9 @@ struct ExerciseWholeContextRollbackOp : IOperation
               && accumulator_it->second.mu_acc.size () == 256
               && accumulator_it->second.mu_acc[0] == 0.125f
               && accumulator_it->second.primary_modality == "audio"
+              && processor_context.accumulator_states.at ("test")
+                         .signals.front ().payload
+                     == std::vector<unsigned char> (8, 0x11)
               && !processor_context.accumulator_states.contains (
                   "unexpected/source")
               && processor_context.recent_scores
@@ -203,6 +219,444 @@ struct ExerciseWholeContextRollbackOp : IOperation
 
   bool *restored;
   mutable int call_count = 0;
+};
+
+struct ExercisePendingUnitRollbackOwnershipOp : IOperation
+{
+  ExercisePendingUnitRollbackOwnershipOp (std::size_t record_count,
+                                          bool *restored_without_copy)
+      : record_count (record_count),
+        restored_without_copy (restored_without_copy)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &processor_context = ctx.GetProcessorContext ();
+    ++call_count;
+    if (call_count == 1)
+      {
+        AccumulatorState pending;
+        pending.n_signals = static_cast<int> (record_count);
+        for (std::size_t index = 0; index < record_count; ++index)
+          {
+            SignalRecord record;
+            record.embedding = Eigen::VectorXf::Constant (
+                256, static_cast<float> (index + 1));
+            record.payload.assign (128, static_cast<unsigned char> (index));
+            record.serial_position = static_cast<int> (index);
+            pending.signals.push_back (std::move (record));
+          }
+        auto [inserted, _]
+            = processor_context.accumulator_states.insert_or_assign (
+                "test", std::move (pending));
+        first_payload = inserted->second.signals.front ().payload.data ();
+        middle_payload
+            = inserted->second.signals[record_count / 2].payload.data ();
+        last_payload = inserted->second.signals.back ().payload.data ();
+        ProcessorContext::WMSlot slot;
+        slot.memory_id = 91;
+        slot.signal_records = inserted->second.signals;
+        slot.blob_ids.push_back (std::vector<unsigned char> (32, 0x5A));
+        processor_context.wm_slots.push_back (std::move (slot));
+        wm_first_payload = processor_context.wm_slots.front ()
+                               .signal_records.front ().payload.data ();
+        wm_first_blob
+            = processor_context.wm_slots.front ().blob_ids.front ().data ();
+        return;
+      }
+    if (call_count == 2)
+      {
+        auto &pending = processor_context.accumulator_states.at (
+            "test");
+        SignalRecord appended;
+        appended.embedding = Eigen::VectorXf::Ones (256);
+        appended.payload.assign (128, 0xA5);
+        appended.serial_position = static_cast<int> (pending.signals.size ());
+        pending.signals.push_back (std::move (appended));
+        pending.n_signals += 1;
+        pending.s_sum = 99.0;
+        throw std::runtime_error ("force pending-unit rollback");
+      }
+
+    const auto &signals = processor_context.accumulator_states.at (
+        "test").signals;
+    if (restored_without_copy)
+      {
+        *restored_without_copy
+            = signals.size () == record_count
+              && signals.front ().payload.data () == first_payload
+              && signals[record_count / 2].payload.data ()
+                     == middle_payload
+              && signals.back ().payload.data () == last_payload
+              && processor_context.wm_slots.size () == 1
+              && processor_context.wm_slots.front ()
+                         .signal_records.front ().payload.data ()
+                     == wm_first_payload
+              && processor_context.wm_slots.front ()
+                         .blob_ids.front ().data ()
+                     == wm_first_blob;
+      }
+  }
+
+  std::size_t record_count = 0;
+  bool *restored_without_copy = nullptr;
+  mutable int call_count = 0;
+  mutable const unsigned char *first_payload = nullptr;
+  mutable const unsigned char *middle_payload = nullptr;
+  mutable const unsigned char *last_payload = nullptr;
+  mutable const unsigned char *wm_first_payload = nullptr;
+  mutable const unsigned char *wm_first_blob = nullptr;
+};
+
+struct ExerciseFailingFlushRecordRollbackOp : IOperation
+{
+  explicit ExerciseFailingFlushRecordRollbackOp (bool *restored)
+      : restored (restored)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &processor_context = ctx.GetProcessorContext ();
+    ++call_count;
+    if (call_count == 1)
+      {
+        AccumulatorState pending;
+        pending.n_signals = 3;
+        for (int index = 0; index < 3; ++index)
+          {
+            SignalRecord record;
+            record.embedding = Eigen::VectorXf::Constant (
+                256, static_cast<float> (index + 1));
+            record.payload.assign (16,
+                                   static_cast<unsigned char> (index + 10));
+            record.serial_position = index;
+            pending.signals.push_back (std::move (record));
+          }
+        processor_context.accumulator_states["test"] = std::move (pending);
+        AccumulatorState unrelated;
+        unrelated.n_signals = 4096;
+        for (int index = 0; index < 4096; ++index)
+          {
+            SignalRecord record;
+            record.payload.assign (8, 0xA5);
+            unrelated.signals.push_back (std::move (record));
+          }
+        processor_context.accumulator_states["unrelated/large"]
+            = std::move (unrelated);
+        unrelated_first_payload
+            = processor_context.accumulator_states.at ("unrelated/large")
+                  .signals.front ()
+                  .payload.data ();
+        ProcessorContext::WMSlot unrelated_slot;
+        unrelated_slot.memory_id = 404;
+        for (int index = 0; index < 4096; ++index)
+          {
+            SignalRecord record;
+            record.payload.assign (8, 0x5A);
+            unrelated_slot.signal_records.push_back (std::move (record));
+          }
+        processor_context.wm_slots.push_back (std::move (unrelated_slot));
+        unrelated_wm_first_payload
+            = processor_context.wm_slots.front ()
+                  .signal_records.front ().payload.data ();
+        return;
+      }
+    if (call_count == 2)
+      {
+        operations::signal_record_rollback_internal::EnsureBackedUp (
+            processor_context);
+        auto &records = processor_context.accumulator_states.at (
+            "test").signals;
+        records.front ().payload.assign (4, 0xFF);
+        records.front ().blob_id.assign (32, 0xEE);
+        records.clear ();
+        throw std::runtime_error ("force failing flush rollback");
+      }
+
+    const auto &records = processor_context.accumulator_states.at (
+        "test").signals;
+    if (restored)
+      {
+        *restored = records.size () == 3
+                    && records.front ().payload
+                           == std::vector<unsigned char> (16, 10)
+                    && records.front ().blob_id.empty ()
+                    && records.back ().payload
+                           == std::vector<unsigned char> (16, 12)
+                    && processor_context.accumulator_states
+                               .at ("unrelated/large")
+                               .signals.front ()
+                               .payload.data ()
+                           == unrelated_first_payload;
+        *restored
+            = *restored && processor_context.wm_slots.front ()
+                                  .signal_records.front ().payload.data ()
+                              == unrelated_wm_first_payload;
+      }
+  }
+
+  bool *restored = nullptr;
+  mutable int call_count = 0;
+  mutable const unsigned char *unrelated_first_payload = nullptr;
+  mutable const unsigned char *unrelated_wm_first_payload = nullptr;
+};
+
+struct ExerciseSnapshotSetupExceptionSafetyOp : IOperation
+{
+  explicit ExerciseSnapshotSetupExceptionSafetyOp (bool *restored)
+      : restored (restored)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &processor_context = ctx.GetProcessorContext ();
+    ++call_count;
+    if (call_count == 1)
+      {
+        AccumulatorState active;
+        active.n_signals = 1;
+        SignalRecord record;
+        record.payload.assign (32, 0x2A);
+        active.signals.push_back (std::move (record));
+        processor_context.accumulator_states["test"] = std::move (active);
+        ProcessorContext::WMSlot slot;
+        slot.memory_id = 17;
+        slot.signal_records
+            = processor_context.accumulator_states.at ("test").signals;
+        processor_context.wm_slots.push_back (std::move (slot));
+        accumulator_payload = processor_context.accumulator_states.at ("test")
+                                  .signals.front ().payload.data ();
+        working_memory_payload = processor_context.wm_slots.front ()
+                                     .signal_records.front ().payload.data ();
+        return;
+      }
+    *restored = processor_context.accumulator_states.at ("test")
+                        .signals.front ().payload.data ()
+                    == accumulator_payload
+                && processor_context.wm_slots.front ()
+                           .signal_records.front ().payload.data ()
+                       == working_memory_payload;
+  }
+
+  bool *restored = nullptr;
+  mutable int call_count = 0;
+  mutable const unsigned char *accumulator_payload = nullptr;
+  mutable const unsigned char *working_memory_payload = nullptr;
+};
+
+struct ExerciseWorkingMemoryEraseOwnershipOp : IOperation
+{
+  explicit ExerciseWorkingMemoryEraseOwnershipOp (bool *restored)
+      : restored (restored)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &processor_context = ctx.GetProcessorContext ();
+    ++call_count;
+    if (call_count == 1)
+      {
+        ProcessorContext::WMSlot small;
+        small.memory_id = 1;
+        SignalRecord small_record;
+        small_record.payload.assign (8, 0x11);
+        small.signal_records.push_back (std::move (small_record));
+        ProcessorContext::WMSlot large;
+        large.memory_id = 2;
+        for (int index = 0; index < 4096; ++index)
+          {
+            SignalRecord record;
+            record.payload.assign (8, 0x22);
+            large.signal_records.push_back (std::move (record));
+          }
+        processor_context.wm_slots.push_back (std::move (small));
+        processor_context.wm_slots.push_back (std::move (large));
+        small_payload = processor_context.wm_slots[0]
+                            .signal_records.front ().payload.data ();
+        large_payload = processor_context.wm_slots[1]
+                            .signal_records.front ().payload.data ();
+        return;
+      }
+    if (call_count == 2)
+      {
+        operations::signal_record_rollback_internal::
+            PreserveWorkingMemorySlotBeforeErase (processor_context, 0);
+        processor_context.wm_slots.erase (processor_context.wm_slots.begin ());
+        throw std::runtime_error ("force working-memory erase rollback");
+      }
+    *restored = processor_context.wm_slots.size () == 2
+                && processor_context.wm_slots[0]
+                           .signal_records.front ().payload.data ()
+                       == small_payload
+                && processor_context.wm_slots[1]
+                           .signal_records.front ().payload.data ()
+                       == large_payload;
+  }
+
+  bool *restored = nullptr;
+  mutable int call_count = 0;
+  mutable const unsigned char *small_payload = nullptr;
+  mutable const unsigned char *large_payload = nullptr;
+};
+
+struct ExerciseWorkingMemoryAppendOwnershipOp : IOperation
+{
+  explicit ExerciseWorkingMemoryAppendOwnershipOp (bool *restored)
+      : restored (restored)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &processor_context = ctx.GetProcessorContext ();
+    ++call_count;
+    if (call_count == 1)
+      {
+        ProcessorContext::WMSlot slot;
+        slot.memory_id = 81;
+        for (int index = 0; index < 4096; ++index)
+          {
+            SignalRecord record;
+            record.payload.assign (8, 0x31);
+            slot.signal_records.push_back (std::move (record));
+          }
+        processor_context.wm_slots.push_back (std::move (slot));
+        first_payload = processor_context.wm_slots.front ()
+                            .signal_records.front ().payload.data ();
+        return;
+      }
+    if (call_count == 2)
+      {
+        SignalRecord appended;
+        appended.payload.assign (8, 0x42);
+        processor_context.wm_slots.front ().signal_records.push_back (
+            std::move (appended));
+        throw std::runtime_error ("force working-memory append rollback");
+      }
+    *restored = processor_context.wm_slots.front ().signal_records.size ()
+                    == 4096
+                && processor_context.wm_slots.front ()
+                           .signal_records.front ().payload.data ()
+                       == first_payload;
+  }
+
+  bool *restored = nullptr;
+  mutable int call_count = 0;
+  mutable const unsigned char *first_payload = nullptr;
+};
+
+struct ExerciseActiveToFullBackupUpgradeOp : IOperation
+{
+  explicit ExerciseActiveToFullBackupUpgradeOp (bool *restored)
+      : restored (restored)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &processor_context = ctx.GetProcessorContext ();
+    ++call_count;
+    if (call_count == 1)
+      {
+        AccumulatorState active;
+        active.n_signals = 1;
+        SignalRecord active_record;
+        active_record.payload.assign (8, 0x19);
+        active.signals.push_back (std::move (active_record));
+        processor_context.accumulator_states["test"] = std::move (active);
+        AccumulatorState foreign;
+        foreign.n_signals = 7;
+        processor_context.accumulator_states["foreign/source"]
+            = std::move (foreign);
+        return;
+      }
+    if (call_count == 2)
+      {
+        operations::signal_record_rollback_internal::EnsureBackedUp (
+            processor_context);
+        processor_context.accumulator_states.at ("test")
+            .signals.front ().payload.assign (8, 0xFF);
+        operations::signal_record_rollback_internal::EnsureAllBackedUp (
+            processor_context);
+        processor_context.accumulator_states.erase ("foreign/source");
+        throw std::runtime_error ("force full-backup upgrade rollback");
+      }
+    *restored = processor_context.accumulator_states.at ("test")
+                        .signals.front ().payload
+                    == std::vector<unsigned char> (8, 0x19)
+                && processor_context.accumulator_states
+                           .at ("foreign/source").n_signals
+                       == 7;
+  }
+
+  bool *restored = nullptr;
+  mutable int call_count = 0;
+};
+
+struct ExerciseNestedDifferentSourceRollbackOp : IOperation
+{
+  explicit ExerciseNestedDifferentSourceRollbackOp (bool *restored)
+      : restored (restored)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &processor_context = ctx.GetProcessorContext ();
+    const auto &signal = ctx.GetSignal ();
+    if (signal.source_id == "inner/source")
+      {
+        AccumulatorState inner;
+        inner.n_signals = 1;
+        SignalRecord record;
+        record.payload.assign (8, 0x77);
+        inner.signals.push_back (std::move (record));
+        processor_context.accumulator_states[signal.source_id]
+            = std::move (inner);
+        return;
+      }
+
+    ++outer_call_count;
+    if (outer_call_count == 1)
+      {
+        AccumulatorState outer;
+        outer.n_signals = 1;
+        SignalRecord record;
+        record.payload.assign (8, 0x55);
+        outer.signals.push_back (std::move (record));
+        processor_context.accumulator_states[signal.source_id]
+            = std::move (outer);
+        return;
+      }
+    if (outer_call_count == 2)
+      {
+        Signal nested;
+        nested.embedding = Eigen::VectorXf::Zero (256);
+        nested.source_id = "inner/source";
+        nested.timestamp = signal.timestamp + 1;
+        processor->Process (nested);
+        throw std::runtime_error ("force outer rollback after nested process");
+      }
+    *restored = !processor_context.accumulator_states.contains ("inner/source")
+                && processor_context.accumulator_states.at (signal.source_id)
+                           .signals.front ().payload
+                       == std::vector<unsigned char> (8, 0x55);
+  }
+
+  SignalProcessor *processor = nullptr;
+  bool *restored = nullptr;
+  mutable int outer_call_count = 0;
 };
 
 struct ExerciseThroughputRollbackOp : IOperation
@@ -423,6 +877,233 @@ TEST_CASE ("SignalProcessor restores exact durable and cache-only state after "
   proc.Process (signal);
   REQUIRE (retrieval_restored);
   REQUIRE (volatile_restored);
+}
+
+TEST_CASE ("SignalProcessor rollback preserves pending Natural record storage",
+           "[processor][rollback][accumulator][scaling]")
+{
+  const auto backup_count_before
+      = cortext::testing::SignalRecordRollbackBackupCountForTest ();
+  const auto copied_count_before
+      = cortext::testing::SignalRecordRollbackCopiedRecordCountForTest ();
+  for (const std::size_t record_count : { 32U, 512U, 4096U })
+    {
+      auto uniq = SQLiteStore::Create (":memory:");
+      std::shared_ptr<Store> store (std::move (uniq));
+      SignalProcessor::Config cfg;
+      cortext::testing::RequireEncoder (cfg);
+      bool restored_without_copy = false;
+      auto pipeline = std::make_unique<DynamicOperationSet> (
+          std::make_unique<ExercisePendingUnitRollbackOwnershipOp> (
+              record_count, &restored_without_copy));
+      SignalProcessor processor (
+          cfg, store,
+          operations::signal_record_rollback_internal::MarkJournalAware (
+              std::move (pipeline)));
+
+      Signal signal;
+      signal.embedding = Eigen::VectorXf::Zero (256);
+      signal.source_id = "test";
+      signal.timestamp = 1000;
+      processor.Process (signal);
+      signal.timestamp = 2000;
+      REQUIRE_THROWS (processor.Process (signal));
+      signal.timestamp = 3000;
+      processor.Process (signal);
+
+      REQUIRE (restored_without_copy);
+    }
+  REQUIRE (cortext::testing::SignalRecordRollbackBackupCountForTest ()
+           == backup_count_before);
+  REQUIRE (cortext::testing::SignalRecordRollbackCopiedRecordCountForTest ()
+           == copied_count_before);
+}
+
+TEST_CASE ("SignalProcessor lazily backs up records for a failing flush",
+           "[processor][rollback][accumulator][flush]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  bool restored = false;
+  const auto backup_count_before
+      = cortext::testing::SignalRecordRollbackBackupCountForTest ();
+  const auto copied_count_before
+      = cortext::testing::SignalRecordRollbackCopiedRecordCountForTest ();
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ExerciseFailingFlushRecordRollbackOp> (&restored));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::MarkJournalAware (
+          std::move (pipeline)));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "test";
+  signal.timestamp = 1000;
+  processor.Process (signal);
+  signal.timestamp = 2000;
+  REQUIRE_THROWS (processor.Process (signal));
+  signal.timestamp = 3000;
+  processor.Process (signal);
+
+  REQUIRE (restored);
+  REQUIRE (cortext::testing::SignalRecordRollbackBackupCountForTest ()
+           == backup_count_before + 1);
+  REQUIRE (cortext::testing::SignalRecordRollbackCopiedRecordCountForTest ()
+           == copied_count_before + 3);
+}
+
+TEST_CASE ("SignalProcessor snapshot setup restores moved ownership on failure",
+           "[processor][rollback][accumulator][snapshot_setup]")
+{
+  for (const int throw_stage : { 1, 2, 3 })
+    {
+      auto uniq = SQLiteStore::Create (":memory:");
+      std::shared_ptr<Store> store (std::move (uniq));
+      SignalProcessor::Config cfg;
+      cortext::testing::RequireEncoder (cfg);
+      bool restored = false;
+      auto pipeline = std::make_unique<DynamicOperationSet> (
+          std::make_unique<ExerciseSnapshotSetupExceptionSafetyOp> (&restored));
+      SignalProcessor processor (
+          cfg, store,
+          operations::signal_record_rollback_internal::MarkJournalAware (
+              std::move (pipeline)));
+
+      Signal signal;
+      signal.embedding = Eigen::VectorXf::Zero (256);
+      signal.source_id = "test";
+      signal.timestamp = 1000;
+      processor.Process (signal);
+      cortext::testing::SetSignalRecordSnapshotSetupThrowStageForTest (
+          throw_stage);
+      signal.timestamp = 2000;
+      REQUIRE_THROWS (processor.Process (signal));
+      signal.timestamp = 3000;
+      processor.Process (signal);
+      REQUIRE (restored);
+    }
+}
+
+TEST_CASE ("SignalProcessor journals one erased working-memory slot by ownership",
+           "[processor][rollback][working_memory][scaling]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  bool restored = false;
+  const auto copied_count_before
+      = cortext::testing::SignalRecordRollbackCopiedRecordCountForTest ();
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ExerciseWorkingMemoryEraseOwnershipOp> (&restored));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::MarkJournalAware (
+          std::move (pipeline)));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "test";
+  signal.timestamp = 1000;
+  processor.Process (signal);
+  signal.timestamp = 2000;
+  REQUIRE_THROWS (processor.Process (signal));
+  signal.timestamp = 3000;
+  processor.Process (signal);
+
+  REQUIRE (restored);
+  REQUIRE (cortext::testing::SignalRecordRollbackCopiedRecordCountForTest ()
+           == copied_count_before);
+}
+
+TEST_CASE ("SignalProcessor trims working-memory appends without copying history",
+           "[processor][rollback][working_memory][scaling]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  bool restored = false;
+  const auto copied_count_before
+      = cortext::testing::SignalRecordRollbackCopiedRecordCountForTest ();
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ExerciseWorkingMemoryAppendOwnershipOp> (&restored));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::MarkJournalAware (
+          std::move (pipeline)));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "test";
+  signal.timestamp = 1000;
+  processor.Process (signal);
+  signal.timestamp = 2000;
+  REQUIRE_THROWS (processor.Process (signal));
+  signal.timestamp = 3000;
+  processor.Process (signal);
+
+  REQUIRE (restored);
+  REQUIRE (cortext::testing::SignalRecordRollbackCopiedRecordCountForTest ()
+           == copied_count_before);
+}
+
+TEST_CASE ("SignalProcessor full backup upgrade preserves exact active records",
+           "[processor][rollback][accumulator][full_backup]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  bool restored = false;
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ExerciseActiveToFullBackupUpgradeOp> (&restored));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::MarkJournalAware (
+          std::move (pipeline)));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "test";
+  signal.timestamp = 1000;
+  processor.Process (signal);
+  signal.timestamp = 2000;
+  REQUIRE_THROWS (processor.Process (signal));
+  signal.timestamp = 3000;
+  processor.Process (signal);
+  REQUIRE (restored);
+}
+
+TEST_CASE ("SignalProcessor custom nested source changes roll back automatically",
+           "[processor][rollback][nested][custom]")
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  bool restored = false;
+  auto operation
+      = std::make_unique<ExerciseNestedDifferentSourceRollbackOp> (&restored);
+  auto *operation_ptr = operation.get ();
+  auto pipeline
+      = std::make_unique<DynamicOperationSet> (std::move (operation));
+  SignalProcessor processor (cfg, store, std::move (pipeline));
+  operation_ptr->processor = &processor;
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "outer/source";
+  signal.timestamp = 1000;
+  processor.Process (signal);
+  signal.timestamp = 2000;
+  REQUIRE_THROWS (processor.Process (signal));
+  signal.timestamp = 3000;
+  processor.Process (signal);
+  REQUIRE (restored);
 }
 
 TEST_CASE ("SignalProcessor restores consolidation throughput after rollback",

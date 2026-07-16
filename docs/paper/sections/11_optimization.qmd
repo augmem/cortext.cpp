@@ -66,12 +66,53 @@ The current branch includes the following implementation-level changes:
 | memory storage | avoid redundant object-store writes for single-signal memory payloads | durable payload identity is preserved |
 | exact durable-neighbor ranking | maintain private current/base embedding surfaces in a process-wide lifecycle registry, including signal-only rows that affect the sqlite-vec population; rank into typed borrowed/owned candidates; reuse the query norm across exact cosine checks | the registry follows processor teardown across sequential thread migration and mirrors authoritative SQL write decisions; the same candidate population, K, filters, tie order, cosine results, thresholds, and supersession edges are retained; SQL remains the fallback and no public header or API layout changes |
 | graph retrieval | score vector similarity first, restrict recency to a tie-break, cap graph bonus, and reserve final occupancy for direct semantic anchors | recent unrelated rows and noisy graph neighbors cannot displace the semantic seed surface |
-| rollback snapshots | detach rebuildable durable caches before copying processor state; ephemeral queries roll back their transaction and restore that exact snapshot without rebuilding the unchanged search surface | generic failures and public no-store queries restore durable and volatile processor state exactly |
+| rollback snapshots | detach rebuildable durable caches, move the private accumulator map, and detach working-memory signal-record and blob-reference vectors before copying remaining processor state; journal active-source vector lengths for ordinary appends and lazily deep-back up only the active source before accepted storage, flush reset, or interrupt reset can mutate prior records; trim working-memory appends and move an evicted slot's record ownership into the journal; reserve a full-map hook for explicit foreign-source accumulator-topology mutation | non-boundary Natural ingestion does not recopy the growing pending unit or source map; a one-source flush does not copy unrelated open-source or working-memory history; failed writes and public no-store queries restore durable and volatile state exactly; public state layout and retention semantics are unchanged |
 | synaptic tagging | use indexed temporal candidate supersets with boundary ties before applying the original exact score and order | the same nearest source-backed memories are tagged without a whole-source group scan |
 | live replay ingress | internal replay path can skip per-event hydration when no probe needs it | public processing APIs still hydrate normally |
 
 The important correctness point is that these are implementation changes to the
 retained engine. They do not reintroduce the removed semantic batch stack.
+
+### Natural/Durable Write-Path Ownership
+
+Natural retention was introduced after the earlier retrieval-latency work, and
+the contemporaneous benchmark ingress was explicitly kept Durable. The July 14
+durable-ingestion optimization therefore established the one-packet Durable
+profile, not the scaling of a long open Natural unit. Source tracing shows that
+both retention values already enter the same `FullRoot`; the competing cost was
+snapshot ownership. Durable forces a boundary/write and resets the unit after
+each call, while Natural can retain many embeddings and payloads. The generic
+rollback copy detached durable search caches but still deep-copied those pending
+records and completed working-memory record lists on every packet.
+
+The cutover retains one accumulator/write algorithm. Natural continues to
+append and uses unchanged adaptive grouping. Durable only forces the explicit
+flush/commit edge over the same pending unit, including its own packet once.
+The private rollback journal makes ordinary Natural snapshot work independent
+of pending-record count; an actual boundary pays one exact active-unit
+backup/write cost. Deterministic 32-, 512-, and 4,096-record accumulator plus matching
+working-memory regressions verify unchanged payload/blob allocation identities
+and zero lazy record backups on ordinary rollback. A failing-flush regression
+verifies one three-record active-source backup restores cleared records plus
+mutated payload/blob state while 4,096 unrelated-source and working-memory
+records remain allocation-identical and add zero to the copy counter. A
+working-memory eviction regression moves one erased slot into the journal and
+restores it beside 4,096 untouched records with zero record copies. Controlled
+failures after active-record detachment, accumulator-map transfer, and
+working-memory detachment verify exception-safe restoration. A direct
+4,096-record working-memory append regression verifies length trimming and
+payload allocation identity without record copies. The journal is selected by
+a private marker on the production operation root; arbitrary caller-supplied
+operation roots retain complete automatic context snapshots, proven by
+hookless destructive and nested different-source failure regressions. A public integration
+regression verifies two Natural packets followed by one
+Durable packet produce one three-signal memory and three ordered signal rows.
+An explicitly marked escalation regression verifies that an exact active-source
+backup remains authoritative when a later foreign-topology mutation requests a
+full-map backup and the combined operation fails.
+These are source-health and work-count proofs. They do not reproduce the full
+15,500-packet observation and do not turn the exact durable candidate scan into
+an asymptotically flat store search.
 
 On 2026-06-30, a full Meta MSC replay rerun verified the retrieval-cache
 optimization on the same 9,130-turn slice used for the hosted frontier-judge

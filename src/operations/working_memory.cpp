@@ -1,4 +1,5 @@
 #include "cortext/operations/working_memory.hpp"
+#include "signal_record_rollback_internal.hpp"
 
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -527,6 +528,8 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
 
       if (evict_idx >= 0)
         {
+          signal_record_rollback_internal::PreserveWorkingMemorySlotBeforeErase (
+              p_ctx, static_cast<std::size_t> (evict_idx));
           p_ctx.wm_slots.erase (p_ctx.wm_slots.begin ()
                                 + static_cast<long> (evict_idx));
           p_ctx.wm_slots_dirty = true;
