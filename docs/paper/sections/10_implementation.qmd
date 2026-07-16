@@ -19,7 +19,27 @@ Retrieved memories are hydrated only after retrieval has selected a compact
 ranked set. Internal routing nodes such as `LABEL` or `ASSOCIATION` rows are not
 treated as user-facing payloads. When such a row reaches the retrieval surface,
 hydration resolves bounded linked source memories where possible so callers see
-concrete source-backed context instead of empty routing artifacts.
+concrete source-backed context instead of empty routing artifacts. A linked
+source keeps its own relevance and composite score when it was independently
+ranked. Otherwise query-backed hydration computes relevance from that source's
+own embedding and computes its composite display score from that relevance and
+the retained relationship weight. Scores therefore describe the displayed
+source result rather than borrowing the internal routing node's score. The same
+scored memory object is serialized by the C API and JavaScript addon. An
+internal hydration call without a query and without an independent source trace
+leaves both optional scores unset; it does not relabel a centroid score as
+source relevance.
+
+Linked-source selection is query-aware before truncation. SQLite computes
+cosine relevance for every eligible member of the bounded linked graph set.
+Multiple graph routes to the same memory are grouped by memory id before
+ranking, so they cannot consume several compact slots. SQLite then combines
+source relevance with the F/S/T-derived relationship weight, orders that
+complete unique set, and only then applies the knob-derived compact limit. This
+prevents either duplicate routes or a recent but weakly related fragment from
+occupying the transfer cap ahead of an older verbatim-relevant source, while
+keeping embedding decoding and application-side hydration bounded to the
+selected rows.
 
 ## Durable Memory Surface
 
@@ -86,9 +106,11 @@ probes can inspect retrieval without mutating the durable store.
 
 Consolidation is explicit. The runtime does not schedule it automatically and
 does not expose mode variants. Callers invoke `Consolidate()` or inject a
-signal with `force_consolidation=true`; the same production pipeline then runs
-the knob-derived consolidation gate, clusterer, shallow consolidation, and graph
-builder.
+signal with `force_consolidation=true`; a signal dispatcher then runs only the
+knob-derived consolidation gate, clusterer, shallow consolidation, and graph
+builder. The normal core, storage, retrieval, feedback, episode, object-store,
+working-memory, signal-counter, and rate-observation paths are not maintenance
+steps.
 
 Shallow consolidation is embedding-only. It clusters eligible long-term
 memories, writes an `ASSOCIATION` centroid node for each cluster, assigns source
@@ -105,21 +127,77 @@ batch semantic extraction job.
 ## Retrieval Implementation
 
 Production retrieval discovers a broad but bounded vector seed set from durable
-memory embeddings, expands through retained graph edges and source/turn
-neighbors, applies temporal rank and supersession demotion, and returns a
-compact selected set. Current
+memory embeddings. Before the seed cap, it removes directed `supersedes`
+targets and collapses near-duplicate embedding families to one representative.
+The family index uses complementary 32-block Cauchy--Schwarz upper bounds in
+the stored coordinate system and a normalized Walsh--Hadamard basis, followed
+by exact cosine checks. Each upper bound is sound, so taking their minimum
+cannot exclude a pair meeting the cosine threshold. The complementary bases
+avoid broad exact pairwise work for both sparse coordinate-aligned vectors and
+dense Hadamard-aligned vectors; arbitrary adversarial surfaces may still reach
+the exact fallback. If the private vector cache is unavailable, durable
+processing rebuilds it once from the complete persisted surface and immediately
+applies the same family and supersession filters before truncation. A failed
+rebuild installs a failure sentinel rather than repeating the two complete
+surface scans on every request. A unique cached vector retains every long-term
+memory metadata alternative that shares its base embedding, and query-time
+eligibility chooses a nonsuperseded sibling without duplicating vector storage.
+The fallback executes one scalar-distance-ordered query after kind, timestamp,
+and current-surface precedence are filtered in SQL; superseded and exact
+near-duplicate families are then skipped in memory until the knob-derived
+budget is filled or the eligible surface is exhausted. Ephemeral retrieval uses
+that fallback without installing volatile registry state.
+It then expands through retained structural graph edges and returns a compact
+selected set. Vector similarity owns the rank; recency is a tie-break and graph
+activation is a bounded residual bonus. `source_id` and modality are metadata,
+not ranking inputs. Direct vector seeds are source `LONG_TERM` memories;
+derived `ASSOCIATION` centroids enter through graph expansion. Direct families
+are ranked and the protected direct prefix is committed before expanded
+families are admitted; expanded candidates are then deduplicated against those
+protected representatives. When a current
+embedding exists, its redundant historical base embedding is omitted from the
+historical seed search because the authoritative surface was already searched.
+Current
 writes are excluded by timestamp, and working-memory overlap filters prevent the
 retrieval result from echoing the active memory tail. Association edges are used
 as graph evidence; they do not bypass final scoring or output caps.
+One dispatch exposes at most one actually used retrieval candidate, so
+retrieval does not synthesize reinforcement pair edges from the packet. Existing
+`reinforces` edges remain eligible for decay, pruning, degree normalization, and
+graph evidence. Historical public knob helpers for the removed packet-pair
+writer remain source-compatible calibrations; only the step calibration still
+feeds the production pruning floor.
 
 The retrieval trace path records a ranking ledger for selected and rejected
 candidates. Production graph retrieval populates composite score, seed
-relevance, temporal score, and the base/spreading/supersession fields of the
+relevance, temporal score, and the base/spreading fields of the
 activation ledger. The shared trace structure still contains reserved
 processor, predictive, pre-activation, durable-source, and evidence fields, but
 this path leaves them at zero; their presence is not evidence that those terms
 participate in ranking. Deleted label-graph and fact-layer fields are not
 emitted.
+
+`Retention::Ephemeral` executes this read path inside a transaction, assembles
+the retrieval result, rolls back the transaction and object transaction, and
+restores the exact pre-query processor snapshot. Retrieval-time reconstruction,
+usage reinforcement, reconsolidation, and strength mutation are skipped for
+that retention policy, so querying cannot change durable rank state.
+
+Schema migrations 25--27 add `consolidation_rate_floor`,
+`consolidation_rate_peak`, initialization, and the armed latch to the singleton
+processor state. Runtime hinting
+reads their in-memory private mirror, so the throughput recommendation adds no
+per-signal SQL query. Processor construction loads or initializes the mirror,
+transaction rollback and ephemeral processing restore it with the full context
+snapshot, successful state persistence writes both values, and processor
+teardown erases its lifecycle-owned entry. A committed maintenance request
+disarms the hint and resets the next event-derived floor and peak to the
+acknowledged rate; ordinary rate recovery establishes a new range and rearms at
+the F/S/T-derived threshold. This event boundary lets a lower throughput regime
+recover independently of an old spike without a count or wall-clock horizon.
+Empty replay is acknowledged, while a rolled-back request restores the exact
+prior latch and range. State-row restoration does not depend on a nonzero
+processed-signal counter, so a maintenance-only disarmed state survives restart.
 
 ## Soft Anchor Implementation Status
 

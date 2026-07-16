@@ -2097,11 +2097,11 @@ WRateSeconds (double T)
   return static_cast<int> (std::round (Lerp (60.0, 300.0, T)));
 }
 
-// Consolidation interval (seconds) — Algorithm 28
+// Emotional-cascade lookback window (seconds)
 inline int
-ConsolidationIntervalSeconds (double T)
+EmotionCascadeWindowSeconds (double T)
 {
-  // consolidation interval = lerp(300, 3600, T)  # 5 min → 1 hour
+  // Stable memories retain a longer affective-neighbor window.
   return static_cast<int> (std::round (Lerp (300.0, 3600.0, T)));
 }
 
@@ -2111,59 +2111,6 @@ ConsolidationEscalationMultiplier (double T)
 {
   // escalates required thresholds with stability (1.5 → 2.5)
   return Lerp (1.5, 2.5, Clamp (T, 0.0, 1.0));
-}
-
-// Required consolidation interval (seconds) — Algorithm 28b
-inline int
-ConsolidationRequiredIntervalSeconds (double T)
-{
-  return static_cast<int> (
-      std::round (ConsolidationIntervalSeconds (T)
-                  * ConsolidationEscalationMultiplier (T)));
-}
-
-// Consolidation rate (writes/min) — Section 7.1
-inline double
-ConsolidationRate (double T, double S)
-{
-  // rate_consolidate = (1 / max(interval, 1)) × (0.3 + 0.7T) × (1 − 0.5S)
-  // Reference: algorithms.md Section 7.1, lines 1015-1017
-  const double interval
-      = static_cast<double> (ConsolidationIntervalSeconds (T));
-  // Convert to writes/min to match m_rate units.
-  return (60.0 / std::max (interval, 1.0)) * (0.3 + 0.7 * T)
-         * (1.0 - 0.5 * SensitivityBias (S));
-}
-
-// Idle required seconds — Algorithm 28b
-inline int
-IdleRequiredSeconds (double T)
-{
-  // idle_required_seconds(T) = round(0.25 × w_rate_seconds(T))
-  return static_cast<int> (
-      std::round (0.25 * static_cast<double> (WRateSeconds (T))));
-}
-
-// Capacity trigger threshold — Algorithm 28 (capacity trigger).
-inline long long
-ConsolidationThresholdCount (double T)
-{
-  // Derive a threshold from stability-scaled windows so it grows with system
-  // maturity and persistence. This stays knob-only and avoids extra tunables.
-  const long long n = static_cast<long long> (NCtx (Clamp (T, 0.0, 1.0)));
-  const long long w = static_cast<long long> (WScore (Clamp (T, 0.0, 1.0)));
-  const long long thr = n * w;
-  return (thr < 1) ? 1 : thr;
-}
-
-// Required consolidation threshold — Algorithm 28b
-inline long long
-ConsolidationRequiredCount (double T)
-{
-  const double base
-      = static_cast<double> (ConsolidationThresholdCount (T));
-  const double scaled = base * ConsolidationEscalationMultiplier (T);
-  return static_cast<long long> (std::max (1.0, std::round (scaled)));
 }
 
 inline int
@@ -3209,6 +3156,9 @@ MemoryUsageCacheDuration (double T)
 inline double
 ReinforcementFallbackContextualSupport (double F, double S, double T)
 {
+  // Retained for source compatibility with callers that used the former
+  // packet-pair writer calibration. Production retrieval no longer creates
+  // reinforcement edges from a single retrieved packet.
   const double f = FocusBias (F);
   const double s = SensitivityBias (S);
   const double t = Clamp (T, 0.0, 1.0);
@@ -3285,9 +3235,9 @@ ReinforcementDecay (double T)
 inline double
 ReinforcementCoRetrievalStep (double F, double S, double T)
 {
-  // Co-retrieval reinforcement is a small online edge update. Sensitivity
-  // controls learning speed, Focus suppresses noisy broad packets, and
-  // Stability lets repeated durable co-activation accumulate.
+  // Compatibility calibration retained as an input to the reinforcement-edge
+  // pruning floor below. Production retrieval does not synthesize packet-pair
+  // updates; existing reinforcement edges remain eligible for maintenance.
   const double f = FocusBias (F);
   const double s = SensitivityBias (S);
   const double t = Clamp (T, 0.0, 1.0);
@@ -3299,8 +3249,8 @@ ReinforcementCoRetrievalStep (double F, double S, double T)
 inline double
 ReinforcementUnselectedScale (double F, double S, double T)
 {
-  // Pairs that merely co-occurred in a retrieved packet should learn much more
-  // slowly than pairs anchored by an actually used memory.
+  // Retained for public source compatibility with the removed packet-pair
+  // writer. This scale is not consumed by production retrieval.
   const double f = FocusBias (F);
   const double s = SensitivityBias (S);
   const double t = Clamp (T, 0.0, 1.0);
@@ -3312,6 +3262,8 @@ ReinforcementUnselectedScale (double F, double S, double T)
 inline double
 ReinforcementFanoutDamping (double F, double S, double T, int candidate_count)
 {
+  // Retained for public source compatibility with the removed packet-pair
+  // writer. Retrieval-side family and graph bounds now own fanout control.
   if (candidate_count <= 2)
     {
       return 1.0;
@@ -3331,10 +3283,10 @@ inline double
 ReinforcementPruneThreshold (double F, double S, double T)
 {
   // Prune only reinforcement edges below a knob-derived evidence floor. The
-  // floor is expressed as "how many anchored co-retrievals would it take to
-  // survive": higher Focus requires cleaner evidence, higher Sensitivity
-  // learns faster and can prune weak edges more aggressively, and higher
-  // Stability preserves weaker long-term associations.
+  // floor reuses the historical step calibration without creating new pair
+  // edges: higher Focus requires cleaner evidence, higher Sensitivity permits
+  // more aggressive weak-edge pruning, and higher Stability preserves weaker
+  // long-term associations.
   const double f = FocusBias (F);
   const double s = SensitivityBias (S);
   const double t = Clamp (T, 0.0, 1.0);

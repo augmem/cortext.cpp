@@ -1,8 +1,8 @@
 # Consolidation and Graph Integration {#sec-consolidation}
 
-Consolidation now means explicit embedding replay over stored memories. It is a
-production operation inside the normal pipeline, not a separate semantic batch
-processor. The current hard-cut implementation removes the previous internal
+Consolidation now means explicit embedding replay over stored memories. It uses
+a maintenance-only transaction path beside the normal signal pipeline, not a
+semantic batch processor or a synthetic input signal. The current hard-cut implementation removes the previous internal
 generative consolidation stack and keeps only shallow graph consolidation.
 
 ## Complementary Learning Systems Split
@@ -14,8 +14,9 @@ for the product:
   source payloads, embeddings, timestamps, and graph metadata.
 * **Bounded live state:** working memory and soft-anchor state support immediate
   continuity without scanning the whole store.
-* **Slow durable graph:** explicit consolidation periodically clusters older
-  long-term memories and writes stable graph structure.
+* **Slow durable graph:** explicit consolidation clusters older long-term
+  memories during observed throughput troughs and writes stable graph
+  structure.
 
 The split is functional rather than model-based. No decoder is required to
 transfer state from the fast path to the durable graph.
@@ -25,26 +26,82 @@ transfer state from the fast path to the durable graph.
 Consolidation is external-only. The runtime never schedules it by itself.
 Callers invoke `Consolidate()` or process a maintenance signal with
 `Signal::force_consolidation=true`. This keeps production scheduling under the
-application's control while still letting the engine derive recommendation flags
+application's control while still letting the engine derive an ordered urgency state
 from the three knobs.
 
-The consolidation operations still live in the full operation chain. On ordinary
-signals `EvaluateConsolidation` returns because `force_consolidation` is false,
-and the downstream gate, cluster, shallow replay, and graph-build stages no-op.
-The `consolidation_recommended` and `consolidation_required` outputs are hints
-for the caller; they do not schedule maintenance work by themselves.
+Ordinary retained and ephemeral signals use the normal operation chain. A
+forced request dispatches only `EvaluateConsolidation`, its score gate, the
+clusterer, shallow replay, and graph construction. Maintenance therefore does
+not create an episode, signal, working-memory row, long-term memory, blob, or
+searchable embedding, and it does not update normal throughput observations.
+The single `consolidation_state` output is an ordered hint for the caller; it
+does not schedule maintenance work by itself.
 
-A caller can use the following external scheduling rule:
+A caller can use the engine hints as the external scheduling rule. Since the
+last committed forced request, including a coherent no-op with no persisted
+cluster, the engine maintains the observed write-rate floor $r_{floor}$ and
+peak $r_{peak}$. The peak is monotonic within that interval. A new lower
+observation lowers the floor immediately; otherwise
+the floor moves upward with an update factor
+$1/W_{rate\_seconds}(T)$. Before a nonzero range has been observed, the
+throughput hint remains off. A persisted initialization bit distinguishes a
+real zero-rate observation from an uninitialized range, so a later positive
+sample updates from the observed zero instead of overwriting it as bootstrap.
+Pre-migration rows leave that bit false even when legacy rate-control ticks are
+positive, because those ticks do not prove that a throughput range was
+observed; the first post-migration sample establishes the floor and peak.
+
+The knob-derived fraction is:
 
 ```text
-should_consolidate =
-  elapsed_time >= consolidation_interval(T)
-  OR memories_since_consolidation >= consolidation_threshold(F,S,T)
-  OR caller_idle_window_available
+p(F,S,T) = clamp(
+  0.5
+  × lerp(1.10, 0.75, focus_bias(F))
+  × lerp(0.80, 1.20, sensitivity_bias(S))
+  × lerp(1.10, 0.80, T),
+  0.20,
+  0.70)
 ```
 
+Higher focus and stability require a deeper trough; higher sensitivity permits
+an earlier recommendation. The normalized throughput position and ordered
+state are:
+
+```text
+range = r_peak - r_floor
+z = (m_rate - r_floor) / range
+p_required(F,S,T) = p(F,S,T) / consolidation_escalation(T)
+p_rearm(F,S,T) = p(F,S,T)
+                 + (1 - p(F,S,T)) * T
+
+consolidation_state =
+  None,        if armed = false
+               OR memories_since_consolidation <= 0
+               OR range <= numeric_epsilon
+               OR z > p(F,S,T)
+  Required,    if z <= p_required(F,S,T)
+  Recommended, otherwise
+```
+
+The required branch is evaluated first. Since
+`consolidation_escalation(T)` is always greater than one, the required boundary
+is strictly below the recommendation boundary after every floor or peak
+update. Elapsed wall or event time and arbitrary memory counts do not enter the
+state decision; backlog is only a positive-work guard. An explicit force
+request starts consolidation independently and its output state is `None`.
+A committed forced request acknowledges the active excursion by persisting
+`armed=false`, even when no coherent cluster exists. The acknowledgment resets
+the next event-derived range to the current rate: both floor and peak become
+that rate. This prevents a historical spike from suppressing recommendations
+after a throughput regime shift. Ordinary throughput observations establish a
+new peak and rearm the classifier only after normalized position $z$ reaches
+$p_{rearm}$; failed transactions restore the prior armed state and range. No
+count or elapsed-time horizon controls the reset. The floor, peak,
+initialization, and armed fields are stored in the singleton processor state row and
+participate in rollback, restart, and ephemeral-query snapshot restoration.
 The engine can recommend consolidation, but the API call is the only way to
-start it. `source_id` strings are never interpreted as maintenance commands.
+start it. `source_id` and modality are never hint inputs or maintenance
+commands.
 
 ## Candidate Selection
 
@@ -59,11 +116,11 @@ min_cluster_size = MinClusterSize(F)
 max_clusters = ConsolidationMaxClusters(F,S,T)
 ```
 
-When a forced consolidation has too few low-strength candidates, the path
-broadens to the lowest-scoring eligible source memories. If clustering still
-finds no group, the fallback mini-cluster forms around the lowest-score item and
-its nearest cosine neighbors. This keeps replay active without adding a mode
-flag.
+An explicit request does not broaden eligibility and does not manufacture a
+nearest-neighbor mini-cluster. If fewer than the knob-derived minimum form a
+coherent density cluster at `MergeThreshold(F)`, replay is a successful no-op.
+This makes force mean "evaluate now," not "merge something regardless of
+evidence."
 
 ## Shallow Replay Product
 
@@ -110,6 +167,23 @@ weights.
 The graph products are useful for later retrieval because graph expansion can
 recover clustered source memories through `derived_from`, co-occurrence,
 similarity, reinforcement, and causal edges.
+Graph construction runs only when shallow replay persisted a cluster and loads
+only the cluster identifiers created by that transaction. Repeating replay
+without newly eligible coherent memories therefore does not rebuild historical
+clusters, replace their timestamps, or decay reinforcement edges.
+
+Association centroids are derived navigation nodes rather than independent
+source observations. Direct semantic vector seeds are restricted to
+`LONG_TERM` memories; `ASSOCIATION` nodes remain retrievable through incoming
+or outgoing graph expansion. Retrieval collapses direct long-term families
+first and commits the knob-bounded direct-anchor prefix before graph-expanded
+families can compete for the remaining positions. The same family index is
+then seeded with those protected representatives, so a near-duplicate derived
+centroid cannot remove an already protected source. This preserves graph
+utility without allowing derived nodes to consume the direct-anchor budget.
+When a current embedding exists for a memory, retrieval also skips scoring its
+redundant historical base embedding; the authoritative current surface was
+already inserted first.
 
 ## Reconstruction Surface Discipline
 

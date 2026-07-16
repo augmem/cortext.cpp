@@ -36,6 +36,21 @@ namespace
 {
 thread_local std::string g_last_error;
 
+const char *
+consolidation_state_name (cortext::ConsolidationState state)
+{
+  switch (state)
+    {
+    case cortext::ConsolidationState::Recommended:
+      return "recommended";
+    case cortext::ConsolidationState::Required:
+      return "required";
+    case cortext::ConsolidationState::None:
+      return "none";
+    }
+  return "none";
+}
+
 void
 clear_last_error ()
 {
@@ -1073,8 +1088,8 @@ context_to_json (const cortext::Cortext::Context &ctx,
     { "should_interrupt", ctx.should_interrupt },
     { "interrupt_aborted", ctx.interrupt_aborted },
     { "at_boundary", ctx.at_boundary },
-    { "consolidation_recommended", ctx.consolidation_recommended },
-    { "consolidation_required", ctx.consolidation_required },
+    { "consolidation_state",
+      consolidation_state_name (ctx.consolidation_state) },
     { "interrupt_gate_has_candidates", ctx.interrupt_gate_has_candidates },
     { "interrupt_gate_blocked_no_store", ctx.interrupt_gate_blocked_no_store },
     { "interrupt_gate_rel_pass", ctx.interrupt_gate_rel_pass },
@@ -1194,6 +1209,20 @@ invoke_embedding_json (Fn &&fn)
     }
 }
 } // namespace
+
+#if defined(CORTEXT_TESTING)
+namespace cortext::internal
+{
+
+std::string
+ContextToJsonForTest (const Cortext::Context &context, bool include_embedding)
+{
+  return context_to_json (context, include_embedding)
+      .dump (-1, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
+} // namespace cortext::internal
+#endif
 
 extern "C"
 {

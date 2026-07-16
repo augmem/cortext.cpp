@@ -15,7 +15,6 @@
 #include <cortext/store/sqlite_store.hpp>
 
 using namespace cortext;
-using cortext::operations::EvaluateConsolidation;
 using cortext::operations::BuildGraphFromConsolidation;
 
 
@@ -33,6 +32,22 @@ MakeSignal (uint64_t ts)
   s.force_consolidation = true;
   return s;
 }
+
+struct EnableGraphBuildOp : IOperation
+{
+  explicit EnableGraphBuildOp (int cluster_id) : cluster_id_ (cluster_id) {}
+
+  void
+  Execute (OperationContext &ctx, Transaction &) const override
+  {
+    ClusterInfo cluster;
+    cluster.cluster_id = cluster_id_;
+    ctx.SetConsolidationClusters ({ cluster });
+    ctx.SetConsolidationPersisted (true);
+  }
+
+  int cluster_id_;
+};
 
 // Create a 256D embedding with first few dimensions set, rest zeros
 std::vector<float>
@@ -85,7 +100,7 @@ TEST_CASE ("V2: GraphBuild creates co-occurrence edges for similar memories in s
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0; // Low focus = threshold 0.85
   auto ops = std::make_unique<DynamicOperationSet> (
-      std::make_unique<EvaluateConsolidation> (),
+      std::make_unique<EnableGraphBuildOp> (100),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -118,6 +133,10 @@ TEST_CASE ("GraphBuild invalidates association fanout cache lazily",
   Signal signal = MakeSignal (1234);
   OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetConsolidationShouldStart (true);
+  ctx.SetConsolidationPersisted (true);
+  ClusterInfo cluster;
+  cluster.cluster_id = 100;
+  ctx.SetConsolidationClusters ({ cluster });
   auto tx = store->Begin ();
   BuildGraphFromConsolidation op;
   op.Execute (ctx, *tx);
@@ -164,7 +183,7 @@ TEST_CASE ("V2: GraphBuild creates causal edges for temporal drift within cluste
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // Low stability = threshold 0.15
   auto ops = std::make_unique<DynamicOperationSet> (
-      std::make_unique<EvaluateConsolidation> (),
+      std::make_unique<EnableGraphBuildOp> (100),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -219,7 +238,7 @@ TEST_CASE ("V2: GraphBuild creates contradiction edges for opposing semantics",
 
   cortext::testing::RequireEncoder (cfg);
   auto ops = std::make_unique<DynamicOperationSet> (
-      std::make_unique<EvaluateConsolidation> (),
+      std::make_unique<EnableGraphBuildOp> (100),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -276,7 +295,7 @@ TEST_CASE ("V2: GraphBuild does not create edges across different clusters",
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.0;
   auto ops = std::make_unique<DynamicOperationSet> (
-      std::make_unique<EvaluateConsolidation> (),
+      std::make_unique<EnableGraphBuildOp> (100),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -338,7 +357,7 @@ TEST_CASE ("V2: GraphBuild decays reinforcement edges",
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // decay = 0.9
   auto ops = std::make_unique<DynamicOperationSet> (
-      std::make_unique<EvaluateConsolidation> (),
+      std::make_unique<EnableGraphBuildOp> (100),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 
@@ -381,7 +400,7 @@ TEST_CASE ("V2: GraphBuild removes weak reinforcement edges",
       { 1LL, 2LL, prune_threshold * 0.5 });
 
   auto ops = std::make_unique<DynamicOperationSet> (
-      std::make_unique<EvaluateConsolidation> (),
+      std::make_unique<EnableGraphBuildOp> (100),
       std::make_unique<BuildGraphFromConsolidation> ());
   SignalProcessor processor (cfg, store, std::move (ops));
 

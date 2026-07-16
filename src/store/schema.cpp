@@ -2,6 +2,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -804,7 +805,86 @@ GetCoreMigrations ()
               "WHERE kind = 'WORKING' AND strength_updated_at IS NULL",
           },
       },
+      {
+          25,
+          "Persist consolidation throughput range",
+          {
+              "ALTER TABLE state ADD COLUMN consolidation_rate_floor REAL NOT NULL DEFAULT 0.0",
+              "ALTER TABLE state ADD COLUMN consolidation_rate_peak REAL NOT NULL DEFAULT 0.0",
+          },
+      },
+      {
+          26,
+          "Persist consolidation throughput initialization",
+          {
+              "ALTER TABLE state ADD COLUMN consolidation_rate_initialized INTEGER NOT NULL DEFAULT 0",
+              "UPDATE state SET consolidation_rate_initialized = 1 "
+              "WHERE consolidation_rate_floor != 0.0 "
+              "OR consolidation_rate_peak != 0.0",
+          },
+      },
+      {
+          27,
+          "Persist consolidation throughput recommendation latch",
+          {
+              "ALTER TABLE state ADD COLUMN consolidation_rate_armed INTEGER NOT NULL DEFAULT 1",
+          },
+      },
   };
+}
+
+void
+ApplyMigrationsThrough (Store &store, int64_t maximum_id)
+{
+  // Migrations must own the write lock before reading the applied set. Use
+  // direct SQL so this does not depend on the configurable default transaction
+  // mode used by normal processing transactions.
+  store.Execute ("BEGIN IMMEDIATE");
+  bool committed = false;
+
+  try
+    {
+      store.Execute (
+          "CREATE TABLE IF NOT EXISTS cortext_schema_migrations ("
+          "  id INTEGER PRIMARY KEY,"
+          "  description TEXT,"
+          "  applied_at INTEGER"
+          ")");
+
+      std::set<int64_t> applied_ids = GetAppliedMigrations (store);
+      auto migrations = GetCoreMigrations ();
+
+      std::sort (migrations.begin (), migrations.end (),
+                 [] (const Migration &a, const Migration &b) {
+                   return a.id < b.id;
+                 });
+
+      for (const auto &m : migrations)
+        {
+          if (m.id > maximum_id || applied_ids.count (m.id))
+            {
+              continue;
+            }
+          ApplySingleMigrationInTransaction (store, m);
+        }
+
+      store.Execute ("COMMIT");
+      committed = true;
+    }
+  catch (...)
+    {
+      if (!committed)
+        {
+          try
+            {
+              store.Execute ("ROLLBACK");
+            }
+          catch (...)
+            {
+            }
+        }
+      throw;
+    }
 }
 
 } // namespace
@@ -814,6 +894,12 @@ std::set<int64_t>
 DebugGetAppliedMigrationIdsForTest (Store &store)
 {
   return GetAppliedMigrations (store);
+}
+
+void
+DebugApplyCoreMigrationsThroughForTest (Store &store, int64_t maximum_id)
+{
+  ApplyMigrationsThrough (store, maximum_id);
 }
 #endif
 
@@ -864,56 +950,7 @@ ColumnExists (Store &store, const std::string &table_name,
 void
 ApplyMigrations (Store &store)
 {
-  // Migrations must own the write lock before reading the applied set. Use
-  // direct SQL so this does not depend on the configurable default transaction
-  // mode used by normal processing transactions.
-  store.Execute ("BEGIN IMMEDIATE");
-  bool committed = false;
-
-  try
-    {
-      store.Execute (
-          "CREATE TABLE IF NOT EXISTS cortext_schema_migrations ("
-          "  id INTEGER PRIMARY KEY,"
-          "  description TEXT,"
-          "  applied_at INTEGER"
-          ")");
-
-      std::set<int64_t> applied_ids = GetAppliedMigrations (store);
-      auto migrations = GetCoreMigrations ();
-
-      // Sort by ID (should already be sorted, but be explicit)
-      std::sort (migrations.begin (), migrations.end (),
-                 [] (const Migration &a, const Migration &b) {
-                   return a.id < b.id;
-                 });
-
-      for (const auto &m : migrations)
-        {
-          if (applied_ids.count (m.id))
-            {
-              continue;
-            }
-          ApplySingleMigrationInTransaction (store, m);
-        }
-
-      store.Execute ("COMMIT");
-      committed = true;
-    }
-  catch (...)
-    {
-      if (!committed)
-        {
-          try
-            {
-              store.Execute ("ROLLBACK");
-            }
-          catch (...)
-            {
-            }
-        }
-      throw;
-    }
+  ApplyMigrationsThrough (store, std::numeric_limits<int64_t>::max ());
 }
 
 } // namespace cortext::store

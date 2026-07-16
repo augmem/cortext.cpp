@@ -155,35 +155,16 @@ TEST_CASE ("WRateSeconds follows spec: lerp(60, 300, T)",
   REQUIRE (WRateSeconds (0.3) < WRateSeconds (0.7));
 }
 
-TEST_CASE ("ConsolidationIntervalSeconds follows spec: lerp(300, 3600, T)",
-           "[formula][knobs][rate]")
+TEST_CASE ("EmotionCascadeWindowSeconds follows spec: lerp(300, 3600, T)",
+           "[formula][knobs][emotion]")
 {
-  // ConsolidationIntervalSeconds = round(lerp(300, 3600, T))
-  REQUIRE (ConsolidationIntervalSeconds (0.0) == 300);
-  REQUIRE (ConsolidationIntervalSeconds (1.0) == 3600);
-  REQUIRE (ConsolidationIntervalSeconds (0.5) == 1950);
+  REQUIRE (EmotionCascadeWindowSeconds (0.0) == 300);
+  REQUIRE (EmotionCascadeWindowSeconds (1.0) == 3600);
+  REQUIRE (EmotionCascadeWindowSeconds (0.5) == 1950);
 
   // Monotonic
-  REQUIRE (ConsolidationIntervalSeconds (0.3)
-           < ConsolidationIntervalSeconds (0.7));
-}
-
-TEST_CASE ("IdleRequiredSeconds follows spec: 0.25 * WRateSeconds(T)",
-           "[formula][knobs][rate]")
-{
-  // IdleRequiredSeconds = round(0.25 * WRateSeconds(T))
-  REQUIRE (IdleRequiredSeconds (0.0)
-           == static_cast<int> (std::round (0.25 * 60)));
-  REQUIRE (IdleRequiredSeconds (1.0)
-           == static_cast<int> (std::round (0.25 * 300)));
-
-  // Derived from WRateSeconds
-  for (double T : { 0.0, 0.25, 0.5, 0.75, 1.0 })
-    {
-      int expected
-          = static_cast<int> (std::round (0.25 * WRateSeconds (T)));
-      REQUIRE (IdleRequiredSeconds (T) == expected);
-    }
+  REQUIRE (EmotionCascadeWindowSeconds (0.3)
+           < EmotionCascadeWindowSeconds (0.7));
 }
 
 // =============================================================================
@@ -320,26 +301,6 @@ TEST_CASE ("MaxDeltaTPerMin follows spec: lerp(0.30, 0.10, maturity)",
   REQUIRE (MaxDeltaTPerMin (10, 0.5) > MaxDeltaTPerMin (1000, 0.5));
 }
 
-TEST_CASE ("ConsolidationThresholdCount follows spec: NCtx(T) * WScore(T)",
-           "[formula][knobs][maturity]")
-{
-  // ConsolidationThresholdCount = NCtx(T) * WScore(T)
-
-  // At T=0: NCtx(0)=32, WScore(0)=20 => 640
-  REQUIRE (ConsolidationThresholdCount (0.0) == 32LL * 20LL);
-
-  // At T=1: NCtx(1)=256, WScore(1)=120 => 30720
-  REQUIRE (ConsolidationThresholdCount (1.0) == 256LL * 120LL);
-
-  // Verify formula for intermediate values
-  for (double T : { 0.0, 0.25, 0.5, 0.75, 1.0 })
-    {
-      long long n = static_cast<long long> (NCtx (T));
-      long long w = static_cast<long long> (WScore (T));
-      REQUIRE (ConsolidationThresholdCount (T) == n * w);
-    }
-}
-
 // =============================================================================
 // 5.1.5 Half-Life & Decay Functions (9 functions)
 // =============================================================================
@@ -421,9 +382,12 @@ TEST_CASE ("ReinforcementDecay follows spec: lerp(0.9, 0.99, T)",
   REQUIRE (ReinforcementDecay (0.3) < ReinforcementDecay (0.7));
 }
 
-TEST_CASE ("Reinforcement co-retrieval update is knob-derived",
+TEST_CASE ("Reinforcement edge-maintenance calibrations remain bounded",
            "[formula][knobs][reinforcement]")
 {
+  // The step still calibrates the production pruning floor. The unselected
+  // and fanout helpers remain covered for public source compatibility only;
+  // production retrieval no longer creates packet-pair edges.
   const double low = ReinforcementCoRetrievalStep (1.0, 0.0, 0.0);
   const double mid = ReinforcementCoRetrievalStep (0.5, 0.5, 0.5);
   const double high = ReinforcementCoRetrievalStep (0.0, 1.0, 1.0);
@@ -1155,12 +1119,12 @@ TEST_CASE ("Extreme stability values", "[formula][knobs][composite]")
   REQUIRE (BaseHalfLifePrior (T_high) == Catch::Approx (43200.0));
   REQUIRE (LambdaMood (30.0, T_high) > 0.95);
   REQUIRE (ReinforcementDecay (T_high) >= 0.98);
-  REQUIRE (ConsolidationIntervalSeconds (T_high) == 3600);
+  REQUIRE (EmotionCascadeWindowSeconds (T_high) == 3600);
 
   // Low stability: short half-lives, fast decay, responsive
   double T_low = 0.0;
   REQUIRE (BaseHalfLifePrior (T_low) == Catch::Approx (120.0));
   REQUIRE (LambdaMood (30.0, T_low) == Catch::Approx (0.5));
   REQUIRE (ReinforcementDecay (T_low) == Catch::Approx (0.9));
-  REQUIRE (ConsolidationIntervalSeconds (T_low) == 300);
+  REQUIRE (EmotionCascadeWindowSeconds (T_low) == 300);
 }

@@ -914,6 +914,8 @@ TEST_CASE ("Graph and memory policy constants derive from knobs",
   REQUIRE (DerivedSourceFallbackEdgeWeight (0.5, 0.5, 0.0)
            == Catch::Approx (DerivedSourceEdgeWeight (0.5, 0.5, 0.0)));
 
+  // Compatibility calibration retained without a production packet-pair
+  // writer so existing public-header consumers do not break.
   REQUIRE (ReinforcementFallbackContextualSupport (0.5, 0.5, 0.5)
            == Catch::Approx (0.50));
   REQUIRE (ReinforcementFallbackContextualSupport (0.5, 0.0, 0.5)
@@ -975,28 +977,4 @@ TEST_CASE ("Reconsolidation and cascade gates derive from knobs",
            > ThresholdObservedQuantile (0.0, 0.5, 0.5));
   REQUIRE (ThresholdObservedQuantile (0.5, 1.0, 0.5)
            < ThresholdObservedQuantile (0.5, 0.0, 0.5));
-}
-
-TEST_CASE (
-    "ConsolidationRate follows spec: (60/interval) * (0.3+0.7T) * (1-0.5S)",
-    "[core][knobs]")
-{
-  // rate_consolidate = (60 / max(interval, 1)) × (0.3 + 0.7T) × (1 − 0.5S)
-  // Reference: algorithms.md Section 7.1
-
-  // At T=0, S=0: interval=300, rate = (60/300) * 0.3 * 1.0 = 0.06
-  REQUIRE (ConsolidationRate (0.0, 0.0) == Catch::Approx (0.06));
-
-  // At T=1, S=0: interval=3600, rate = (60/3600) * 1.0 * 1.0 ≈ 0.0166667
-  REQUIRE (ConsolidationRate (1.0, 0.0) == Catch::Approx (60.0 / 3600.0));
-
-  // At T=0, S=1: interval=300, rate = (60/300) * 0.3 * 0.5 = 0.03
-  REQUIRE (ConsolidationRate (0.0, 1.0) == Catch::Approx (0.03));
-
-  // Higher S decreases rate factor (1-0.5S)
-  REQUIRE (ConsolidationRate (0.0, 0.5) < ConsolidationRate (0.0, 0.0));
-
-  // Higher T: interval increases faster than rate factor, so overall rate decreases
-  // (interval grows 300→3600 while factor grows 0.3→1.0, net effect is lower rate)
-  REQUIRE (ConsolidationRate (0.5, 0.0) < ConsolidationRate (0.0, 0.0));
 }

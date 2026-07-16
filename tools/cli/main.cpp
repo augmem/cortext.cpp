@@ -25,6 +25,20 @@
 namespace
 {
 
+const char *ConsolidationStateName (cortext::ConsolidationState state)
+{
+  switch (state)
+    {
+    case cortext::ConsolidationState::Recommended:
+      return "recommended";
+    case cortext::ConsolidationState::Required:
+      return "required";
+    case cortext::ConsolidationState::None:
+      return "not needed";
+    }
+  return "not needed";
+}
+
 struct CliOptions
 {
   std::string db_path = "cortext_memory.db";
@@ -182,10 +196,10 @@ void PrintGauges (const cortext::Cortext::Context &context, bool stored)
       std::cout << "  ! interrupt recommended: surfaced context is likely "
                    "worth acting on now\n";
     }
-  if (context.consolidation_recommended || context.consolidation_required)
+  if (context.consolidation_state != cortext::ConsolidationState::None)
     {
       std::cout << "  ~ consolidation "
-                << (context.consolidation_required ? "required" : "recommended")
+                << ConsolidationStateName (context.consolidation_state)
                 << " (run: consolidate)\n";
     }
 }
@@ -284,7 +298,7 @@ int RunConsolidate (cortext::Cortext &engine, const CliOptions &options)
     {
       std::cout << "  · wm " << context.working_memory.size ()
                 << " · further consolidation "
-                << (context.consolidation_recommended ? "recommended" : "not needed")
+                << ConsolidationStateName (context.consolidation_state)
                 << "\n";
     }
   return 0;

@@ -563,6 +563,10 @@ WriteNeighborUpdates (Transaction &tx, long long embedding_id,
 void
 ApplyReconsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
+  if (context.GetSignal ().retention == Retention::Ephemeral)
+    {
+      return;
+    }
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   Store *store = context.GetStore ();

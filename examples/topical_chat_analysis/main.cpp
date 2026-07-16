@@ -1658,8 +1658,8 @@ int main(int argc, char **argv) {
               should_consolidate = true;
             }
             if (cfg.consolidate_during
-                && (ctx.consolidation_recommended
-                    || ctx.consolidation_required)) {
+                && ctx.consolidation_state
+                       != cortext::ConsolidationState::None) {
               if (!cfg.consolidate_idle || ctx.at_boundary) {
                 should_consolidate = true;
               }
