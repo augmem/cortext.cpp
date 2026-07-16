@@ -242,6 +242,11 @@ RefreshProcessorSurfaces (Transaction &tx, ProcessorContext &p_ctx,
           { new_embedding_id, memory_id, 0, std::string (), std::string (),
             embedding });
     }
+  else
+    {
+      historical_surface_search_cache_internal::
+          SetCurrentSurfaceDatabaseCurrent (p_ctx, false);
+    }
 }
 
 void
@@ -682,6 +687,110 @@ LoadCurrentSeedRowsFromCache (
   return rows;
 }
 
+std::optional<std::vector<std::map<std::string, std::any>>>
+LoadCurrentSeedRowsFromProcessorSurface (
+    const ProcessorContext &p_ctx, const Eigen::VectorXf &query_embedding,
+    long long exclusion_ts, int candidate_limit,
+    const std::unordered_set<long long> &superseded_memory_ids,
+    double duplicate_threshold)
+{
+  const int embedding_dim = static_cast<int> (query_embedding.size ());
+  if (embedding_dim <= 0 || candidate_limit <= 0)
+    {
+      return std::nullopt;
+    }
+
+  std::vector<historical_surface_search_cache_internal::RankedEntry> ranked;
+  ranked.reserve (p_ctx.retrieval_surface_cache.size ());
+  for (std::size_t index = 0; index < p_ctx.retrieval_surface_cache.size ();
+      ++index)
+    {
+      const auto &surface = p_ctx.retrieval_surface_cache[index];
+      if (surface.kind != "LONG_TERM" || !surface.vector_seed_eligible
+          || surface.start_ts >= exclusion_ts
+          || superseded_memory_ids.count (surface.memory_id) != 0)
+        {
+          continue;
+        }
+      if (surface.memory_id <= 0 || surface.embedding_id <= 0
+          || surface.embedding.size () != embedding_dim)
+        {
+          return std::nullopt;
+        }
+      ranked.push_back (
+          { index, (surface.embedding - query_embedding).squaredNorm () });
+    }
+  std::sort (ranked.begin (), ranked.end (), [&p_ctx] (const auto &a,
+                                                        const auto &b) {
+    if (a.distance != b.distance)
+      {
+        return a.distance < b.distance;
+      }
+    return p_ctx.retrieval_surface_cache[a.index].memory_id
+           < p_ctx.retrieval_surface_cache[b.index].memory_id;
+  });
+  CollapseRankedFamilies (
+      ranked, duplicate_threshold, candidate_limit,
+      [&p_ctx] (std::size_t candidate_index) -> const auto & {
+        return p_ctx.retrieval_surface_cache[candidate_index];
+      });
+
+  std::vector<std::map<std::string, std::any>> rows;
+  rows.reserve (ranked.size ());
+  for (const auto &candidate : ranked)
+    {
+      const auto &surface
+          = p_ctx.retrieval_surface_cache[candidate.index];
+      rows.push_back (
+          { { "memory_id", surface.memory_id },
+            { "embedding_id", surface.embedding_id },
+            { "start_ts", surface.start_ts },
+            { "embedding", ToFloatVector (surface.embedding) } });
+    }
+  return rows;
+}
+
+bool
+RebuildCurrentSearchCacheFromProcessorSurface (ProcessorContext &p_ctx)
+{
+  const auto prior_state
+      = historical_surface_search_cache_internal::Find (p_ctx);
+  if (!prior_state || !prior_state->processor_surface_complete)
+    {
+      return false;
+    }
+  const bool current_surface_database_current
+      = prior_state->current_surface_database_current;
+  std::vector<historical_surface_search_cache_internal::Entry>
+      current_entries;
+  current_entries.reserve (p_ctx.retrieval_surface_cache.size ());
+  for (const auto &surface : p_ctx.retrieval_surface_cache)
+    {
+      if (surface.kind != "LONG_TERM" || !surface.vector_seed_eligible)
+        {
+          continue;
+        }
+      if (surface.memory_id <= 0 || surface.embedding_id <= 0
+          || surface.embedding.size () <= 0)
+        {
+          return false;
+        }
+      current_entries.push_back (
+          { surface.embedding_id, surface.memory_id, 0, std::string (),
+            std::string (), surface.embedding });
+    }
+  if (!historical_surface_search_cache_internal::Reset (
+          p_ctx, {}, std::move (current_entries)))
+    {
+      return false;
+    }
+  historical_surface_search_cache_internal::SetCurrentSurfaceDatabaseCurrent (
+      p_ctx, current_surface_database_current);
+  historical_surface_search_cache_internal::SetProcessorSurfaceComplete (
+      p_ctx, true);
+  return true;
+}
+
 bool
 RebuildSurfaceSearchCache (Transaction &tx, ProcessorContext &p_ctx,
                            int embedding_dim)
@@ -725,8 +834,30 @@ RebuildSurfaceSearchCache (Transaction &tx, ProcessorContext &p_ctx,
         }
 
       auto current_rows = tx.Execute (
-          "SELECT memory_id, embedding_id, embedding "
-          "FROM current_memory_embeddings ORDER BY memory_id");
+          "SELECT m.memory_id, "
+          "       CASE WHEN ?1 != 0 "
+          "            THEN COALESCE(latest_r.embedding_id, "
+          "                          cme.embedding_id, m.embedding_id) "
+          "            ELSE m.embedding_id END AS embedding_id, "
+          "       CASE WHEN ?1 != 0 "
+          "            THEN COALESCE(latest_e.embedding, cme.embedding, "
+          "                          base_e.embedding) "
+          "            ELSE base_e.embedding END AS embedding "
+          "FROM memories m "
+          "LEFT JOIN memory_reconstructions latest_r "
+          "  ON latest_r.reconstruction_id = ("
+          "    SELECT MAX(mr2.reconstruction_id) "
+          "    FROM memory_reconstructions mr2 "
+          "    WHERE mr2.memory_id = m.memory_id"
+          "  ) "
+          "LEFT JOIN embeddings latest_e "
+          "  ON latest_e.embedding_id = latest_r.embedding_id "
+          "LEFT JOIN current_memory_embeddings cme "
+          "  ON cme.memory_id = m.memory_id "
+          "JOIN embeddings base_e ON base_e.embedding_id = m.embedding_id "
+          "WHERE m.kind = 'LONG_TERM' "
+          "ORDER BY m.memory_id",
+          { constructive_recall::Disabled () ? 0 : 1 });
       std::vector<historical_surface_search_cache_internal::Entry>
           current_entries;
       current_entries.reserve (current_rows.size ());
@@ -745,8 +876,36 @@ RebuildSurfaceSearchCache (Transaction &tx, ProcessorContext &p_ctx,
                 AnyLongLong (row, "memory_id"), 0, std::string (),
                 std::string (), std::move (embedding) });
         }
-      return historical_surface_search_cache_internal::Reset (
-          p_ctx, std::move (historical_entries), std::move (current_entries));
+      bool current_surface_database_current = true;
+      if (!constructive_recall::Disabled ())
+        {
+          current_surface_database_current
+              = tx.Execute (
+                      "SELECT 1 AS stale "
+                      "FROM memory_reconstructions mr "
+                      "LEFT JOIN current_memory_embeddings cme "
+                      "  ON cme.memory_id = mr.memory_id "
+                      "WHERE mr.reconstruction_id = ("
+                      "  SELECT MAX(mr2.reconstruction_id) "
+                      "  FROM memory_reconstructions mr2 "
+                      "  WHERE mr2.memory_id = mr.memory_id"
+                      ") "
+                      "AND (cme.memory_id IS NULL "
+                      "     OR cme.embedding_id != mr.embedding_id) "
+                      "LIMIT 1",
+                      {})
+                    .empty ();
+        }
+      if (!historical_surface_search_cache_internal::Reset (
+              p_ctx, std::move (historical_entries),
+              std::move (current_entries)))
+        {
+          return false;
+        }
+      historical_surface_search_cache_internal::
+          SetCurrentSurfaceDatabaseCurrent (
+              p_ctx, current_surface_database_current);
+      return true;
     }
   catch (const std::exception &e)
     {
@@ -760,73 +919,213 @@ RebuildSurfaceSearchCache (Transaction &tx, ProcessorContext &p_ctx,
 std::vector<std::map<std::string, std::any>>
 LoadEligibleSeedRowsFromSqlFallback (
     Transaction &tx, const Eigen::VectorXf &query_embedding,
-    long long exclusion_ts, int candidate_limit,
+    long long exclusion_ts, int candidate_limit, int materialization_limit,
     const std::unordered_set<long long> &superseded_memory_ids,
-    double duplicate_threshold)
+    double duplicate_threshold, bool constructive_recall_enabled,
+    bool current_surface_database_current)
 {
   std::vector<std::map<std::string, std::any>> selected;
   selected.reserve (static_cast<std::size_t> (std::max (0, candidate_limit)));
-  if (candidate_limit <= 0 || query_embedding.size () <= 0)
+  if (candidate_limit <= 0 || materialization_limit <= 0
+      || query_embedding.size () <= 0)
     {
       return selected;
     }
 
+  std::vector<long long> ordered_superseded_ids (
+      superseded_memory_ids.begin (), superseded_memory_ids.end ());
+  std::sort (ordered_superseded_ids.begin (), ordered_superseded_ids.end ());
+  std::string superseded_membership = ",";
+  for (const long long memory_id : ordered_superseded_ids)
+    {
+      superseded_membership += std::to_string (memory_id);
+      superseded_membership += ',';
+    }
+
   std::unordered_set<long long> seen_memory_ids;
   FamilyRepresentativeIndex families (duplicate_threshold);
-  auto rows = tx.Execute (
-      "SELECT memory_id, embedding_id, start_ts, embedding "
-      "FROM ("
-      "  SELECT m.memory_id, cme.embedding_id, m.start_ts, "
-      "         cme.embedding, "
-      "         vec_distance_l2(cme.embedding, ?) AS distance "
+  const bool use_latest_reconstructions
+      = constructive_recall_enabled && !current_surface_database_current;
+  std::size_t row_offset = 0;
+#ifdef CORTEXT_TESTING
+  std::size_t materialized_row_count = 0;
+#endif
+  while (static_cast<int> (selected.size ()) < candidate_limit)
+    {
+      std::string query;
+      std::vector<std::any> params;
+      if (use_latest_reconstructions)
+        {
+          query = "WITH latest_reconstruction AS ("
+      "  SELECT memory_id, MAX(reconstruction_id) AS reconstruction_id "
+      "  FROM memory_reconstructions GROUP BY memory_id"
+      "), reconstructed_eligible AS ("
+      "  SELECT m.memory_id, mr.embedding_id, m.start_ts, "
+      "         e.embedding, vec_distance_l2(e.embedding, ?1) AS distance "
+      "  FROM latest_reconstruction latest "
+      "  JOIN memory_reconstructions mr "
+      "    ON mr.reconstruction_id = latest.reconstruction_id "
+      "  JOIN embeddings e ON e.embedding_id = mr.embedding_id "
+      "  JOIN memories m ON m.memory_id = latest.memory_id "
+      "  WHERE m.kind = 'LONG_TERM' "
+      "    AND COALESCE(m.start_ts, 0) < ?2 "
+      "    AND instr(?3, ',' || CAST(m.memory_id AS TEXT) || ',') = 0"
+      "), current_eligible AS ("
+      "  SELECT m.memory_id, cme.embedding_id, m.start_ts, cme.embedding, "
+      "         vec_distance_l2(cme.embedding, ?1) AS distance "
       "  FROM current_memory_embeddings cme "
       "  JOIN memories m ON m.memory_id = cme.memory_id "
       "  WHERE m.kind = 'LONG_TERM' "
-      "    AND COALESCE(m.start_ts, 0) < ? "
-      "  UNION ALL "
-      "  SELECT m.memory_id, m.embedding_id, m.start_ts, e.embedding, "
-      "         vec_distance_l2(e.embedding, ?) AS distance "
+      "    AND COALESCE(m.start_ts, 0) < ?2 "
+      "    AND instr(?3, ',' || CAST(m.memory_id AS TEXT) || ',') = 0 "
+      "    AND NOT EXISTS ("
+      "      SELECT 1 FROM latest_reconstruction latest "
+      "      WHERE latest.memory_id = m.memory_id"
+      "    )"
+      "), historical_eligible AS ("
+      "  SELECT m.memory_id, m.embedding_id, m.start_ts, "
+      "         e.embedding, "
+      "         vec_distance_l2(e.embedding, ?1) AS distance "
       "  FROM memories m "
       "  JOIN embeddings e ON e.embedding_id = m.embedding_id "
       "  WHERE m.kind = 'LONG_TERM' "
-      "    AND COALESCE(m.start_ts, 0) < ? "
+      "    AND COALESCE(m.start_ts, 0) < ?2 "
+      "    AND instr(?3, ',' || CAST(m.memory_id AS TEXT) || ',') = 0 "
       "    AND NOT EXISTS ("
       "      SELECT 1 FROM current_memory_embeddings cme2 "
       "      WHERE cme2.memory_id = m.memory_id"
+      "    ) "
+      "    AND NOT EXISTS ("
+      "      SELECT 1 FROM latest_reconstruction latest2 "
+      "      WHERE latest2.memory_id = m.memory_id"
       "    )"
-      ") eligible "
-      "ORDER BY distance ASC, memory_id ASC, embedding_id ASC",
-      { ToFloatVector (query_embedding), exclusion_ts,
-        ToFloatVector (query_embedding), exclusion_ts });
+      "), historical_ranked AS ("
+      "  SELECT memory_id, embedding_id, start_ts, embedding, distance, "
+      "         ROW_NUMBER() OVER ("
+      "           PARTITION BY embedding "
+      "           ORDER BY start_ts ASC, memory_id ASC"
+      "         ) AS reference_rank "
+      "  FROM historical_eligible"
+      "), eligible AS ("
+      "  SELECT memory_id, embedding_id, start_ts, embedding, distance "
+      "  FROM reconstructed_eligible "
+      "  UNION ALL "
+      "  SELECT memory_id, embedding_id, start_ts, embedding, distance "
+      "  FROM current_eligible "
+      "  UNION ALL "
+      "  SELECT memory_id, embedding_id, start_ts, embedding, distance "
+      "  FROM historical_ranked WHERE reference_rank = 1"
+      ") "
+      "SELECT memory_id, embedding_id, start_ts, embedding "
+      "FROM eligible ";
+          params = {
+            ToFloatVector (query_embedding), exclusion_ts,
+            superseded_membership
+          };
+        }
+      else
+        {
+          query
+              = "WITH current_eligible AS ("
+                "  SELECT m.memory_id, cme.embedding_id, m.start_ts, "
+                "         cme.embedding, "
+                "         vec_distance_l2(cme.embedding, ?) AS distance "
+                "  FROM current_memory_embeddings cme "
+                "  JOIN memories m ON m.memory_id = cme.memory_id "
+                "  WHERE m.kind = 'LONG_TERM' "
+                "    AND COALESCE(m.start_ts, 0) < ? "
+                "    AND instr(?, ',' || CAST(m.memory_id AS TEXT) || ',') "
+                "        = 0"
+                "), historical_eligible AS ("
+                "  SELECT m.memory_id, m.embedding_id, m.start_ts, "
+                "         e.embedding, "
+                "         vec_distance_l2(e.embedding, ?) AS distance "
+                "  FROM memories m "
+                "  JOIN embeddings e ON e.embedding_id = m.embedding_id "
+                "  WHERE m.kind = 'LONG_TERM' "
+                "    AND COALESCE(m.start_ts, 0) < ? "
+                "    AND instr(?, ',' || CAST(m.memory_id AS TEXT) || ',') "
+                "        = 0 "
+                "    AND NOT EXISTS ("
+                "      SELECT 1 FROM current_memory_embeddings cme2 "
+                "      WHERE cme2.memory_id = m.memory_id"
+                "    )"
+                "), historical_ranked AS ("
+                "  SELECT memory_id, embedding_id, start_ts, embedding, "
+                "         distance, "
+                "         ROW_NUMBER() OVER ("
+                "           PARTITION BY embedding "
+                "           ORDER BY start_ts ASC, memory_id ASC"
+                "         ) AS reference_rank "
+                "  FROM historical_eligible"
+                "), eligible AS ("
+                "  SELECT memory_id, embedding_id, start_ts, embedding, "
+                "         distance FROM current_eligible "
+                "  UNION ALL "
+                "  SELECT memory_id, embedding_id, start_ts, embedding, "
+                "         distance "
+                "  FROM historical_ranked WHERE reference_rank = 1"
+                ") "
+                "SELECT memory_id, embedding_id, start_ts, embedding "
+                "FROM eligible ";
+          params = { ToFloatVector (query_embedding), exclusion_ts,
+                     superseded_membership, ToFloatVector (query_embedding),
+                     exclusion_ts, superseded_membership };
+        }
+      query += "ORDER BY distance ASC, memory_id ASC, embedding_id ASC "
+               "LIMIT ?";
+      params.push_back (static_cast<long long> (materialization_limit));
+      if (row_offset > 0)
+        {
+          query += " OFFSET ?";
+          params.push_back (static_cast<long long> (row_offset));
+        }
+      auto rows = tx.Execute (query, params);
 #ifdef CORTEXT_TESTING
-  retrieval_trace::IncrementLastSqlFallbackQueryCount ();
+      retrieval_trace::IncrementLastSqlFallbackQueryCount ();
+      materialized_row_count += rows.size ();
 #endif
-  for (auto &row : rows)
-    {
-      const long long memory_id = AnyLongLong (row, "memory_id");
-      const auto embedding_it = row.find ("embedding");
-      Eigen::VectorXf embedding;
-      if (memory_id <= 0 || superseded_memory_ids.count (memory_id) != 0
-          || !seen_memory_ids.insert (memory_id).second
-          || embedding_it == row.end ()
-          || !AnyToEmbedding (
-              embedding_it->second, static_cast<int> (query_embedding.size ()),
-              embedding))
+      if (rows.empty ())
         {
-          continue;
+          break;
         }
-      auto features = BuildFamilyEmbeddingFeatures (embedding);
-      if (families.IsDuplicate (features))
+      row_offset += rows.size ();
+
+      for (auto &row : rows)
         {
-          continue;
+          const long long memory_id = AnyLongLong (row, "memory_id");
+          const auto embedding_it = row.find ("embedding");
+          Eigen::VectorXf embedding;
+          if (memory_id <= 0 || superseded_memory_ids.count (memory_id) != 0
+              || !seen_memory_ids.insert (memory_id).second
+              || embedding_it == row.end ()
+              || !AnyToEmbedding (embedding_it->second,
+                                  static_cast<int> (query_embedding.size ()),
+                                  embedding))
+            {
+              continue;
+            }
+          auto features = BuildFamilyEmbeddingFeatures (embedding);
+          if (families.IsDuplicate (features))
+            {
+              continue;
+            }
+          families.Add (std::move (features));
+          selected.push_back (std::move (row));
+          if (static_cast<int> (selected.size ()) >= candidate_limit)
+            {
+              break;
+            }
         }
-      families.Add (std::move (features));
-      selected.push_back (std::move (row));
-      if (static_cast<int> (selected.size ()) >= candidate_limit)
+      if (rows.size () < static_cast<std::size_t> (materialization_limit))
         {
           break;
         }
     }
+#ifdef CORTEXT_TESTING
+  retrieval_trace::SetLastSqlFallbackMaterializedRowCount (
+      materialized_row_count);
+#endif
   return selected;
 }
 
@@ -991,6 +1290,23 @@ SelectFamilyRepresentatives (std::vector<Candidate> ranked,
 }
 
 void
+SortAndLimitCandidates (std::vector<Candidate> &ranked, int limit)
+{
+  std::sort (ranked.begin (), ranked.end (), [] (const Candidate &a,
+                                                  const Candidate &b) {
+    if (a.score != b.score)
+      {
+        return a.score > b.score;
+      }
+    return a.memory_id > b.memory_id;
+  });
+  if (static_cast<int> (ranked.size ()) > limit)
+    {
+      ranked.resize (static_cast<std::size_t> (std::max (0, limit)));
+    }
+}
+
+void
 SortCandidates (std::vector<Candidate> &ranked)
 {
   std::sort (ranked.begin (), ranked.end (), [] (const Candidate &a,
@@ -1018,6 +1334,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
 #ifdef CORTEXT_TESTING
   retrieval_trace::ClearLastFamilyExactComparisonCount ();
   retrieval_trace::ClearLastSqlFallbackQueryCount ();
+  retrieval_trace::ClearLastSqlFallbackMaterializedRowCount ();
 #endif
 
   if (!context.GetShouldCheckRetrieval ())
@@ -1036,6 +1353,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       1, core::RetrievalGraphExpandedRagMaxItems (F, T));
   const int seed_search_limit
       = core::RetrievalSeedSearchK (F, S, T, seed_limit);
+  const int fallback_materialization_limit
+      = core::RetrievalSeedSearchK (F, S, T, seed_search_limit);
   const int fanout = std::max (
       0, core::RetrievalGraphExpansionFanout (F, S, T));
   const std::uint64_t exclusion_ts
@@ -1081,33 +1400,42 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
 
   std::vector<std::map<std::string, std::any>> rows;
   std::unordered_set<long long> seen_seed_memory_ids;
+  bool sql_fallback_rows_current = false;
   bool cache_search_available = false;
+  auto surface_search_state
+      = historical_surface_search_cache_internal::Find (p_ctx);
+  const auto cache_surface_usable = [] (const auto &state) {
+    return state && state->current_surface_search_current;
+  };
   start_profile_timing ();
-  if (auto current_knn_rows = LoadCurrentSeedRowsFromCache (
-          p_ctx, signal.embedding, static_cast<long long> (exclusion_ts),
-          seed_search_limit, superseded_memory_ids, duplicate_threshold))
+  if (cache_surface_usable (surface_search_state))
     {
-      cache_search_available = true;
-      AppendUniqueRows (rows, std::move (*current_knn_rows),
-                        seen_seed_memory_ids);
-    }
-  if (auto historical_knn_rows = LoadHistoricalSeedRowsFromCache (
+      auto current_knn_rows = LoadCurrentSeedRowsFromCache (
           p_ctx, signal.embedding, static_cast<long long> (exclusion_ts),
-          seed_search_limit, superseded_memory_ids, duplicate_threshold))
-    {
-      cache_search_available = true;
-      AppendUniqueRows (rows, std::move (*historical_knn_rows),
-                        seen_seed_memory_ids);
+          seed_search_limit, superseded_memory_ids, duplicate_threshold);
+      auto historical_knn_rows = LoadHistoricalSeedRowsFromCache (
+          p_ctx, signal.embedding, static_cast<long long> (exclusion_ts),
+          seed_search_limit, superseded_memory_ids, duplicate_threshold);
+      if (current_knn_rows && historical_knn_rows)
+        {
+          cache_search_available = true;
+          AppendUniqueRows (rows, std::move (*current_knn_rows),
+                            seen_seed_memory_ids);
+          AppendUniqueRows (rows, std::move (*historical_knn_rows),
+                            seen_seed_memory_ids);
+        }
     }
   profile_timing ("GraphRetrieve.seed_knn_cache", section_start);
 
-  if (!cache_search_available
-      && signal.retention != Retention::Ephemeral
-      && !historical_surface_search_cache_internal::RecoveryFailed (p_ctx))
+  if (!cache_search_available && surface_search_state
+      && surface_search_state->processor_surface_complete)
     {
       start_profile_timing ();
-      if (RebuildSurfaceSearchCache (tx, p_ctx, embedding_dim))
+      if (signal.retention != Retention::Ephemeral
+          && RebuildCurrentSearchCacheFromProcessorSurface (p_ctx))
         {
+          surface_search_state
+              = historical_surface_search_cache_internal::Find (p_ctx);
           if (auto current_knn_rows = LoadCurrentSeedRowsFromCache (
                   p_ctx, signal.embedding,
                   static_cast<long long> (exclusion_ts), seed_search_limit,
@@ -1117,14 +1445,47 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
               AppendUniqueRows (rows, std::move (*current_knn_rows),
                                 seen_seed_memory_ids);
             }
-          if (auto historical_knn_rows = LoadHistoricalSeedRowsFromCache (
+        }
+      else if (auto processor_rows
+               = LoadCurrentSeedRowsFromProcessorSurface (
+                   p_ctx, signal.embedding,
+                   static_cast<long long> (exclusion_ts), seed_search_limit,
+                   superseded_memory_ids, duplicate_threshold))
+        {
+          cache_search_available = true;
+          AppendUniqueRows (rows, std::move (*processor_rows),
+                            seen_seed_memory_ids);
+        }
+      profile_timing ("GraphRetrieve.seed_processor_surface", section_start);
+    }
+
+  if (!cache_search_available
+      && signal.retention != Retention::Ephemeral
+      && !(surface_search_state && surface_search_state->recovery_failed))
+    {
+      start_profile_timing ();
+      if (RebuildSurfaceSearchCache (tx, p_ctx, embedding_dim))
+        {
+          surface_search_state
+              = historical_surface_search_cache_internal::Find (p_ctx);
+          if (cache_surface_usable (surface_search_state))
+            {
+              auto current_knn_rows = LoadCurrentSeedRowsFromCache (
                   p_ctx, signal.embedding,
                   static_cast<long long> (exclusion_ts), seed_search_limit,
-                  superseded_memory_ids, duplicate_threshold))
-            {
-              cache_search_available = true;
-              AppendUniqueRows (rows, std::move (*historical_knn_rows),
-                                seen_seed_memory_ids);
+                  superseded_memory_ids, duplicate_threshold);
+              auto historical_knn_rows = LoadHistoricalSeedRowsFromCache (
+                  p_ctx, signal.embedding,
+                  static_cast<long long> (exclusion_ts), seed_search_limit,
+                  superseded_memory_ids, duplicate_threshold);
+              if (current_knn_rows && historical_knn_rows)
+                {
+                  cache_search_available = true;
+                  AppendUniqueRows (rows, std::move (*current_knn_rows),
+                                    seen_seed_memory_ids);
+                  AppendUniqueRows (rows, std::move (*historical_knn_rows),
+                                    seen_seed_memory_ids);
+                }
             }
         }
       else
@@ -1142,9 +1503,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         {
           auto fallback_rows = LoadEligibleSeedRowsFromSqlFallback (
               tx, signal.embedding, static_cast<long long> (exclusion_ts),
-              seed_search_limit, superseded_memory_ids, duplicate_threshold);
+              seed_limit, fallback_materialization_limit,
+              superseded_memory_ids, duplicate_threshold,
+              constructive_recall_enabled,
+              surface_search_state && surface_search_state
+                                          ->current_surface_database_current);
           AppendUniqueRows (rows, std::move (fallback_rows),
                             seen_seed_memory_ids);
+          sql_fallback_rows_current = constructive_recall_enabled;
         }
       catch (const std::exception &e)
         {
@@ -1175,7 +1541,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         }
       if (constructive_recall_enabled)
         {
-          if (!RefreshCandidateFromProcessorSurface (
+          if (!sql_fallback_rows_current
+              && !RefreshCandidateFromProcessorSurface (
                   p_ctx, candidate, embedding_dim))
             {
               (void)RefreshCandidateToCurrentSurface (
@@ -1191,8 +1558,15 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       candidate.direct_seed = true;
       seeded.push_back (std::move (candidate));
     }
-  seeded = SelectFamilyRepresentatives (
-      std::move (seeded), duplicate_threshold, seed_limit);
+  if (sql_fallback_rows_current)
+    {
+      SortAndLimitCandidates (seeded, seed_limit);
+    }
+  else
+    {
+      seeded = SelectFamilyRepresentatives (
+          std::move (seeded), duplicate_threshold, seed_limit);
+    }
   profile_timing ("GraphRetrieve.seed_rank", section_start);
 
   std::unordered_map<long long, Candidate> candidates;

@@ -1480,27 +1480,23 @@ LoadHistoricalSurfaceSearchCache (Store &store, ProcessorContext &ctx)
                 ExtractString (row, "kind"), ExtractString (row, "source_id"),
                 BlobToEigen (emb_it->second) });
         }
-      auto current_rows = store.Execute (
-          "SELECT memory_id, embedding_id, embedding "
-          "FROM current_memory_embeddings ORDER BY memory_id");
       std::vector<
           operations::historical_surface_search_cache_internal::Entry>
           current_entries;
-      current_entries.reserve (current_rows.size ());
-      for (const auto &row : current_rows)
+      current_entries.reserve (ctx.retrieval_surface_cache.size ());
+      for (const auto &surface : ctx.retrieval_surface_cache)
         {
-          auto emb_it = row.find ("embedding");
-          if (emb_it == row.end () || !emb_it->second.has_value ())
+          if (surface.kind != "LONG_TERM" || !surface.vector_seed_eligible
+              || surface.memory_id <= 0 || surface.embedding_id <= 0
+              || surface.embedding.size () <= 0)
             {
               continue;
             }
           current_entries.push_back (
-              { ExtractInt64 (row, "embedding_id", 0),
-                ExtractInt64 (row, "memory_id", 0), 0, std::string (),
-                std::string (), BlobToEigen (emb_it->second) });
+              { surface.embedding_id, surface.memory_id, 0, std::string (),
+                std::string (), surface.embedding });
         }
       if (search_entries.size () != embedding_rows.size ()
-          || current_entries.size () != current_rows.size ()
           || !operations::historical_surface_search_cache_internal::Reset (
               ctx, std::move (search_entries), std::move (current_entries)))
         {
@@ -1547,6 +1543,12 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
           "            WHEN ?1 != 0 AND cme.memory_id IS NOT NULL "
           "            THEN cme.embedding "
           "            ELSE base_e.embedding END AS embedding, "
+          "       CASE WHEN ?1 = 0 "
+          "                  OR latest_r.reconstruction_id IS NULL "
+          "                  OR (cme.memory_id IS NOT NULL "
+          "                      AND cme.embedding_id = latest_r.embedding_id) "
+          "            THEN 1 ELSE 0 END "
+          "         AS current_surface_database_current, "
           "       base_e.embedding AS base_embedding, "
           "       COALESCE(m.created_at, "
           "                CASE WHEN ?1 != 0 THEN latest_r.created_at END, "
@@ -1586,16 +1588,23 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
           "   OR (m.kind != 'WORKING' "
           "       AND m.kind != 'LABEL' "
           "       AND m.embedding_id IS NOT NULL)",
-          { constructive_recall_enabled });
+          { constructive_recall_enabled ? 1 : 0 });
 
+      bool current_surface_database_current = true;
+      bool processor_surface_complete = true;
       ctx.retrieval_surface_cache.reserve (rows.size ());
       ctx.retrieval_surface_index.reserve (rows.size ());
       ctx.retrieval_surface_embedding_index.reserve (rows.size ());
       for (const auto &row : rows)
         {
+          if (ExtractInt64 (row, "current_surface_database_current", 0) == 0)
+            {
+              current_surface_database_current = false;
+            }
           auto emb_it = row.find ("embedding");
           if (emb_it == row.end () || !emb_it->second.has_value ())
             {
+              processor_surface_complete = false;
               continue;
             }
           ProcessorContext::RetrievalSurfaceEntry entry;
@@ -1637,6 +1646,11 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
                                       association_is_association);
         }
       LoadHistoricalSurfaceSearchCache (store, ctx);
+      operations::historical_surface_search_cache_internal::
+          SetCurrentSurfaceDatabaseCurrent (
+              ctx, current_surface_database_current);
+      operations::historical_surface_search_cache_internal::
+          SetProcessorSurfaceComplete (ctx, processor_surface_complete);
       ctx.SortRetrievalSurfaceSourceIndexes ();
       telemetry::LogDebug (
           "cortext.retrieval_surface_cache.load",
@@ -1647,6 +1661,10 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
   catch (const std::exception &e)
     {
       operations::historical_surface_search_cache_internal::Erase (ctx);
+      operations::historical_surface_search_cache_internal::
+          SetCurrentSurfaceDatabaseCurrent (ctx, false);
+      operations::historical_surface_search_cache_internal::
+          SetProcessorSurfaceComplete (ctx, false);
       telemetry::LogWarn (
           "Failed to load retrieval surface cache",
           { telemetry::Attribute::String ("component", "signal_processor"),
