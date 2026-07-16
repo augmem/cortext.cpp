@@ -39,21 +39,39 @@ struct MemoryData
 /// @brief Load memories for cluster-based processing.
 /// Groups by cluster_id for building edges within clusters.
 std::map<int, std::vector<MemoryData>>
-LoadClusterMemories (Store *store)
+LoadClusterMemories (Transaction &tx,
+                     const std::vector<ClusterInfo> &new_clusters)
 {
   std::map<int, std::vector<MemoryData>> clusters;
 
-  // Query memories with cluster_id, ordered by timestamp
-  auto rows = store->Execute (
+  if (new_clusters.empty ())
+    {
+      return clusters;
+    }
+
+  std::string placeholders;
+  std::vector<std::any> parameters;
+  parameters.reserve (new_clusters.size ());
+  for (const auto &cluster : new_clusters)
+    {
+      if (!placeholders.empty ())
+        {
+          placeholders += ", ";
+        }
+      placeholders += "?";
+      parameters.emplace_back (cluster.cluster_id);
+    }
+
+  auto rows = tx.Execute (
       "SELECT m.memory_id, m.embedding_id, m.cluster_id, "
       "COALESCE(m.end_ts, m.start_ts, m.created_at, 0) AS created_at, "
       "COALESCE(m.boundary_score, 0.0) AS boundary_score, "
       "e.embedding "
       "FROM memories m "
       "JOIN embeddings e ON m.embedding_id = e.embedding_id "
-      "WHERE m.cluster_id IS NOT NULL "
+      "WHERE m.cluster_id IN (" + placeholders + ") "
       "ORDER BY m.cluster_id, created_at",
-      {});
+      parameters);
 
   constexpr int kEmbeddingDim = 256;
 
@@ -368,12 +386,11 @@ DecayReinforcementEdges (Transaction &tx, double decay_rate,
 void
 BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx) const
 {
-  if (!context.GetConsolidationShouldStart ())
+  if (!context.GetConsolidationPersisted ())
     {
       return;
     }
   context.GetProcessorContext ().association_fanout_cache.valid = false;
-  Store *store = context.GetStore ();
   const auto &cfg = context.GetConfig ();
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
@@ -400,9 +417,9 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
   // No need to create graph_nodes or graph_edges tables - using V2 tables
 
   // 1) Build edges from MEMORIES with cluster_id.
-  if (store)
-    {
-      auto clusters = LoadClusterMemories (store);
+  {
+      auto clusters = LoadClusterMemories (
+          tx, context.GetConsolidationClusters ());
 
       // 2) Co-occurrence edges: memory <-> memory within clusters
       // Creates 'co_occurs' edges for highly similar memories
@@ -426,7 +443,7 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
                                 cfg.stability,
                                 same_event_boundary_threshold, now_ts);
         }
-    }
+  }
 
   // 6) Decay reinforcement edges (created during retrieval)
   if (cfg.reinforcement_enabled)
@@ -443,7 +460,7 @@ BuildGraphFromConsolidation::Execute (OperationContext &context, Transaction &tx
   // Count associations for logging
   long long edges_count = 0;
 
-  if (store)
+  if (Store *store = context.GetStore ())
     {
       auto edge_rows = store->Execute (
           "SELECT COUNT(*) AS cnt FROM associations", {});

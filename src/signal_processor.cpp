@@ -11,6 +11,7 @@
 #include "cortext/store/schema.hpp"
 #include "cortext/store/utils.hpp"
 #include "operations/constructive_recall_internal.hpp"
+#include "operations/consolidation_throughput_state_internal.hpp"
 #include "operations/historical_surface_search_cache_internal.hpp"
 #include "working_memory_time_internal.hpp"
 #include <algorithm>
@@ -235,6 +236,8 @@ struct ProcessorRollbackSnapshot
 {
   ProcessorContext context;
   DetachedProcessorCaches caches;
+  operations::consolidation_throughput_state_internal::State
+      consolidation_throughput;
   bool initialized = false;
 };
 
@@ -678,41 +681,16 @@ ApplyConsolidationHint (const Signal &signal, const SignalProcessor::Config &cfg
 {
   if (signal.force_consolidation)
     {
-      out.consolidation_recommended = false;
-      out.consolidation_required = false;
+      out.consolidation_state = ConsolidationState::None;
       return;
     }
-  const uint64_t now_ts = signal.timestamp;
-  const uint64_t last_ts = ctx.last_consolidation_ts;
-  const uint64_t since_ms
-      = (last_ts > 0 && now_ts > last_ts) ? (now_ts - last_ts) : 0;
-
-  const uint64_t interval_ms
-      = static_cast<uint64_t> (
-            std::max (0, core::ConsolidationIntervalSeconds (cfg.stability)))
-        * 1000;
-  const uint64_t required_interval_ms
-      = static_cast<uint64_t> (
-            std::max (0, core::ConsolidationRequiredIntervalSeconds (cfg.stability)))
-        * 1000;
-
-  const bool time_recommended
-      = (interval_ms > 0) && (since_ms >= interval_ms);
-  const bool time_required
-      = (required_interval_ms > 0) && (since_ms >= required_interval_ms);
-
-  const long long count = std::max (0, ctx.memories_since_consolidation);
-  const long long count_threshold
-      = core::ConsolidationThresholdCount (cfg.stability);
-  const long long count_required
-      = core::ConsolidationRequiredCount (cfg.stability);
-  const bool count_recommended = count >= count_threshold;
-  const bool count_req = count >= count_required;
-
-  const bool required = time_required || count_req;
-  const bool recommended = required || time_recommended || count_recommended;
-  out.consolidation_recommended = recommended;
-  out.consolidation_required = required;
+  const auto rate_state
+      = operations::consolidation_throughput_state_internal::Find (ctx);
+  out.consolidation_state
+      = operations::consolidation_throughput_state_internal::Classify (
+          rate_state, ctx.m_rate,
+          std::max (0, ctx.memories_since_consolidation), cfg.focus,
+          cfg.sensitivity, cfg.stability);
 }
 
 const char *
@@ -1101,10 +1079,6 @@ LoadState (Store &store, ProcessorContext &ctx,
       // === Processor state fields ===
       ctx.signals_processed
           = static_cast<int> (ExtractInt64 (row, "signals_processed", 0));
-      if (ctx.signals_processed == 0)
-        {
-          return false;
-        }
       const bool legacy_policy_defaults
           = NearlyEqual (ExtractDouble (row, "theta_dynamic", 0.2), 0.2)
             && NearlyEqual (ExtractDouble (row, "theta_target", 0.2), 0.2)
@@ -1211,6 +1185,12 @@ LoadState (Store &store, ProcessorContext &ctx,
 
       // Rate control (Algorithm 8)
       ctx.m_rate = ExtractDouble (row, "m_rate", 0.0);
+      operations::consolidation_throughput_state_internal::Reset (
+          ctx,
+          { ExtractDouble (row, "consolidation_rate_floor", 0.0),
+            ExtractDouble (row, "consolidation_rate_peak", 0.0),
+            ExtractInt64 (row, "consolidation_rate_initialized", 0) != 0,
+            ExtractInt64 (row, "consolidation_rate_armed", 1) != 0 });
       ctx.rho_hat_prev = ExtractDouble (row, "rho_hat_prev", 0.0);
       ctx.rate_ticks = static_cast<int> (ExtractInt64 (row, "rate_ticks", 0));
       ctx.dt_ema = ExtractDouble (row, "dt_ema", 0.0);
@@ -1480,7 +1460,8 @@ LoadHistoricalSurfaceSearchCache (Store &store, ProcessorContext &ctx)
           "       COALESCE(m.source_id, '') AS source_id "
           "FROM embeddings e "
           "LEFT JOIN memories m ON m.embedding_id = e.embedding_id "
-          "ORDER BY e.embedding_id");
+          "  AND m.kind = 'LONG_TERM' "
+          "ORDER BY e.embedding_id, COALESCE(m.start_ts, 0), m.memory_id");
       std::vector<
           operations::historical_surface_search_cache_internal::Entry>
           search_entries;
@@ -1586,13 +1567,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
           "       COALESCE(m.pre_activation, 0.0) AS pre_activation, "
           "       CASE WHEN (cme.memory_id IS NOT NULL "
           "                  OR m.embedding_id IS NOT NULL) "
-          "             AND m.kind != 'WORKING' "
-          "             AND m.kind != 'LABEL' "
-          "             AND (m.kind != 'ASSOCIATION' OR EXISTS ("
-          "               SELECT 1 FROM associations a "
-          "               WHERE a.source_memory_id = m.memory_id "
-          "                 AND a.edge_type = 'derived_from'"
-          "             )) "
+          "             AND m.kind = 'LONG_TERM' "
           "            THEN 1 ELSE 0 END AS vector_seed_eligible "
           "FROM memories m "
           "LEFT JOIN current_memory_embeddings cme "
@@ -2094,15 +2069,19 @@ SignalProcessor::SignalProcessor (const Config &config,
       SeedKnobDerivedStateDefaults (*context_, config_);
       context_->last_rate_timestamp = static_cast<uint64_t> (now_ms);
       context_->last_mood_ts = static_cast<uint64_t> (now_ms);
+      operations::consolidation_throughput_state_internal::Reset (*context_);
     }
-
 }
 
 SignalProcessor::~SignalProcessor ()
 {
   if (context_)
     {
+      // SignalProcessor exclusively owns the process-lifetime registry entry.
+      // Erasing it prevents a later allocation at the same address from
+      // inheriting state from this processor or store.
       operations::historical_surface_search_cache_internal::Erase (*context_);
+      operations::consolidation_throughput_state_internal::Erase (*context_);
     }
 }
 
@@ -2111,12 +2090,14 @@ SignalProcessor::Process (const Signal &signal)
 {
   const auto t0 = std::chrono::steady_clock::now ();
   telemetry::ScopedSpan span ("cortext.process");
+  const bool read_only = signal.retention == Retention::Ephemeral;
+  const bool maintenance = signal.force_consolidation && !read_only;
 
   // Create transaction for this signal processing
   const auto tx_begin_start = std::chrono::steady_clock::now ();
   auto tx = store_ ? store_->Begin () : nullptr;
   std::unique_ptr<ObjectTransaction> object_tx;
-  if (object_store_ && tx)
+  if (object_store_ && tx && !maintenance)
     {
       if (dynamic_cast<SqlObjectStore *> (object_store_.get ()) == nullptr)
         {
@@ -2135,6 +2116,9 @@ SignalProcessor::Process (const Signal &signal)
       {
         rollback_snapshot.context = *context_;
         rollback_snapshot.caches = detached_caches;
+        rollback_snapshot.consolidation_throughput
+            = operations::consolidation_throughput_state_internal::Find (
+                *context_);
         rollback_snapshot.initialized = true;
       }
     catch (...)
@@ -2173,6 +2157,8 @@ SignalProcessor::Process (const Signal &signal)
   auto restore_context_snapshot = [&] {
     operations::historical_surface_search_cache_internal::Erase (*context_);
     *context_ = std::move (rollback_snapshot.context);
+    operations::consolidation_throughput_state_internal::Reset (
+        *context_, rollback_snapshot.consolidation_throughput);
     RestoreRebuildableProcessorCaches (*context_, rollback_snapshot.caches);
     rollback_snapshot.initialized = false;
     if (store_)
@@ -2182,26 +2168,54 @@ SignalProcessor::Process (const Signal &signal)
         LoadHistoricalSurfaceSearchCache (*store_, *context_);
       }
   };
+  auto restore_read_only_context_snapshot = [&] {
+    *context_ = std::move (rollback_snapshot.context);
+    operations::consolidation_throughput_state_internal::Reset (
+        *context_, rollback_snapshot.consolidation_throughput);
+    RestoreRebuildableProcessorCaches (*context_, rollback_snapshot.caches);
+    rollback_snapshot.initialized = false;
+  };
+  std::optional<Output> read_only_output;
 
   try
     {
-      op_context.SetCurrentOperationType ("StartNewEpisode");
       auto op_start = std::chrono::steady_clock::now ();
-      StartNewEpisode (tx.get (), signal.timestamp);
-      op_context.AddOperationTiming (
-          "SignalProcessor.start_new_episode",
-          ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
+      if (!maintenance)
+        {
+          op_context.SetCurrentOperationType ("StartNewEpisode");
+          StartNewEpisode (tx.get (), signal.timestamp);
+          op_context.AddOperationTiming (
+              "SignalProcessor.start_new_episode",
+              ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
+        }
       if (tx)
         {
           root_operation_->Execute (op_context, *tx);
         }
 
-      if (op_context.GetWriteDecision ())
+      if (read_only)
+        {
+          Output out;
+          AssembleOutputMemories (op_context, out);
+          AssembleOutputFields (op_context, out);
+          rollback_object_tx ();
+          if (tx)
+            {
+              tx->Rollback ();
+            }
+          restore_read_only_context_snapshot ();
+          ApplyConsolidationHint (signal, config_, *context_, out);
+          read_only_output = std::move (out);
+        }
+      else if (!maintenance && op_context.GetWriteDecision ())
         {
           context_->write_rate_window_.Record (signal.timestamp);
         }
 
-      context_->last_signal_timestamp = signal.timestamp;
+      if (!read_only && !maintenance)
+        {
+          context_->last_signal_timestamp = signal.timestamp;
+        }
 
       span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
       span.SetAttribute ("cortext.interrupt_allowed",
@@ -2213,7 +2227,7 @@ SignalProcessor::Process (const Signal &signal)
       span.SetAttribute ("cortext.effective_focus",
                          op_context.GetEffectiveFocus ());
 
-      if (op_context.ShouldFinalizeEpisode ())
+      if (!read_only && !maintenance && op_context.ShouldFinalizeEpisode ())
         {
           op_context.SetCurrentOperationType ("FinalizeEpisode");
           op_start = std::chrono::steady_clock::now ();
@@ -2223,23 +2237,34 @@ SignalProcessor::Process (const Signal &signal)
               ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
         }
 
-      context_->signals_processed += 1;
+      if (!read_only && !maintenance)
+        {
+          context_->signals_processed += 1;
+        }
 
       // Persist state within the same transaction (v2 schema)
-      if (tx)
+      if (tx && !read_only)
         {
+          if (maintenance)
+            {
+              operations::consolidation_throughput_state_internal::Acknowledge (
+                  *context_, context_->m_rate);
+            }
           op_context.SetCurrentOperationType ("PersistState");
           op_start = std::chrono::steady_clock::now ();
           PersistState (*tx);           // Unified state
           op_context.AddOperationTiming (
               "SignalProcessor.persist_state",
               ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
-          op_context.SetCurrentOperationType ("PersistWorkingMemory");
-          op_start = std::chrono::steady_clock::now ();
-          PersistWorkingMemory (*tx, signal.force_consolidation, &op_context);
-          op_context.AddOperationTiming (
-              "SignalProcessor.persist_working_memory",
-              ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
+          if (!maintenance)
+            {
+              op_context.SetCurrentOperationType ("PersistWorkingMemory");
+              op_start = std::chrono::steady_clock::now ();
+              PersistWorkingMemory (*tx, false, &op_context);
+              op_context.AddOperationTiming (
+                  "SignalProcessor.persist_working_memory",
+                  ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
+            }
           if (object_tx)
             {
               op_context.SetCurrentOperationType ("PersistObjects");
@@ -2328,9 +2353,16 @@ SignalProcessor::Process (const Signal &signal)
     }
 
   Output out;
-  AssembleOutputMemories (op_context, out);
-  AssembleOutputFields (op_context, out);
-  ApplyConsolidationHint (signal, config_, *context_, out);
+  if (read_only_output.has_value ())
+    {
+      out = std::move (*read_only_output);
+    }
+  else
+    {
+      AssembleOutputMemories (op_context, out);
+      AssembleOutputFields (op_context, out);
+      ApplyConsolidationHint (signal, config_, *context_, out);
+    }
   const auto t1 = std::chrono::steady_clock::now ();
   const double ms = ElapsedMillis (t0, t1);
   telemetry::RecordHistogram ("cortext.process_duration_ms", ms);
@@ -2358,6 +2390,8 @@ SignalProcessor::Flush ()
     }
   ProcessorContext context_snapshot;
   DetachedProcessorCaches context_cache_snapshot;
+  const auto consolidation_throughput_snapshot
+      = operations::consolidation_throughput_state_internal::Find (*context_);
   {
     auto detached_caches = DetachRebuildableProcessorCaches (*context_);
     context_snapshot = *context_;
@@ -2366,6 +2400,8 @@ SignalProcessor::Flush ()
   }
   auto restore_context_snapshot = [&] {
     *context_ = std::move (context_snapshot);
+    operations::consolidation_throughput_state_internal::Reset (
+        *context_, consolidation_throughput_snapshot);
     RestoreRebuildableProcessorCaches (*context_, context_cache_snapshot);
   };
   auto tx = store_->Begin ();
@@ -2542,6 +2578,8 @@ SignalProcessor::PersistState (Transaction &tx)
       = core::WMMaintenanceCostPerSlot (config_.sensitivity, config_.focus);
   const int wm_slot_count
       = static_cast<int> (context_->wm_slots.size ());
+  const auto consolidation_throughput
+      = operations::consolidation_throughput_state_internal::Find (*context_);
 
   // Get blender weights
   const double blender_fallback = core::BlendBootstrapFallback (
@@ -2597,6 +2635,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "wm_maintenance_cost, wm_slot_count, wm_last_accepted, wm_last_chunked, "
       // Consolidation
       "last_consolidation_ts, consolidation_count, memories_since_consolidation, is_processing_signal, last_retrieval_ts, "
+      "consolidation_rate_floor, consolidation_rate_peak, consolidation_rate_initialized, consolidation_rate_armed, "
       // Episode tracking
       "episode_start_ts, last_interrupt_tick, last_signal_timestamp, updated_at, "
       "write_rate_timestamps, "
@@ -2616,7 +2655,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, ?, ?, ?, "  // Uncertainty + modulators
       "?, ?, ?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
-      "?, ?, ?, ?, ?, "  // Consolidation
+      "?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Consolidation
       "?, ?, ?, ?, ?, "  // Episode tracking + write_rate_timestamps
       "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Blender weights (12)
       "?, ?, "  // Blender ready/count
@@ -2673,6 +2712,9 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->memories_since_consolidation,
         context_->is_processing_signal ? 1 : 0,
         static_cast<long long> (context_->last_retrieval_ts),
+        consolidation_throughput.floor, consolidation_throughput.peak,
+        consolidation_throughput.initialized ? 1 : 0,
+        consolidation_throughput.armed ? 1 : 0,
         // Episode tracking
         static_cast<long long> (context_->episode_start_ts),
         context_->last_interrupt_tick,

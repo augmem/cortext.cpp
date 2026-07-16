@@ -227,7 +227,8 @@ emo_max, arousal_sum, drift_accum, drift_at_last_interrupt,
 drift_acc_pacing, x_last_check. Global variables: signals_processed,
 u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target,
 hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability,
-last_rate_timestamp, last_retrieval_ts, retention_ema, last_embedding,
+last_rate_timestamp, last_retrieval_ts, retention_ema,
+consolidation_rate_floor, consolidation_rate_peak, last_embedding,
 x_pred_ema. Weight naming rule: weight** and **weight variables (e.g.,
 weight_relevance, mismatch_weight, weight_surprise) are control
 parameters; w** variables (e.g., w_relevance, w_mismatch, … w_arousal)
@@ -410,22 +411,36 @@ settings, but they are not additional user-facing memory knobs.
 ### Retrieval Breadth
 
 Retrieval uses two F/S/T-derived breadths rather than one global top-k.
-The candidate discovery pass stays broad so source memories remain
+The candidate discovery pass stays broad so durable memories remain
 reachable:
 
     seed_k(F) = round(lerp(96, 8, FocusBias(F)))
 
-The prompt-facing output is then narrowed after vector-seed relevance,
-event-time recency, graph expansion, same-source/turn-neighbor
-expansion, and supersession demotion:
+Before the vector-seed cap is applied, superseded targets and
+near-duplicate embedding families are collapsed to one current
+representative. Family lookup normalizes each embedding and partitions
+its coordinates into 32 deterministic blocks. For a candidate `x` and
+representative `y`, Cauchy–Schwarz gives the recall-safe upper bound
+
+    cos(x, y) <= sum_b ||x_b||_2 ||y_b||_2
+
+When that bound is below the cosine family threshold, the pair cannot be
+a duplicate and the full dot product is skipped. All remaining pairs
+receive an exact cosine check, so the screen cannot introduce a
+false-negative partition while avoiding broad exact comparisons on
+diverse vectors. The prompt-facing output is then narrowed after vector
+relevance and bounded graph expansion:
 
     selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
 
-Candidate ranking includes an event-time temporal prior in addition to
-vector relevance and graph/source-neighbor evidence:
+Vector relevance is the primary rank. Event-time recency is restricted
+to a bounded tie-break so an old semantic match cannot be displaced by a
+recent but unrelated memory. Graph evidence contributes only a bounded
+residual bonus:
 
-    temporal_rank(m) = exp(-age_s(m) / tau_rank(F,S,T))
-    score(m) += weight_rank(F,S,T) * temporal_rank(m)
+    semantic(m) = map01(cos(q, embedding(m)))
+    base(m) = semantic(m) + (1 - semantic(m)) * 10^-6 * temporal_rank(m)
+    score(m) = base(m) + (1 - base(m)) * min(0.08, w_graph * graph(m))
 
 New source-backed memories also receive a knob-derived source
 reliability prior instead of relying on a fixed storage default:
@@ -435,13 +450,15 @@ reliability prior instead of relying on a fixed storage default:
                    - 0.05(S' - S'_0.5)
                    + 0.08(T - 0.5), 0.50, 0.90)
 
-This split lets low Focus explore many source/blob seeds while still
+This split lets low Focus explore many durable-memory seeds while
 keeping the application prompt bounded by a compact final surface. The
-intermediate graph boosts, durable-source floors, and text seed
-thresholds are likewise derived from Focus, Sensitivity, and Stability
-in the implementation rather than exposed as additional user settings.
-The stored `source_reliability` and `source_contradiction_count` fields
-are not currently consumed by production ranking;
+intermediate graph breadth and score weights are likewise derived from
+Focus, Sensitivity, and Stability in the implementation rather than
+exposed as additional user settings. Neither `source_id` nor modality
+participates in candidate discovery, family collapse, scoring, graph
+expansion, or final selection. The stored `source_reliability` and
+`source_contradiction_count` fields are not currently consumed by
+production ranking;
 <a href="#sec-advanced" class="quarto-xref">Section 8</a> distinguishes
 that metadata from the proposed confidence gate.
 
@@ -1961,46 +1978,20 @@ long-term retention for used memories.
 
 ## Reinforcement Graph Maintenance
 
-Co-retrieved memories also form *reinforces* edges in the ASSOCIATIONS
-graph. These edges are strengthened during retrieval/use and **only
-decayed during explicit consolidation cycles** (triggered externally via
-`Consolidate()` or `cortext_consolidate`), matching the system’s
-“idle-time consolidation” policy. This prevents per-turn decay from
-erasing fresh reinforcement and keeps runtime retrieval updates stable
-while still allowing long-term pruning during consolidation.
+The normal interrupt gate injects at most one selected memory into
+active context per dispatch. Production retrieval therefore does not
+synthesize a pairwise *reinforces* edge from its broader retrieved
+packet: packet co-occurrence is not evidence that two memories were used
+together. This also prevents repeated noisy packets from turning
+boilerplate into durable graph hubs.
 
-The online edge update is intentionally slower than per-memory trace
-reinforcement because it changes the durable graph topology. The current
-runtime derives the co-retrieval edge increment from the three knobs and
-the retrieved-packet shape rather than using a fixed constant:
-
-    base_edge_step(F,S,T) =
-      clamp(lerp(0.015, 0.055, S~) *
-            lerp(1.20, 0.70, F~) *
-            lerp(0.75, 1.15, T), 0.005, 0.08)
-
-    unselected_scale(F,S,T) =
-      clamp(lerp(0.10, 0.35, S~) *
-            lerp(0.85, 0.65, F~) *
-            lerp(0.80, 1.05, T), 0.05, 0.40)
-
-    fanout_damping(F,S,T,n) =
-      1, if n <= 2
-      clamp(sqrt(reference_fanout(F,S,T) / n), 0.25, 1.0), otherwise
-
-    pair_step(i,j) =
-      base_edge_step * fanout_damping *
-      sqrt(clamp(contextual_support_i,0,1) *
-           clamp(contextual_support_j,0,1)) *
-      (1.0 if either endpoint was the selected/used memory
-       else unselected_scale)
-
-Thus a pair anchored by an actually used memory can still learn from
-repeated co-activation, while pairs that merely co-occur inside a broad
-or noisy retrieval packet update much more slowly. This is the
-production replacement for the earlier fixed `0.1` co-retrieval
-increment, which could saturate repeated noisy packets into durable
-graph hubs after only a few retrievals.
+Existing *reinforces* edges remain valid association inputs for stores
+and explicit graph workflows that already contain them. They are decayed
+and pruned only during explicit consolidation cycles (triggered
+externally via `Consolidate()` or `cortext_consolidate`), matching the
+system’s idle-time consolidation policy. At retrieval time their weight
+is degree-normalized before the bounded graph bonus is applied,
+preventing high-degree hubs from dominating candidate rank.
 
 ## Causal Feedback Loop
 
@@ -2641,11 +2632,12 @@ directed `supersedes` edge from the new memory to the older memory:
                          weight = SupersessionEdgeWeight(cos,F,S,T))
         contradiction_count(e_old) += 1
 
-Retrieval traverses `supersedes` edges so a replacement can surface when
-a query first hits the stale assertion. The superseded target is demoted
-by `RetrievalSupersededMemoryPenalty(F,S,T) × edge_weight`, but remains
-retrievable as historical evidence. The number of written supersession
-edges is capped by `SupersessionMaxEdges(F,S,T)`.
+Retrieval treats `supersedes` as a directional family relation rather
+than a traversable activation edge. Superseded targets are removed
+before the vector seed cap, leaving the replacement eligible as the
+family representative and preventing obsolete members from consuming
+prompt slots. The number of written supersession edges is capped by
+`SupersessionMaxEdges(F,S,T)`.
 
 ## Constructive Recall and Controlled Distortion
 
@@ -2876,10 +2868,11 @@ evidence that proactive procedural retrieval ships today.
 # Consolidation and Graph Integration
 
 Consolidation now means explicit embedding replay over stored memories.
-It is a production operation inside the normal pipeline, not a separate
-semantic batch processor. The current hard-cut implementation removes
-the previous internal generative consolidation stack and keeps only
-shallow graph consolidation.
+It uses a maintenance-only transaction path beside the normal signal
+pipeline, not a semantic batch processor or a synthetic input signal.
+The current hard-cut implementation removes the previous internal
+generative consolidation stack and keeps only shallow graph
+consolidation.
 
 ## Complementary Learning Systems Split
 
@@ -2891,8 +2884,9 @@ matters for the product:
     metadata.
 -   **Bounded live state:** working memory and soft-anchor state support
     immediate continuity without scanning the whole store.
--   **Slow durable graph:** explicit consolidation periodically clusters
-    older long-term memories and writes stable graph structure.
+-   **Slow durable graph:** explicit consolidation clusters older
+    long-term memories during observed throughput troughs and writes
+    stable graph structure.
 
 The split is functional rather than model-based. No decoder is required
 to transfer state from the fast path to the durable graph.
@@ -2903,28 +2897,84 @@ Consolidation is external-only. The runtime never schedules it by
 itself. Callers invoke `Consolidate()` or process a maintenance signal
 with `Signal::force_consolidation=true`. This keeps production
 scheduling under the application’s control while still letting the
-engine derive recommendation flags from the three knobs.
+engine derive an ordered urgency state from the three knobs.
 
-The consolidation operations still live in the full operation chain. On
-ordinary signals `EvaluateConsolidation` returns because
-`force_consolidation` is false, and the downstream gate, cluster,
-shallow replay, and graph-build stages no-op. The
-`consolidation_recommended` and `consolidation_required` outputs are
-hints for the caller; they do not schedule maintenance work by
-themselves.
+Ordinary retained and ephemeral signals use the normal operation chain.
+A forced request dispatches only `EvaluateConsolidation`, its score
+gate, the clusterer, shallow replay, and graph construction. Maintenance
+therefore does not create an episode, signal, working-memory row,
+long-term memory, blob, or searchable embedding, and it does not update
+normal throughput observations. The single `consolidation_state` output
+is an ordered hint for the caller; it does not schedule maintenance work
+by itself.
 
-A caller can use the following external scheduling rule:
+A caller can use the engine hints as the external scheduling rule. Since
+the last committed forced request, including a coherent no-op with no
+persisted cluster, the engine maintains the observed write-rate floor
+*r*<sub>*f**l**o**o**r*</sub> and peak *r*<sub>*p**e**a**k*</sub>. The
+peak is monotonic within that interval. A new lower observation lowers
+the floor immediately; otherwise the floor moves upward with an update
+factor 1/*W*<sub>*r**a**t**e*\_*s**e**c**o**n**d**s*</sub>(*T*). Before
+a nonzero range has been observed, the throughput hint remains off. A
+persisted initialization bit distinguishes a real zero-rate observation
+from an uninitialized range, so a later positive sample updates from the
+observed zero instead of overwriting it as bootstrap. Pre-migration rows
+leave that bit false even when legacy rate-control ticks are positive,
+because those ticks do not prove that a throughput range was observed;
+the first post-migration sample establishes the floor and peak.
+
+The knob-derived fraction is:
 
 ``` text
-should_consolidate =
-  elapsed_time >= consolidation_interval(T)
-  OR memories_since_consolidation >= consolidation_threshold(F,S,T)
-  OR caller_idle_window_available
+p(F,S,T) = clamp(
+  0.5
+  × lerp(1.10, 0.75, focus_bias(F))
+  × lerp(0.80, 1.20, sensitivity_bias(S))
+  × lerp(1.10, 0.80, T),
+  0.20,
+  0.70)
 ```
 
-The engine can recommend consolidation, but the API call is the only way
-to start it. `source_id` strings are never interpreted as maintenance
-commands.
+Higher focus and stability require a deeper trough; higher sensitivity
+permits an earlier recommendation. The normalized throughput position
+and ordered state are:
+
+``` text
+range = r_peak - r_floor
+z = (m_rate - r_floor) / range
+p_required(F,S,T) = p(F,S,T) / consolidation_escalation(T)
+p_rearm(F,S,T) = p(F,S,T)
+                 + (1 - p(F,S,T)) * T
+
+consolidation_state =
+  None,        if armed = false
+               OR memories_since_consolidation <= 0
+               OR range <= numeric_epsilon
+               OR z > p(F,S,T)
+  Required,    if z <= p_required(F,S,T)
+  Recommended, otherwise
+```
+
+The required branch is evaluated first. Since
+`consolidation_escalation(T)` is always greater than one, the required
+boundary is strictly below the recommendation boundary after every floor
+or peak update. Elapsed wall or event time and arbitrary memory counts
+do not enter the state decision; backlog is only a positive-work guard.
+An explicit force request starts consolidation independently and its
+output state is `None`. A committed forced request acknowledges the
+active excursion by persisting `armed=false`, even when no coherent
+cluster exists. The acknowledgment resets the next event-derived range
+to the current rate: both floor and peak become that rate. This prevents
+a historical spike from suppressing recommendations after a throughput
+regime shift. Ordinary throughput observations establish a new peak and
+rearm the classifier only after normalized position *z* reaches
+*p*<sub>*r**e**a**r**m*</sub>; failed transactions restore the prior
+armed state and range. No count or elapsed-time horizon controls the
+reset. The floor, peak, initialization, and armed fields are stored in
+the singleton processor state row and participate in rollback, restart,
+and ephemeral-query snapshot restoration. The engine can recommend
+consolidation, but the API call is the only way to start it. `source_id`
+and modality are never hint inputs or maintenance commands.
 
 ## Candidate Selection
 
@@ -2940,11 +2990,11 @@ min_cluster_size = MinClusterSize(F)
 max_clusters = ConsolidationMaxClusters(F,S,T)
 ```
 
-When a forced consolidation has too few low-strength candidates, the
-path broadens to the lowest-scoring eligible source memories. If
-clustering still finds no group, the fallback mini-cluster forms around
-the lowest-score item and its nearest cosine neighbors. This keeps
-replay active without adding a mode flag.
+An explicit request does not broaden eligibility and does not
+manufacture a nearest-neighbor mini-cluster. If fewer than the
+knob-derived minimum form a coherent density cluster at
+`MergeThreshold(F)`, replay is a successful no-op. This makes force mean
+“evaluate now,” not “merge something regardless of evidence.”
 
 ## Shallow Replay Product
 
@@ -2990,7 +3040,25 @@ builder remains bounded by the candidate/cluster cap and knob-derived
 edge conditions and weights. The graph products are useful for later
 retrieval because graph expansion can recover clustered source memories
 through `derived_from`, co-occurrence, similarity, reinforcement, and
-causal edges.
+causal edges. Graph construction runs only when shallow replay persisted
+a cluster and loads only the cluster identifiers created by that
+transaction. Repeating replay without newly eligible coherent memories
+therefore does not rebuild historical clusters, replace their
+timestamps, or decay reinforcement edges.
+
+Association centroids are derived navigation nodes rather than
+independent source observations. Direct semantic vector seeds are
+restricted to `LONG_TERM` memories; `ASSOCIATION` nodes remain
+retrievable through incoming or outgoing graph expansion. Retrieval
+collapses direct long-term families first and commits the knob-bounded
+direct-anchor prefix before graph-expanded families can compete for the
+remaining positions. The same family index is then seeded with those
+protected representatives, so a near-duplicate derived centroid cannot
+remove an already protected source. This preserves graph utility without
+allowing derived nodes to consume the direct-anchor budget. When a
+current embedding exists for a memory, retrieval also skips scoring its
+redundant historical base embedding; the authoritative current surface
+was already inserted first.
 
 ## Reconstruction Surface Discipline
 
@@ -3463,14 +3531,350 @@ The mechanism-eval directory above was local run output and is not
 checked into this repository; the numerical result is retained as a
 historical run record, not a checkout-reproducible aggregate artifact.
 
-On 2026-07-08, the public retention path was re-screened after fixing
-`Retention::Ephemeral` to force a processing boundary without granting
-durable write permission. The focused regression suite verified that
-public ephemeral queries retrieve durable API memories, expose a
-boundary packet, and leave memory and signal counts unchanged. A CLI
-smoke test stored “The garage door code is 8841.”, ran an ephemeral
-`recall "garage door code"`, retrieved the stored memory, and confirmed
-the SQLite memory/signal counts were unchanged before and after recall.
+On 2026-07-14, the public retention path was re-screened after making
+`Retention::Ephemeral` transactionally read-only. The focused regression
+suite verified that public ephemeral queries retrieve durable API
+memories, expose a boundary packet, and leave memories, signals, current
+embeddings, associations, reconstructions, retrieval/use counters,
+lability, suppression, strength, episodes, and persisted processor state
+unchanged. A prior CLI smoke test stored “The garage door code is
+8841.”, ran an ephemeral `recall "garage door code"`, retrieved the
+stored memory, and confirmed the SQLite memory/signal counts were
+unchanged before and after recall.
+
+The same 2026-07-14 screen exercised a deterministic 512-message
+agent-style corpus with repeated tool acknowledgements and sixteen
+buried copies of the sentence “The same-session recall test returned
+teal.” A packaged JavaScript ephemeral query returned four family
+representatives, with needle-bearing memories at ranks 0 and 1. Every
+returned item exposed numeric `relevance` and `composite_score`; the
+runtime object shape remained unchanged and did not add the undocumented
+`rel` alias. This is a deterministic source-health probe, not a claim
+about the unavailable reporter corpus.
+
+The family screen also places 430 cosine-near distractors ahead of a
+distinctive target. The distractors deliberately swap their eighth- and
+ninth-strongest coordinates, reproducing the false-negative boundary of
+a lossy top-feature fingerprint. Both the normal cached path and the
+cache-rebuild path retain the target after a sound block-norm upper
+bound and exact cosine family checks. The rebuild installs the recovered
+surface so subsequent requests do not repeat the full SQL scan. A failed
+rebuild installs a failure sentinel so later requests do not retry the
+two complete surface scans. Shared base vectors keep all long-term
+memory metadata alternatives behind one stored vector so a superseded
+sibling cannot hide an eligible sibling. Retrieval fallback executes one
+eligibility-filtered, scalar-distance-ordered query, then applies
+supersession and exact family collapse in memory until the knob-derived
+candidate budget is filled or the eligible durable surface is exhausted.
+An ephemeral request never installs recovery state in the process
+registry. A separate 256-vector orthogonal-basis test exercises the
+broad non-duplicate surface and requires exact family comparisons to
+remain below one quarter of the all-pairs count.
+
+Performance was compared against the exact 1.2.1 macOS arm64 prebuild
+using two unmeasured warm-up pairs and 18 measured pairs. Each pair
+alternated baseline-first/candidate-first order with seed 20260714 and
+used fresh processes and fresh databases. The zero-margin paired-median
+gate and one-sided 95% bootstrap upper bound passed for all eight
+metrics. The schema-v5 artifact binds the result to the exact baseline
+addon and executed package wrapper, candidate addon and executed package
+wrapper, candidate core runtime, full CMake-cache digest, actual
+candidate build configuration and compiler, candidate build-source
+digest, final review tree, and exact base-to-tree patch digest. Every
+measured worker also records the core runtime it actually loaded and
+verifies its path and SHA-256 against that candidate runtime; final
+binding fails if any measured binary, build input, build configuration,
+package-level JavaScript wrapper, or source changes. The validator
+schema and dependency manifest ship beside the benchmark, baseline and
+candidate workers both scrub runtime-loader overrides, and packaged
+prebuild discovery uses Node architecture tags:
+
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>Metric</th>
+<th style="text-align: right;">Baseline median</th>
+<th style="text-align: right;">Candidate median</th>
+<th style="text-align: right;">Paired median difference</th>
+<th style="text-align: right;">95% upper bound</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>retrieval p50 (ms)</td>
+<td style="text-align: right;">7.532</td>
+<td style="text-align: right;">3.258</td>
+<td style="text-align: right;">-4.236</td>
+<td style="text-align: right;">-3.978</td>
+</tr>
+<tr>
+<td>retrieval p95 (ms)</td>
+<td style="text-align: right;">11.885</td>
+<td style="text-align: right;">8.707</td>
+<td style="text-align: right;">-3.124</td>
+<td style="text-align: right;">-2.267</td>
+</tr>
+<tr>
+<td>ingestion p50 (ms)</td>
+<td style="text-align: right;">16.538</td>
+<td style="text-align: right;">7.819</td>
+<td style="text-align: right;">-8.622</td>
+<td style="text-align: right;">-8.523</td>
+</tr>
+<tr>
+<td>ingestion p95 (ms)</td>
+<td style="text-align: right;">28.662</td>
+<td style="text-align: right;">11.980</td>
+<td style="text-align: right;">-16.435</td>
+<td style="text-align: right;">-16.092</td>
+</tr>
+<tr>
+<td>retrieval throughput (ops/s)</td>
+<td style="text-align: right;">111.853</td>
+<td style="text-align: right;">249.574</td>
+<td style="text-align: right;">-140.172<a href="#fn1"
+class="footnote-ref" id="fnref1"
+role="doc-noteref"><sup>1</sup></a></td>
+<td style="text-align: right;">-130.781</td>
+</tr>
+<tr>
+<td>ingestion throughput (ops/s)</td>
+<td style="text-align: right;">57.936</td>
+<td style="text-align: right;">132.363</td>
+<td style="text-align: right;">-74.318<a href="#fn2"
+class="footnote-ref" id="fnref2"
+role="doc-noteref"><sup>2</sup></a></td>
+<td style="text-align: right;">-70.880</td>
+</tr>
+<tr>
+<td>peak resident bytes</td>
+<td style="text-align: right;">1,056,464,896</td>
+<td style="text-align: right;">788,086,784</td>
+<td style="text-align: right;">-267,804,672</td>
+<td style="text-align: right;">-267,206,656</td>
+</tr>
+<tr>
+<td>database bytes</td>
+<td style="text-align: right;">8,982,528</td>
+<td style="text-align: right;">6,008,832</td>
+<td style="text-align: right;">-2,973,696</td>
+<td style="text-align: right;">-2,973,696</td>
+</tr>
+</tbody>
+</table>
+<section id="footnotes" class="footnotes footnotes-end-of-document"
+role="doc-endnotes">
+<hr />
+<ol>
+<li id="fn1"><p>For higher-is-better throughput metrics, the registered
+difference is baseline minus candidate; for all other metrics it is
+candidate minus baseline. Non-positive values pass the zero-margin
+gate.<a href="#fnref1" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+<li id="fn2"><p>For higher-is-better throughput metrics, the registered
+difference is baseline minus candidate; for all other metrics it is
+candidate minus baseline. Non-positive values pass the zero-margin
+gate.<a href="#fnref2" class="footnote-back"
+role="doc-backlink">↩︎</a></p></li>
+</ol>
+</section>
+
+### Reporter-Corpus Consolidate-on-Recommend Control
+
+On 2026-07-15, the 1,915-message whole-message durable replay was rerun
+on fresh isolated databases with the exact seven-query manifest. Every
+arm used the same generic source id, default text modality, and
+`F=0.45`, `S=0.5`, `T=0.5`. The policy treatment called explicit
+consolidation exactly once after each durable result whose consolidation
+state was `recommended` or `required`; ephemeral query results never
+triggered consolidation, and there was no unconditional final call.
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>Arm</th>
+<th style="text-align: right;">Recommendation outputs</th>
+<th style="text-align: right;">Consolidations</th>
+<th style="text-align: right;">Top-12 hits</th>
+<th style="text-align: right;">Ingest wall time</th>
+<th style="text-align: right;">Seven-query wall time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>released 1.2.1 policy</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">1/7</td>
+<td style="text-align: right;">167.313 s</td>
+<td style="text-align: right;">340.468 ms</td>
+</tr>
+<tr>
+<td>current candidate, no consolidation</td>
+<td style="text-align: right;">1,546</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">2/7</td>
+<td style="text-align: right;">52.085 s</td>
+<td style="text-align: right;">251.387 ms</td>
+</tr>
+<tr>
+<td>current candidate, consolidate on recommendation</td>
+<td style="text-align: right;">124</td>
+<td style="text-align: right;">124</td>
+<td style="text-align: right;">1/7</td>
+<td style="text-align: right;">70.593 s</td>
+<td style="text-align: right;">277.151 ms</td>
+</tr>
+</tbody>
+</table>
+
+The released booleans did not fire on any of the 1,915 writes, so that
+arm reproduced the old never-consolidated behavior. The current
+no-consolidation control emitted 28 `recommended` and 1,518 `required`
+results. In the treatment, the first call occurred at write 371. Calls
+then clustered into six consecutive bursts at writes 371–417, 689–711,
+947–965, 1228–1239, 1547–1558, and 1885–1895. Each explicit call
+returned state `none`, but the next durable write could immediately emit
+`required`; the policy therefore produced 6 recommended calls followed
+by 118 required calls rather than one call per throughput event. The 124
+calls consumed 8.372 s in aggregate (median 59.846 ms, p95 135.009 ms,
+maximum 164.979 ms).
+
+Against the matched current-candidate control, the treatment lost the
+`alice_gate_launch_code` top-12 hit and gained no top-12 hit. It did
+return the `pre_llm_plugin_hook` needle at rank 14, so the full
+variable-length packets contained two needles in both arms while the
+fixed top-12 score regressed from 2/7 to 1/7. All seven needle counts
+remained byte-content-equivalent and all needle-bearing rows remained
+`LONG_TERM`; the failure is not retention.
+
+The treatment also produced 37 additional long-term rows, 130
+association memories, 167 additional current-memory embedding rows,
+5,365 additional graph edges, 90 additional signal rows, and 1,867,776
+additional database bytes before the queries. Its ingest wall time was
+18.509 s (+35.54%) above the matched control, and its query wall time
+was 25.764 ms (+10.25%) higher. This is one paired local run, not a
+statistical production-latency estimate, but it fails the requested
+non-regression gate and shows that callers must not treat every
+non-`none` output as an unlatched level-triggered command.
+
+The earlier 3/7 logical replay remains useful retrieval evidence but is
+not the matched causal control for this experiment: candidate retrieval
+queried a byte-identical copy of the released-ingested database. The
+sanitized control artifact has SHA-256
+`69db0e3337b708ce14c11dbc5a91883b2a4b825023df602206b543f8917f8909`. It
+contains only labels and hashes, not transcript text, query plaintext,
+needles, or memory content. This experiment added no source-id-specific
+or modality-specific behavior and does not establish seven-of-seven
+recall, production performance, issue closure, or release readiness.
+
+### Consolidation Integrity Repair
+
+The same matched replay was repeated after making recommendation
+consumption edge-triggered, isolating forced maintenance from normal
+ingestion, removing forced candidate/cluster fallbacks, limiting graph
+construction to newly persisted clusters, preserving direct long-term
+family representatives before graph expansion can compete, and
+relevance-ordering linked sources before the compact hydration limit.
+Both arms used fresh databases and the same 1,915 messages, seven
+queries, source metadata, retention settings, model, runtime, and F/S/T
+values.
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+<col style="width: 17%" />
+</colgroup>
+<thead>
+<tr>
+<th>Arm</th>
+<th style="text-align: right;">Non-<code>none</code> outputs</th>
+<th style="text-align: right;">Consolidations</th>
+<th style="text-align: right;">Top-12 hits</th>
+<th style="text-align: right;">Ingest wall time</th>
+<th style="text-align: right;">Seven-query wall time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>repaired candidate, no consolidation</td>
+<td style="text-align: right;">1,519</td>
+<td style="text-align: right;">0</td>
+<td style="text-align: right;">2/7</td>
+<td style="text-align: right;">47.650 s</td>
+<td style="text-align: right;">179.378 ms</td>
+</tr>
+<tr>
+<td>repaired candidate, consolidate on recommendation</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">1</td>
+<td style="text-align: right;">2/7</td>
+<td style="text-align: right;">48.000 s</td>
+<td style="text-align: right;">184.338 ms</td>
+</tr>
+</tbody>
+</table>
+
+The treatment emitted one `recommended` result at write 372, ran one
+24.395 ms maintenance transaction, and then emitted `none` for the
+remaining durable writes. The call changed only the persisted
+acknowledgment latch and event-derived floor/peak: it added zero memory
+rows, long-term rows, working rows, current embeddings, graph edges,
+association memories, signal rows, or processed-signal count. SQLite
+allocated four 4 KiB pages at the call boundary; final treatment storage
+was two 4 KiB pages larger than the matched control (23,068,672 versus
+23,060,480 bytes). The hashed raw snapshots include the armed latch and
+nonzero-connectivity count before the call, after the call, and at final
+query boundaries. They record `armed` changing from one to zero and zero
+memories with nonzero persisted connectivity in both arms, closing the
+hidden global-write path found during the first repair replay. All seven
+needle counts remained `LONG_TERM` with counts 12, 21, 44, 2, 11, 2, and
+7. Both arms retained the same two top-12 hits and ended with 1,915
+long-term memories, 1,915 current embeddings, and 1,915 processed
+signals. Every ephemeral-query durable delta remained zero.
+
+The reporter replay is a functional matched control, not a latency
+estimator. Performance was therefore checked separately against the
+frozen released baseline with two warm-up pairs and 18 measured
+fresh-process, fresh-database pairs, alternating order at the registered
+zero non-inferiority margin. All eight gates passed.
+Candidate-minus-baseline latency medians and one-sided 95% upper bounds
+were -4.236/-3.978 ms for retrieval p50, -3.124/-2.267 ms for retrieval
+p95, -8.622/-8.523 ms for ingestion p50, and -16.435/-16.092 ms for
+ingestion p95. Higher-is-better throughput uses baseline minus candidate
+and was likewise negative at both point and upper bound; peak RSS and
+database bytes also passed.
+
+The JavaScript binding contract now loads the measured native addon,
+executes an ephemeral text request, and checks the serialized runtime
+object as well as the TypeScript declaration: `consolidation_state` is
+present and the two old boolean fields are absent. The sanitized repair
+artifact contains no transcript text, query plaintext, needle plaintext,
+or memory content. Its content address is recorded in the project proof
+ledger rather than embedded here, avoiding a self-reference between the
+artifact’s reviewed-tree identity and this manuscript. This repair
+remains generic: it adds no source-id or modality branch and does not
+claim seven-of-seven recall, production latency, merge readiness, or
+release readiness.
 
 On 2026-07-11, retention was expanded to four policies: `Natural`
 (default when omitted: `force_boundary=false`, `force_write=false` so
@@ -4957,7 +5361,28 @@ compact ranked set. Internal routing nodes such as `LABEL` or
 `ASSOCIATION` rows are not treated as user-facing payloads. When such a
 row reaches the retrieval surface, hydration resolves bounded linked
 source memories where possible so callers see concrete source-backed
-context instead of empty routing artifacts.
+context instead of empty routing artifacts. A linked source keeps its
+own relevance and composite score when it was independently ranked.
+Otherwise query-backed hydration computes relevance from that source’s
+own embedding and computes its composite display score from that
+relevance and the retained relationship weight. Scores therefore
+describe the displayed source result rather than borrowing the internal
+routing node’s score. The same scored memory object is serialized by the
+C API and JavaScript addon. An internal hydration call without a query
+and without an independent source trace leaves both optional scores
+unset; it does not relabel a centroid score as source relevance.
+
+Linked-source selection is query-aware before truncation. SQLite
+computes cosine relevance for every eligible member of the bounded
+linked graph set. Multiple graph routes to the same memory are grouped
+by memory id before ranking, so they cannot consume several compact
+slots. SQLite then combines source relevance with the F/S/T-derived
+relationship weight, orders that complete unique set, and only then
+applies the knob-derived compact limit. This prevents either duplicate
+routes or a recent but weakly related fragment from occupying the
+transfer cap ahead of an older verbatim-relevant source, while keeping
+embedding decoding and application-side hydration bounded to the
+selected rows.
 
 ## Durable Memory Surface
 
@@ -5027,9 +5452,11 @@ replay probes can inspect retrieval without mutating the durable store.
 
 Consolidation is explicit. The runtime does not schedule it
 automatically and does not expose mode variants. Callers invoke
-`Consolidate()` or inject a signal with `force_consolidation=true`; the
-same production pipeline then runs the knob-derived consolidation gate,
-clusterer, shallow consolidation, and graph builder.
+`Consolidate()` or inject a signal with `force_consolidation=true`; a
+signal dispatcher then runs only the knob-derived consolidation gate,
+clusterer, shallow consolidation, and graph builder. The normal core,
+storage, retrieval, feedback, episode, object-store, working-memory,
+signal-counter, and rate-observation paths are not maintenance steps.
 
 Shallow consolidation is embedding-only. It clusters eligible long-term
 memories, writes an `ASSOCIATION` centroid node for each cluster,
@@ -5047,22 +5474,82 @@ edges, not a batch semantic extraction job.
 ## Retrieval Implementation
 
 Production retrieval discovers a broad but bounded vector seed set from
-durable memory embeddings, expands through retained graph edges and
-source/turn neighbors, applies temporal rank and supersession demotion,
-and returns a compact selected set. Current writes are excluded by
-timestamp, and working-memory overlap filters prevent the retrieval
-result from echoing the active memory tail. Association edges are used
-as graph evidence; they do not bypass final scoring or output caps.
+durable memory embeddings. Before the seed cap, it removes directed
+`supersedes` targets and collapses near-duplicate embedding families to
+one representative. The family index uses complementary 32-block
+Cauchy–Schwarz upper bounds in the stored coordinate system and a
+normalized Walsh–Hadamard basis, followed by exact cosine checks. Each
+upper bound is sound, so taking their minimum cannot exclude a pair
+meeting the cosine threshold. The complementary bases avoid broad exact
+pairwise work for both sparse coordinate-aligned vectors and dense
+Hadamard-aligned vectors; arbitrary adversarial surfaces may still reach
+the exact fallback. If the private vector cache is unavailable, durable
+processing rebuilds it once from the complete persisted surface and
+immediately applies the same family and supersession filters before
+truncation. A failed rebuild installs a failure sentinel rather than
+repeating the two complete surface scans on every request. A unique
+cached vector retains every long-term memory metadata alternative that
+shares its base embedding, and query-time eligibility chooses a
+nonsuperseded sibling without duplicating vector storage. The fallback
+executes one scalar-distance-ordered query after kind, timestamp, and
+current-surface precedence are filtered in SQL; superseded and exact
+near-duplicate families are then skipped in memory until the
+knob-derived budget is filled or the eligible surface is exhausted.
+Ephemeral retrieval uses that fallback without installing volatile
+registry state. It then expands through retained structural graph edges
+and returns a compact selected set. Vector similarity owns the rank;
+recency is a tie-break and graph activation is a bounded residual bonus.
+`source_id` and modality are metadata, not ranking inputs. Direct vector
+seeds are source `LONG_TERM` memories; derived `ASSOCIATION` centroids
+enter through graph expansion. Direct families are ranked and the
+protected direct prefix is committed before expanded families are
+admitted; expanded candidates are then deduplicated against those
+protected representatives. When a current embedding exists, its
+redundant historical base embedding is omitted from the historical seed
+search because the authoritative surface was already searched. Current
+writes are excluded by timestamp, and working-memory overlap filters
+prevent the retrieval result from echoing the active memory tail.
+Association edges are used as graph evidence; they do not bypass final
+scoring or output caps. One dispatch exposes at most one actually used
+retrieval candidate, so retrieval does not synthesize reinforcement pair
+edges from the packet. Existing `reinforces` edges remain eligible for
+decay, pruning, degree normalization, and graph evidence. Historical
+public knob helpers for the removed packet-pair writer remain
+source-compatible calibrations; only the step calibration still feeds
+the production pruning floor.
 
 The retrieval trace path records a ranking ledger for selected and
 rejected candidates. Production graph retrieval populates composite
-score, seed relevance, temporal score, and the
-base/spreading/supersession fields of the activation ledger. The shared
-trace structure still contains reserved processor, predictive,
-pre-activation, durable-source, and evidence fields, but this path
-leaves them at zero; their presence is not evidence that those terms
-participate in ranking. Deleted label-graph and fact-layer fields are
-not emitted.
+score, seed relevance, temporal score, and the base/spreading fields of
+the activation ledger. The shared trace structure still contains
+reserved processor, predictive, pre-activation, durable-source, and
+evidence fields, but this path leaves them at zero; their presence is
+not evidence that those terms participate in ranking. Deleted
+label-graph and fact-layer fields are not emitted.
+
+`Retention::Ephemeral` executes this read path inside a transaction,
+assembles the retrieval result, rolls back the transaction and object
+transaction, and restores the exact pre-query processor snapshot.
+Retrieval-time reconstruction, usage reinforcement, reconsolidation, and
+strength mutation are skipped for that retention policy, so querying
+cannot change durable rank state.
+
+Schema migrations 25–27 add `consolidation_rate_floor`,
+`consolidation_rate_peak`, initialization, and the armed latch to the
+singleton processor state. Runtime hinting reads their in-memory private
+mirror, so the throughput recommendation adds no per-signal SQL query.
+Processor construction loads or initializes the mirror, transaction
+rollback and ephemeral processing restore it with the full context
+snapshot, successful state persistence writes both values, and processor
+teardown erases its lifecycle-owned entry. A committed maintenance
+request disarms the hint and resets the next event-derived floor and
+peak to the acknowledged rate; ordinary rate recovery establishes a new
+range and rearms at the F/S/T-derived threshold. This event boundary
+lets a lower throughput regime recover independently of an old spike
+without a count or wall-clock horizon. Empty replay is acknowledged,
+while a rolled-back request restores the exact prior latch and range.
+State-row restoration does not depend on a nonzero processed-signal
+counter, so a maintenance-only disarmed state survives restart.
 
 ## Soft Anchor Implementation Status
 
@@ -5229,22 +5716,31 @@ path</td>
 </tr>
 <tr>
 <td>retrieval seed surface</td>
-<td>current-memory embedding lookup instead of all reconstruction
-versions; recent seed and same-source expansion use the live retrieval
-surface cache before SQL fallback</td>
-<td>latest reconstruction remains visible without unbounded scan growth,
-and source-neighbor behavior is preserved without per-seed table
-scans</td>
+<td>current-memory embedding lookup with pre-cap supersession filtering
+and complementary sound 32-block Cauchy–Schwarz bounds in the stored and
+Walsh–Hadamard bases followed by exact cosine family checks; shared
+vectors retain all long-term metadata alternatives; cache loss performs
+one persisted-surface rebuild, while rebuild failure is latched and uses
+one eligibility-filtered scalar-distance ordering before in-memory
+family selection</td>
+<td>latest reconstruction and eligible shared-embedding siblings remain
+visible, duplicate boilerplate or ineligible nearest rows cannot consume
+the knob-derived candidate cap, sparse and dense orthogonal vector
+families avoid broad exact cosine work, adversarial surfaces retain an
+exact fallback, failed recovery does not repeat complete scans or full
+ordering per page, ephemeral recovery does not mutate the registry, and
+source/modality metadata cannot influence rank</td>
 </tr>
 <tr>
 <td>graph expansion</td>
 <td>retained traversal types: <code>co_occurs</code>,
 <code>similar_to</code>, <code>reinforces</code>, <code>causes</code>,
 <code>derived_from</code>, <code>next_in_episode</code>,
-<code>prev_in_episode</code>, <code>within_same_event</code>, and
-<code>supersedes</code></td>
-<td>removed fact and label-bank paths cannot influence rank; stored
-maintenance-only edge types are not traversed</td>
+<code>prev_in_episode</code>, and <code>within_same_event</code>;
+<code>reinforces</code> is degree-normalized</td>
+<td>graph activation is bounded and high-degree hubs cannot dominate;
+directional <code>supersedes</code> relations define families but are
+not activation edges</td>
 </tr>
 <tr>
 <td>reconstruction</td>
@@ -5272,19 +5768,19 @@ public header or API layout changes</td>
 </tr>
 <tr>
 <td>graph retrieval</td>
-<td>share certified exact neighbor rows from the immediately preceding
-write, refresh current representatives from the processor surface, and
-apply supersession demotion from a transactionally coherent fanout
-cache</td>
-<td>the SQL paths remain fallbacks; retrieved order and penalties remain
-identical</td>
+<td>score vector similarity first, restrict recency to a tie-break, cap
+graph bonus, and reserve final occupancy for direct semantic
+anchors</td>
+<td>recent unrelated rows and noisy graph neighbors cannot displace the
+semantic seed surface</td>
 </tr>
 <tr>
 <td>rollback snapshots</td>
-<td>detach rebuildable durable caches before copying processor state and
-reload them after a failed transaction</td>
-<td>generic rollback still restores durable and volatile processor state
-exactly</td>
+<td>detach rebuildable durable caches before copying processor state;
+ephemeral queries roll back their transaction and restore that exact
+snapshot without rebuilding the unchanged search surface</td>
+<td>generic failures and public no-store queries restore durable and
+volatile processor state exactly</td>
 </tr>
 <tr>
 <td>synaptic tagging</td>

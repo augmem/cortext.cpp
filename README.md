@@ -239,7 +239,7 @@ int main ()
       std::cout << memory.relevance << " " << MemoryText (memory) << "\n";
     }
 
-  if (ctx.consolidation_recommended)
+  if (ctx.consolidation_state != cortext::ConsolidationState::None)
     {
       engine->Consolidate ();
     }
@@ -277,7 +277,8 @@ Top-level fields include:
 - `working_memory`: active short-term memory slots.
 - `embedding`: the current signal embedding when requested.
 - `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior.
-- `consolidation_recommended`, `consolidation_required`: maintenance hints.
+- `consolidation_state`: ordered `None`, `Recommended`, or `Required`
+  maintenance urgency derived from the current throughput range.
 - `output`: scores, write decisions, operation timings, and storage ids.
 - `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
 

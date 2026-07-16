@@ -1,5 +1,6 @@
 // tests/migration_core.test.cpp
 #include <catch2/catch_test_macros.hpp>
+#include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include "test_helpers.hpp"
 #include <cortext/processor.hpp>
 #include <cortext/store/sqlite_store.hpp>
@@ -59,6 +60,7 @@ public:
 namespace cortext::store
 {
 std::set<int64_t> DebugGetAppliedMigrationIdsForTest (Store &store);
+void DebugApplyCoreMigrationsThroughForTest (Store &store, int64_t maximum_id);
 }
 
 TEST_CASE("Migrations lock the full pass before reading applied ids",
@@ -134,6 +136,121 @@ TEST_CASE("Migrations track version history", "[schema][migration]") {
     }
 
     REQUIRE(id == 0);
+}
+
+TEST_CASE("Migration 25 adds persisted consolidation throughput state",
+          "[schema][migration][consolidation]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(25) == 1);
+
+    auto columns = store->Execute("PRAGMA table_info(state)");
+    std::set<std::string> names;
+    for (const auto& row : columns) {
+        names.insert(std::any_cast<std::string>(row.at("name")));
+    }
+    REQUIRE(names.count("consolidation_rate_floor") == 1);
+    REQUIRE(names.count("consolidation_rate_peak") == 1);
+
+    store->Execute(
+        "INSERT INTO state(id, consolidation_rate_floor, "
+        "consolidation_rate_peak) VALUES(1, 2.5, 9.5)");
+    const auto rows = store->Execute(
+        "SELECT consolidation_rate_floor, consolidation_rate_peak "
+        "FROM state WHERE id = 1");
+    REQUIRE(std::any_cast<double>(rows[0].at("consolidation_rate_floor"))
+            == 2.5);
+    REQUIRE(std::any_cast<double>(rows[0].at("consolidation_rate_peak"))
+            == 9.5);
+}
+
+TEST_CASE("Migration 26 adds consolidation throughput initialization",
+          "[schema][migration][consolidation]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(26) == 1);
+
+    auto columns = store->Execute("PRAGMA table_info(state)");
+    std::set<std::string> names;
+    for (const auto& row : columns) {
+        names.insert(std::any_cast<std::string>(row.at("name")));
+    }
+    REQUIRE(names.count("consolidation_rate_initialized") == 1);
+
+    store->Execute(
+        "INSERT INTO state(id, rate_ticks, consolidation_rate_floor, "
+        "consolidation_rate_peak, consolidation_rate_initialized) "
+        "VALUES(1, 1, 0.0, 0.0, 1)");
+    const auto rows = store->Execute(
+        "SELECT consolidation_rate_initialized FROM state WHERE id = 1");
+    REQUIRE(std::any_cast<long long>(
+                rows[0].at("consolidation_rate_initialized")) == 1);
+}
+
+TEST_CASE("Migration 26 leaves pre-25 throughput range uninitialized",
+          "[schema][migration][consolidation]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 24);
+    store->Execute(
+        "INSERT INTO state(id, signals_processed, m_rate, rate_ticks) "
+        "VALUES(1, 1, 70.5, 1)");
+
+    cortext::store::ApplyMigrations(*store);
+
+    const auto rows = store->Execute(
+        "SELECT m_rate, consolidation_rate_floor, "
+        "consolidation_rate_peak, consolidation_rate_initialized "
+        "FROM state WHERE id = 1");
+    REQUIRE(rows.size() == 1);
+    REQUIRE(std::any_cast<double>(rows[0].at("consolidation_rate_floor"))
+            == 0.0);
+    REQUIRE(std::any_cast<double>(rows[0].at("consolidation_rate_peak"))
+            == 0.0);
+    REQUIRE(std::any_cast<long long>(
+                rows[0].at("consolidation_rate_initialized")) == 0);
+
+    ProcessorContext context;
+    namespace throughput
+        = operations::consolidation_throughput_state_internal;
+    throughput::Reset(context, {
+        std::any_cast<double>(rows[0].at("consolidation_rate_floor")),
+        std::any_cast<double>(rows[0].at("consolidation_rate_peak")),
+        std::any_cast<long long>(
+            rows[0].at("consolidation_rate_initialized")) != 0,
+    });
+    const double first_new_rate =
+        std::any_cast<double>(rows[0].at("m_rate"));
+    throughput::Observe(context, first_new_rate, 0.5, 0.5, 0.5);
+    const auto observed = throughput::Find(context);
+    REQUIRE(observed.initialized);
+    REQUIRE(observed.floor == first_new_rate);
+    REQUIRE(observed.peak == first_new_rate);
+    throughput::Erase(context);
+}
+
+TEST_CASE("Migration 27 adds an armed consolidation throughput latch",
+          "[schema][migration][consolidation]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(27) == 1);
+    const auto columns = store->Execute("PRAGMA table_info(state)");
+    std::set<std::string> names;
+    for (const auto& row : columns) {
+        names.insert(std::any_cast<std::string>(row.at("name")));
+    }
+    REQUIRE(names.count("consolidation_rate_armed") == 1);
+
+    store->Execute("INSERT INTO state(id) VALUES(1)");
+    const auto rows = store->Execute(
+        "SELECT consolidation_rate_armed FROM state WHERE id = 1");
+    REQUIRE(std::any_cast<long long>(rows[0].at("consolidation_rate_armed"))
+            == 1);
 }
 
 TEST_CASE("Migrations preserve 64-bit applied migration ids",

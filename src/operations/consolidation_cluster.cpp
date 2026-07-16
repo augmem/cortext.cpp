@@ -43,7 +43,6 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
   const auto &cfg = context.GetConfig ();
   auto params = ConsolidationClusterParams::FromKnobs (cfg.focus, cfg.sensitivity,
                                                        cfg.stability);
-  const bool force_consolidation = context.GetSignal ().force_consolidation;
 
   // v2: Load candidates from context (in-memory passing)
   const auto &input_candidates = context.GetConsolidationCandidates ();
@@ -258,105 +257,6 @@ ConsolidationCluster::Execute (OperationContext &context, Transaction &tx) const
         {
           break;
         }
-    }
-
-  if (clusters.empty () && force_consolidation && n >= min_pts)
-    {
-      // Forced fallback: pick a coherent mini-cluster around the lowest-score item.
-      int anchor_idx = -1;
-      double best_score = 0.0;
-      for (int i = 0; i < n; ++i)
-        {
-          if (items[static_cast<size_t> (i)].embedding.size () == 0)
-            {
-              continue;
-            }
-          if (anchor_idx < 0 || items[static_cast<size_t> (i)].score < best_score)
-            {
-              best_score = items[static_cast<size_t> (i)].score;
-              anchor_idx = i;
-            }
-        }
-      if (anchor_idx < 0)
-        {
-          context.SetConsolidationClusters (std::move (clusters));
-          telemetry::LogDebug ("cortext.consolidation_cluster",
-                               { telemetry::Attribute::Int64 ("cluster_count",
-                                                              0) });
-          return;
-        }
-
-      std::vector<std::pair<double, int>> sims;
-      sims.reserve (static_cast<size_t> (n));
-      const auto &anchor = items[static_cast<size_t> (anchor_idx)].embedding;
-      for (int i = 0; i < n; ++i)
-        {
-          const auto &cand = items[static_cast<size_t> (i)].embedding;
-          if (cand.size () == 0 || cand.size () != anchor.size ())
-            {
-              continue;
-            }
-          const double sim = core::CosineSimilarity (anchor, cand);
-          sims.emplace_back (sim, i);
-        }
-      std::sort (sims.begin (), sims.end (),
-                 [] (const auto &a, const auto &b) {
-                   if (a.first == b.first)
-                     {
-                       return a.second < b.second;
-                     }
-                   return a.first > b.first;
-                 });
-      if (static_cast<int> (sims.size ()) < min_pts)
-        {
-          context.SetConsolidationClusters (std::move (clusters));
-          telemetry::LogDebug ("cortext.consolidation_cluster",
-                               { telemetry::Attribute::Int64 ("cluster_count",
-                                                              0) });
-          return;
-        }
-
-      const int k = std::min (min_pts, static_cast<int> (sims.size ()));
-      ClusterInfo cluster;
-      cluster.cluster_id = next_cluster_id++;
-      cluster.avg_score = 0.0;
-      Eigen::VectorXf centroid;
-      bool centroid_init = false;
-      int accepted_embedding_count = 0;
-
-      for (int i = 0; i < k; ++i)
-        {
-          const auto &item = items[static_cast<size_t> (sims[i].second)];
-          cluster.memory_ids.push_back (item.memory_id);
-          cluster.embedding_ids.push_back (item.embedding_id);
-          cluster.avg_score += item.score;
-          if (!centroid_init)
-            {
-              centroid = item.embedding;
-              centroid_init = true;
-              ++accepted_embedding_count;
-            }
-          else if (centroid.size () == item.embedding.size ())
-            {
-              centroid += item.embedding;
-              ++accepted_embedding_count;
-            }
-        }
-
-      if (k > 0)
-        {
-          cluster.avg_score /= static_cast<double> (k);
-        }
-      if (centroid_init && accepted_embedding_count > 0)
-        {
-          centroid = centroid / static_cast<float> (accepted_embedding_count);
-        }
-      cluster.centroid.resize (static_cast<size_t> (centroid.size ()));
-      for (int i = 0; i < centroid.size (); ++i)
-        {
-          cluster.centroid[static_cast<size_t> (i)] = centroid (i);
-        }
-      clusters.push_back (std::move (cluster));
     }
 
   // 4. Pass clusters to next operation via context.

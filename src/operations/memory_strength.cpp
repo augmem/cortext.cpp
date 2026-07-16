@@ -240,6 +240,10 @@ GetInt64Maybe (const std::map<std::string, std::any> &row, const char *key)
 void
 UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
 {
+  if (context.GetSignal ().retention == Retention::Ephemeral)
+    {
+      return;
+    }
   const auto &cfg = context.GetConfig ();
   auto &p_ctx = context.GetProcessorContext ();
 

@@ -38,6 +38,7 @@
     "access": "public"
   },
   "scripts": {
+    "test": "node contract.test.mjs",
     "build": "cd ../.. && cmake --preset ffi-release-node && cmake --build --preset ffi-release-node --target cortext cortext_node",
     "build:package": "cd ../.. && python3 scripts/build_javascript_package.py"
   }

@@ -58,18 +58,6 @@ TEST_CASE ("WRateSeconds produces expected intervals",
   }
 }
 
-TEST_CASE ("IdleRequiredSeconds is 25% of WRateSeconds",
-           "[regression][write_rate]")
-{
-  // idle_required = 0.25 * w_rate_seconds(T)
-
-  for (double T : { 0.0, 0.25, 0.5, 0.75, 1.0 })
-    {
-      int expected = static_cast<int> (std::round (0.25 * WRateSeconds (T)));
-      REQUIRE (IdleRequiredSeconds (T) == expected);
-    }
-}
-
 // =============================================================================
 // 5.3.2 Episode Boundary Frequency Tests
 // =============================================================================
@@ -392,31 +380,28 @@ TEST_CASE ("Max wait drift decreases with Focus",
 }
 
 // =============================================================================
-// 5.3.7 Consolidation Parameters (Phase 3 additions)
+// 5.3.7 Emotional Cascade Parameters
 // =============================================================================
 
-TEST_CASE ("Consolidation interval increases with Stability",
-           "[regression][consolidation]")
+TEST_CASE ("Emotional cascade window increases with Stability",
+           "[regression][emotion]")
 {
-  // consolidation_interval = lerp(300, 3600, T)
-  // Higher stability = longer intervals between consolidation
-
   SECTION ("Low stability: 5 minutes (300s)")
   {
-    REQUIRE (ConsolidationIntervalSeconds (0.0) == 300);
+    REQUIRE (EmotionCascadeWindowSeconds (0.0) == 300);
   }
 
   SECTION ("High stability: 1 hour (3600s)")
   {
-    REQUIRE (ConsolidationIntervalSeconds (1.0) == 3600);
+    REQUIRE (EmotionCascadeWindowSeconds (1.0) == 3600);
   }
 
   SECTION ("Interval increases monotonically")
   {
     for (double T = 0.0; T < 1.0; T += 0.1)
       {
-        REQUIRE (ConsolidationIntervalSeconds (T)
-                 < ConsolidationIntervalSeconds (T + 0.1));
+        REQUIRE (EmotionCascadeWindowSeconds (T)
+                 < EmotionCascadeWindowSeconds (T + 0.1));
       }
   }
 }
@@ -592,5 +577,5 @@ TEST_CASE ("High Stability affects all persistence parameters consistently",
   REQUIRE (LambdaMood (1.0, T) > 0.99);         // Slower mood decay
   REQUIRE (ReinforcementDecay (T) > 0.97);      // Slower edge decay
   REQUIRE (WRateSeconds (T) > 250);             // Longer write intervals
-  REQUIRE (ConsolidationIntervalSeconds (T) > 3000); // Longer consolidation
+  REQUIRE (EmotionCascadeWindowSeconds (T) > 3000); // Longer affect window
 }

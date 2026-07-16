@@ -20,7 +20,8 @@ EvaluateConsolidation::Execute (OperationContext &context, Transaction &tx) cons
 {
   (void)tx;
 
-  if (!context.GetSignal ().force_consolidation)
+  if (context.GetSignal ().retention == Retention::Ephemeral
+      || !context.GetSignal ().force_consolidation)
     {
       return;
     }
@@ -42,70 +43,49 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   const double S_eff = core::SensitivityBias (S_raw);
   const uint64_t now_ts = context.GetSignal ().timestamp;
   (void)now_ts;
-  const bool force_consolidation = context.GetSignal ().force_consolidation;
   // Floor derived from knobs (no magic numbers).
   const double floor_cutoff = core::PeripheryCutoff (T);
-
-  // V2: Update connectivity metric from ASSOCIATIONS edge count (Section 9.2).
-  // Connectivity = normalized count of edges where this memory participates.
-  // Normalized by max observed edge count to keep values in [0, 1].
-  const auto connectivity_start = std::chrono::steady_clock::now ();
-  tx.Execute ("WITH edge_counts AS ("
-              "  SELECT m.memory_id, "
-              "         (SELECT COUNT(*) FROM associations a "
-              "          WHERE a.source_memory_id = m.memory_id "
-              "             OR a.target_memory_id = m.memory_id) AS cnt "
-              "  FROM memories m"
-              "), max_cnt AS ("
-              "  SELECT COALESCE(MAX(cnt), 0) AS m FROM edge_counts"
-              ") "
-              "UPDATE memories SET connectivity = COALESCE(("
-              "  SELECT CASE WHEN (SELECT m FROM max_cnt) > 0 "
-              "              THEN CAST(ec.cnt AS REAL) / (SELECT m FROM max_cnt) "
-              "              ELSE 0.0 END "
-              "  FROM edge_counts ec WHERE ec.memory_id = "
-              "memories.memory_id"
-              "), 0.0);",
-              {});
-  context.AddOperationTiming (
-      "ScoreConsolidation.update_connectivity_sql",
-      std::chrono::duration<double, std::milli> (
-          std::chrono::steady_clock::now () - connectivity_start)
-          .count ());
 
   // v2: Select candidates whose score is below floor.
   // score = T*strength - F*redundancy + S*connectivity + T*stability
   // Uses unified memories table which contains per-memory state.
   const double tag_weight = core::ConsolidationCandidateTagWeight (
       F_raw, S_raw, T);
-  const std::string candidate_scope
-      = "WHERE m.kind = 'LONG_TERM' "
-        "  AND m.cluster_id IS NULL ";
-  const std::string query = std::string (
-      "SELECT m.memory_id, COALESCE(cme.embedding_id, m.embedding_id) "
-      "       AS embedding_id, "
-      "       ((?1 * COALESCE(m.strength, 1.0)) "
-      "        - (?2 * COALESCE(m.redundancy, 0.0)) "
-      "        + (?3 * COALESCE(m.connectivity, 0.0)) "
-      "        + (?4 * COALESCE(m.stability, 0.0)) "
-      "        + (?5 * CASE WHEN m.tag_expires_at > ?6 "
-      "                THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) "
-      "        AS computed_score, "
-      "       COALESCE(cme.embedding, e.embedding) AS embedding "
-      "FROM memories m "
-      "JOIN embeddings e ON m.embedding_id = e.embedding_id "
-      "LEFT JOIN current_memory_embeddings cme "
-      "  ON cme.memory_id = m.memory_id "
-      )
-      + candidate_scope
-      + " "
-      + "  AND ((?1 * COALESCE(m.strength, 1.0)) "
-        "       - (?2 * COALESCE(m.redundancy, 0.0)) "
-        "       + (?3 * COALESCE(m.connectivity, 0.0)) "
-        "       + (?4 * COALESCE(m.stability, 0.0)) "
-        "       + (?5 * CASE WHEN m.tag_expires_at > ?6 "
-        "               THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) < ?7 "
-        "ORDER BY computed_score ASC, m.created_at ASC, m.memory_id ASC;";
+  const std::string query
+      = "WITH edge_counts AS ("
+        "  SELECT m.memory_id, "
+        "         (SELECT COUNT(*) FROM associations a "
+        "          WHERE a.source_memory_id = m.memory_id "
+        "             OR a.target_memory_id = m.memory_id) AS cnt "
+        "  FROM memories m"
+        "), max_cnt AS ("
+        "  SELECT COALESCE(MAX(cnt), 0) AS maximum FROM edge_counts"
+        "), scored AS ("
+        "  SELECT m.memory_id, "
+        "         COALESCE(cme.embedding_id, m.embedding_id) AS embedding_id, "
+        "         ((?1 * COALESCE(m.strength, 1.0)) "
+        "          - (?2 * COALESCE(m.redundancy, 0.0)) "
+        "          + (?3 * CASE WHEN max_cnt.maximum > 0 "
+        "                 THEN CAST(ec.cnt AS REAL) / max_cnt.maximum "
+        "                 ELSE 0.0 END) "
+        "          + (?4 * COALESCE(m.stability, 0.0)) "
+        "          + (?5 * CASE WHEN m.tag_expires_at > ?6 "
+        "                  THEN COALESCE(m.tag_strength, 0.0) "
+        "                  ELSE 0.0 END)) AS computed_score, "
+        "         COALESCE(cme.embedding, e.embedding) AS embedding, "
+        "         m.created_at "
+        "  FROM memories m "
+        "  JOIN embeddings e ON m.embedding_id = e.embedding_id "
+        "  LEFT JOIN current_memory_embeddings cme "
+        "    ON cme.memory_id = m.memory_id "
+        "  LEFT JOIN edge_counts ec ON ec.memory_id = m.memory_id "
+        "  CROSS JOIN max_cnt "
+        "  WHERE m.kind = 'LONG_TERM' "
+        "    AND m.cluster_id IS NULL"
+        ") "
+        "SELECT memory_id, embedding_id, computed_score, embedding "
+        "FROM scored WHERE computed_score < ?7 "
+        "ORDER BY computed_score ASC, created_at ASC, memory_id ASC;";
   const auto candidate_query_start = std::chrono::steady_clock::now ();
   auto rows = tx.Execute (
       query,
@@ -117,54 +97,6 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
           std::chrono::steady_clock::now () - candidate_query_start)
           .count ());
   internal::ThrowIfStopRequested ();
-  const int min_cluster_size = core::MinClusterSize (F_raw);
-  if (force_consolidation
-      && static_cast<int> (rows.size ()) < min_cluster_size)
-    {
-      const int fallback_limit
-          = std::max ({ core::WRet (T), min_cluster_size, 1 });
-      const std::string fallback_query = std::string (
-          "WITH ranked AS ("
-          "  SELECT m.memory_id, COALESCE(cme.embedding_id, m.embedding_id) "
-          "         AS embedding_id, "
-          "         m.embedding_id AS base_embedding_id, "
-          "         ((?1 * COALESCE(m.strength, 1.0)) "
-          "          - (?2 * COALESCE(m.redundancy, 0.0)) "
-          "          + (?3 * COALESCE(m.connectivity, 0.0)) "
-          "          + (?4 * COALESCE(m.stability, 0.0)) "
-          "          + (?5 * CASE WHEN m.tag_expires_at > ?6 "
-          "                  THEN COALESCE(m.tag_strength, 0.0) ELSE 0.0 END)) "
-          "          AS computed_score "
-          "  FROM memories m "
-          "  LEFT JOIN current_memory_embeddings cme "
-          "    ON cme.memory_id = m.memory_id "
-          )
-          + candidate_scope
-          + " "
-          + "  ORDER BY computed_score ASC, m.created_at ASC, "
-            "m.memory_id ASC LIMIT ?7"
-            ") "
-            "SELECT ranked.memory_id, ranked.embedding_id, "
-            "       ranked.computed_score, "
-            "       COALESCE(cme.embedding, e.embedding) AS embedding "
-            "FROM ranked "
-            "JOIN embeddings e ON ranked.base_embedding_id = e.embedding_id "
-            "LEFT JOIN current_memory_embeddings cme "
-            "  ON cme.memory_id = ranked.memory_id "
-            "ORDER BY ranked.computed_score ASC, ranked.memory_id ASC;";
-      const auto fallback_query_start = std::chrono::steady_clock::now ();
-      rows = tx.Execute (
-          fallback_query,
-          { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
-            fallback_limit });
-      context.AddOperationTiming (
-          "ScoreConsolidation.fallback_query_sql",
-          std::chrono::duration<double, std::milli> (
-              std::chrono::steady_clock::now () - fallback_query_start)
-              .count ());
-      internal::ThrowIfStopRequested ();
-    }
-
   std::vector<ConsolidationCandidate> candidates;
   if (!rows.empty())
     {

@@ -1,6 +1,7 @@
 // tests/state_persistence.test.cpp
 #include <any>
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
+#include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include "../src/working_memory_time_internal.hpp"
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
@@ -116,6 +117,48 @@ struct CaptureProcessorContextOp : IOperation
       {
         *captured = &ctx.GetProcessorContext ();
       }
+  }
+};
+
+struct SetConsolidationThroughputOp : IOperation
+{
+  operations::consolidation_throughput_state_internal::State state;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    operations::consolidation_throughput_state_internal::Reset (
+        ctx.GetProcessorContext (), state);
+  }
+};
+
+struct CaptureConsolidationThroughputOp : IOperation
+{
+  operations::consolidation_throughput_state_internal::State *captured
+      = nullptr;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    if (captured)
+      {
+        *captured
+            = operations::consolidation_throughput_state_internal::Find (
+                ctx.GetProcessorContext ());
+      }
+  }
+};
+
+struct ObserveConsolidationThroughputOp : IOperation
+{
+  double rate = 0.0;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    operations::consolidation_throughput_state_internal::Observe (
+        ctx.GetProcessorContext (), rate, ctx.GetConfig ().focus,
+        ctx.GetConfig ().sensitivity, ctx.GetConfig ().stability);
   }
 };
 
@@ -714,6 +757,136 @@ TEST_CASE ("State persistence is idempotent across restarts",
   // Signals processed should be cumulative
   auto state_vals = store->Execute ("SELECT signals_processed FROM state");
   REQUIRE (GetInt64 (state_vals[0], "signals_processed") == 3);
+}
+
+TEST_CASE ("Consolidation throughput range persists across processor restart",
+           "[state_persistence][consolidation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  SignalProcessor::Config cfg = MakeConfig ();
+
+  {
+    auto set = std::make_unique<SetConsolidationThroughputOp> ();
+    set->state = { 2.5, 11.0, true, false };
+    auto ops = std::make_unique<DynamicOperationSet> (std::move (set));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Zero (256);
+    signal.timestamp = 1000;
+    signal.source_id = "first/store";
+    processor.Process (signal);
+  }
+
+  auto rows = store->Execute (
+      "SELECT consolidation_rate_floor, consolidation_rate_peak, "
+      "consolidation_rate_initialized, consolidation_rate_armed "
+      "FROM state WHERE id = 1");
+  REQUIRE (rows.size () == 1);
+  REQUIRE_THAT (GetDouble (rows[0], "consolidation_rate_floor"),
+                WithinAbs (2.5, 1e-12));
+  REQUIRE_THAT (GetDouble (rows[0], "consolidation_rate_peak"),
+                WithinAbs (11.0, 1e-12));
+  REQUIRE (GetInt64 (rows[0], "consolidation_rate_initialized") == 1);
+  REQUIRE (GetInt64 (rows[0], "consolidation_rate_armed") == 0);
+
+  operations::consolidation_throughput_state_internal::State restored;
+  {
+    auto capture = std::make_unique<CaptureConsolidationThroughputOp> ();
+    capture->captured = &restored;
+    auto ops = std::make_unique<DynamicOperationSet> (std::move (capture));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Zero (256);
+    signal.timestamp = 2000;
+    signal.source_id = "second/store";
+    processor.Process (signal);
+  }
+  REQUIRE_THAT (restored.floor, WithinAbs (2.5, 1e-12));
+  REQUIRE_THAT (restored.peak, WithinAbs (11.0, 1e-12));
+  REQUIRE (restored.initialized);
+  REQUIRE_FALSE (restored.armed);
+}
+
+TEST_CASE ("Zero consolidation throughput initialization persists across restart",
+           "[state_persistence][consolidation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  SignalProcessor::Config cfg = MakeConfig ();
+
+  {
+    auto set = std::make_unique<SetConsolidationThroughputOp> ();
+    set->state = { 0.0, 0.0, true };
+    auto ops = std::make_unique<DynamicOperationSet> (std::move (set));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Zero (256);
+    signal.timestamp = 1000;
+    signal.source_id = "zero/store";
+    processor.Process (signal);
+  }
+
+  auto rows = store->Execute (
+      "SELECT consolidation_rate_floor, consolidation_rate_peak, "
+      "consolidation_rate_initialized FROM state WHERE id = 1");
+  REQUIRE (rows.size () == 1);
+  REQUIRE_THAT (GetDouble (rows[0], "consolidation_rate_floor"),
+                WithinAbs (0.0, 1e-12));
+  REQUIRE_THAT (GetDouble (rows[0], "consolidation_rate_peak"),
+                WithinAbs (0.0, 1e-12));
+  REQUIRE (GetInt64 (rows[0], "consolidation_rate_initialized") == 1);
+
+  operations::consolidation_throughput_state_internal::State observed;
+  {
+    auto observe = std::make_unique<ObserveConsolidationThroughputOp> ();
+    observe->rate = 10.0;
+    auto capture = std::make_unique<CaptureConsolidationThroughputOp> ();
+    capture->captured = &observed;
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::move (observe), std::move (capture));
+    SignalProcessor processor (cfg, store, std::move (ops));
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Zero (256);
+    signal.timestamp = 2000;
+    signal.source_id = "positive/store";
+    processor.Process (signal);
+  }
+  REQUIRE (observed.initialized);
+  REQUIRE (observed.floor > 0.0);
+  REQUIRE (observed.floor < 10.0);
+  REQUIRE_THAT (observed.peak, WithinAbs (10.0, 1e-12));
+}
+
+TEST_CASE ("Disarmed consolidation range loads with zero processed signals",
+           "[state_persistence][consolidation]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  SignalProcessor::Config cfg = MakeConfig ();
+  cortext::store::ApplyMigrations (*store);
+  store->Execute ("INSERT INTO state (id) VALUES (1) ON CONFLICT(id) DO NOTHING");
+  store->Execute (
+      "UPDATE state SET signals_processed = 0, "
+      "consolidation_rate_floor = 2.5, consolidation_rate_peak = 11.0, "
+      "consolidation_rate_initialized = 1, consolidation_rate_armed = 0 "
+      "WHERE id = 1");
+
+  operations::consolidation_throughput_state_internal::State restored;
+  auto capture = std::make_unique<CaptureConsolidationThroughputOp> ();
+  capture->captured = &restored;
+  auto ops = std::make_unique<DynamicOperationSet> (std::move (capture));
+  SignalProcessor processor (cfg, store, std::move (ops));
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.timestamp = 1000;
+  signal.source_id = "zero-signal/restart";
+  processor.Process (signal);
+
+  REQUIRE_THAT (restored.floor, WithinAbs (2.5, 1e-12));
+  REQUIRE_THAT (restored.peak, WithinAbs (11.0, 1e-12));
+  REQUIRE (restored.initialized);
+  REQUIRE_FALSE (restored.armed);
 }
 
 // Operation that populates WM slots for testing persistence

@@ -229,7 +229,9 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
           surface_entry.kind = "ASSOCIATION";
           surface_entry.source_id = association_id;
           surface_entry.modality = "text";
-          surface_entry.vector_seed_eligible = true;
+          // Consolidation centroids organize graph traversal. Direct semantic
+          // seed slots remain reserved for source memories.
+          surface_entry.vector_seed_eligible = false;
           surface_entry.embedding = centroid_vec;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
           historical_surface_search_cache_internal::UpsertCurrent (

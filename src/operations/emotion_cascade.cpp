@@ -244,9 +244,9 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
 
-  // Define recent window for emotional sources (last consolidation interval)
+  // Define the stability-derived lookback window for emotional sources.
   const int consolidation_interval
-      = core::ConsolidationIntervalSeconds (cfg.stability);
+      = core::EmotionCascadeWindowSeconds (cfg.stability);
   const long long recent_window_ms
       = static_cast<long long> (consolidation_interval) * 1000LL;
   const long long recent_window_ts = std::max (0LL, now_ts - recent_window_ms);

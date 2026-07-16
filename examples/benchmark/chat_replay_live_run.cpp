@@ -50,6 +50,21 @@ constexpr const char *kUserSourceId = "User";
 constexpr const char *kContactSourceId = "Contact";
 constexpr long long kNormalRagVectorSearchMultiplier = 8;
 
+const char *
+ConsolidationStateName (cortext::ConsolidationState state)
+{
+  switch (state)
+    {
+    case cortext::ConsolidationState::Recommended:
+      return "recommended";
+    case cortext::ConsolidationState::Required:
+      return "required";
+    case cortext::ConsolidationState::None:
+      return "none";
+    }
+  return "none";
+}
+
 struct Config
 {
   fs::path input_dir;
@@ -626,8 +641,8 @@ PublicBehaviorJson (const cortext::Cortext::Context &ctx)
     { "should_interrupt", ctx.should_interrupt },
     { "interrupt_aborted", ctx.interrupt_aborted },
     { "at_boundary", ctx.at_boundary },
-    { "consolidation_recommended", ctx.consolidation_recommended },
-    { "consolidation_required", ctx.consolidation_required },
+    { "consolidation_state",
+      ConsolidationStateName (ctx.consolidation_state) },
     { "interrupt_gate_has_candidates", ctx.interrupt_gate_has_candidates },
     { "interrupt_gate_blocked_no_store",
       ctx.interrupt_gate_blocked_no_store },

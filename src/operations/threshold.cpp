@@ -1,4 +1,5 @@
 #include "cortext/operations/threshold.hpp"
+#include "consolidation_throughput_state_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
@@ -274,6 +275,8 @@ UpdateRateState::Execute (OperationContext &context, Transaction &tx) const
                               : constants::kNormalizedMin;
 
   p_ctx.m_rate = (1.0 - alpha_rate) * p_ctx.m_rate + alpha_rate * rho_inst;
+  consolidation_throughput_state_internal::Observe (
+      p_ctx, p_ctx.m_rate, cfg.focus, cfg.sensitivity, cfg.stability);
   p_ctx.rate_ticks = p_ctx.rate_ticks + 1;
 
   const double denom_bias

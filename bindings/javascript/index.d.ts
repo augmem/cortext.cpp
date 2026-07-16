@@ -20,7 +20,8 @@ export interface CortextMemory {
   timestamp?: number;
   modality?: string;
   mimetype?: string;
-  rel?: number;
+  relevance?: number;
+  composite_score?: number;
   salience?: number;
   contradiction?: number;
   usage_count?: number;
@@ -28,14 +29,15 @@ export interface CortextMemory {
   [key: string]: unknown;
 }
 
+export type ConsolidationState = "none" | "recommended" | "required";
+
 export interface CortextContext {
   retrieved_memory?: CortextMemory[];
   working_memory?: CortextMemory[];
   should_interrupt?: boolean;
   interrupt_aborted?: boolean;
   at_boundary?: boolean;
-  consolidation_recommended?: boolean;
-  consolidation_required?: boolean;
+  consolidation_state: ConsolidationState;
   output?: Record<string, unknown>;
   embedding?: number[];
   embedding_dimension?: number;

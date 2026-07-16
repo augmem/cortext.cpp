@@ -151,6 +151,10 @@ RunReinforcementUpdate (double focus, double sensitivity, double stability,
       "WHERE source_memory_id = 7 AND target_memory_id = 8 "
       "AND edge_type = 'reinforces'",
       {});
+  if (rows.empty ())
+    {
+      return 0.0;
+    }
   REQUIRE (rows.size () == 1);
   return AnyToDouble (rows[0].at ("weight"));
 }
@@ -243,26 +247,9 @@ TEST_CASE ("High DA increases procedural value update gain",
   REQUIRE (disabled == Catch::Approx (0.8).margin (1e-6));
 }
 
-TEST_CASE ("Reinforcement edge update is knob-derived",
+TEST_CASE ("Single-candidate usage does not synthesize pair reinforcement",
            "[operations][detect_memory_usage][reinforcement]")
 {
-  const double mid_selected
-      = RunReinforcementUpdate (0.5, 0.5, 0.5, true);
-  REQUIRE (mid_selected
-           == Catch::Approx (
-               core::ReinforcementCoRetrievalStep (0.5, 0.5, 0.5))
-                  .margin (1e-6));
-
-  const double mid_unselected
-      = RunReinforcementUpdate (0.5, 0.5, 0.5, false);
-  REQUIRE (mid_unselected
-           == Catch::Approx (
-               core::ReinforcementCoRetrievalStep (0.5, 0.5, 0.5)
-               * core::ReinforcementUnselectedScale (0.5, 0.5, 0.5))
-                  .margin (1e-6));
-  REQUIRE (mid_unselected < mid_selected);
-
-  const double conservative = RunReinforcementUpdate (1.0, 0.0, 0.0, true);
-  const double eager = RunReinforcementUpdate (0.0, 1.0, 1.0, true);
-  REQUIRE (eager > conservative);
+  REQUIRE (RunReinforcementUpdate (0.5, 0.5, 0.5, false) == 0.0);
+  REQUIRE (RunReinforcementUpdate (0.5, 0.5, 0.5, true) == 0.0);
 }
