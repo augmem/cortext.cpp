@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cortext/core/utils.hpp>
+#include <cortext/core/knobs.hpp>
 #include <cortext/operations/graph_retrieval.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_set.hpp>
@@ -14,7 +15,10 @@
 
 #include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -925,7 +929,6 @@ TEST_CASE ("Graph retrieval soundly collapses cosine-near families before KNN ca
                   2000 + offset,
                   "duplicate/" + std::to_string (offset));
     }
-
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   auto ops = std::make_unique<DynamicOperationSet> (
@@ -1029,6 +1032,11 @@ TEST_CASE ("Graph retrieval SQL fallback collapses families before candidate cap
                   2000 + offset,
                   "duplicate/" + std::to_string (offset));
     }
+  for (long long offset = 0; offset < 900; ++offset)
+    {
+      SeedMemory (*store, 2000 + offset, 20000 + offset, UnitVec (31),
+                  3000 + offset, "distant/" + std::to_string (offset));
+    }
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
@@ -1054,6 +1062,14 @@ TEST_CASE ("Graph retrieval SQL fallback collapses families before candidate cap
                          })
            != candidates.end ());
   REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+  const int seed_limit = std::max (1, core::RetrievalMaxResults (cfg.focus));
+  const int seed_search_limit = core::RetrievalSeedSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, seed_limit);
+  const int fallback_materialization_limit = core::RetrievalSeedSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, seed_search_limit);
+  REQUIRE (
+      operations::retrieval_trace::GetLastSqlFallbackMaterializedRowCount ()
+      <= static_cast<std::size_t> (fallback_materialization_limit));
   REQUIRE (
       operations::historical_surface_search_cache_internal::Find (pctx)
       == recovery_state);
@@ -1094,7 +1110,7 @@ TEST_CASE ("Graph retrieval SQL fallback filters ineligible nearest rows before 
   constexpr long long kTargetMemoryId = 9000;
   SeedMemory (*store, kTargetMemoryId, 19000,
               VectorWithCosineToDim0 (0.90f), 1000, "eligible");
-  for (long long offset = 0; offset < 160; ++offset)
+  for (long long offset = 0; offset < 900; ++offset)
     {
       const long long memory_id = 1000 + offset;
       SeedMemory (*store, memory_id, 10000 + offset, UnitVec (0), 1000,
@@ -1126,6 +1142,69 @@ TEST_CASE ("Graph retrieval SQL fallback filters ineligible nearest rows before 
                  return candidate.memory_id == kTargetMemoryId;
                })
            != ctx.GetRetrievedMemoryCandidates ().end ());
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval SQL fallback performance probe",
+           "[.benchmark][operations][graph][retrieval][sql]")
+{
+  const char *row_count_env = std::getenv ("LTM_FALLBACK_BENCH_ROWS");
+  const char *repeats_env = std::getenv ("LTM_FALLBACK_BENCH_REPEATS");
+  const long long row_count
+      = row_count_env == nullptr ? 1915 : std::stoll (row_count_env);
+  const int repeats = repeats_env == nullptr ? 12 : std::stoi (repeats_env);
+  REQUIRE (row_count > 0);
+  REQUIRE (repeats > 0);
+
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  for (long long offset = 0; offset < row_count; ++offset)
+    {
+      Eigen::VectorXf embedding = UnitVec (static_cast<int> (offset % 255));
+      embedding[255]
+          = static_cast<float> ((offset % 97) + 1) / 10000.0f;
+      embedding.normalize ();
+      SeedMemory (*store, 1000 + offset, 10000 + offset, embedding,
+                  1000 + offset);
+    }
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx);
+  auto signal = MakeSignal (UnitVec (0), 1000000000);
+  std::vector<double> elapsed_ms;
+  elapsed_ms.reserve (static_cast<std::size_t> (repeats));
+  for (int repeat = 0; repeat < repeats; ++repeat)
+    {
+      OperationContext ctx (signal, pctx, cfg, store.get ());
+      ctx.SetShouldCheckRetrieval (true);
+      ctx.SetWriteExclusionTs (signal.timestamp);
+      GraphAugmentedRetrieveCandidates operation;
+      auto tx = store->Begin ();
+      const auto start = std::chrono::steady_clock::now ();
+      operation.Execute (ctx, *tx);
+      const auto end = std::chrono::steady_clock::now ();
+      tx->Rollback ();
+      REQUIRE_FALSE (ctx.GetRetrievedMemoryCandidates ().empty ());
+      elapsed_ms.push_back (
+          std::chrono::duration<double, std::milli> (end - start).count ());
+    }
+  std::sort (elapsed_ms.begin (), elapsed_ms.end ());
+  const auto percentile = [&elapsed_ms] (double fraction) {
+    const std::size_t index = std::min (
+        elapsed_ms.size () - 1,
+        static_cast<std::size_t> (
+            std::ceil (fraction * static_cast<double> (elapsed_ms.size ())))
+            - 1);
+    return elapsed_ms[index];
+  };
+  std::cout << "CORTEXT_FALLBACK_BENCH {\"rows\":" << row_count
+            << ",\"repeats\":" << repeats
+            << ",\"p50_ms\":" << percentile (0.50)
+            << ",\"p95_ms\":" << percentile (0.95) << "}" << std::endl;
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 
@@ -1198,6 +1277,110 @@ TEST_CASE ("Graph retrieval cache rebuild accepts shared base embeddings",
       [] (const auto &entry) { return entry.embedding_id == 100; });
   REQUIRE (shared_entry != state->entries.end ());
   REQUIRE (shared_entry->memory_references.size () == 1);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval bounded fallback keeps eligible shared sibling",
+           "[operations][graph][retrieval][sql][shared-embedding][supersession]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+      "start_ts, created_at) VALUES(?, ?, ?, 'LONG_TERM', ?, ?)",
+      { 11LL, 100LL, std::string ("shared"), 1100LL, 1100LL });
+  SeedMemory (*store, 20, 200, VectorWithCosineToDim0 (0.92f), 2000);
+  store->Execute (
+      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, "
+      "weight, last_reinforced) VALUES(?, ?, 'supersedes', ?, ?)",
+      { 20LL, 10LL, 1.0, 2000LL });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  pctx.UpsertRetrievalSurface (
+      { 20, 200, 2000, 2000, 0, 0, 0, 0, "LONG_TERM", "replacement", "",
+        -1.0, 0, 0.0, 0.0, 0.0, false, true,
+        VectorWithCosineToDim0 (0.92f) });
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx);
+  auto signal = MakeSignal (UnitVec (0), 3000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  REQUIRE (std::find_if (
+               ctx.GetRetrievedMemoryCandidates ().begin (),
+               ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) { return candidate.memory_id == 10; })
+           == ctx.GetRetrievedMemoryCandidates ().end ());
+  REQUIRE (std::find_if (
+               ctx.GetRetrievedMemoryCandidates ().begin (),
+               ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) { return candidate.memory_id == 11; })
+           != ctx.GetRetrievedMemoryCandidates ().end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval fallback pages past cosine family saturation",
+           "[operations][graph][retrieval][sql][pagination][family]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  for (long long offset = 0; offset < 600; ++offset)
+    {
+      auto embedding = UnitVec (0);
+      embedding[1] = static_cast<float> (offset + 1) / 1000000.0f;
+      embedding.normalize ();
+      SeedMemory (*store, 1000 + offset, 10000 + offset, embedding,
+                  1100 + offset, "cosine-family");
+    }
+  constexpr long long kTargetMemoryId = 9000;
+  SeedMemory (*store, kTargetMemoryId, 200,
+              VectorWithCosineToDim0 (0.95f), 2000, "target");
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx);
+  auto signal = MakeSignal (UnitVec (0), 100000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  REQUIRE (std::find_if (
+               ctx.GetRetrievedMemoryCandidates ().begin (),
+               ctx.GetRetrievedMemoryCandidates ().end (),
+               [] (const auto &candidate) {
+                 return candidate.memory_id == kTargetMemoryId;
+           })
+           != ctx.GetRetrievedMemoryCandidates ().end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 2);
+  const int seed_limit = std::max (1, core::RetrievalMaxResults (cfg.focus));
+  const int seed_search_limit = core::RetrievalSeedSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, seed_limit);
+  const int page_limit = core::RetrievalSeedSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, seed_search_limit);
+  const auto materialized
+      = operations::retrieval_trace::GetLastSqlFallbackMaterializedRowCount ();
+  REQUIRE (materialized > static_cast<std::size_t> (page_limit));
+  REQUIRE (materialized
+           <= static_cast<std::size_t> (2 * page_limit));
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 

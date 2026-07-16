@@ -142,11 +142,28 @@ rebuild installs a failure sentinel rather than repeating the two complete
 surface scans on every request. A unique cached vector retains every long-term
 memory metadata alternative that shares its base embedding, and query-time
 eligibility chooses a nonsuperseded sibling without duplicating vector storage.
-The fallback executes one scalar-distance-ordered query after kind, timestamp,
-and current-surface precedence are filtered in SQL; superseded and exact
-near-duplicate families are then skipped in memory until the knob-derived
-budget is filled or the eligible surface is exhausted. Ephemeral retrieval uses
-that fallback without installing volatile registry state.
+The fallback executes a demand-driven sequence of ordered SQL pages
+over the current and historical vector surfaces. Each page joins memory
+metadata and applies kind, timestamp, and supersession eligibility before
+distance ordering, excludes a historical row when that memory already has a
+current reconstruction, collapses byte-identical historical vectors, and uses
+a second application of the existing F/S/T-derived seed-search breadth as its
+row bound. One in-memory cosine-family index spans every page; paging stops when
+the ordinary semantic-family seed budget is full or the eligible surface is
+exhausted. Current per-memory reconstructions remain distinct and the
+corresponding base row for that same memory is excluded. This recovery path
+preserves an eligible target behind 900 closer ineligible rows and preserves an
+eligible sibling of a superseded shared embedding. A separate 600-member
+byte-distinct cosine-near family requires two bounded pages and cannot hide the
+next semantic target. The ordinary 430-family regression remains one page and
+returns no more than the 477-row default page bound rather than materializing
+all 1,331 eligible rows. The embedded sqlite-vec implementation is brute-force,
+so every requested page scans the persisted vector surfaces; the optimization
+bounds rows returned to C++ and downstream embedding decoding, not the scan's
+asymptotic order or the historical window partition's internal sort and
+materialization work.
+Ephemeral retrieval uses the fallback without installing volatile registry
+state.
 It then expands through retained structural graph edges and returns a compact
 selected set. Vector similarity owns the rank; recency is a tie-break and graph
 activation is a bounded residual bonus. `source_id` and modality are metadata,
