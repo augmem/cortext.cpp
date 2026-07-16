@@ -1094,13 +1094,18 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             }
           surface_entry.embedding = embedding_to_store;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
-          if (!constructive_recall::Disabled ()
-              && !constructive_recall::CurrentSurfaceWritesDisabled ())
+          if (!constructive_recall::Disabled ())
             {
               historical_surface_search_cache_internal::UpsertCurrent (
                   p_ctx,
                   { embedding_id, memory_id, 0, std::string (),
                     std::string (), embedding_to_store });
+            }
+          if (!constructive_recall::Disabled ()
+              && constructive_recall::CurrentSurfaceWritesDisabled ())
+            {
+              historical_surface_search_cache_internal::
+                  SetCurrentSurfaceDatabaseCurrent (p_ctx, false);
             }
 
           const int k_key = core::SparseKeySize (

@@ -58,6 +58,9 @@ struct RankedEntry
 struct State
 {
   bool recovery_failed = false;
+  bool current_surface_database_current = false;
+  bool current_surface_search_current = false;
+  bool processor_surface_complete = false;
   int embedding_dim = 0;
   std::vector<Entry> entries;
   std::vector<float> search;
@@ -145,6 +148,47 @@ RecoveryFailed (const ProcessorContext &ctx)
   return state && state->recovery_failed;
 }
 
+inline bool
+CurrentSurfaceDatabaseCurrent (const ProcessorContext &ctx)
+{
+  const auto state = Find (ctx);
+  return state && state->current_surface_database_current;
+}
+
+inline bool
+CurrentSurfaceSearchCurrent (const ProcessorContext &ctx)
+{
+  const auto state = Find (ctx);
+  return state && state->current_surface_search_current;
+}
+
+inline void
+SetCurrentSurfaceDatabaseCurrent (const ProcessorContext &ctx,
+                                  bool database_current)
+{
+  auto &registry = Registry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  auto &state = registry.states[&ctx];
+  if (!state)
+    {
+      state = std::make_shared<State> ();
+    }
+  state->current_surface_database_current = database_current;
+}
+
+inline void
+SetProcessorSurfaceComplete (const ProcessorContext &ctx, bool complete)
+{
+  auto &registry = Registry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  auto &state = registry.states[&ctx];
+  if (!state)
+    {
+      state = std::make_shared<State> ();
+    }
+  state->processor_surface_complete = complete;
+}
+
 inline void
 MarkRecoveryFailed (const ProcessorContext &ctx)
 {
@@ -152,6 +196,14 @@ MarkRecoveryFailed (const ProcessorContext &ctx)
   state->recovery_failed = true;
   auto &registry = Registry ();
   std::lock_guard<std::mutex> lock (registry.mutex);
+  const auto existing = registry.states.find (&ctx);
+  if (existing != registry.states.end () && existing->second)
+    {
+      state->current_surface_database_current
+          = existing->second->current_surface_database_current;
+      state->processor_surface_complete
+          = existing->second->processor_surface_complete;
+    }
   registry.states[&ctx] = std::move (state);
 }
 
@@ -217,15 +269,17 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
                        }),
           entry.memory_references.end ());
     }
-  if (state->entries.empty ())
+  if (state->entries.empty () && current_entries.empty ())
     {
+      state->current_surface_search_current = true;
       auto &registry = Registry ();
       std::lock_guard<std::mutex> lock (registry.mutex);
       registry.states[&ctx] = std::move (state);
       return true;
     }
   state->embedding_dim = static_cast<int> (
-      state->entries.front ().embedding.size ());
+      state->entries.empty () ? current_entries.front ().embedding.size ()
+                              : state->entries.front ().embedding.size ());
   if (state->embedding_dim <= 0)
     {
       Erase (ctx);
@@ -269,6 +323,7 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
                                         + entry.embedding.size ());
     }
   auto &registry = Registry ();
+  state->current_surface_search_current = true;
   std::lock_guard<std::mutex> lock (registry.mutex);
   registry.states[&ctx] = std::move (state);
   return true;
