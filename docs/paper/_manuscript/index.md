@@ -3567,7 +3567,22 @@ demand-driven ordered pages over the current and historical vector
 surfaces. Every SQL page applies kind, timestamp, and supersession
 eligibility before distance ordering and a knob-derived top-k page
 limit; one C++ cosine-family index spans the pages until the ordinary
-seed budget is full or the surface is exhausted. A dedicated
+seed budget is full or the surface is exhausted. Processor hydration
+records persisted-current currency separately from processor-surface
+completeness, and the private search cache follows the processor’s
+latest reconstruction vectors even when current-table writes are
+disabled. A valid-cache regression places a full F/S/T-derived seed
+breadth of distinct base families ahead of a target and then maps every
+base to one latest family; the target remains visible because cache
+ordering and family accounting use the latest vectors. The same test
+invalidates the cache and proves that an ephemeral query with a complete
+processor surface still finds the target without SQL or registry
+mutation. Two additional regressions cover incomplete-processor recovery
+using an explicit non-materializing policy and a disabled-current-write
+experiment hook; the SQL fallback substitutes latest reconstructions
+before family accounting. A separate disable-ablation regression removes
+the private cache after reconstruction and verifies that rebuild ranks
+the base embedding, matching restart hydration. A dedicated
 invalid-neighbor regression places 900 closer `WORKING` rows before the
 eligible long-term target and still requires the target to surface.
 Another regression inserts 600 eligible historical memories with
@@ -3575,34 +3590,43 @@ distinct embedding identifiers and byte-distinct normalized vectors
 inside one cosine family before a distinct target. The first 477-row
 page cannot fill the semantic-family budget, so the fallback requests a
 second page and the target surfaces. Current per-memory reconstructions
-remain distinct from the historical family selection. The adversarial
-fallback regression contains 430 cosine-near distractors plus 900
-distant rows: the distinctive target remains selected while returned SQL
-rows stay at or below the second-stage knob-derived bound (477 for the
-test knobs), rather than materializing all 1,331 eligible rows. An
-ephemeral request never installs recovery state in the process registry.
-A separate 256-vector orthogonal-basis test exercises the broad
-non-duplicate surface and requires exact family comparisons to remain
-below one quarter of the all-pairs count.
+remain distinct rows while family accounting uses their current vectors.
+The adversarial fallback regression contains 430 cosine-near distractors
+plus 900 distant rows: the distinctive target remains selected while
+returned SQL rows stay at or below the second-stage knob-derived bound
+(477 for the test knobs), rather than materializing all 1,331 eligible
+rows. An ephemeral request never installs recovery state in the process
+registry. A separate 256-vector orthogonal-basis test exercises the
+broad non-duplicate surface and requires exact family comparisons to
+remain below one quarter of the all-pairs count.
 
-The fallback performance probe directly forces the failed-cache sentinel
-and compares the repaired statement with pull-request head `19a53132`
-under the same warning-clean Debug build, test objects, store generator,
-and query vector. At 1,915 rows, six paired processes with five timed
-requests per process produced a median process p50 of 43.244 ms for the
-repaired query versus 295.397 ms for the head comparator (85.36% lower).
-At 8,000 rows, six paired processes with five requests per process
-produced 138.709 versus 1,221.390 ms (88.64% lower). Candidate-first and
-comparator-first order each owned half of the pairs at both sizes;
-median 8,000-row process p95 values were 141.450 versus 1,235.425 ms.
-The probe isolates query execution from database seeding and verifies a
-nonempty retrieved set on every timed request. This is direct cache-loss
-latency/scaling evidence, not an ANN claim: sqlite-vec remains a
-brute-force linear scan, while each SQL `LIMIT` bounds only the rows
-returned to C++ and decoded downstream. The historical window partition
-may still sort and materialize the full eligible history internally
-before the limit. The measured unique-vector populations fill the
-semantic seed budget in one page.
+The recovery performance probe compares the repair with exact pushed
+pull-request head `cb5b8f3c` under matched AppleClang Release builds,
+test objects, store generators, and query vectors. Every tenth memory
+has a non-materialized reconstruction and each process executes 50 timed
+ephemeral requests after seeding. Three alternating-order exact-final
+pairs at 1,915 rows produced median process p50/p95 values of
+9.445/9.641 ms for the repaired complete-processor path versus
+19.144/19.518 ms for the comparator; paired differences were
+-9.699/-9.884 ms and all three were negative. At 8,000 rows the
+corresponding medians were 39.381/39.985 versus 73.276/74.217 ms, with
+paired differences of -33.867/-34.198 ms and all three negative. An
+incomplete-processor diagnostic exercises the latest-reconstruction SQL
+union separately. Its paired median p50/p95 differences were
+-0.117/-0.030 ms at 1,915 rows and -2.528/-5.881 ms at 8,000 rows; five
+of six metric-by-pair results at 1,915 and all six at 8,000 were
+favorable. These remain recovery-path diagnostics, not promoted to a
+zero-margin non-inferiority result. The registered 18-pair fresh-process
+benchmark below remains the normal-path performance gate. The direct
+probe isolates query execution from database seeding and verifies a
+nonempty retrieved set on every timed request. This is recovery
+latency/scaling evidence, not an ANN claim or a statistical
+production-latency estimate: sqlite-vec remains a brute-force linear
+scan, while each SQL `LIMIT` bounds only the rows returned to C++ and
+decoded downstream. The historical window partition may still sort and
+materialize the full eligible history internally before the limit. The
+measured unique-vector populations fill the semantic seed budget in one
+page.
 
 Performance was compared against the exact 1.2.1 macOS arm64 prebuild
 using two unmeasured warm-up pairs and 18 measured pairs. Each pair
@@ -3642,56 +3666,56 @@ prebuild discovery uses Node architecture tags:
 <tbody>
 <tr>
 <td>retrieval p50 (ms)</td>
-<td style="text-align: right;">7.376</td>
-<td style="text-align: right;">3.179</td>
-<td style="text-align: right;">-4.238</td>
-<td style="text-align: right;">-4.125</td>
+<td style="text-align: right;">7.228</td>
+<td style="text-align: right;">3.035</td>
+<td style="text-align: right;">-4.214</td>
+<td style="text-align: right;">-4.162</td>
 </tr>
 <tr>
 <td>retrieval p95 (ms)</td>
-<td style="text-align: right;">11.438</td>
-<td style="text-align: right;">8.485</td>
-<td style="text-align: right;">-3.168</td>
-<td style="text-align: right;">-2.648</td>
+<td style="text-align: right;">11.232</td>
+<td style="text-align: right;">8.282</td>
+<td style="text-align: right;">-2.971</td>
+<td style="text-align: right;">-2.548</td>
 </tr>
 <tr>
 <td>ingestion p50 (ms)</td>
-<td style="text-align: right;">16.359</td>
-<td style="text-align: right;">6.482</td>
-<td style="text-align: right;">-9.913</td>
-<td style="text-align: right;">-9.711</td>
+<td style="text-align: right;">16.237</td>
+<td style="text-align: right;">6.415</td>
+<td style="text-align: right;">-9.781</td>
+<td style="text-align: right;">-9.700</td>
 </tr>
 <tr>
 <td>ingestion p95 (ms)</td>
-<td style="text-align: right;">28.168</td>
-<td style="text-align: right;">10.794</td>
-<td style="text-align: right;">-17.233</td>
-<td style="text-align: right;">-16.847</td>
+<td style="text-align: right;">27.428</td>
+<td style="text-align: right;">10.319</td>
+<td style="text-align: right;">-17.327</td>
+<td style="text-align: right;">-16.912</td>
 </tr>
 <tr>
 <td>retrieval throughput (ops/s)</td>
-<td style="text-align: right;">113.529</td>
-<td style="text-align: right;">262.075</td>
-<td style="text-align: right;">-147.782<a href="#fn1"
+<td style="text-align: right;">115.728</td>
+<td style="text-align: right;">272.989</td>
+<td style="text-align: right;">-157.876<a href="#fn1"
 class="footnote-ref" id="fnref1"
 role="doc-noteref"><sup>1</sup></a></td>
-<td style="text-align: right;">-142.909</td>
+<td style="text-align: right;">-156.074</td>
 </tr>
 <tr>
 <td>ingestion throughput (ops/s)</td>
-<td style="text-align: right;">58.849</td>
-<td style="text-align: right;">152.692</td>
-<td style="text-align: right;">-93.690<a href="#fn2"
+<td style="text-align: right;">59.372</td>
+<td style="text-align: right;">156.712</td>
+<td style="text-align: right;">-97.913<a href="#fn2"
 class="footnote-ref" id="fnref2"
 role="doc-noteref"><sup>2</sup></a></td>
-<td style="text-align: right;">-90.676</td>
+<td style="text-align: right;">-97.280</td>
 </tr>
 <tr>
 <td>peak resident bytes</td>
-<td style="text-align: right;">1,057,677,312</td>
-<td style="text-align: right;">787,349,504</td>
-<td style="text-align: right;">-270,139,392</td>
-<td style="text-align: right;">-268,058,624</td>
+<td style="text-align: right;">1,055,596,544</td>
+<td style="text-align: right;">785,063,936</td>
+<td style="text-align: right;">-270,524,416</td>
+<td style="text-align: right;">-269,574,144</td>
 </tr>
 <tr>
 <td>database bytes</td>
@@ -3850,40 +3874,41 @@ values.
 <tbody>
 <tr>
 <td>repaired candidate, no consolidation</td>
-<td style="text-align: right;">1,546</td>
+<td style="text-align: right;">1,558</td>
 <td style="text-align: right;">0</td>
 <td style="text-align: right;">2/7</td>
-<td style="text-align: right;">47.494 s</td>
-<td style="text-align: right;">180.230 ms</td>
+<td style="text-align: right;">46.719 s</td>
+<td style="text-align: right;">206.878 ms</td>
 </tr>
 <tr>
 <td>repaired candidate, consolidate on recommendation</td>
 <td style="text-align: right;">1</td>
 <td style="text-align: right;">1</td>
 <td style="text-align: right;">2/7</td>
-<td style="text-align: right;">45.603 s</td>
-<td style="text-align: right;">199.968 ms</td>
+<td style="text-align: right;">46.732 s</td>
+<td style="text-align: right;">194.543 ms</td>
 </tr>
 </tbody>
 </table>
 
-The treatment emitted one `recommended` result at write 372, ran one
-22.807 ms maintenance transaction, and then emitted `none` for the
-remaining durable writes. The call changed only the persisted
-acknowledgment latch and event-derived floor/peak: it added zero memory
-rows, long-term rows, working rows, current embeddings, graph edges,
-association memories, signal rows, or processed-signal count. SQLite
-allocated four 4 KiB pages at the call boundary, and both independently
-built fresh databases finished at 23,064,576 bytes. The hashed raw
-snapshots include the armed latch and nonzero-connectivity count before
-the call, after the call, and at final query boundaries. They record
-`armed` changing from one to zero and zero memories with nonzero
-persisted connectivity in both arms, closing the hidden global-write
-path found during the first repair replay. All seven needle counts
-remained `LONG_TERM` with counts 12, 21, 44, 2, 11, 2, and 7. Both arms
-retained the same two top-12 hits and ended with 1,915 long-term
-memories, 1,915 current embeddings, and 1,915 processed signals. Every
-ephemeral-query durable delta remained zero.
+The treatment emitted `recommended` at write 380 and ran one 22.630 ms
+maintenance transaction. The call acknowledged the current throughput
+event, reset its derived floor/peak, and cleared the armed latch.
+Recommendation timing varies with the observed early ingest rate, rather
+than an arbitrary message-count or elapsed-time cadence. The call added
+zero memory rows, long-term rows, working rows, current embeddings,
+graph edges, association memories, signal rows, or processed-signal
+count. Both independently built fresh databases finished at 23,060,480
+and 23,064,576 bytes, respectively. The hashed raw snapshots include the
+armed latch and nonzero-connectivity count before the call, after the
+call, and at final query boundaries. They record the acknowledgment
+clearing `armed` and zero memories with nonzero persisted connectivity
+in both arms, closing the hidden global-write path found during the
+first repair replay. All seven needle counts remained `LONG_TERM` with
+counts 12, 21, 44, 2, 11, 2, and 7. Both arms retained the same two
+top-12 hits and ended with 1,915 long-term memories, 1,915 current
+embeddings, and 1,915 processed signals. Every ephemeral-query durable
+delta remained zero.
 
 The reporter replay is a functional matched control, not a latency
 estimator. Performance was therefore checked separately against the
@@ -3891,8 +3916,8 @@ frozen released baseline with two warm-up pairs and 18 measured
 fresh-process, fresh-database pairs, alternating order at the registered
 zero non-inferiority margin. All eight gates passed.
 Candidate-minus-baseline latency medians and one-sided 95% upper bounds
-were -4.238/-4.125 ms for retrieval p50, -3.168/-2.648 ms for retrieval
-p95, -9.913/-9.711 ms for ingestion p50, and -17.233/-16.847 ms for
+were -4.214/-4.162 ms for retrieval p50, -2.971/-2.548 ms for retrieval
+p95, -9.781/-9.700 ms for ingestion p50, and -17.327/-16.912 ms for
 ingestion p95. Higher-is-better throughput uses baseline minus candidate
 and was likewise negative at both point and upper bound; peak RSS and
 database bytes also passed.
@@ -5532,41 +5557,57 @@ current reconstruction, collapses byte-identical historical vectors, and
 uses a second application of the existing F/S/T-derived seed-search
 breadth as its row bound. One in-memory cosine-family index spans every
 page; paging stops when the ordinary semantic-family seed budget is full
-or the eligible surface is exhausted. Current per-memory reconstructions
-remain distinct and the corresponding base row for that same memory is
-excluded. This recovery path preserves an eligible target behind 900
-closer ineligible rows and preserves an eligible sibling of a superseded
-shared embedding. A separate 600-member byte-distinct cosine-near family
-requires two bounded pages and cannot hide the next semantic target. The
-ordinary 430-family regression remains one page and returns no more than
-the 477-row default page bound rather than materializing all 1,331
-eligible rows. The embedded sqlite-vec implementation is brute-force, so
-every requested page scans the persisted vector surfaces; the
-optimization bounds rows returned to C++ and downstream embedding
-decoding, not the scan’s asymptotic order or the historical window
-partition’s internal sort and materialization work. Ephemeral retrieval
-uses the fallback without installing volatile registry state. It then
-expands through retained structural graph edges and returns a compact
-selected set. Vector similarity owns the rank; recency is a tie-break
-and graph activation is a bounded residual bonus. `source_id` and
-modality are metadata, not ranking inputs. Direct vector seeds are
-source `LONG_TERM` memories; derived `ASSOCIATION` centroids enter
-through graph expansion. Direct families are ranked and the protected
-direct prefix is committed before expanded families are admitted;
-expanded candidates are then deduplicated against those protected
-representatives. When a current embedding exists, its redundant
-historical base embedding is omitted from the historical seed search
-because the authoritative surface was already searched. Current writes
-are excluded by timestamp, and working-memory overlap filters prevent
-the retrieval result from echoing the active memory tail. Association
-edges are used as graph evidence; they do not bypass final scoring or
-output caps. One dispatch exposes at most one actually used retrieval
-candidate, so retrieval does not synthesize reinforcement pair edges
-from the packet. Existing `reinforces` edges remain eligible for decay,
-pruning, degree normalization, and graph evidence. Historical public
-knob helpers for the removed packet-pair writer remain source-compatible
-calibrations; only the step calibration still feeds the production
-pruning floor.
+or the eligible surface is exhausted. Processor hydration tracks
+persisted-current-surface currency and processor-surface completeness
+independently. The private current-vector search cache is built and
+incrementally updated from the processor’s latest reconstruction
+surface, even when a test or storage policy intentionally omits the
+corresponding persisted-current write. A valid cache therefore performs
+distance ordering and cosine-family accounting on latest vectors. If
+that cache is unavailable while the processor surface is complete,
+durable retrieval rebuilds a current-only cache from the processor
+surface and ephemeral retrieval scans that surface directly without
+mutating the registry. Only an incomplete processor surface falls back
+to SQL; in that recovery case the query substitutes each latest
+reconstruction before cross-page family accounting. Base families that
+converge after reconstruction therefore consume one current-family slot
+and cannot stop selection early. Current per-memory reconstructions
+remain distinct rows and the corresponding base row for that same memory
+is excluded. When constructive recall is disabled, both restart
+hydration and cache-loss rebuild select the base embedding and ignore
+reconstruction/current surfaces. This recovery path preserves an
+eligible target behind 900 closer ineligible rows and preserves an
+eligible sibling of a superseded shared embedding. A separate 600-member
+byte-distinct cosine-near family requires two bounded pages and cannot
+hide the next semantic target. The ordinary 430-family regression
+remains one page and returns no more than the 477-row default page bound
+rather than materializing all 1,331 eligible rows. The embedded
+sqlite-vec implementation is brute-force, so every requested page scans
+the persisted vector surfaces; the optimization bounds rows returned to
+C++ and downstream embedding decoding, not the scan’s asymptotic order
+or the historical window partition’s internal sort and materialization
+work. Ephemeral retrieval uses the fallback without installing volatile
+registry state. It then expands through retained structural graph edges
+and returns a compact selected set. Vector similarity owns the rank;
+recency is a tie-break and graph activation is a bounded residual bonus.
+`source_id` and modality are metadata, not ranking inputs. Direct vector
+seeds are source `LONG_TERM` memories; derived `ASSOCIATION` centroids
+enter through graph expansion. Direct families are ranked and the
+protected direct prefix is committed before expanded families are
+admitted; expanded candidates are then deduplicated against those
+protected representatives. When a current embedding exists, its
+redundant historical base embedding is omitted from the historical seed
+search because the authoritative surface was already searched. Current
+writes are excluded by timestamp, and working-memory overlap filters
+prevent the retrieval result from echoing the active memory tail.
+Association edges are used as graph evidence; they do not bypass final
+scoring or output caps. One dispatch exposes at most one actually used
+retrieval candidate, so retrieval does not synthesize reinforcement pair
+edges from the packet. Existing `reinforces` edges remain eligible for
+decay, pruning, degree normalization, and graph evidence. Historical
+public knob helpers for the removed packet-pair writer remain
+source-compatible calibrations; only the step calibration still feeds
+the production pruning floor.
 
 The retrieval trace path records a ranking ledger for selected and
 rejected candidates. Production graph retrieval populates composite
@@ -5769,22 +5810,25 @@ path</td>
 <td>current-memory embedding lookup with pre-cap supersession filtering
 and complementary sound 32-block Cauchy–Schwarz bounds in the stored and
 Walsh–Hadamard bases followed by exact cosine family checks; shared
-vectors retain all long-term metadata alternatives; cache loss performs
-one persisted-surface rebuild, while rebuild failure is latched and uses
-metadata-eligible, distance-ordered, F/S/T-bounded pages feeding one
-cross-page cosine-family index while retaining distinct current
-per-memory reconstructions</td>
+vectors retain all long-term metadata alternatives; the private search
+cache follows the processor’s latest reconstruction surface
+independently of persisted-current materialization; cache loss uses the
+complete processor surface directly or, only when that surface is
+incomplete, metadata-eligible, distance-ordered, F/S/T-bounded SQL pages
+feeding one cross-page cosine-family index that substitutes latest
+reconstructions before accounting</td>
 <td>latest reconstruction and eligible shared-embedding siblings remain
-visible, byte-distinct near-duplicate boilerplate cannot consume the
+visible, byte-distinct near-duplicate boilerplate and stale base
+families that converge after reconstruction cannot consume the
 semantic-family candidate budget, sparse and dense orthogonal vector
-families avoid broad exact cosine work, failed recovery does not repeat
-rebuilds or return the complete result at once, ephemeral recovery does
-not mutate the registry, and source/modality metadata cannot influence
-rank; sqlite-vec still scans linearly for every requested page, the
-historical window partition may internally sort and materialize the full
-eligible history, and the knob-derived top-k bounds only rows returned
-to C++ and decoded downstream rather than claiming sublinear search or
-bounded internal sorter memory</td>
+families avoid broad exact cosine work, recovery does not return the
+complete result at once, ephemeral recovery does not mutate the
+registry, and source/modality metadata cannot influence rank; sqlite-vec
+still scans linearly for every requested SQL page, the historical window
+partition may internally sort and materialize the full eligible history,
+and the knob-derived top-k bounds only rows returned to C++ and decoded
+downstream rather than claiming sublinear search or bounded internal
+sorter memory</td>
 </tr>
 <tr>
 <td>graph expansion</td>
