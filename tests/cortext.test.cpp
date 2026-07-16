@@ -480,6 +480,55 @@ TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
   REQUIRE_FALSE (ephemeral.output.stored_memory_id.has_value ());
 }
 
+TEST_CASE ("Durable flushes one shared Natural accumulator unit",
+           "[cortext][retention][accumulator][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+
+  const auto first = ctx->ProcessTextAt (
+      "A calm sentence in one pending thought.", "stream/shared", 1000ULL,
+      cortext::Retention::Natural);
+  const auto second = ctx->ProcessTextAt (
+      "A second calm sentence in the same thought.", "stream/shared",
+      2000ULL, cortext::Retention::Natural);
+  REQUIRE_FALSE (first.output.stored_memory_id.has_value ());
+  REQUIRE_FALSE (second.output.stored_memory_id.has_value ());
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM memories WHERE source_id = ?",
+               { std::string ("stream/shared") })
+               .empty ());
+
+  const auto durable = ctx->ProcessTextAt (
+      "The explicit turn closes that pending thought.", "stream/shared",
+      3000ULL, cortext::Retention::Durable);
+  REQUIRE (durable.output.stored_memory_id.has_value ());
+  const auto memory_rows = store->Execute (
+      "SELECT memory_id, n_signals FROM memories WHERE source_id = ? "
+      "AND kind = 'LONG_TERM'",
+      { std::string ("stream/shared") });
+  REQUIRE (memory_rows.size () == 1);
+  REQUIRE (AnyToLongLong (memory_rows[0].at ("n_signals")) == 3);
+  const auto signal_rows = store->Execute (
+      "SELECT timestamp, serial_position FROM signals WHERE memory_id = ? "
+      "ORDER BY serial_position",
+      { AnyToLongLong (memory_rows[0].at ("memory_id")) });
+  REQUIRE (signal_rows.size () == 3);
+  REQUIRE (AnyToLongLong (signal_rows[0].at ("timestamp")) == 1000);
+  REQUIRE (AnyToLongLong (signal_rows[1].at ("timestamp")) == 2000);
+  REQUIRE (AnyToLongLong (signal_rows[2].at ("timestamp")) == 3000);
+}
+
 TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
            "[cortext][belief_revision][eval][aist]")
 {

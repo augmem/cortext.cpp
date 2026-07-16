@@ -10,6 +10,7 @@
 #include "operations/constructive_recall_internal.hpp"
 #include "operations/meta_learning_internal.hpp"
 #include "operations/retrieval_trace_state.hpp"
+#include "operations/signal_record_rollback_internal.hpp"
 #include "experimental_env.hpp"
 #include "signal_filter.hpp"
 #include "streaming_text_probe.hpp"
@@ -1247,10 +1248,13 @@ BuildRootOperationSet (bool probe_mode)
 
   if (probe_mode)
     {
-      return std::make_unique<ProbeRoot> ();
+      return operations::signal_record_rollback_internal::MarkJournalAware (
+          std::make_unique<ProbeRoot> ());
     }
-  return std::make_unique<SignalOperationDispatch> (
-      std::make_unique<FullRoot> (), std::make_unique<MaintenanceRoot> ());
+  return operations::signal_record_rollback_internal::MarkJournalAware (
+      std::make_unique<SignalOperationDispatch> (
+          std::make_unique<FullRoot> (),
+          std::make_unique<MaintenanceRoot> ()));
 }
 
 namespace

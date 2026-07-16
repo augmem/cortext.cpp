@@ -3,6 +3,7 @@
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "signal_record_rollback_internal.hpp"
 
 namespace cortext::operations
 {
@@ -32,6 +33,7 @@ ResetAccumulatorAfterFlush::Execute (OperationContext &context,
       return;
     }
 
+  signal_record_rollback_internal::EnsureBackedUp (p_ctx);
   it->second.ResetForNextUnit (signal.timestamp);
 }
 

@@ -5487,6 +5487,37 @@ flags and persisted-record cursors. Association writers invalidate the
 fanout cache in constant time and rebuild it lazily on the next
 traversal.
 
+Natural and Durable retention enter the same operation chain and
+accumulate the current signal before boundary evaluation. Natural leaves
+boundary and write acceptance to the accumulator algorithms. Durable
+adds an explicit boundary and accepted flush of that same pending unit;
+it does not construct a second single-signal memory alongside the
+accumulated unit. The Durable packet is the last signal in the flushed
+unit exactly once.
+
+Rollback snapshots move the private accumulator map, working-memory
+records, and their blob-reference vectors out of the generic context
+copy and restore their ownership immediately afterward. The active
+source’s bounded scalar accumulator fields remain in the rollback
+snapshot. An ordinary non-boundary Natural packet therefore journals
+original vector lengths and appends in place without copying the prior
+unit. A private rollback hook takes one deep backup of the active source
+immediately before a path may mutate or clear its pre-existing records:
+accepted storage, an accumulator flush reset, or an accepted interrupt
+reset. Working-memory appends roll back by original vector length;
+eviction moves the erased slot’s record-vector ownership into the
+journal and maps surviving slot identities without copying their
+history. A separate full-map hook is reserved for operations that
+explicitly mutate foreign-source accumulator topology. Failure restores
+the applicable ownership or backup; successful processing discards it.
+This changes snapshot ownership only, not public state layout,
+accumulator scoring, boundary decisions, write acceptance, or retrieval
+ranking. The ownership journal is enabled only for the private
+production operation root, whose mutation sites carry that contract. A
+caller-supplied `IOperation` root retains the automatic complete-context
+snapshot, preserving exact rollback for hookless destructive operations
+and synchronous nested processing without a new public API requirement.
+
 ## Current Operation Pipeline
 
 The production operation chain is:
@@ -5704,6 +5735,18 @@ Graph expansion after seed discovery is bounded by F/S/T-derived row and
 fanout limits. Working-memory and soft-anchor updates operate over
 bounded live state and remain independent of total store size.
 
+For an open Natural unit containing `U` signal records, the ordinary
+rollback snapshot performs constant-time accumulator-map ownership
+transfer plus record-vector ownership moves per working-memory slot and
+does not copy the `U` records. Appending the next record remains
+amortized `O(1)`. A boundary, Durable flush, or other destructive
+active-source transition may copy `O(U)` active-unit records once for
+exact rollback, then persist `O(U)` records. Working-memory append and
+eviction rollback moves or trims owned vectors and does not copy
+unrelated or cumulative working-memory history. This removes the prior
+cumulative `O(U^2)` record-copy path across a long open unit; it does
+not change the separate `O(Nd)` exact durable candidate search.
+
 The safety checks preserve these bounds: bind-result validation is one
 branch per existing parameter, working-memory decay advances one
 timestamp per bounded slot and schedules at most one memory-row update
@@ -5888,11 +5931,19 @@ semantic seed surface</td>
 </tr>
 <tr>
 <td>rollback snapshots</td>
-<td>detach rebuildable durable caches before copying processor state;
-ephemeral queries roll back their transaction and restore that exact
-snapshot without rebuilding the unchanged search surface</td>
-<td>generic failures and public no-store queries restore durable and
-volatile processor state exactly</td>
+<td>detach rebuildable durable caches, move the private accumulator map,
+and detach working-memory signal-record and blob-reference vectors
+before copying remaining processor state; journal active-source vector
+lengths for ordinary appends and lazily deep-back up only the active
+source before accepted storage, flush reset, or interrupt reset can
+mutate prior records; trim working-memory appends and move an evicted
+slot’s record ownership into the journal; reserve a full-map hook for
+explicit foreign-source accumulator-topology mutation</td>
+<td>non-boundary Natural ingestion does not recopy the growing pending
+unit or source map; a one-source flush does not copy unrelated
+open-source or working-memory history; failed writes and public no-store
+queries restore durable and volatile state exactly; public state layout
+and retention semantics are unchanged</td>
 </tr>
 <tr>
 <td>synaptic tagging</td>
@@ -5913,6 +5964,51 @@ needs it</td>
 The important correctness point is that these are implementation changes
 to the retained engine. They do not reintroduce the removed semantic
 batch stack.
+
+### Natural/Durable Write-Path Ownership
+
+Natural retention was introduced after the earlier retrieval-latency
+work, and the contemporaneous benchmark ingress was explicitly kept
+Durable. The July 14 durable-ingestion optimization therefore
+established the one-packet Durable profile, not the scaling of a long
+open Natural unit. Source tracing shows that both retention values
+already enter the same `FullRoot`; the competing cost was snapshot
+ownership. Durable forces a boundary/write and resets the unit after
+each call, while Natural can retain many embeddings and payloads. The
+generic rollback copy detached durable search caches but still
+deep-copied those pending records and completed working-memory record
+lists on every packet.
+
+The cutover retains one accumulator/write algorithm. Natural continues
+to append and uses unchanged adaptive grouping. Durable only forces the
+explicit flush/commit edge over the same pending unit, including its own
+packet once. The private rollback journal makes ordinary Natural
+snapshot work independent of pending-record count; an actual boundary
+pays one exact active-unit backup/write cost. Deterministic 32-, 512-,
+and 4,096-record accumulator plus matching working-memory regressions
+verify unchanged payload/blob allocation identities and zero lazy record
+backups on ordinary rollback. A failing-flush regression verifies one
+three-record active-source backup restores cleared records plus mutated
+payload/blob state while 4,096 unrelated-source and working-memory
+records remain allocation-identical and add zero to the copy counter. A
+working-memory eviction regression moves one erased slot into the
+journal and restores it beside 4,096 untouched records with zero record
+copies. Controlled failures after active-record detachment,
+accumulator-map transfer, and working-memory detachment verify
+exception-safe restoration. A direct 4,096-record working-memory append
+regression verifies length trimming and payload allocation identity
+without record copies. The journal is selected by a private marker on
+the production operation root; arbitrary caller-supplied operation roots
+retain complete automatic context snapshots, proven by hookless
+destructive and nested different-source failure regressions. A public
+integration regression verifies two Natural packets followed by one
+Durable packet produce one three-signal memory and three ordered signal
+rows. An explicitly marked escalation regression verifies that an exact
+active-source backup remains authoritative when a later foreign-topology
+mutation requests a full-map backup and the combined operation fails.
+These are source-health and work-count proofs. They do not reproduce the
+full 15,500-packet observation and do not turn the exact durable
+candidate scan into an asymptotically flat store search.
 
 On 2026-06-30, a full Meta MSC replay rerun verified the retrieval-cache
 optimization on the same 9,130-turn slice used for the hosted

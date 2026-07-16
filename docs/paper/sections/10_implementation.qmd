@@ -74,6 +74,35 @@ restores working-memory dirty flags and persisted-record cursors. Association
 writers invalidate the fanout cache in constant time and rebuild it lazily on
 the next traversal.
 
+Natural and Durable retention enter the same operation chain and accumulate the
+current signal before boundary evaluation. Natural leaves boundary and write
+acceptance to the accumulator algorithms. Durable adds an explicit boundary and
+accepted flush of that same pending unit; it does not construct a second
+single-signal memory alongside the accumulated unit. The Durable packet is the
+last signal in the flushed unit exactly once.
+
+Rollback snapshots move the private accumulator map, working-memory records,
+and their blob-reference vectors out of the generic context copy and restore
+their ownership immediately afterward. The active source's bounded scalar
+accumulator fields remain in the rollback snapshot. An ordinary non-boundary
+Natural packet therefore journals original vector lengths and appends in place
+without copying the prior unit. A private rollback hook takes one deep backup
+of the active source immediately before a path may mutate or clear its
+pre-existing records: accepted storage, an accumulator flush reset, or an
+accepted interrupt reset. Working-memory appends roll back by original vector
+length; eviction moves the erased slot's record-vector ownership into the
+journal and maps surviving slot identities without copying their history. A
+separate full-map hook is reserved for operations that explicitly mutate
+foreign-source accumulator topology. Failure restores the applicable ownership
+or backup; successful processing discards it. This changes snapshot ownership only,
+not public state layout, accumulator
+scoring, boundary decisions, write acceptance, or retrieval ranking.
+The ownership journal is enabled only for the private production operation root,
+whose mutation sites carry that contract. A caller-supplied `IOperation` root
+retains the automatic complete-context snapshot, preserving exact rollback for
+hookless destructive operations and synchronous nested processing without a
+new public API requirement.
+
 ## Current Operation Pipeline
 
 The production operation chain is:
@@ -278,6 +307,17 @@ knob-capped number of supersession edges. Graph expansion after seed discovery
 is bounded by F/S/T-derived row and fanout limits. Working-memory and
 soft-anchor updates operate over bounded live state and remain independent of
 total store size.
+
+For an open Natural unit containing `U` signal records, the ordinary rollback
+snapshot performs constant-time accumulator-map ownership transfer plus
+record-vector ownership moves per working-memory slot and does not copy the `U`
+records. Appending the next record remains amortized `O(1)`. A boundary,
+Durable flush, or other destructive active-source transition may copy `O(U)`
+active-unit records once for exact rollback, then persist `O(U)` records.
+Working-memory append and eviction rollback moves or trims owned vectors and
+does not copy unrelated or cumulative working-memory history.
+This removes the prior cumulative `O(U^2)` record-copy path across a long open
+unit; it does not change the separate `O(Nd)` exact durable candidate search.
 
 The safety checks preserve these bounds: bind-result validation is one branch
 per existing parameter, working-memory decay advances one timestamp per bounded
