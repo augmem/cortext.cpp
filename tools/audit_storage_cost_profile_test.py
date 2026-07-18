@@ -206,7 +206,7 @@ def plateau_fixture(
 
 def epoch_fixture(
     *,
-    epoch_count: int = 9,
+    epoch_count: int = 16,
     epoch_length: int = 120,
     material: bool = True,
     peak_growth: float = 1.0,
@@ -237,6 +237,8 @@ def epoch_fixture(
                 name: (0.0 if name.startswith("rollback_") else 10.0)
                 for name in audit.REQUIRED_WORK_COUNTERS
             }
+            work_counters["graph_candidate_count"] = process_ms * 5.0
+            work_counters["graph_exact_comparison_count"] = process_ms * 5.0
             work_counters["supersession_rows_visited"] = (
                 work_counters["supersession_current_candidate_count"]
                 + work_counters["supersession_historical_candidate_count"]
@@ -326,6 +328,9 @@ def epoch_fixture(
     return {
         "schema": "cortext_packet_storage_profile_v2",
         "processed_events": event_count,
+        "focus": 0.5,
+        "sensitivity": 0.5,
+        "stability": 0.5,
         "consolidation_epoch_relational_contract_sha256": (
             audit.CONSOLIDATION_EPOCH_RELATIONAL_CONTRACT_SHA256
         ),
@@ -337,6 +342,19 @@ def epoch_fixture(
         "active_epoch_limits": audit.ACTIVE_EPOCH_LIMITS,
         "store_checkpoints": checkpoints,
     }, rows
+
+
+def set_fixture_retention(
+    profile: dict[str, object], rows: list[dict[str, object]], retention: str,
+) -> None:
+    profile["retention"] = retention
+    for row in rows:
+        row["retention"] = retention
+        if retention == "durable":
+            row["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"] = 0.0
+            row["operation_ms"][
+                "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+            ] = 0.0
 
 
 class AttributionContractTest(unittest.TestCase):
@@ -426,22 +444,34 @@ class PlateauContractTest(unittest.TestCase):
         self.assertTrue(result["passed"], result["failures"])
         self.assertEqual(result["mode"], "sawtooth")
         self.assertGreaterEqual(result["material_epoch_count"], 4)
+        self.assertTrue(result["retrieval_cycle_symmetry"]["passed"])
         full_result = audit.suffix_plateau_result(profile, rows, 50)
         self.assertTrue(full_result["passed"], full_result["candidate_failures"])
 
-    def test_accepts_flat_envelope_without_consolidation(self) -> None:
+    def test_accepts_durable_flat_envelope_without_consolidation(self) -> None:
         profile, rows = plateau_fixture()
+        set_fixture_retention(profile, rows, "durable")
         result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
         self.assertTrue(result["passed"], result["failures"])
         self.assertEqual(result["mode"], "flat-envelope")
 
-    def test_accepts_flat_envelope_with_complete_nonmaterial_epochs(self) -> None:
+    def test_accepts_durable_flat_envelope_with_complete_nonmaterial_epochs(self) -> None:
         profile, rows = epoch_fixture(material=False)
+        set_fixture_retention(profile, rows, "durable")
         result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
         self.assertTrue(result["passed"], result["failures"])
         self.assertEqual(result["mode"], "flat-envelope")
         self.assertGreaterEqual(result["complete_epoch_count"], 4)
         self.assertEqual(result["material_epoch_count"], 0)
+
+    def test_rejects_natural_flat_envelope_without_retrieval_cycles(self) -> None:
+        profile, rows = epoch_fixture(material=False)
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "natural cutover requires retrieval cycle symmetry",
+            result["failures"],
+        )
 
     def test_rejects_successful_consolidations_without_complete_epochs(self) -> None:
         profile, rows = epoch_fixture(epoch_length=60, material=False)
@@ -482,6 +512,230 @@ class PlateauContractTest(unittest.TestCase):
             result["failures"],
         )
 
+    def test_rejects_material_cycles_without_retrieval_work_reset(self) -> None:
+        profile, rows = epoch_fixture()
+        for row in rows:
+            row["work_counters"]["graph_candidate_count"] = 10.0
+            row["work_counters"]["graph_exact_comparison_count"] = 10.0
+            row["operation_ms"] = fixture_operation_ms(row["work_counters"])
+            row["operation_ms"].update(
+                {
+                    "ConsolidationEpoch.epoch_id": float(
+                        row["consolidation_epoch_id"]
+                    ),
+                    "ConsolidationEpoch.events_since_epoch_start": float(
+                        row["events_since_epoch_start"]
+                    ),
+                    **{
+                        f"ConsolidationEpoch.{name}": float(value)
+                        for name, value in row[
+                            "consolidation_epoch_counters"
+                        ].items()
+                    },
+                }
+            )
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn("too few material retrieval resets", result["failures"])
+
+    def test_rejects_one_dissimilar_retrieval_cycle(self) -> None:
+        profile, rows = epoch_fixture()
+        target_epoch = 10
+        target = [
+            row for row in rows
+            if row["consolidation_epoch_id"] == target_epoch
+        ]
+        for index, row in enumerate(target):
+            value = 100.0 if index % 2 == 0 else 0.0
+            row["work_counters"]["graph_candidate_count"] = value
+            row["work_counters"]["graph_exact_comparison_count"] = value
+            row["operation_ms"] = fixture_operation_ms(row["work_counters"])
+            row["operation_ms"].update(
+                {
+                    "ConsolidationEpoch.epoch_id": float(target_epoch),
+                    "ConsolidationEpoch.events_since_epoch_start": float(
+                        row["events_since_epoch_start"]
+                    ),
+                    **{
+                        f"ConsolidationEpoch.{name}": float(value)
+                        for name, value in row[
+                            "consolidation_epoch_counters"
+                        ].items()
+                    },
+                }
+            )
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "retrieval cycle shape p95 exceeds limit", result["failures"]
+        )
+
+    def test_rejects_late_retrieval_cycle_template_drift(self) -> None:
+        profile, rows = epoch_fixture()
+        baseline = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        late_epoch_ids = {
+            epoch["consolidation_epoch_id"]
+            for epoch in baseline["complete_epochs"][-5:]
+        }
+        for epoch_id in late_epoch_ids:
+            target = [
+                row for row in rows
+                if row["consolidation_epoch_id"] == epoch_id
+            ]
+            for index, row in enumerate(target):
+                progress = index / (len(target) - 1)
+                value = (10.0 + 90.0 * progress * progress) / 2.0
+                row["work_counters"]["graph_candidate_count"] = value
+                row["work_counters"]["graph_exact_comparison_count"] = value
+                row["operation_ms"] = fixture_operation_ms(row["work_counters"])
+                row["operation_ms"].update(
+                    {
+                        "ConsolidationEpoch.epoch_id": float(epoch_id),
+                        "ConsolidationEpoch.events_since_epoch_start": float(
+                            row["events_since_epoch_start"]
+                        ),
+                        **{
+                            f"ConsolidationEpoch.{name}": float(counter)
+                            for name, counter in row[
+                                "consolidation_epoch_counters"
+                            ].items()
+                        },
+                    }
+                )
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "late retrieval cycle template drifts", result["failures"]
+        )
+
+    def test_rejects_inverse_retrieval_sawtooth(self) -> None:
+        profile, rows = epoch_fixture()
+        for row in rows:
+            progress = (row["events_since_epoch_start"] - 1) / 119.0
+            value = (100.0 - 90.0 * progress) / 2.0
+            row["work_counters"]["graph_candidate_count"] = value
+            row["work_counters"]["graph_exact_comparison_count"] = value
+            row["operation_ms"] = fixture_operation_ms(row["work_counters"])
+            row["operation_ms"].update(
+                {
+                    "ConsolidationEpoch.epoch_id": float(
+                        row["consolidation_epoch_id"]
+                    ),
+                    "ConsolidationEpoch.events_since_epoch_start": float(
+                        row["events_since_epoch_start"]
+                    ),
+                    **{
+                        f"ConsolidationEpoch.{name}": float(counter)
+                        for name, counter in row[
+                            "consolidation_epoch_counters"
+                        ].items()
+                    },
+                }
+            )
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "retrieval work falls before consolidation", result["failures"]
+        )
+
+    def test_rejects_flat_retrieval_cycles_with_geometric_epoch_decay(self) -> None:
+        profile, rows = epoch_fixture()
+        for row in rows:
+            epoch_id = row["consolidation_epoch_id"]
+            value = 100.0 * 0.9**epoch_id / 2.0
+            row["work_counters"]["graph_candidate_count"] = value
+            row["work_counters"]["graph_exact_comparison_count"] = value
+            row["operation_ms"] = fixture_operation_ms(row["work_counters"])
+            row["operation_ms"].update(
+                {
+                    "ConsolidationEpoch.epoch_id": float(epoch_id),
+                    "ConsolidationEpoch.events_since_epoch_start": float(
+                        row["events_since_epoch_start"]
+                    ),
+                    **{
+                        f"ConsolidationEpoch.{name}": float(counter)
+                        for name, counter in row[
+                            "consolidation_epoch_counters"
+                        ].items()
+                    },
+                }
+            )
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "retrieval cycle lacks material ramp", result["failures"]
+        )
+
+    def test_rejects_repeatable_spiky_retrieval_cycles(self) -> None:
+        profile, rows = epoch_fixture()
+        for row in rows:
+            events_since = row["events_since_epoch_start"]
+            if events_since <= 50:
+                retrieval_work = 10.0
+            elif events_since <= 70:
+                retrieval_work = 1000.0 if events_since % 2 == 0 else 0.0
+            else:
+                retrieval_work = 200.0 if events_since % 2 == 0 else 0.0
+            value = retrieval_work / 2.0
+            row["work_counters"]["graph_candidate_count"] = value
+            row["work_counters"]["graph_exact_comparison_count"] = value
+            row["operation_ms"] = fixture_operation_ms(row["work_counters"])
+            row["operation_ms"].update(
+                {
+                    "ConsolidationEpoch.epoch_id": float(
+                        row["consolidation_epoch_id"]
+                    ),
+                    "ConsolidationEpoch.events_since_epoch_start": float(
+                        events_since
+                    ),
+                    **{
+                        f"ConsolidationEpoch.{name}": float(counter)
+                        for name, counter in row[
+                            "consolidation_epoch_counters"
+                        ].items()
+                    },
+                }
+            )
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "retrieval cycle contains excessive negative variation",
+            result["failures"],
+        )
+        self.assertIn("retrieval work exceeds F/S/T bound", result["failures"])
+
+    def test_rejects_work_bound_violation_in_final_partial_cycle(self) -> None:
+        profile, rows = epoch_fixture()
+        row = rows[-1]
+        row["work_counters"]["graph_candidate_count"] = 100.0
+        row["work_counters"]["graph_exact_comparison_count"] = 100.0
+        row["operation_ms"] = fixture_operation_ms(row["work_counters"])
+        row["operation_ms"].update(
+            {
+                "ConsolidationEpoch.epoch_id": float(
+                    row["consolidation_epoch_id"]
+                ),
+                "ConsolidationEpoch.events_since_epoch_start": float(
+                    row["events_since_epoch_start"]
+                ),
+                **{
+                    f"ConsolidationEpoch.{name}": float(counter)
+                    for name, counter in row[
+                        "consolidation_epoch_counters"
+                    ].items()
+                },
+            }
+        )
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn("retrieval work exceeds F/S/T bound", result["failures"])
+        self.assertEqual(
+            result["retrieval_cycle_symmetry"][
+                "accepted_suffix_maximum_retrieval_work"
+            ],
+            200.0,
+        )
+
     def test_rejects_consolidation_reset_counter_that_does_not_fall(self) -> None:
         profile, rows = epoch_fixture(reset_counters=False)
         result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
@@ -506,12 +760,12 @@ class PlateauContractTest(unittest.TestCase):
             )
         )
 
-        profile["consolidation_events"][4]["post_reset_counters"][counter] = 1
+        profile["consolidation_events"][-2]["post_reset_counters"][counter] = 1
         rejected = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
         self.assertFalse(rejected["passed"])
         self.assertIn("consolidation reset counter does not fall", rejected["failures"])
         self.assertEqual(
-            rejected["complete_epochs"][4]["reset_counter_ratios"][counter],
+            rejected["complete_epochs"][-1]["reset_counter_ratios"][counter],
             float("inf"),
         )
 
@@ -520,6 +774,7 @@ class PlateauContractTest(unittest.TestCase):
 
     def test_nonmaterial_zero_reset_counter_must_remain_zero(self) -> None:
         profile, rows = epoch_fixture(material=False)
+        set_fixture_retention(profile, rows, "durable")
         counter = "accumulator_signal_count"
         for event in profile["consolidation_events"]:
             close = event["event_index"]
@@ -531,12 +786,12 @@ class PlateauContractTest(unittest.TestCase):
         self.assertTrue(accepted["passed"], accepted["failures"])
         self.assertEqual(accepted["mode"], "flat-envelope")
 
-        profile["consolidation_events"][4]["post_reset_counters"][counter] = 1
+        profile["consolidation_events"][-2]["post_reset_counters"][counter] = 1
         rejected = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
         self.assertFalse(rejected["passed"])
         self.assertIn("consolidation reset counter does not fall", rejected["failures"])
         self.assertEqual(
-            rejected["complete_epochs"][4]["reset_counter_ratios"][counter],
+            rejected["complete_epochs"][-1]["reset_counter_ratios"][counter],
             float("inf"),
         )
         self.assertFalse(audit.suffix_plateau_result(profile, rows, 50)["passed"])
@@ -667,6 +922,7 @@ class PlateauContractTest(unittest.TestCase):
 
     def test_accepts_end_anchored_ramp_then_plateau(self) -> None:
         profile, rows = plateau_fixture()
+        set_fixture_retention(profile, rows, "durable")
         result = audit.suffix_plateau_result(profile, rows, 10)
         self.assertTrue(result["passed"])
         self.assertEqual(result["accepted_suffix"]["plateau_end_event"], 126)
@@ -813,6 +1069,7 @@ class PlateauContractTest(unittest.TestCase):
 
     def test_diagnostic_row_counts_are_not_timing_operations(self) -> None:
         profile, rows = plateau_fixture()
+        set_fixture_retention(profile, rows, "durable")
         ranges = audit.end_anchored_ranges(len(rows), 10)
         for row in rows:
             window_index = next(
@@ -856,6 +1113,345 @@ class PlateauContractTest(unittest.TestCase):
             process_windows=[2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 2.0] + [10.0] * 5
         )
         self.assertFalse(audit.suffix_plateau_result(profile, rows, 10)["passed"])
+
+
+class BoundedActivationQualityContractTest(unittest.TestCase):
+    def quality_fixture(self, role: str = "candidate") -> dict[str, object]:
+        evidence = []
+        modalities = ["text", "audio", "image"]
+        embedding_count = 40000
+        for query_number in range(512):
+            query_index = query_number * (embedding_count - 1) // 511
+            ranked_ids = [query_number * 100 + rank for rank in range(16)]
+            evidence.append(
+                {
+                    "query_number": query_number,
+                    "query_index": query_index,
+                    "query_embedding_id": 1000000 + query_index,
+                    "exact_ranked_ids": ranked_ids,
+                    "candidate_ranked_ids": ranked_ids.copy(),
+                    "exact_neighbor_semantic_coverage": 1.0,
+                    "source_ids": [f"opaque-{query_number % 4}"],
+                    "modalities": [modalities[query_number % 3]],
+                    "history_ordinal": query_index,
+                    "history_count": embedding_count,
+                    "history_segment": ("early", "middle", "late")[
+                        min(2, query_index * 3 // embedding_count)
+                    ],
+                }
+            )
+        fixed_probe_numbers = [0, 85, 170, 255, 340, 425, 511]
+        artifact = {
+            "schema": "cortext_bounded_activation_shadow_quality_v1",
+            "quality_role": role,
+            "control_kind": (
+                "current-public-retrieval"
+                if role == "approved-control"
+                else "candidate-router"
+            ),
+            "existing_fixed_probe_identity_rank_sha256": "1" * 64,
+            "embedding_count": embedding_count,
+            "query_count": 512,
+            "result_k": 16,
+            "focus": 0.5,
+            "sensitivity": 0.5,
+            "stability": 0.5,
+            "fixed_embedding_slots": 16020,
+            "quality": {
+                "all": {
+                    "count": 512,
+                    "mean_exact_id_recall_at_k": 1.0,
+                    "mean_top1_exact_id": 1.0,
+                    "mean_exact_neighbor_semantic_coverage": 1.0,
+                }
+            },
+            "query_evidence": evidence,
+            "fixed_identity_rank_probes": [
+                {
+                    "query_number": query_number,
+                    "exact_ranked_ids": evidence[query_number][
+                        "exact_ranked_ids"
+                    ],
+                    "candidate_ranked_ids": evidence[query_number][
+                        "candidate_ranked_ids"
+                    ],
+                }
+                for query_number in fixed_probe_numbers
+            ],
+            "sqlite_restart_measurements": [
+                {
+                    "fraction": 0.25,
+                    "retained_rows": 10000,
+                    "rows_visited": 8000,
+                    "measurement_authority": "production-shaped-persistent-restart",
+                    "restored_candidate_count": 16,
+                    "pre_restart_probe_identity_rank_sha256": "0" * 64,
+                    "post_restart_probe_identity_rank_sha256": "0" * 64,
+                    "restart_production_gate": True,
+                    "linear_history": False,
+                },
+                {
+                    "fraction": 0.5,
+                    "retained_rows": 20000,
+                    "rows_visited": 12000,
+                    "measurement_authority": "production-shaped-persistent-restart",
+                    "restored_candidate_count": 16,
+                    "pre_restart_probe_identity_rank_sha256": "0" * 64,
+                    "post_restart_probe_identity_rank_sha256": "0" * 64,
+                    "restart_production_gate": True,
+                    "linear_history": False,
+                },
+                {
+                    "fraction": 1.0,
+                    "retained_rows": 40000,
+                    "rows_visited": 16020,
+                    "measurement_authority": "production-shaped-persistent-restart",
+                    "restored_candidate_count": 16,
+                    "pre_restart_probe_identity_rank_sha256": "0" * 64,
+                    "post_restart_probe_identity_rank_sha256": "0" * 64,
+                    "restart_production_gate": True,
+                    "linear_history": False,
+                }
+            ],
+        }
+        restart_probe_digest = audit.ranked_query_evidence_result(
+            artifact, 16
+        )["fixed_probe_identity_rank_sha256"]
+        for item in artifact["sqlite_restart_measurements"]:
+            item["pre_restart_probe_identity_rank_sha256"] = restart_probe_digest
+            item["post_restart_probe_identity_rank_sha256"] = restart_probe_digest
+        return artifact
+
+    def control_fixture(self) -> dict[str, object]:
+        return self.quality_fixture("approved-control")
+
+    def audit_result(
+        self, candidate: dict[str, object],
+        control: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        control = control or self.control_fixture()
+        control_sha256 = audit.hashlib.sha256(
+            audit.canonical_json(control)
+        ).hexdigest()
+        return audit.bounded_activation_quality_result(
+            candidate, control, control_sha256
+        )
+
+    def test_accepts_exact_quality_and_bounded_restart(self) -> None:
+        result = self.audit_result(self.quality_fixture())
+        self.assertTrue(result["passed"], result["failures"])
+
+    def test_rejects_unapproved_control_digest(self) -> None:
+        with self.assertRaisesRegex(ValueError, "control digest is not approved"):
+            audit.bounded_activation_quality_result(
+                self.quality_fixture(), self.control_fixture(), "0" * 64
+            )
+
+    def test_rejects_nonpublic_control_kind(self) -> None:
+        control = self.control_fixture()
+        control["control_kind"] = "exhaustive-embedding-neighbor-candidate"
+        with self.assertRaisesRegex(ValueError, "not the current public retrieval"):
+            self.audit_result(self.quality_fixture(), control)
+
+    def test_rejects_unbound_existing_public_probe_digest(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["existing_fixed_probe_identity_rank_sha256"] = "2" * 64
+        with self.assertRaisesRegex(ValueError, "seven-probe digest"):
+            self.audit_result(fixture)
+
+    def test_rejects_candidate_that_differs_from_approved_control_rank(self) -> None:
+        control = self.control_fixture()
+        control["query_evidence"][37]["candidate_ranked_ids"][1:3] = reversed(
+            control["query_evidence"][37]["candidate_ranked_ids"][1:3]
+        )
+        result = self.audit_result(self.quality_fixture(), control)
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "candidate evidence differs from approved control corpus",
+            result["failures"],
+        )
+
+    def test_rejects_missing_deterministic_query_identity(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["query_evidence"][0].pop("query_embedding_id")
+        with self.assertRaisesRegex(
+            ValueError, "query identity is not bound to deterministic sampling"
+        ):
+            self.audit_result(fixture)
+
+    def test_rejects_arbitrary_fixed_probe_positions(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["fixed_identity_rank_probes"] = [
+            {
+                "query_number": query_number,
+                "exact_ranked_ids": fixture["query_evidence"][query_number][
+                    "exact_ranked_ids"
+                ],
+                "candidate_ranked_ids": fixture["query_evidence"][query_number][
+                    "candidate_ranked_ids"
+                ],
+            }
+            for query_number in range(7)
+        ]
+        with self.assertRaisesRegex(
+            ValueError, "fixed identity-rank probe query is invalid"
+        ):
+            self.audit_result(fixture)
+
+    def test_rejects_current_observation_residuals(self) -> None:
+        fixture = self.quality_fixture()
+        control = self.control_fixture()
+        for item in fixture["query_evidence"]:
+            item["candidate_ranked_ids"] = [
+                value + 100000000 for value in item["exact_ranked_ids"]
+            ]
+        for probe in fixture["fixed_identity_rank_probes"]:
+            query_number = probe["query_number"]
+            probe["candidate_ranked_ids"] = fixture["query_evidence"][
+                query_number
+            ]["candidate_ranked_ids"]
+        fixture["quality"]["all"]["mean_exact_id_recall_at_k"] = 0.0
+        fixture["quality"]["all"]["mean_top1_exact_id"] = 0.0
+        for item in fixture["sqlite_restart_measurements"]:
+            item["rows_visited"] = item["retained_rows"]
+            item["restart_production_gate"] = False
+            item["linear_history"] = True
+        result = self.audit_result(fixture, control)
+        self.assertFalse(result["passed"])
+        self.assertIn("exact identity recall below invariant", result["failures"])
+        self.assertIn("exact top-1 below invariant", result["failures"])
+        self.assertIn("restart remains proportional to history", result["failures"])
+
+    def test_rejects_missing_mixed_input_coverage(self) -> None:
+        fixture = self.quality_fixture()
+        control = self.control_fixture()
+        for item in fixture["query_evidence"]:
+            item["source_ids"] = ["one-source"]
+            item["modalities"] = ["text"]
+            item["history_ordinal"] = 0
+            item["history_segment"] = "early"
+        result = self.audit_result(fixture, control)
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "mixed source modality and history coverage missing",
+            result["failures"],
+        )
+
+    def test_rejects_out_of_range_quality_fraction(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["quality"]["all"]["mean_top1_exact_id"] = 1.01
+        with self.assertRaisesRegex(ValueError, "must not exceed one"):
+            self.audit_result(fixture)
+
+    def test_rejects_reordered_exact_neighbors(self) -> None:
+        fixture = self.quality_fixture()
+        control = self.control_fixture()
+        for item in fixture["query_evidence"]:
+            item["candidate_ranked_ids"][1:3] = reversed(
+                item["candidate_ranked_ids"][1:3]
+            )
+        for probe in fixture["fixed_identity_rank_probes"]:
+            query_number = probe["query_number"]
+            probe["candidate_ranked_ids"] = fixture["query_evidence"][
+                query_number
+            ]["candidate_ranked_ids"]
+        result = self.audit_result(fixture, control)
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "deterministic exact rank order differs", result["failures"]
+        )
+        self.assertIn("fixed identity-rank probe differs", result["failures"])
+
+    def test_rejects_unbound_query_count(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["quality"]["all"]["count"] = 0
+        result = self.audit_result(fixture)
+        self.assertFalse(result["passed"])
+        self.assertIn("quality query evidence count mismatch", result["failures"])
+
+    def test_rejects_linear_restart_despite_passing_labels(self) -> None:
+        fixture = self.quality_fixture()
+        for item in fixture["sqlite_restart_measurements"]:
+            item["rows_visited"] = item["retained_rows"]
+        result = self.audit_result(fixture)
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "restart remains proportional to history", result["failures"]
+        )
+
+    def test_rejects_vacuous_restart_series(self) -> None:
+        fixture = self.quality_fixture()
+        for index, item in enumerate(fixture["sqlite_restart_measurements"]):
+            item["retained_rows"] = 16021 + index
+            item["rows_visited"] = 0
+            item["restored_candidate_count"] = 0
+        with self.assertRaisesRegex(
+            ValueError, "not bound to restored corpus state"
+        ):
+            self.audit_result(fixture)
+
+    def test_rejects_restart_probe_digest_mismatch(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["sqlite_restart_measurements"][1][
+            "post_restart_probe_identity_rank_sha256"
+        ] = "6" * 64
+        with self.assertRaisesRegex(
+            ValueError, "not bound to restored corpus state"
+        ):
+            self.audit_result(fixture)
+
+    def test_rejects_restart_probe_digest_that_is_consistent_but_wrong(self) -> None:
+        fixture = self.quality_fixture()
+        for item in fixture["sqlite_restart_measurements"]:
+            item["pre_restart_probe_identity_rank_sha256"] = "6" * 64
+            item["post_restart_probe_identity_rank_sha256"] = "6" * 64
+        with self.assertRaisesRegex(
+            ValueError, "not bound to restored corpus state"
+        ):
+            self.audit_result(fixture)
+
+    def test_quality_cli_enforces_contract_and_report_only_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "quality.json"
+            control = root / "control.json"
+            output = root / "audit.json"
+            fixture = self.quality_fixture()
+            fixture["query_evidence"][1]["candidate_ranked_ids"][1:3] = reversed(
+                fixture["query_evidence"][1]["candidate_ranked_ids"][1:3]
+            )
+            artifact.write_text(json.dumps(fixture), encoding="utf-8")
+            control.write_text(
+                json.dumps(self.control_fixture()),
+                encoding="utf-8",
+            )
+            approved_control_sha256 = audit.hashlib.sha256(
+                audit.canonical_json(self.control_fixture())
+            ).hexdigest()
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("audit_storage_cost_profile.py")),
+                "--shadow-quality",
+                str(artifact),
+                "--quality-control",
+                str(control),
+                "--approved-control-sha256",
+                approved_control_sha256,
+                "--out",
+                str(output),
+            ]
+            enforced = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            report_only = subprocess.run(
+                [*command, "--report-only"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(enforced.returncode, 1, enforced.stderr)
+            self.assertEqual(report_only.returncode, 0, report_only.stderr)
+            self.assertFalse(json.loads(output.read_text())["passed"])
 
 
 if __name__ == "__main__":

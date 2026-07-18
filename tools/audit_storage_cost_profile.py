@@ -205,6 +205,18 @@ PLATEAU_HEIGHT_REFERENCES = {
 }
 CONSOLIDATION_EPOCH_PRE_POST_EVENTS = 50
 CONSOLIDATION_EPOCH_MINIMUM_MATERIAL_RESETS = 4
+RETRIEVAL_CYCLE_MINIMUM_MATERIAL_CYCLES = 10
+RETRIEVAL_CYCLE_MATERIAL_RESET_FRACTION_MIN = 0.80
+RETRIEVAL_CYCLE_RESAMPLE_BINS = 50
+RETRIEVAL_CYCLE_SHAPE_P95_NORMALIZED_MAE_MAX = 0.20
+RETRIEVAL_CYCLE_LATE_TEMPLATE_MAE_MAX = 0.10
+RETRIEVAL_CYCLE_NEGATIVE_VARIATION_OVER_RAMP_MAX = 0.25
+RETRIEVAL_CYCLE_MAX_OVER_TRAILING_MEAN_MAX = 1.25
+RETRIEVAL_QUALITY_QUERY_COUNT = 512
+RETRIEVAL_QUALITY_K = 16
+RETRIEVAL_EXACT_ID_RECALL_MIN = 1.0
+RETRIEVAL_EXACT_TOP1_MIN = 1.0
+RETRIEVAL_SEMANTIC_COVERAGE_MIN = 0.95
 CONSOLIDATION_EPOCH_MATERIAL_RAMP_RATIO_MIN = 1.10
 CONSOLIDATION_EPOCH_POST_PRE_PROCESS_RATIO_MAX = 0.90
 CONSOLIDATION_EPOCH_RESET_COUNTER_RATIO_MAX = 0.90
@@ -376,6 +388,13 @@ def finite_nonnegative(value: Any, field: str) -> float:
     result = float(value)
     if not math.isfinite(result) or result < 0.0:
         raise ValueError(f"{field} must be finite and nonnegative")
+    return result
+
+
+def finite_fraction(value: Any, field: str) -> float:
+    result = finite_nonnegative(value, field)
+    if result > 1.0:
+        raise ValueError(f"{field} must not exceed one")
     return result
 
 
@@ -796,6 +815,589 @@ def sequence_trend(values: Sequence[float]) -> dict[str, Any]:
     }
 
 
+def retrieval_work(row: dict[str, Any]) -> float:
+    counters = row.get("work_counters")
+    if not isinstance(counters, dict):
+        raise ValueError("row lacks work_counters")
+    return finite_nonnegative(
+        counters.get("graph_candidate_count"),
+        "work_counters.graph_candidate_count",
+    ) + finite_nonnegative(
+        counters.get("graph_exact_comparison_count"),
+        "work_counters.graph_exact_comparison_count",
+    )
+
+
+def resample_equal_progress(values: Sequence[float], bins: int) -> list[float]:
+    if bins <= 0 or len(values) < bins:
+        raise ValueError("retrieval cycle cannot be resampled to required bins")
+    result = []
+    for index in range(bins):
+        begin = index * len(values) // bins
+        end = (index + 1) * len(values) // bins
+        if end <= begin:
+            raise ValueError("retrieval cycle resample produced an empty bin")
+        result.append(statistics.mean(values[begin:end]))
+    return result
+
+
+def normalized_cycle(
+    values: Sequence[float], trough: float, peak: float,
+) -> list[float]:
+    span = peak - trough
+    if span == 0.0:
+        return [0.0 for _ in values]
+    return [(value - trough) / span for value in values]
+
+
+def mean_profile(profiles: Sequence[Sequence[float]]) -> list[float]:
+    if not profiles:
+        raise ValueError("retrieval cycle profile set is empty")
+    width = len(profiles[0])
+    if width == 0 or any(len(profile) != width for profile in profiles):
+        raise ValueError("retrieval cycle profile widths differ")
+    return [
+        statistics.mean(profile[index] for profile in profiles)
+        for index in range(width)
+    ]
+
+
+def profile_mae(left: Sequence[float], right: Sequence[float]) -> float:
+    if not left or len(left) != len(right):
+        raise ValueError("retrieval cycle profile comparison is invalid")
+    return statistics.mean(abs(a - b) for a, b in zip(left, right))
+
+
+def nearest_rank_percentile(values: Sequence[float], fraction: float) -> float:
+    if not values or not 0.0 < fraction <= 1.0:
+        raise ValueError("invalid nearest-rank percentile input")
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
+
+
+def knob_fixed_embedding_slots(artifact: dict[str, Any]) -> int:
+    focus = finite_fraction(artifact.get("focus"), "focus")
+    sensitivity = finite_fraction(artifact.get("sensitivity"), "sensitivity")
+    stability = finite_fraction(artifact.get("stability"), "stability")
+    rounded = lambda value: math.floor(value + 0.5)
+    roots = 8 + rounded(24 * sensitivity)
+    leaves = 128 + rounded(512 * focus + 512 * stability)
+    representatives = 8 + rounded(32 * focus)
+    return roots + leaves + leaves * representatives
+
+
+def knob_normal_comparison_bound(artifact: dict[str, Any]) -> int:
+    focus = finite_fraction(artifact.get("focus"), "focus")
+    sensitivity = finite_fraction(artifact.get("sensitivity"), "sensitivity")
+    stability = finite_fraction(artifact.get("stability"), "stability")
+    rounded = lambda value: math.floor(value + 0.5)
+    roots = 8 + rounded(24 * sensitivity)
+    leaves = 128 + rounded(512 * focus + 512 * stability)
+    representatives = 8 + rounded(32 * focus)
+    children_per_root = math.ceil(leaves / roots)
+    root_beam = 1 + rounded(3 * sensitivity)
+    return (
+        roots
+        + root_beam * children_per_root
+        + 2 * representatives
+        + children_per_root
+    )
+
+
+def ranked_query_evidence_result(
+    artifact: dict[str, Any], result_k: int,
+) -> dict[str, Any]:
+    evidence = artifact.get("query_evidence")
+    if not isinstance(evidence, list) or len(evidence) != RETRIEVAL_QUALITY_QUERY_COUNT:
+        raise ValueError("query evidence must contain exactly 512 rows")
+    embedding_count = nonnegative_integer(
+        artifact.get("embedding_count"), "embedding_count"
+    )
+    if embedding_count <= RETRIEVAL_QUALITY_QUERY_COUNT:
+        raise ValueError("embedding corpus is too small for held-out queries")
+    exact_recall_total = 0.0
+    exact_top1_total = 0.0
+    semantic_total = 0.0
+    source_ids: set[str] = set()
+    modalities: set[str] = set()
+    history_segments: set[str] = set()
+    by_number: dict[int, dict[str, Any]] = {}
+    query_embedding_ids: set[int] = set()
+    exact_rank_match = True
+    for expected_number, item in enumerate(evidence):
+        if not isinstance(item, dict):
+            raise ValueError("query evidence row must be an object")
+        query_number = nonnegative_integer(
+            item.get("query_number"), "query_evidence.query_number"
+        )
+        if query_number != expected_number or query_number in by_number:
+            raise ValueError("query evidence numbers must be unique and contiguous")
+        query_index = nonnegative_integer(
+            item.get("query_index"), "query_evidence.query_index"
+        )
+        expected_index = math.floor(
+            query_number * (embedding_count - 1)
+            / (RETRIEVAL_QUALITY_QUERY_COUNT - 1)
+        )
+        query_embedding_id = item.get("query_embedding_id")
+        if (
+            query_index != expected_index
+            or isinstance(query_embedding_id, bool)
+            or not isinstance(query_embedding_id, int)
+            or query_embedding_id in query_embedding_ids
+        ):
+            raise ValueError("query identity is not bound to deterministic sampling")
+        query_embedding_ids.add(query_embedding_id)
+        exact_ids = item.get("exact_ranked_ids")
+        candidate_ids = item.get("candidate_ranked_ids")
+        if (
+            not isinstance(exact_ids, list)
+            or not isinstance(candidate_ids, list)
+            or len(exact_ids) != result_k
+            or len(candidate_ids) != result_k
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in exact_ids)
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in candidate_ids)
+            or len(set(exact_ids)) != result_k
+            or len(set(candidate_ids)) != result_k
+        ):
+            raise ValueError("query ranked identities are invalid")
+        hits = len(set(exact_ids).intersection(candidate_ids))
+        exact_recall_total += hits / result_k
+        exact_top1_total += candidate_ids[0] == exact_ids[0]
+        exact_rank_match = exact_rank_match and candidate_ids == exact_ids
+        semantic_total += finite_fraction(
+            item.get("exact_neighbor_semantic_coverage"),
+            "query_evidence.exact_neighbor_semantic_coverage",
+        )
+        item_sources = item.get("source_ids")
+        item_modalities = item.get("modalities")
+        history_segment = item.get("history_segment")
+        history_ordinal = nonnegative_integer(
+            item.get("history_ordinal"), "query_evidence.history_ordinal"
+        )
+        history_count = nonnegative_integer(
+            item.get("history_count"), "query_evidence.history_count"
+        )
+        if history_count == 0 or history_ordinal >= history_count:
+            raise ValueError("query SQLite history position is invalid")
+        expected_history_segment = ("early", "middle", "late")[
+            min(2, history_ordinal * 3 // history_count)
+        ]
+        if (
+            not isinstance(item_sources, list)
+            or not item_sources
+            or any(not isinstance(value, str) or not value for value in item_sources)
+            or not isinstance(item_modalities, list)
+            or not item_modalities
+            or any(not isinstance(value, str) or not value for value in item_modalities)
+            or history_segment != expected_history_segment
+        ):
+            raise ValueError("query provenance evidence is invalid")
+        source_ids.update(item_sources)
+        modalities.update(item_modalities)
+        history_segments.add(history_segment)
+        by_number[query_number] = item
+
+    probes = artifact.get("fixed_identity_rank_probes")
+    if not isinstance(probes, list) or len(probes) != 7:
+        raise ValueError("exactly seven fixed identity-rank probes are required")
+    fixed_probe_numbers = [
+        math.floor(probe * (RETRIEVAL_QUALITY_QUERY_COUNT - 1) / 6)
+        for probe in range(7)
+    ]
+    probe_payload = []
+    probe_numbers: set[int] = set()
+    fixed_probes_match = True
+    for probe in probes:
+        if not isinstance(probe, dict):
+            raise ValueError("fixed identity-rank probe must be an object")
+        query_number = nonnegative_integer(
+            probe.get("query_number"), "fixed probe query_number"
+        )
+        if (
+            query_number in probe_numbers
+            or query_number not in by_number
+            or query_number != fixed_probe_numbers[len(probe_numbers)]
+        ):
+            raise ValueError("fixed identity-rank probe query is invalid")
+        exact_ids = probe.get("exact_ranked_ids")
+        candidate_ids = probe.get("candidate_ranked_ids")
+        if (
+            exact_ids != by_number[query_number]["exact_ranked_ids"]
+            or candidate_ids != by_number[query_number]["candidate_ranked_ids"]
+        ):
+            raise ValueError("fixed identity-rank probe is not bound to query evidence")
+        fixed_probes_match = fixed_probes_match and exact_ids == candidate_ids
+        probe_numbers.add(query_number)
+        probe_payload.append({"query_number": query_number, "ranked_ids": exact_ids})
+
+    count = len(evidence)
+    return {
+        "count": count,
+        "mean_exact_id_recall_at_k": exact_recall_total / count,
+        "mean_top1_exact_id": exact_top1_total / count,
+        "mean_exact_neighbor_semantic_coverage": semantic_total / count,
+        "exact_rank_match": exact_rank_match,
+        "source_count": len(source_ids),
+        "modalities": sorted(modalities),
+        "history_segments": sorted(history_segments),
+        "by_number": by_number,
+        "fixed_probes_match": fixed_probes_match,
+        "fixed_probe_identity_rank_sha256": hashlib.sha256(
+            canonical_json(probe_payload)
+        ).hexdigest(),
+    }
+
+
+def retrieval_cycle_symmetry_result(
+    material_epochs: Sequence[dict[str, Any]], retrieval_work_bound: int,
+    accepted_suffix_retrieval_work: Sequence[float],
+) -> dict[str, Any]:
+    failures = []
+    profiles = [epoch["_retrieval_cycle_profile"] for epoch in material_epochs]
+    inverse_ramp_count = sum(
+        epoch["trailing_peak_mean_retrieval_work"]
+        < epoch["leading_mean_retrieval_work"]
+        for epoch in material_epochs
+    )
+    if inverse_ramp_count:
+        failures.append("retrieval work falls before consolidation")
+    nonmaterial_ramp_count = sum(
+        epoch["retrieval_trailing_over_leading"]
+        < CONSOLIDATION_EPOCH_MATERIAL_RAMP_RATIO_MIN
+        for epoch in material_epochs
+    )
+    if nonmaterial_ramp_count:
+        failures.append("retrieval cycle lacks material ramp")
+    excessive_negative_variation_count = sum(
+        epoch["retrieval_negative_variation_over_ramp"]
+        > RETRIEVAL_CYCLE_NEGATIVE_VARIATION_OVER_RAMP_MAX
+        for epoch in material_epochs
+    )
+    if excessive_negative_variation_count:
+        failures.append("retrieval cycle contains excessive negative variation")
+    excessive_spike_count = sum(
+        epoch["retrieval_max_over_trailing_mean"]
+        > RETRIEVAL_CYCLE_MAX_OVER_TRAILING_MEAN_MAX
+        for epoch in material_epochs
+    )
+    if excessive_spike_count:
+        failures.append("retrieval cycle contains excessive spike")
+    work_bound_exceeded_count = sum(
+        work > retrieval_work_bound
+        for work in accepted_suffix_retrieval_work
+    )
+    if work_bound_exceeded_count:
+        failures.append("retrieval work exceeds F/S/T bound")
+    reset_count = sum(
+        epoch["retrieval_post_over_trailing"]
+        <= CONSOLIDATION_EPOCH_POST_PRE_PROCESS_RATIO_MAX
+        for epoch in material_epochs
+    )
+    reset_fraction = ratio(float(reset_count), float(len(material_epochs)))
+    template = None
+    errors: list[float] = []
+    p95 = None
+    late_template_error = None
+    retrieval_peak_trend = None
+    retrieval_trough_trend = None
+    if len(material_epochs) < RETRIEVAL_CYCLE_MINIMUM_MATERIAL_CYCLES:
+        failures.append("fewer than ten material retrieval cycles")
+    else:
+        template = [
+            statistics.median(profile[index] for profile in profiles)
+            for index in range(RETRIEVAL_CYCLE_RESAMPLE_BINS)
+        ]
+        errors = [profile_mae(profile, template) for profile in profiles]
+        p95 = nearest_rank_percentile(errors, 0.95)
+        prior_template = mean_profile(profiles[-10:-5])
+        final_template = mean_profile(profiles[-5:])
+        late_template_error = profile_mae(prior_template, final_template)
+        if p95 > RETRIEVAL_CYCLE_SHAPE_P95_NORMALIZED_MAE_MAX:
+            failures.append("retrieval cycle shape p95 exceeds limit")
+        if late_template_error > RETRIEVAL_CYCLE_LATE_TEMPLATE_MAE_MAX:
+            failures.append("late retrieval cycle template drifts")
+        retrieval_peak_trend = sequence_trend(
+            [
+                epoch["trailing_peak_mean_retrieval_work"]
+                for epoch in material_epochs
+            ]
+        )
+        retrieval_trough_trend = sequence_trend(
+            [
+                epoch["following_trough_mean_retrieval_work"]
+                for epoch in material_epochs
+            ]
+        )
+        for trend, name, half_ratio_limit in (
+            (
+                retrieval_peak_trend,
+                "retrieval peak",
+                CONSOLIDATION_EPOCH_PEAK_HALF_RATIO_MAX,
+            ),
+            (
+                retrieval_trough_trend,
+                "retrieval trough",
+                CONSOLIDATION_EPOCH_TROUGH_HALF_RATIO_MAX,
+            ),
+        ):
+            if trend["half"]["second_over_first"] > half_ratio_limit:
+                failures.append(f"{name} rises")
+            if trend["relative_theil_sen_per_epoch"] > RELATIVE_THEIL_SEN_MAX:
+                failures.append(f"{name} relative slope rises")
+            if trend["relative_bootstrap_95_upper_per_epoch"] > RELATIVE_BOOTSTRAP_UPPER_MAX:
+                failures.append(f"{name} bootstrap upper rises")
+    if reset_fraction < RETRIEVAL_CYCLE_MATERIAL_RESET_FRACTION_MIN:
+        failures.append("too few material retrieval resets")
+    return {
+        "passed": not failures,
+        "material_cycle_count": len(material_epochs),
+        "inverse_ramp_count": inverse_ramp_count,
+        "nonmaterial_ramp_count": nonmaterial_ramp_count,
+        "excessive_negative_variation_count": (
+            excessive_negative_variation_count
+        ),
+        "excessive_spike_count": excessive_spike_count,
+        "work_bound_exceeded_count": work_bound_exceeded_count,
+        "retrieval_work_bound": retrieval_work_bound,
+        "accepted_suffix_maximum_retrieval_work": max(
+            accepted_suffix_retrieval_work, default=0.0
+        ),
+        "material_reset_count": reset_count,
+        "material_reset_fraction": reset_fraction,
+        "resample_bins": RETRIEVAL_CYCLE_RESAMPLE_BINS,
+        "shape_p95_normalized_mae": p95,
+        "late_template_normalized_mae": late_template_error,
+        "retrieval_peak_trend": retrieval_peak_trend,
+        "retrieval_trough_trend": retrieval_trough_trend,
+        "cycle_error_min": min(errors) if errors else None,
+        "cycle_error_max": max(errors) if errors else None,
+        "failures": sorted(set(failures)),
+    }
+
+
+def bounded_activation_quality_result(
+    artifact: dict[str, Any], control_artifact: dict[str, Any],
+    approved_control_sha256: str,
+) -> dict[str, Any]:
+    if artifact.get("schema") != "cortext_bounded_activation_shadow_quality_v1":
+        raise ValueError("bounded activation quality schema mismatch")
+    if control_artifact.get("schema") != artifact.get("schema"):
+        raise ValueError("bounded activation quality control schema mismatch")
+    if artifact.get("quality_role") != "candidate":
+        raise ValueError("bounded activation candidate role is missing")
+    if control_artifact.get("quality_role") != "approved-control":
+        raise ValueError("approved bounded activation control is missing")
+    if control_artifact.get("control_kind") != "current-public-retrieval":
+        raise ValueError("approved control is not the current public retrieval path")
+    existing_probe_digest = artifact.get("existing_fixed_probe_identity_rank_sha256")
+    control_existing_probe_digest = control_artifact.get(
+        "existing_fixed_probe_identity_rank_sha256"
+    )
+    if (
+        not isinstance(existing_probe_digest, str)
+        or len(existing_probe_digest) != 64
+        or any(char not in "0123456789abcdef" for char in existing_probe_digest)
+        or existing_probe_digest != control_existing_probe_digest
+    ):
+        raise ValueError("existing seven-probe digest is not control-bound")
+    control_sha256 = hashlib.sha256(canonical_json(control_artifact)).hexdigest()
+    if approved_control_sha256 != control_sha256:
+        raise ValueError("bounded activation control digest is not approved")
+    query_count = nonnegative_integer(artifact.get("query_count"), "query_count")
+    result_k = nonnegative_integer(artifact.get("result_k"), "result_k")
+    quality = artifact.get("quality")
+    if not isinstance(quality, dict) or not isinstance(quality.get("all"), dict):
+        raise ValueError("bounded activation quality summary is missing")
+    all_quality = quality["all"]
+    evidence = ranked_query_evidence_result(artifact, result_k)
+    control_result_k = nonnegative_integer(
+        control_artifact.get("result_k"), "control result_k"
+    )
+    control_evidence = ranked_query_evidence_result(
+        control_artifact, control_result_k
+    )
+    baseline_binding_passed = (
+        control_result_k == result_k
+        and control_artifact.get("query_count") == artifact.get("query_count")
+        and control_artifact.get("embedding_count") == artifact.get("embedding_count")
+    )
+    for query_number in range(RETRIEVAL_QUALITY_QUERY_COUNT):
+        candidate_row = evidence["by_number"][query_number]
+        control_row = control_evidence["by_number"][query_number]
+        baseline_binding_passed = baseline_binding_passed and all(
+            candidate_row.get(field) == control_row.get(field)
+            for field in (
+                "query_index",
+                "query_embedding_id",
+                "exact_ranked_ids",
+                "candidate_ranked_ids",
+                "source_ids",
+                "modalities",
+                "history_ordinal",
+                "history_count",
+                "history_segment",
+            )
+        )
+    summary_count = nonnegative_integer(
+        all_quality.get("count"), "quality.all.count"
+    )
+    exact_recall = finite_fraction(
+        all_quality.get("mean_exact_id_recall_at_k"),
+        "quality.all.mean_exact_id_recall_at_k",
+    )
+    exact_top1 = finite_fraction(
+        all_quality.get("mean_top1_exact_id"),
+        "quality.all.mean_top1_exact_id",
+    )
+    semantic_coverage = finite_fraction(
+        all_quality.get("mean_exact_neighbor_semantic_coverage"),
+        "quality.all.mean_exact_neighbor_semantic_coverage",
+    )
+    for name, reported, measured in (
+        ("mean_exact_id_recall_at_k", exact_recall,
+         evidence["mean_exact_id_recall_at_k"]),
+        ("mean_top1_exact_id", exact_top1, evidence["mean_top1_exact_id"]),
+        ("mean_exact_neighbor_semantic_coverage", semantic_coverage,
+         evidence["mean_exact_neighbor_semantic_coverage"]),
+    ):
+        if not math.isclose(reported, measured, rel_tol=0.0, abs_tol=1.0e-12):
+            raise ValueError(f"quality.all.{name} is not bound to query evidence")
+    coverage_passed = (
+        evidence["source_count"] >= 4
+        and {"text", "audio", "image"}.issubset(evidence["modalities"])
+        and {"early", "middle", "late"}.issubset(
+            evidence["history_segments"]
+        )
+    )
+    restart = artifact.get("sqlite_restart_measurements")
+    if not isinstance(restart, list) or len(restart) != 3:
+        raise ValueError("exactly three bounded activation restart measurements are required")
+    derived_slot_bound = knob_fixed_embedding_slots(artifact)
+    reported_slot_bound = nonnegative_integer(
+        artifact.get("fixed_embedding_slots"), "fixed_embedding_slots"
+    )
+    if reported_slot_bound != derived_slot_bound:
+        raise ValueError("fixed embedding slot bound does not match F/S/T")
+    restart_rows = []
+    restart_probe_digest = evidence["fixed_probe_identity_rank_sha256"]
+    for item in restart:
+        if not isinstance(item, dict):
+            raise ValueError("restart measurement must be an object")
+        restart_rows.append(
+            {
+                "fraction": finite_fraction(item.get("fraction"), "restart fraction"),
+                "retained_rows": nonnegative_integer(
+                    item.get("retained_rows"), "restart retained_rows"
+                ),
+                "rows_visited": nonnegative_integer(
+                    item.get("rows_visited"), "restart rows_visited"
+                ),
+                "measurement_authority": item.get("measurement_authority"),
+                "restored_candidate_count": nonnegative_integer(
+                    item.get("restored_candidate_count"),
+                    "restart restored_candidate_count",
+                ),
+                "pre_restart_probe_identity_rank_sha256": item.get(
+                    "pre_restart_probe_identity_rank_sha256"
+                ),
+                "post_restart_probe_identity_rank_sha256": item.get(
+                    "post_restart_probe_identity_rank_sha256"
+                ),
+                "claimed_linear_history": item.get("linear_history"),
+                "claimed_production_gate": item.get("restart_production_gate"),
+            }
+        )
+    expected_fractions = (0.25, 0.5, 1.0)
+    for item, expected_fraction in zip(restart_rows, expected_fractions):
+        expected_retained = max(
+            1, math.floor(artifact["embedding_count"] * expected_fraction)
+        )
+        pre_digest = item["pre_restart_probe_identity_rank_sha256"]
+        post_digest = item["post_restart_probe_identity_rank_sha256"]
+        if (
+            item["fraction"] != expected_fraction
+            or item["retained_rows"] != expected_retained
+            or item["rows_visited"] == 0
+            or item["restored_candidate_count"] < result_k
+            or not isinstance(pre_digest, str)
+            or len(pre_digest) != 64
+            or any(char not in "0123456789abcdef" for char in pre_digest)
+            or pre_digest != restart_probe_digest
+            or post_digest != restart_probe_digest
+        ):
+            raise ValueError(
+                "restart measurement is not bound to restored corpus state"
+            )
+    maximum_retained = restart_rows[-1]["retained_rows"]
+    maximum_rows_visited = max(item["rows_visited"] for item in restart_rows)
+    measured_restart_bounded = (
+        maximum_retained > derived_slot_bound
+        and maximum_rows_visited <= derived_slot_bound
+    )
+    claims_consistent = all(
+        item["measurement_authority"]
+        == "production-shaped-persistent-restart"
+        and item["claimed_linear_history"] is False
+        and item["claimed_production_gate"] is True
+        for item in restart_rows
+    )
+    restart_passed = measured_restart_bounded and claims_consistent
+    failures = []
+    if query_count != RETRIEVAL_QUALITY_QUERY_COUNT:
+        failures.append("quality query count mismatch")
+    if summary_count != query_count or evidence["count"] != query_count:
+        failures.append("quality query evidence count mismatch")
+    if result_k != RETRIEVAL_QUALITY_K:
+        failures.append("quality result k mismatch")
+    if exact_recall < RETRIEVAL_EXACT_ID_RECALL_MIN:
+        failures.append("exact identity recall below invariant")
+    if exact_top1 < RETRIEVAL_EXACT_TOP1_MIN:
+        failures.append("exact top-1 below invariant")
+    if not evidence["exact_rank_match"]:
+        failures.append("deterministic exact rank order differs")
+    if semantic_coverage < RETRIEVAL_SEMANTIC_COVERAGE_MIN:
+        failures.append("semantic coverage below threshold")
+    if not coverage_passed:
+        failures.append("mixed source modality and history coverage missing")
+    if not evidence["fixed_probes_match"]:
+        failures.append("fixed identity-rank probe differs")
+    if (
+        not baseline_binding_passed
+        or evidence["fixed_probe_identity_rank_sha256"]
+        != control_evidence["fixed_probe_identity_rank_sha256"]
+    ):
+        failures.append("candidate evidence differs from approved control corpus")
+    if not restart_passed:
+        failures.append("restart remains proportional to history")
+    return {
+        "schema": "cortext_bounded_activation_quality_audit_v1",
+        "passed": not failures,
+        "query_count": query_count,
+        "result_k": result_k,
+        "mean_exact_id_recall_at_k": exact_recall,
+        "mean_top1_exact_id": exact_top1,
+        "mean_exact_neighbor_semantic_coverage": semantic_coverage,
+        "deterministic_exact_rank_order_passed": evidence["exact_rank_match"],
+        "query_input_coverage_passed": coverage_passed,
+        "query_source_count": evidence["source_count"],
+        "query_modalities": evidence["modalities"],
+        "query_history_segments": evidence["history_segments"],
+        "fixed_identity_rank_probes_passed": evidence["fixed_probes_match"],
+        "fixed_probe_identity_rank_sha256": evidence[
+            "fixed_probe_identity_rank_sha256"
+        ],
+        "existing_fixed_probe_identity_rank_sha256": existing_probe_digest,
+        "approved_control_artifact_sha256": control_sha256,
+        "approved_control_binding_passed": baseline_binding_passed,
+        "bounded_restart_passed": restart_passed,
+        "derived_restart_row_visit_bound": derived_slot_bound,
+        "maximum_restart_retained_rows": maximum_retained,
+        "maximum_restart_rows_visited": maximum_rows_visited,
+        "failures": sorted(set(failures)),
+    }
+
+
 def consolidation_epoch_result(
     profile: dict[str, Any], rows: Sequence[dict[str, Any]],
     suffix_start: int, suffix_end: int,
@@ -832,6 +1434,17 @@ def consolidation_epoch_result(
             float(row["process_ms"]) for row in epoch_rows[-k:]
         )
         post = statistics.mean(float(row["process_ms"]) for row in post_rows)
+        retrieval_values = [retrieval_work(row) for row in epoch_rows]
+        retrieval_leading = statistics.mean(retrieval_values[:k])
+        retrieval_trailing = statistics.mean(retrieval_values[-k:])
+        retrieval_post = statistics.mean(retrieval_work(row) for row in post_rows)
+        retrieval_ramp = retrieval_trailing - retrieval_leading
+        retrieval_negative_variation = sum(
+            max(0.0, previous - current)
+            for previous, current in zip(
+                retrieval_values, retrieval_values[1:]
+            )
+        )
         ramp_ratio = ratio(trailing, leading)
         post_pre_ratio = ratio(post, trailing)
         reset_ratios = {
@@ -861,6 +1474,29 @@ def consolidation_epoch_result(
             "following_trough_mean_process_ms": post,
             "trailing_over_leading": ramp_ratio,
             "post_over_trailing": post_pre_ratio,
+            "leading_mean_retrieval_work": retrieval_leading,
+            "trailing_peak_mean_retrieval_work": retrieval_trailing,
+            "following_trough_mean_retrieval_work": retrieval_post,
+            "retrieval_post_over_trailing": ratio(
+                retrieval_post, retrieval_trailing
+            ),
+            "retrieval_trailing_over_leading": ratio(
+                retrieval_trailing, retrieval_leading
+            ),
+            "maximum_retrieval_work": max(retrieval_values),
+            "retrieval_negative_variation_over_ramp": ratio(
+                retrieval_negative_variation, max(0.0, retrieval_ramp)
+            ),
+            "retrieval_max_over_trailing_mean": ratio(
+                max(retrieval_values), retrieval_trailing
+            ),
+            "_retrieval_cycle_profile": normalized_cycle(
+                resample_equal_progress(
+                    retrieval_values, RETRIEVAL_CYCLE_RESAMPLE_BINS
+                ),
+                retrieval_leading,
+                retrieval_trailing,
+            ),
             "material": material,
             "reset_counter_ratios": reset_ratios,
             "reset_counter_failures": reset_failures,
@@ -943,6 +1579,25 @@ def consolidation_epoch_result(
         if normalized_mutation_cost["half"]["second_over_first"] > CONSOLIDATION_EPOCH_NORMALIZED_COST_HALF_RATIO_MAX:
             failures.append("consolidation cost per sealed mutation rises")
 
+    retrieval_cycle_symmetry = None
+    if mode == "sawtooth":
+        retrieval_cycle_symmetry = retrieval_cycle_symmetry_result(
+            material_epochs,
+            knob_normal_comparison_bound(profile),
+            [
+                retrieval_work(row)
+                for row in rows
+                if suffix_start
+                <= nonnegative_integer(row.get("event_index"), "event_index")
+                < suffix_end
+            ],
+        )
+        failures.extend(retrieval_cycle_symmetry["failures"])
+    elif mode == "flat-envelope" and profile.get("retention") == "natural":
+        failures.append("natural cutover requires retrieval cycle symmetry")
+    for epoch in complete_epochs:
+        epoch.pop("_retrieval_cycle_profile", None)
+
     return {
         "passed": mode != "invalid" and not failures,
         "mode": mode,
@@ -955,6 +1610,7 @@ def consolidation_epoch_result(
         "normalized_event_cost_trend": normalized_event_cost,
         "normalized_mutation_cost_trend": normalized_mutation_cost,
         "frequency_trend": frequency_trend,
+        "retrieval_cycle_symmetry": retrieval_cycle_symmetry,
         "failures": sorted(set(failures)),
     }
 
@@ -1389,8 +2045,12 @@ def profile_summary(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--db", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--profile", type=Path)
+    source.add_argument("--shadow-quality", type=Path)
+    parser.add_argument("--quality-control", type=Path)
+    parser.add_argument("--approved-control-sha256")
+    parser.add_argument("--db", type=Path)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--window-size", type=int, default=100)
     parser.add_argument("--report-only", action="store_true")
@@ -1400,6 +2060,25 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.shadow_quality:
+        if args.quality_control is None:
+            raise ValueError("--quality-control is required with --shadow-quality")
+        artifact = json.loads(args.shadow_quality.read_text(encoding="utf-8"))
+        if args.approved_control_sha256 is None:
+            raise ValueError(
+                "--approved-control-sha256 is required with --shadow-quality"
+            )
+        control_artifact = json.loads(args.quality_control.read_text(encoding="utf-8"))
+        result = bounded_activation_quality_result(
+            artifact, control_artifact, args.approved_control_sha256
+        )
+        rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
+        if args.out:
+            args.out.write_text(rendered, encoding="utf-8")
+        print(rendered, end="")
+        return 0 if args.report_only or result["passed"] else 1
+    if args.db is None:
+        raise ValueError("--db is required with --profile")
     if args.window_size <= 0:
         raise ValueError("--window-size must be positive")
     result = profile_summary(

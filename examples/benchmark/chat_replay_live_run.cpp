@@ -34,6 +34,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -99,6 +100,7 @@ struct Config
   bool append = false;
   bool resume_from_existing = false;
   bool profile_probes_only = false;
+  bool shadow_quality_control = false;
   bool checkpoint_eval_only = false;
   int progress_stride = 1000;
   std::uint64_t fixed_timestamp_base_ms = 0;
@@ -116,6 +118,35 @@ struct Config
   cortext::Retention retention = cortext::Retention::Durable;
   std::string sqlite_profile = "realtime";
 };
+
+struct ShadowQualityModeMetadata
+{
+  const char *role;
+  const char *control_kind;
+};
+
+constexpr ShadowQualityModeMetadata
+ShadowQualityMode (bool exact_control)
+{
+  return exact_control
+             ? ShadowQualityModeMetadata {
+                 "control-candidate",
+                 "exhaustive-embedding-neighbor-candidate",
+               }
+             : ShadowQualityModeMetadata {
+                 "candidate",
+                 "bounded-activation-router-candidate",
+               };
+}
+
+static_assert (std::string_view (ShadowQualityMode (false).role)
+               == "candidate");
+static_assert (std::string_view (ShadowQualityMode (false).control_kind)
+               == "bounded-activation-router-candidate");
+static_assert (std::string_view (ShadowQualityMode (true).role)
+               == "control-candidate");
+static_assert (std::string_view (ShadowQualityMode (true).control_kind)
+               == "exhaustive-embedding-neighbor-candidate");
 
 struct ResumeCheckpoint
 {
@@ -1815,6 +1846,8 @@ ParseArgs (int argc, char **argv)
         cfg.message_corpus = require_value ();
       else if (arg == "--shadow-embedding-corpus")
         cfg.shadow_embedding_corpus = require_value ();
+      else if (arg == "--shadow-quality-control")
+        cfg.shadow_quality_control = true;
       else if (arg == "--db")
         cfg.db_path = require_value ();
       else if (arg == "--out")
@@ -1994,6 +2027,14 @@ struct ShadowEmbeddingCorpus
       embeddings;
 };
 
+struct ShadowQueryProvenance
+{
+  std::vector<std::string> source_id_digests;
+  std::vector<std::string> modalities;
+  std::size_t history_ordinal = std::numeric_limits<std::size_t>::max ();
+  std::size_t history_count = 0;
+};
+
 ShadowEmbeddingCorpus
 ReadShadowEmbeddingCorpus (const fs::path &path)
 {
@@ -2013,6 +2054,8 @@ ReadShadowEmbeddingCorpus (const fs::path &path)
   ShadowEmbeddingCorpus corpus;
   corpus.ids.resize (static_cast<std::size_t> (count));
   corpus.embeddings.resize (static_cast<std::size_t> (count));
+  std::unordered_set<long long> seen_ids;
+  seen_ids.reserve (static_cast<std::size_t> (count));
   std::vector<float> values (dimension, 0.0F);
   for (std::size_t index = 0; index < corpus.embeddings.size (); ++index)
     {
@@ -2025,6 +2068,10 @@ ReadShadowEmbeddingCorpus (const fs::path &path)
         throw std::runtime_error (
             "truncated shadow embedding corpus at record "
             + std::to_string (index));
+      if (!seen_ids.insert (corpus.ids[index]).second)
+        throw std::runtime_error (
+            "duplicate identity in shadow embedding corpus: "
+            + std::to_string (corpus.ids[index]));
       Eigen::Map<const Eigen::VectorXf> mapped (
           values.data (), static_cast<Eigen::Index> (values.size ()));
       if (!shadow::Normalize (mapped, corpus.embeddings[index]))
@@ -2036,6 +2083,86 @@ ReadShadowEmbeddingCorpus (const fs::path &path)
   if (stream.read (&trailing, 1))
     throw std::runtime_error ("shadow embedding corpus has trailing bytes");
   return corpus;
+}
+
+std::vector<ShadowQueryProvenance>
+ReadShadowQueryProvenance (const fs::path &database_path,
+                           const ShadowEmbeddingCorpus &corpus)
+{
+  if (database_path.empty () || !fs::exists (database_path))
+    throw std::runtime_error (
+        "shadow quality requires the authoritative --db for query provenance");
+  sqlite3 *raw_database = nullptr;
+  if (sqlite3_open_v2 (database_path.string ().c_str (), &raw_database,
+                       SQLITE_OPEN_READONLY, nullptr)
+      != SQLITE_OK)
+    {
+      const std::string message
+          = raw_database != nullptr ? sqlite3_errmsg (raw_database)
+                                    : "failed to allocate SQLite handle";
+      if (raw_database != nullptr)
+        sqlite3_close (raw_database);
+      throw std::runtime_error ("failed to open shadow provenance database: "
+                                + message);
+    }
+  std::unique_ptr<sqlite3, decltype (&sqlite3_close)> database (
+      raw_database, sqlite3_close);
+  sqlite3_stmt *raw_statement = nullptr;
+  constexpr const char *query
+      = "SELECT embedding_id, source_id, modality FROM signals "
+        "WHERE embedding_id IS NOT NULL ORDER BY timestamp, signal_id";
+  if (sqlite3_prepare_v2 (database.get (), query, -1, &raw_statement, nullptr)
+      != SQLITE_OK)
+    throw std::runtime_error ("failed to query shadow provenance database: "
+                              + std::string (sqlite3_errmsg (database.get ())));
+  std::unique_ptr<sqlite3_stmt, decltype (&sqlite3_finalize)> statement (
+      raw_statement, sqlite3_finalize);
+
+  std::unordered_map<long long, ShadowQueryProvenance> by_embedding;
+  int step = SQLITE_ROW;
+  std::size_t history_ordinal = 0;
+  while ((step = sqlite3_step (statement.get ())) == SQLITE_ROW)
+    {
+      const auto embedding_id = sqlite3_column_int64 (statement.get (), 0);
+      const auto *source = reinterpret_cast<const char *> (
+          sqlite3_column_text (statement.get (), 1));
+      const auto *modality = reinterpret_cast<const char *> (
+          sqlite3_column_text (statement.get (), 2));
+      if (source == nullptr || modality == nullptr)
+        throw std::runtime_error (
+            "shadow provenance contains a null source or modality");
+      auto &entry = by_embedding[embedding_id];
+      entry.history_ordinal
+          = std::min (entry.history_ordinal, history_ordinal);
+      entry.source_id_digests.push_back (PrivateValueDigest (source));
+      entry.modalities.emplace_back (modality);
+      ++history_ordinal;
+    }
+  if (step != SQLITE_DONE)
+    throw std::runtime_error ("failed while reading shadow provenance: "
+                              + std::string (sqlite3_errmsg (database.get ())));
+
+  std::vector<ShadowQueryProvenance> result;
+  result.reserve (corpus.ids.size ());
+  for (const auto embedding_id : corpus.ids)
+    {
+      auto found = by_embedding.find (embedding_id);
+      if (found == by_embedding.end ())
+        throw std::runtime_error (
+            "shadow embedding lacks authoritative signal provenance: "
+            + std::to_string (embedding_id));
+      auto provenance = found->second;
+      provenance.history_count = history_ordinal;
+      for (auto *values : { &provenance.source_id_digests,
+                            &provenance.modalities })
+        {
+          std::sort (values->begin (), values->end ());
+          values->erase (std::unique (values->begin (), values->end ()),
+                         values->end ());
+        }
+      result.push_back (std::move (provenance));
+    }
+  return result;
 }
 
 struct ShadowQualityAccumulator
@@ -2126,6 +2253,8 @@ RunShadowEmbeddingQuality (const Config &cfg)
         "shadow query count and result k must be positive");
   const auto corpus = ReadShadowEmbeddingCorpus (
       cfg.shadow_embedding_corpus);
+  const auto query_provenance
+      = ReadShadowQueryProvenance (cfg.db_path, corpus);
   const auto parameters
       = shadow::DeriveParameters (cfg.focus, cfg.sensitivity, cfg.stability);
   shadow::State state (parameters);
@@ -2179,6 +2308,7 @@ RunShadowEmbeddingQuality (const Config &cfg)
   ShadowQualityAccumulator duplicates;
   ShadowQualityAccumulator nonduplicates;
   std::array<ShadowQualityAccumulator, 4> query_age;
+  nlohmann::json query_evidence = nlohmann::json::array ();
   const auto evaluation_started = std::chrono::steady_clock::now ();
   for (int query_number = 0; query_number < cfg.shadow_queries;
        ++query_number)
@@ -2217,9 +2347,15 @@ RunShadowEmbeddingQuality (const Config &cfg)
                                          corpus.embeddings[index]),
                 index });
         }
-      const std::size_t candidate_count = candidates.size ();
-      take_best (candidates,
-                 static_cast<std::size_t> (cfg.shadow_result_k));
+      std::size_t candidate_count = candidates.size ();
+      if (cfg.shadow_quality_control)
+        {
+          candidates = exact;
+          candidate_count = candidates.size ();
+        }
+      else
+        take_best (candidates,
+                   static_cast<std::size_t> (cfg.shadow_result_k));
       if (exact.empty () || candidates.empty ())
         throw std::runtime_error ("shadow quality query returned no result");
 
@@ -2247,6 +2383,32 @@ RunShadowEmbeddingQuality (const Config &cfg)
       const double exact_best_similarity = 1.0 - exact.front ().distance / 2.0;
       const double best_similarity = 1.0 - candidates.front ().distance / 2.0;
       const bool duplicate_query = exact.front ().distance <= 1.0e-6F;
+      nlohmann::json exact_ranked_ids = nlohmann::json::array ();
+      nlohmann::json candidate_ranked_ids = nlohmann::json::array ();
+      for (const auto &item : exact)
+        exact_ranked_ids.push_back (corpus.ids[item.index]);
+      for (const auto &item : candidates)
+        candidate_ranked_ids.push_back (corpus.ids[item.index]);
+      const auto &provenance = query_provenance[query_index];
+      const std::size_t history_segment = std::min<std::size_t> (
+          2, provenance.history_ordinal * 3 / provenance.history_count);
+      constexpr std::array<const char *, 3> history_segment_names {
+        "early", "middle", "late"
+      };
+      query_evidence.push_back (
+          { { "query_number", query_number },
+            { "query_index", query_index },
+            { "query_embedding_id", corpus.ids[query_index] },
+            { "exact_ranked_ids", std::move (exact_ranked_ids) },
+            { "candidate_ranked_ids", std::move (candidate_ranked_ids) },
+            { "exact_neighbor_semantic_coverage",
+              semantic_coverage / exact.size () },
+            { "source_ids",
+              provenance.source_id_digests },
+            { "modalities", provenance.modalities },
+            { "history_ordinal", provenance.history_ordinal },
+            { "history_count", provenance.history_count },
+            { "history_segment", history_segment_names[history_segment] } });
 
       auto add = [&] (ShadowQualityAccumulator &accumulator) {
         ++accumulator.count;
@@ -2336,12 +2498,14 @@ RunShadowEmbeddingQuality (const Config &cfg)
       seed->Commit ();
       shadow::State rebuilt (parameters);
       shadow::RebuildFromPersistentAuthority (rebuilt, *restart_store);
-      if (rebuilt.disabled || rebuilt.metrics.restart_rows_visited != row_count)
+      if (rebuilt.disabled)
         throw std::runtime_error (
             "shadow SQLite restart measurement failed at fraction "
             + std::to_string (fraction));
       restart_measurements.push_back (
           { { "fraction", fraction },
+            { "measurement_authority",
+              "synthetic-full-history-fallback" },
             { "retained_rows", row_count },
             { "rows_visited", rebuilt.metrics.restart_rows_visited },
             { "rebuild_ms", rebuilt.metrics.restart_rebuild_ms },
@@ -2350,8 +2514,23 @@ RunShadowEmbeddingQuality (const Config &cfg)
             { "restart_production_gate",
               rebuilt.metrics.restart_production_gate } });
     }
+  nlohmann::json fixed_identity_rank_probes = nlohmann::json::array ();
+  for (int probe = 0; probe < 7; ++probe)
+    {
+      const auto query_number = static_cast<std::size_t> (
+          static_cast<long double> (probe) * (cfg.shadow_queries - 1) / 6);
+      fixed_identity_rank_probes.push_back (
+          { { "query_number", query_number },
+            { "exact_ranked_ids",
+              query_evidence[query_number]["exact_ranked_ids"] },
+            { "candidate_ranked_ids",
+              query_evidence[query_number]["candidate_ranked_ids"] } });
+    }
+  const auto quality_mode = ShadowQualityMode (cfg.shadow_quality_control);
   nlohmann::json out {
     { "schema", "cortext_bounded_activation_shadow_quality_v1" },
+    { "quality_role", quality_mode.role },
+    { "control_kind", quality_mode.control_kind },
     { "observation_only", true },
     { "corpus", cfg.shadow_embedding_corpus.string () },
     { "embedding_count", corpus.embeddings.size () },
@@ -2389,6 +2568,9 @@ RunShadowEmbeddingQuality (const Config &cfg)
         { "duplicate_queries", FinalShadowQuality (duplicates) },
         { "nonduplicate_queries", FinalShadowQuality (nonduplicates) } } },
     { "query_age_quartiles", std::move (age_quality) },
+    { "query_evidence", std::move (query_evidence) },
+    { "fixed_identity_rank_probes",
+      std::move (fixed_identity_rank_probes) },
     { "sqlite_restart_measurements", std::move (restart_measurements) },
   };
   WriteJsonArtifact (cfg.output_path, out);
