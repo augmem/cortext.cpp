@@ -168,6 +168,57 @@ peaks and troughs, a material reset, and a more cycle-symmetric retrieval
 sawtooth. Write cost remains a reported tradeoff, and this preference does not
 substitute for replay evidence or authorize a semantic cutover.
 
+The cutover audit makes that objective decidable. It measures retrieval work as
+candidate plus exact-comparison counts rather than wall time, divides the
+Natural replay at successful public-consolidation boundaries, resamples each
+complete material cycle to 50 equal-progress bins, and normalizes each cycle by
+the difference between its first-50-event post-consolidation mean and its
+last-50-event pre-consolidation mean. A cycle whose latter mean is lower is an
+inverse ramp and fails; a zero range is represented by an all-zero profile and
+also fails because every accepted cycle must exhibit the same material positive
+ramp required of the process-time envelope. Retrieval-work peaks and following
+troughs are independently subject to the same non-rising half, Theil--Sen, and
+bootstrap trend bounds as the process envelope, preventing geometrically
+declining flat cycles from masquerading as consolidation resets. Each cycle
+also limits accumulated negative variation to 0.25 of its anchored ramp and its
+maximum event work to 1.25 times the trailing mean, while every event must stay
+within the normal-comparison ceiling derived from F/S/T. These independent
+shape and amplitude constraints prevent a candidate-derived median template
+from accepting repeatable spikes. At least ten material cycles are required;
+at least 80% must reset to no more than 90% of their trailing
+pre-consolidation work; the nearest-rank 95th-percentile
+cycle-to-median-template mean absolute
+error must be at most 0.20; and the final-five versus prior-five template error
+must be at most 0.10. Natural cutover cannot use flat-envelope mode to bypass
+these cycle gates; the already-flat Durable control remains eligible for its
+separate flat-envelope contract. The separate 512-query, top-16 corpus gate
+preserves exact
+identifier recall and exact top-1 at 1.0 and requires the complete ordered
+top-16 identity list to match, including seven fixed identity-and-rank probes.
+The summary is recomputed from all 512 per-query records rather than trusted as
+a label. The candidate must match a separate control artifact whose exact
+content digest was approved before the audit; deterministic query indices,
+embedding identities, ranked controls, and the seven fixed probe positions are
+bound across those artifacts. The approved control must identify the current
+public retrieval path, and the candidate must also preserve the independently
+recorded digest of the pre-existing seven public identity-and-rank probes; the
+pre- and post-restart probe digests at every retained-history fraction must
+equal the candidate/control fixed-probe digest, so a restart cannot preserve a
+consistent but incorrect ranking; the
+benchmark's exhaustive embedding-neighbor mode can propose a control artifact
+but cannot label itself approved. Hashed source provenance, modality, and history
+position come from the queried embedding's authoritative SQLite signal rows;
+together they must cover early, middle, and late history, text, audio, image,
+and at least four opaque sources. Restart acceptance likewise derives the fixed
+row-visit ceiling from F/S/T and checks measured retained-row and visited-row
+series from a production-shaped persistent restart rather than trusting
+pass/fail labels. The three retained counts are fixed at 25%, 50%, and 100% of
+the bound corpus, visited-row counts must be nonzero and within the F/S/T
+capacity, and a ranked probe digest before restart must match the restored
+probe with at least top-16 candidate state. The current synthetic full-history
+fallback measurement is explicitly ineligible. These are candidate-selection
+thresholds, not evidence that the current observation-only graph passes them.
+
 On 2026-06-30, a full Meta MSC replay rerun verified the retrieval-cache
 optimization on the same 9,130-turn slice used for the hosted frontier-judge
 artifact. The run preserved native probe behavior exactly: all non-timing probe
