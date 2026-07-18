@@ -412,6 +412,8 @@ pub fn build(b: *std.Build) void {
     mod.addCMacro("SQLITE_CORE", "1");
     mod.addCMacro("SQLITE_THREADSAFE", "1");
     mod.addCMacro("SQLITE_ENABLE_JSON1", "1");
+    mod.addCMacro("SQLITE_ENABLE_MATH_FUNCTIONS", "1");
+    mod.addCMacro("SQLITE_ENABLE_PREUPDATE_HOOK", "1");
     mod.addCMacro("CORTEXT_EMBED_VEC", "1");
     mod.addCMacro("SQLITE_VEC_OMIT_FS", "1");
     mod.addCMacro("CORTEXT_EMBED_OBJSTORE", "1");
