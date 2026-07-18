@@ -11,6 +11,7 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
 #include "../src/operations/constructive_recall_internal.hpp"
+#include "../src/operations/execution_cache_sidecar_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include <algorithm>
 #include <atomic>
@@ -210,6 +211,15 @@ TEST_CASE ("MemoryStorage uses default SqlObjectStore inside processor "
   const auto out = processor.Process (s);
   REQUIRE (out.stored_memory_id.has_value ());
   REQUIRE (out.stored_signal_id.has_value ());
+  REQUIRE (out.operation_ms.at (
+               "MemoryStorage.supersession_current_rows_visited")
+           == 0.0);
+  REQUIRE (out.operation_ms.at (
+               "MemoryStorage.supersession_historical_rows_visited")
+           == 0.0);
+  REQUIRE (out.operation_ms.at (
+               "MemoryStorage.supersession_sql_fallback_count")
+           == 3.0);
 
   auto memory_rows = store->Execute (
       "SELECT blob_id FROM memories WHERE memory_id = ?",
@@ -515,7 +525,7 @@ TEST_CASE ("MemoryStorage stores memory even when no payload",
 }
 
 TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
-           "[operations][memory_storage][supersession]")
+           "[operations][memory_storage][supersession][fanout_cache]")
 {
   ScopedTempDb db;
   Store *store = db.get ();
@@ -535,6 +545,10 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
   s.mimetype = "image/custom-test";
 
   ProcessorContext pctx;
+  pctx.UpsertRetrievalSurface (
+      { 10, 100, 1000, 1000, 0, 0, 0, 0, "LONG_TERM", "belief/source",
+        "text", -1.0, 0, 0.0, 0.0, 0.0, false, true,
+        stale_embedding });
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
 
@@ -576,7 +590,17 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
       { correction_memory_id, 10LL });
   REQUIRE (edge_rows.size () == 1);
   REQUIRE (std::any_cast<double> (edge_rows[0].at ("weight")) > 0.0);
-  REQUIRE_FALSE (pctx.association_fanout_cache.valid);
+  REQUIRE (pctx.association_fanout_cache.valid);
+  REQUIRE (pctx.association_fanout_cache.out_by_source
+               .at (correction_memory_id)
+               .front ().memory_id
+           == 10LL);
+  const auto sidecar
+      = operations::execution_cache_sidecar_internal::Find (pctx);
+  REQUIRE (sidecar);
+  REQUIRE (sidecar->supersession_eligibility.valid);
+  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10LL)
+           == 2000LL);
 
   auto stale_rows = store->Execute (
       "SELECT source_contradiction_count FROM memories WHERE memory_id = ?",
@@ -620,6 +644,263 @@ TEST_CASE ("Typed supersession candidates retain borrowed cache vectors",
   cache::SupersessionCandidate invalid;
   invalid.memory_id = 12;
   REQUIRE (invalid.Embedding () == nullptr);
+}
+
+TEST_CASE ("Historical cache tracks only supersession-eligible embeddings",
+           "[operations][memory_storage][supersession][coverage]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  ProcessorContext pctx;
+  REQUIRE (cache::Reset (
+      pctx,
+      { { 100, 10, 1000, "LONG_TERM", "source/a", UnitVec (0) },
+        { 101, 11, 1001, "ASSOCIATION", "source/b", UnitVec (1) },
+        { 102, 0, 0, std::string (), std::string (), UnitVec (2) } }));
+  auto state = cache::Find (pctx);
+  REQUIRE (state != nullptr);
+  REQUIRE (state->supersession_entry_indices.size () == 2);
+
+  cache::Append (
+      pctx, { 103, 12, 1002, "ASSOCIATION", "source/c", UnitVec (3) });
+  cache::Append (
+      pctx, { 104, 0, 0, std::string (), std::string (), UnitVec (4) });
+  cache::RemoveEmbedding (pctx, 100);
+  state = cache::Find (pctx);
+  REQUIRE (state != nullptr);
+  REQUIRE (state->supersession_entry_indices.size () == 2);
+  for (const std::size_t index : state->supersession_entry_indices)
+    {
+      REQUIRE (index < state->entries.size ());
+      REQUIRE (cache::IsSupersessionCandidateEntry (state->entries[index]));
+      REQUIRE (state->supersession_index_positions.at (index)
+               < state->supersession_entry_indices.size ());
+    }
+  cache::Erase (pctx);
+}
+
+TEST_CASE ("Shared embeddings retain every supersession memory sibling",
+           "[operations][memory_storage][supersession][coverage]"
+           "[shared-embedding]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const Eigen::VectorXf stale_embedding = UnitVec (0);
+  const Eigen::VectorXf correction_embedding = VectorWithCosineToDim0 (0.94f);
+  const int candidate_limit = std::max (
+      1, core::SupersessionCandidateLimit (cfg.focus, cfg.sensitivity,
+                                           cfg.stability));
+  const int max_edges = core::SupersessionMaxEdges (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const int sibling_count = candidate_limit + 1;
+  cortext::testing::SeedEmbeddingV2 (*store, 100, stale_embedding, 1000);
+
+  ProcessorContext pctx;
+  std::vector<cache::Entry> historical_entries;
+  std::vector<cache::Entry> current_entries;
+  historical_entries.reserve (static_cast<std::size_t> (sibling_count));
+  current_entries.reserve (static_cast<std::size_t> (sibling_count));
+  for (int index = 0; index < sibling_count; ++index)
+    {
+      const long long sibling_id = 10LL + index;
+      const long long start_ts = 1000LL + index;
+      const std::string source_id
+          = "belief/sibling/" + std::to_string (index);
+      cortext::testing::SeedMemoryV2 (*store, sibling_id, 100, source_id,
+                                      "LONG_TERM", 1.0, start_ts);
+      ProcessorContext::RetrievalSurfaceEntry current;
+      current.memory_id = sibling_id;
+      current.embedding_id = 100;
+      current.start_ts = start_ts;
+      current.kind = "LONG_TERM";
+      current.embedding = stale_embedding;
+      pctx.UpsertRetrievalSurface (std::move (current));
+      historical_entries.push_back (
+          { 100, sibling_id, start_ts, "LONG_TERM", source_id,
+            stale_embedding });
+      current_entries.push_back (
+          { 100, sibling_id, start_ts, "LONG_TERM", source_id,
+            stale_embedding, 100 });
+    }
+  REQUIRE (cache::Reset (pctx, std::move (historical_entries),
+                         std::move (current_entries)));
+  const auto cache_state = cache::Find (pctx);
+  REQUIRE (cache_state);
+  REQUIRE (cache_state->supersession_entry_by_memory.contains (10));
+  REQUIRE (cache_state->supersession_entry_by_memory.contains (
+      9LL + sibling_count));
+  REQUIRE (cache_state->supersession_embedding_fanout);
+  REQUIRE_FALSE (cache::CurrentPopulationCoversHistorical (
+      *cache_state, -1));
+
+  Signal signal;
+  signal.embedding = correction_embedding;
+  signal.timestamp = 2000;
+  signal.source_id = "belief/correction";
+  signal.modality = "text";
+  signal.mimetype = "text/plain";
+  AccumulatorState acc;
+  acc.mu_acc = signal.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.8;
+  acc.s_max = 0.8;
+  acc.t_start = signal.timestamp;
+  SignalRecord record;
+  record.embedding = signal.embedding;
+  record.timestamp = signal.timestamp;
+  record.modality = signal.modality;
+  record.mime = signal.mimetype;
+  record.score = 0.8;
+  acc.signals.push_back (std::move (record));
+  pctx.accumulator_states[signal.source_id] = std::move (acc);
+
+  OperationContext ctx (signal, pctx, cfg, store);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (signal.embedding);
+  MemoryStorage operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Commit ();
+  REQUIRE (ctx.GetStoredMemoryId ());
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_current_rows_visited")
+           == static_cast<double> (sibling_count));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_historical_coverage_proven")
+           == 0.0);
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_sql_fallback_count")
+           == 0.0);
+  const auto edges = store->Execute (
+      "SELECT target_memory_id FROM associations "
+      "WHERE source_memory_id = ? AND edge_type = 'supersedes' "
+      "ORDER BY target_memory_id",
+      { *ctx.GetStoredMemoryId () });
+  REQUIRE (edges.size () == static_cast<std::size_t> (max_edges));
+  for (int index = 0; index < max_edges; ++index)
+    REQUIRE (AnyToLongLong (edges[static_cast<std::size_t> (index)].at (
+                                "target_memory_id"))
+             == 10LL + sibling_count - max_edges + index);
+  cache::Erase (pctx);
+}
+
+TEST_CASE ("Exact empty supersession coverage skips the recent SQL fallback",
+           "[operations][memory_storage][supersession][coverage]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  Signal signal;
+  signal.embedding = UnitVec (0);
+  signal.timestamp = 2000;
+  signal.source_id = "fresh/source";
+  signal.modality = "text";
+  signal.mimetype = "text/plain";
+
+  ProcessorContext pctx;
+  REQUIRE (cache::Reset (pctx, {}));
+  AccumulatorState acc;
+  acc.mu_acc = signal.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.8;
+  acc.s_max = 0.8;
+  acc.t_start = signal.timestamp;
+  SignalRecord record;
+  record.embedding = signal.embedding;
+  record.timestamp = signal.timestamp;
+  record.modality = signal.modality;
+  record.mime = signal.mimetype;
+  record.score = 0.8;
+  acc.signals.push_back (std::move (record));
+  pctx.accumulator_states[signal.source_id] = std::move (acc);
+
+  OperationContext ctx (signal, pctx, cfg, store);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (signal.embedding);
+  MemoryStorage operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE (ctx.GetStoredMemoryId ());
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_current_rows_visited")
+           == 0.0);
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_historical_rows_visited")
+           == 0.0);
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_historical_coverage_proven")
+           == 1.0);
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_sql_fallback_count")
+           == 0.0);
+  cache::Erase (pctx);
+}
+
+TEST_CASE ("Equivalent current population proves historical coverage in O1",
+           "[operations][memory_storage][supersession][coverage]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  ProcessorContext pctx;
+  REQUIRE (cache::Reset (
+      pctx,
+      { { 100, 10, 1000, "LONG_TERM", "source/a", UnitVec (0) },
+        { 101, 11, 1001, "LONG_TERM", "source/b", UnitVec (1) } },
+      { { 100, 10, 0, std::string (), std::string (), UnitVec (0), 100 },
+        { 101, 11, 0, std::string (), std::string (), UnitVec (1), 101 } }));
+  auto state = cache::Find (pctx);
+  REQUIRE (state != nullptr);
+  REQUIRE (cache::CurrentPopulationCoversHistorical (*state, -1));
+
+  cache::Append (
+      pctx, { 102, 12, 1002, "LONG_TERM", "source/c", UnitVec (2) });
+  state = cache::Find (pctx);
+  REQUIRE (state != nullptr);
+  REQUIRE (cache::CurrentPopulationCoversHistorical (*state, 12));
+  REQUIRE_FALSE (cache::CurrentPopulationCoversHistorical (*state, 10));
+
+  cache::UpsertCurrent (
+      pctx,
+      { 102, 12, 0, std::string (), std::string (), UnitVec (2), 102 });
+  state = cache::Find (pctx);
+  REQUIRE (cache::CurrentPopulationCoversHistorical (*state, -1));
+
+  cache::UpsertCurrent (
+      pctx,
+      { 200, 10, 0, std::string (), std::string (), UnitVec (3), 100 });
+  state = cache::Find (pctx);
+  REQUIRE_FALSE (cache::CurrentPopulationCoversHistorical (*state, -1));
+  cache::UpsertCurrent (
+      pctx,
+      { 100, 10, 0, std::string (), std::string (), UnitVec (0), 100 });
+  state = cache::Find (pctx);
+  REQUIRE (cache::CurrentPopulationCoversHistorical (*state, -1));
+  cache::Erase (pctx);
+
+  ProcessorContext reversed;
+  REQUIRE (cache::Reset (
+      reversed,
+      { { 100, 11, 1000, "LONG_TERM", "source/a", UnitVec (0) },
+        { 101, 10, 1001, "LONG_TERM", "source/b", UnitVec (1) } },
+      { { 100, 11, 0, std::string (), std::string (), UnitVec (0), 100 },
+        { 101, 10, 0, std::string (), std::string (), UnitVec (1), 101 } }));
+  state = cache::Find (reversed);
+  REQUIRE (state != nullptr);
+  REQUIRE_FALSE (cache::CurrentPopulationCoversHistorical (*state, -1));
+  cache::Erase (reversed);
 }
 
 TEST_CASE ("Historical surface cache survives sequential thread migration and "
@@ -829,6 +1110,9 @@ TEST_CASE ("MemoryStorage preserves SQL KNN behavior with signal-only decoys",
   tx->Commit ();
 
   REQUIRE (ctx.GetStoredMemoryId ().has_value ());
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_historical_coverage_proven")
+           == 1.0);
   const auto edge_rows = store->Execute (
       "SELECT 1 FROM associations "
       "WHERE source_memory_id = ? AND target_memory_id = ? "

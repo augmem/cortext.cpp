@@ -830,6 +830,41 @@ GetCoreMigrations ()
               "ALTER TABLE state ADD COLUMN consolidation_rate_armed INTEGER NOT NULL DEFAULT 1",
           },
       },
+      {
+          28,
+          "Persist lazy retrieval suppression recovery state",
+          {
+              "CREATE TABLE IF NOT EXISTS rif_recovery_clock("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "generation INTEGER NOT NULL CHECK(generation > 0), "
+              "log_factor REAL NOT NULL, last_ts INTEGER NOT NULL)",
+              "CREATE TABLE IF NOT EXISTS rif_generation_resets("
+              "generation INTEGER PRIMARY KEY CHECK(generation > 0), "
+              "reset_ts INTEGER NOT NULL)",
+              "CREATE TABLE IF NOT EXISTS rif_active_state("
+              "memory_id INTEGER PRIMARY KEY, "
+              "generation INTEGER NOT NULL CHECK(generation > 0), "
+              "anchor_suppression REAL NOT NULL "
+              "CHECK(anchor_suppression > 1e-9), "
+              "recovery_total REAL NOT NULL, "
+              "anchor_log_factor REAL NOT NULL, "
+              "expires_log_factor REAL NOT NULL, "
+              "FOREIGN KEY(memory_id) REFERENCES memories(memory_id) "
+              "ON DELETE CASCADE)",
+              "CREATE INDEX IF NOT EXISTS idx_rif_active_due ON rif_active_state("
+              "generation, expires_log_factor, memory_id)",
+              "INSERT OR IGNORE INTO rif_recovery_clock("
+              "singleton, generation, log_factor, last_ts) "
+              "SELECT 1, 1, 0.0, COALESCE(MAX(suppression_ts), 0) "
+              "FROM memories WHERE suppression > 1e-9",
+              "INSERT OR REPLACE INTO rif_active_state("
+              "memory_id, generation, anchor_suppression, recovery_total, "
+              "anchor_log_factor, expires_log_factor) "
+              "SELECT memory_id, 1, suppression, strength + suppression, "
+              "0.0, ln(1e-9 / suppression) "
+              "FROM memories WHERE suppression > 1e-9",
+          },
+      },
   };
 }
 
@@ -866,6 +901,39 @@ ApplyMigrationsThrough (Store &store, int64_t maximum_id)
               continue;
             }
           ApplySingleMigrationInTransaction (store, m);
+        }
+
+      const auto rif_tables = store.Execute (
+          "SELECT 1 FROM sqlite_master "
+          "WHERE type = 'table' AND name = 'rif_active_state' LIMIT 1");
+      if (!rif_tables.empty ())
+        {
+          // The approved migration contains only the three persistent tables
+          // and one index. Keep the derived-value seam connection-local.
+          store.Execute ("DROP VIEW IF EXISTS temp.rif_effective_memories");
+          store.Execute (
+              "CREATE TEMP VIEW rif_effective_memories AS "
+              "SELECT m.memory_id, "
+              "CASE WHEN a.memory_id IS NULL THEN m.strength "
+              "     WHEN a.generation = c.generation THEN "
+              "       MAX(0.0, a.recovery_total - "
+              "           a.anchor_suppression * "
+              "           exp(c.log_factor - a.anchor_log_factor)) "
+              "     ELSE a.recovery_total END AS strength, "
+              "CASE WHEN a.memory_id IS NULL THEN m.suppression "
+              "     WHEN a.generation = c.generation THEN "
+              "       a.anchor_suppression * "
+              "       exp(c.log_factor - a.anchor_log_factor) "
+              "     ELSE 0.0 END AS suppression, "
+              "CASE WHEN a.memory_id IS NULL THEN m.suppression_ts "
+              "     WHEN a.generation = c.generation THEN c.last_ts "
+              "     ELSE COALESCE(r.reset_ts, c.last_ts) "
+              "END AS suppression_ts "
+              "FROM memories m "
+              "CROSS JOIN rif_recovery_clock c "
+              "LEFT JOIN rif_active_state a ON a.memory_id = m.memory_id "
+              "LEFT JOIN rif_generation_resets r "
+              "  ON r.generation = a.generation");
         }
 
       store.Execute ("COMMIT");

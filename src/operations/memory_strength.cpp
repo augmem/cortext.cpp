@@ -1,5 +1,8 @@
 #include "cortext/operations/memory_strength.hpp"
 #include "historical_surface_search_cache_internal.hpp"
+#include "emotional_metadata_cache_internal.hpp"
+#include "execution_cache_sidecar_internal.hpp"
+#include "association_fanout_cache_internal.hpp"
 #include <algorithm>
 #include <limits>
 #include <cstdint>
@@ -14,6 +17,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include "eviction_policy_override.hpp"
 #include "eviction_policy.hpp"
+#include "rif_state_internal.hpp"
 #include <cmath>
 #include <functional>
 #include <optional>
@@ -287,12 +291,15 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
 
       const std::string select_sql
           = std::string (
-                "SELECT memory_id, strength, use_frequency, contextual_gain, "
-                "retrieved_count, "
-                "       used_count, last_access, created_at, flashbulb, "
-                "       half_life_bonus, trace_fast, trace_med, trace_slow, "
-                "trace_ultra "
-                "FROM memories WHERE ")
+                "SELECT m.memory_id, rif.strength AS strength, "
+                "       m.use_frequency, m.contextual_gain, "
+                "       m.retrieved_count, m.used_count, m.last_access, "
+                "       m.created_at, m.flashbulb, m.half_life_bonus, "
+                "       m.trace_fast, m.trace_med, m.trace_slow, "
+                "       m.trace_ultra "
+                "FROM memories m "
+                "JOIN rif_effective_memories rif "
+                "  ON rif.memory_id = m.memory_id WHERE m.")
             + lookup_column + " = ?";
       const auto select_start = SteadyClock::now ();
       auto rows = tx.Execute (select_sql, { lookup_id });
@@ -499,6 +506,11 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
           { retrieved_new, used_new, used_flag, ts, contextual_gain,
             influence_factor, use_frequency, strength, traces[0], traces[1],
             traces[2], traces[3], ts, lookup_id });
+      rif_state_internal::RefreshActiveStrengthWhere (
+          tx, std::string (lookup_column) + " = ?", { lookup_id });
+      rif_active_epoch_cache_internal::StageMemory (
+          execution_cache_sidecar_internal::Ensure (p_ctx)->rif_active_epoch,
+          row_memory_id);
       if (row_memory_id > 0)
         {
           p_ctx.UpdateRetrievalSurfaceUsageByMemory (row_memory_id,
@@ -607,8 +619,9 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
   auto evictable_rows = tx.Execute (
       "SELECT m.memory_id, m.embedding_id "
       "FROM memories m INDEXED BY idx_memories_ltm_strength_created"
+      " JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id"
           " " + eviction_where
-          + " ORDER BY m.strength ASC, m.created_at ASC LIMIT ?",
+          + " ORDER BY rif.strength ASC, m.created_at ASC LIMIT ?",
       select_params);
   context.AddOperationTiming ("MemoryStrength.eviction_select_ids_sql",
                               ElapsedMillis (eviction_select_start));
@@ -661,6 +674,8 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
 
   for (const long long memory_id : evictable_memory_ids)
     {
+      association_fanout_cache::NotifyRetrievalSurfaceChanged (p_ctx,
+                                                               memory_id);
       p_ctx.RemoveRetrievalSurface (memory_id);
     }
   // The embedding deletion phase can preserve rows still referenced by other
@@ -734,11 +749,13 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                       "SELECT m.memory_id, m.embedding_id, m.source_id, "
                       "       m.kind, COALESCE(m.label, ''), m.start_ts, "
                       "       m.end_ts, m.created_at, m.last_access, "
-                      "       m.strength, m.use_frequency, "
+                      "       rif.strength, m.use_frequency, "
                       "       m.contextual_gain, m.retrieved_count, "
                       "       m.used_count, m.n_signals, m.modality, "
                       "       'periphery_cutoff', ? "
                       "FROM memories m "
+                      "JOIN rif_effective_memories rif "
+                      "  ON rif.memory_id = m.memory_id "
                       "WHERE m.memory_id IN (" + placeholders + ")",
                       params);
                 });
@@ -812,6 +829,15 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
                 });
   context.AddOperationTiming ("MemoryStrength.eviction_delete_memories_sql",
                               ElapsedMillis (memory_delete_start));
+  for (const long long memory_id : evictable_memory_ids)
+    {
+      emotional_metadata_cache_internal::Remove (
+          context.GetProcessorContext (), memory_id);
+    }
+  rif_active_epoch_cache_internal::StageMemories (
+      execution_cache_sidecar_internal::Ensure (
+          context.GetProcessorContext ())->rif_active_epoch,
+      evictable_memory_ids);
 
   const auto objstore_delete_start = SteadyClock::now ();
   const long long evicted_blob_count

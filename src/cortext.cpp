@@ -1,4 +1,5 @@
 #include "cortext/cortext.hpp"
+#include "cortext_pipeline_internal.hpp"
 #include "cortext/clock.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -983,7 +984,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
       // Content blobs are loaded separately via LoadSignalBlobs
       auto rows = store->Execute (
           "SELECT m.memory_id, m.source_id, m.modality, m.start_ts, "
-          "       m.strength, m.last_access, m.n_signals, "
+          "       rif.strength, m.last_access, m.n_signals, "
           "       m.s_max, m.s_avg, m.s_arousal_avg, "
           "       m.retrieved_count, m.used_count, m.blob_id, "
           "       (SELECT mr.blob_id FROM memory_reconstructions mr "
@@ -998,6 +999,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           "          ORDER BY s.serial_position LIMIT 1)"
           "       ) AS signal_mime "
           "FROM memories m "
+          "JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
           "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
           "ORDER BY m.start_ts ASC");
 
@@ -1248,13 +1250,15 @@ BuildRootOperationSet (bool probe_mode)
 
   if (probe_mode)
     {
-      return operations::signal_record_rollback_internal::MarkJournalAware (
-          std::make_unique<ProbeRoot> ());
+      return operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (
+              std::make_unique<ProbeRoot> ());
     }
-  return operations::signal_record_rollback_internal::MarkJournalAware (
-      std::make_unique<SignalOperationDispatch> (
-          std::make_unique<FullRoot> (),
-          std::make_unique<MaintenanceRoot> ()));
+  return operations::signal_record_rollback_internal::
+      MarkEngineOwnedJournalAware (
+          std::make_unique<SignalOperationDispatch> (
+              std::make_unique<FullRoot> (),
+              std::make_unique<MaintenanceRoot> ()));
 }
 
 namespace

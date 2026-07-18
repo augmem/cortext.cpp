@@ -6,10 +6,13 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
+#include "../src/operations/consolidation_epoch_profile_internal.hpp"
+#include "../src/store/mutation_audit_internal.hpp"
 #include <algorithm>
 #include <any>
 #include <filesystem>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -19,6 +22,16 @@ namespace
 class UnsupportedBindParam
 {
 };
+
+std::set<std::string>
+MutationKeys (const std::vector<cortext::internal::SQLiteMutationIdentity> &items)
+{
+  std::set<std::string> keys;
+  for (const auto &item : items)
+    keys.insert (std::to_string (static_cast<int> (item.kind)) + ":"
+                 + item.table + ":" + item.logical_identity);
+  return keys;
+}
 
 // Helper function to create a temporary database file
 std::string
@@ -37,6 +50,237 @@ TEST_CASE ("SQLiteStore rejects bind parameter count mismatches",
   REQUIRE_THROWS_WITH (
       store->Execute ("SELECT ? AS value", {}),
       Catch::Matchers::ContainsSubstring ("parameter count mismatch"));
+}
+
+TEST_CASE ("SQLite mutation audit publishes committed logical identities",
+           "[store][profiling][transaction]")
+{
+  cortext::testing::ScopedEnvVar profile_epoch (
+      "CORTEXT_PROFILE_CONSOLIDATION_EPOCH", "1");
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  store->Execute ("CREATE TABLE memories(memory_id INTEGER PRIMARY KEY, value TEXT)");
+  store->Execute (
+      "CREATE TABLE associations(source_memory_id INTEGER NOT NULL, "
+      "target_memory_id INTEGER NOT NULL, edge_type TEXT NOT NULL, "
+      "weight REAL NOT NULL, PRIMARY KEY(source_memory_id, target_memory_id, edge_type))");
+  store->Execute (
+      "CREATE VIRTUAL TABLE embeddings USING vec0("
+      "embedding_id INTEGER PRIMARY KEY, embedding float[256], +created_at integer)");
+  store->Execute (
+      "CREATE VIRTUAL TABLE current_memory_embeddings USING vec0("
+      "memory_id INTEGER PRIMARY KEY, embedding_id INTEGER, "
+      "embedding float[256])");
+  store->Execute (
+      "CREATE TABLE memory_reconstructions("
+      "reconstruction_id INTEGER PRIMARY KEY, value TEXT)");
+  cortext::internal::ResetSQLiteMutationAudit (store.get ());
+
+  {
+    auto transaction = store->Begin ();
+    transaction->Execute ("INSERT INTO memories VALUES(1, 'committed')");
+    transaction->Execute (
+        "INSERT INTO associations VALUES(1, 2, 'related', 0.5)");
+    transaction->Execute (
+        "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+        "VALUES(7, ?, 100)", { std::vector<float> (256, 0.25F) });
+    transaction->Commit ();
+  }
+  auto committed_batch
+      = cortext::internal::ConsumeSQLiteCommittedMutations (store.get ());
+  REQUIRE (committed_batch.trigger_journal_ready);
+  auto committed = committed_batch.committed_hook_identities;
+  std::set<std::string> logical_identities;
+  for (const auto &mutation : committed)
+    logical_identities.insert (mutation.logical_identity);
+  CAPTURE (logical_identities);
+  REQUIRE (logical_identities.size () == 3);
+  REQUIRE (logical_identities.contains ("memory:1:1"));
+  REQUIRE (logical_identities.contains ("association:1:11:27:related"));
+  REQUIRE (logical_identities.contains ("embeddings:1:7"));
+  REQUIRE (
+      cortext::operations::consolidation_epoch_profile_internal::
+          DistinctTypedMutationCount (committed)
+      == 3);
+  REQUIRE (
+      cortext::operations::consolidation_epoch_profile_internal::
+          DistinctTypedMutationCount (
+              committed_batch.committed_trigger_identities)
+      == 3);
+  REQUIRE (MutationKeys (committed_batch.committed_hook_identities)
+           == MutationKeys (committed_batch.committed_trigger_identities));
+
+  {
+    auto transaction = store->Begin ();
+    transaction->Execute (
+        "INSERT OR REPLACE INTO associations VALUES(1, 2, 'related', 0.75)");
+    transaction->Commit ();
+  }
+  committed_batch
+      = cortext::internal::ConsumeSQLiteCommittedMutations (store.get ());
+  committed = committed_batch.committed_hook_identities;
+  logical_identities.clear ();
+  for (const auto &mutation : committed)
+    logical_identities.insert (mutation.logical_identity);
+  REQUIRE (logical_identities.size () == 1);
+  REQUIRE (logical_identities.contains ("association:1:11:27:related"));
+  REQUIRE (
+      cortext::operations::consolidation_epoch_profile_internal::
+          DistinctTypedMutationCount (committed)
+      == 1);
+  REQUIRE (
+      cortext::operations::consolidation_epoch_profile_internal::
+          DistinctTypedMutationCount (
+              committed_batch.committed_trigger_identities)
+      == 1);
+  REQUIRE (MutationKeys (committed_batch.committed_hook_identities)
+           == MutationKeys (committed_batch.committed_trigger_identities));
+
+  {
+    auto transaction = store->Begin ();
+    transaction->Execute ("DELETE FROM embeddings WHERE embedding_id = 7");
+    transaction->Commit ();
+  }
+  committed_batch
+      = cortext::internal::ConsumeSQLiteCommittedMutations (store.get ());
+  REQUIRE (committed_batch.trigger_journal_ready);
+  REQUIRE (MutationKeys (committed_batch.committed_hook_identities)
+           == MutationKeys (committed_batch.committed_trigger_identities));
+  REQUIRE (committed_batch.committed_hook_identities.size () == 1);
+  REQUIRE (committed_batch.committed_hook_identities[0].logical_identity
+           == "embeddings:1:7");
+
+  {
+    auto transaction = store->Begin ();
+    transaction->Execute (
+        "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+        "VALUES(7, ?, 102)", { std::vector<float> (256, 0.75F) });
+    transaction->Commit ();
+  }
+  committed_batch
+      = cortext::internal::ConsumeSQLiteCommittedMutations (store.get ());
+  REQUIRE (committed_batch.trigger_journal_ready);
+  REQUIRE (
+      cortext::operations::consolidation_epoch_profile_internal::
+          DistinctTypedMutationCount (
+              committed_batch.committed_hook_identities)
+      == 1);
+  REQUIRE (
+      cortext::operations::consolidation_epoch_profile_internal::
+          DistinctTypedMutationCount (
+              committed_batch.committed_trigger_identities)
+      == 1);
+  REQUIRE (committed_batch.committed_hook_identities[0].logical_identity
+           == "embeddings:1:7");
+  REQUIRE (MutationKeys (committed_batch.committed_hook_identities)
+           == MutationKeys (committed_batch.committed_trigger_identities));
+
+  {
+    auto transaction = store->Begin ();
+    transaction->Execute ("INSERT INTO memories VALUES(2, 'rolled back')");
+    transaction->Execute (
+        "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+        "VALUES(8, ?, 101)", { std::vector<float> (256, 0.5F) });
+    transaction->Rollback ();
+  }
+  committed_batch
+      = cortext::internal::ConsumeSQLiteCommittedMutations (store.get ());
+  REQUIRE (committed_batch.committed_hook_identities.empty ());
+  REQUIRE (committed_batch.committed_trigger_identities.empty ());
+
+  {
+    auto outer = store->Begin ();
+    outer->Execute ("INSERT INTO memories VALUES(2, 'outer')");
+    auto inner = outer->Begin ();
+    inner->Execute ("INSERT INTO memories VALUES(3, 'inner')");
+    inner->Rollback ();
+    outer->Commit ();
+  }
+  committed_batch
+      = cortext::internal::ConsumeSQLiteCommittedMutations (store.get ());
+  committed = committed_batch.committed_hook_identities;
+  REQUIRE (committed.size () == 1);
+  REQUIRE (committed[0].logical_identity == "memory:1:2");
+  REQUIRE (MutationKeys (committed_batch.committed_hook_identities)
+           == MutationKeys (committed_batch.committed_trigger_identities));
+}
+
+TEST_CASE ("SQLite mutation audit stays absent when profiling is disabled",
+           "[store][profiling][default]")
+{
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  cortext::internal::ResetSQLiteMutationAudit (store.get ());
+  const auto objects = store->Execute (
+      "SELECT name FROM sqlite_temp_master "
+      "WHERE name LIKE 'cortext_mutation_%'");
+  REQUIRE (objects.empty ());
+  const auto batch
+      = cortext::internal::ConsumeSQLiteCommittedMutations (store.get ());
+  REQUIRE_FALSE (batch.trigger_journal_ready);
+  REQUIRE (batch.committed_hook_identities.empty ());
+  REQUIRE (batch.committed_trigger_identities.empty ());
+}
+
+TEST_CASE ("Consolidation epoch independently verifies its typed mutation union",
+           "[store][profiling][consolidation]")
+{
+  cortext::testing::ScopedEnvVar profile_epoch (
+      "CORTEXT_PROFILE_CONSOLIDATION_EPOCH", "1");
+  cortext::ProcessorContext context;
+  using cortext::internal::SQLiteMutationIdentity;
+  using cortext::internal::SQLiteMutationAuditBatch;
+  using cortext::internal::SQLiteMutationKind;
+  namespace epoch
+      = cortext::operations::consolidation_epoch_profile_internal;
+  const std::vector<SQLiteMutationIdentity> initial {
+    SQLiteMutationIdentity { SQLiteMutationKind::Memory, "memories",
+                             "memory:1:1" },
+    SQLiteMutationIdentity { SQLiteMutationKind::Association, "associations",
+                             "association:1:11:27:related" },
+    SQLiteMutationIdentity { SQLiteMutationKind::Index, "embeddings",
+                             "embeddings:1:7" },
+  };
+  const std::vector<SQLiteMutationIdentity> closing {
+    SQLiteMutationIdentity { SQLiteMutationKind::Association, "associations",
+                             "association:1:11:27:related" },
+    SQLiteMutationIdentity { SQLiteMutationKind::Index,
+                             "current_memory_embeddings",
+                             "current_memory_embeddings:1:1" },
+  };
+  epoch::Reset (context);
+  epoch::ObserveEvent (
+      context, SQLiteMutationAuditBatch { initial, initial, true });
+  const auto seal = epoch::Seal (
+      context, SQLiteMutationAuditBatch { closing, closing, true });
+  REQUIRE (seal.sealed_epoch_mutation_count == 4);
+  REQUIRE (seal.sealed_mutation_identity_count == 4);
+  REQUIRE (seal.sealed_mutation_identity_verified);
+  REQUIRE (seal.post.consolidation_dirty_memory_count == 0);
+  REQUIRE (seal.post.consolidation_dirty_association_count == 0);
+  REQUIRE (seal.post.consolidation_dirty_index_count == 0);
+  epoch::Erase (context);
+
+  cortext::ProcessorContext omitted_context;
+  epoch::Reset (omitted_context);
+  const auto omitted = epoch::Seal (
+      omitted_context, SQLiteMutationAuditBatch { {}, { initial[0] }, true });
+  REQUIRE_FALSE (omitted.sealed_mutation_identity_verified);
+  REQUIRE (omitted.sealed_epoch_mutation_count == 1);
+  REQUIRE (omitted.sealed_mutation_identity_count == 0);
+  epoch::Erase (omitted_context);
+
+  cortext::ProcessorContext substituted_context;
+  epoch::Reset (substituted_context);
+  const std::vector<SQLiteMutationIdentity> substituted_hook {
+    SQLiteMutationIdentity { SQLiteMutationKind::Memory, "memories",
+                             "memory:1:2" },
+  };
+  const auto substituted = epoch::Seal (
+      substituted_context,
+      SQLiteMutationAuditBatch { substituted_hook, { initial[0] }, true });
+  REQUIRE_FALSE (substituted.sealed_mutation_identity_verified);
+  REQUIRE (substituted.sealed_epoch_mutation_count
+           == substituted.sealed_mutation_identity_count);
+  epoch::Erase (substituted_context);
 }
 
 // Helper function to clean up temporary database file

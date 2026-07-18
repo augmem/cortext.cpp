@@ -1707,6 +1707,17 @@ TEST_CASE ("Flush restores working-memory persistence state after commit failure
   const std::size_t baseline_cache_count = cache::RegistrySizeForTest ();
   auto sqlite = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
   cortext::testing::InitializeCoreSchema (*sqlite);
+  cortext::testing::SeedEmbeddingV2 (
+      *sqlite, 100LL, std::vector<float> (256, 0.125f), 900LL);
+  cortext::testing::SeedEmbeddingV2 (
+      *sqlite, 101LL, std::vector<float> (256, 0.25f), 950LL);
+  cortext::testing::SeedMemoryV2 (*sqlite, 10LL, 100LL, "lineage/source",
+                                  "LONG_TERM", 1.0, 900LL);
+  sqlite->Execute (
+      "INSERT INTO memory_reconstructions("
+      "reconstruction_id, memory_id, embedding_id, created_at) "
+      "VALUES(1, 10, 101, 950)");
+  cortext::testing::SeedCurrentMemoryEmbeddingV2 (*sqlite, 10LL, 101LL);
   auto store = std::make_shared<FailCommitStore> (sqlite);
 
   ProcessorContext *captured = nullptr;
@@ -1723,6 +1734,7 @@ TEST_CASE ("Flush restores working-memory persistence state after commit failure
   REQUIRE (captured != nullptr);
   REQUIRE (cache::RegistrySizeForTest () == baseline_cache_count + 1);
   REQUIRE (cache::Find (*captured) != nullptr);
+  REQUIRE (cache::BaseEmbeddingIdForMemory (*captured, 10LL, 0) == 100LL);
 
   ProcessorContext::WMSlot slot;
   slot.embedding = signal.embedding;
@@ -1748,6 +1760,7 @@ TEST_CASE ("Flush restores working-memory persistence state after commit failure
   REQUIRE (captured->wm_slots_dirty);
   REQUIRE (cache::RegistrySizeForTest () == baseline_cache_count + 1);
   REQUIRE (cache::Find (*captured) != nullptr);
+  REQUIRE (cache::BaseEmbeddingIdForMemory (*captured, 10LL, 0) == 100LL);
 
   signal.timestamp = 2000;
   REQUIRE_NOTHROW (processor.Process (signal));

@@ -81,6 +81,79 @@ accepted flush of that same pending unit; it does not construct a second
 single-signal memory alongside the accumulated unit. The Durable packet is the
 last signal in the flushed unit exactly once.
 
+### Lazy retrieval-inhibition state and the active epoch
+
+Migration 28 keeps the existing `memories` columns but adds a private SQLite
+recovery clock, generation resets, per-memory anchored inhibition state, an
+expiry index, and a connection-local temporary effective-value view. The
+persistent migration inventory is exactly the three state tables plus the
+expiry index; it does not install durable views or triggers. Retrieval
+competition advances one global log-recovery clock per event, materializes only rows whose exact
+suppression has crossed the existing $10^{-9}$ active threshold, and updates
+only newly suppressed losers. A full-recovery interval advances a generation;
+older rows are materialized in bounded batches and reset markers are pruned
+after their generation has no remaining active rows. Internal reads that
+depend on strength, suppression, or the suppression timestamp use the
+temporary effective view. Compatibility handling conservatively materializes
+and rebuilds the private representation around every caller-supplied SQL
+statement because aliases, wildcards, views, subqueries, and triggers cannot be
+classified safely from SQL text. A caller mutation also invalidates every
+database-derived processor cache before the statement executes.
+
+The authoritative signal mutation still commits once to persistent SQLite.
+After that commit, a separate connection-local in-memory SQLite database
+publishes only the current recovery clock and active-generation inhibition
+rows. It never mirrors durable memory, signal, embedding, association, or
+payload history. A failed persistent commit restores the pre-signal processor
+snapshot; a failed post-commit epoch publication discards and rebuilds the
+disposable database from persistent authority without replaying the committed
+signal. Natural returns after publication. Durable follows the identical path
+and then executes only the named WAL checkpoint barrier.
+
+The active epoch records event, changed-row, and allocated-byte measures with
+harness safety ceilings of 512 events, 32,768 mutations, and 64 MiB. Reaching a
+ceiling raises the existing `Required` consolidation hint before an honoring
+caller can enter another event. Ignoring the hint neither starts another epoch
+nor drops mutations. A successful explicit consolidation rebuilds the
+disposable epoch and resets its mutable measures; a failed consolidation leaves
+the old epoch intact. These are harness-scoped ceilings, not a claim that every
+production workload is globally bounded.
+
+### Bounded activation observation shadow
+
+A separate private experiment observes whether long-lived retrieval can use a
+fixed-size sparse activation graph. It is disabled unless the internal
+`CORTEXT_BOUNDED_ACTIVATION_SHADOW` flag is set, cannot select candidates or
+scores, and never writes canonical tables. `SignalProcessor` prepares a lookup
+against the last published shadow generation, commits the ordinary persistent
+SQLite transaction, and only then publishes the immutable observation once.
+Nested processing journals its prepared observations while SQLite uses
+savepoints; releasing a nested savepoint never publishes. The outermost root
+commit publishes the journal in event order, while an outer rollback discards
+the complete journal. Rollback, cancellation, or commit failure therefore
+leaves the published generation unchanged. Natural and Durable share this
+publication edge; Durable's later checkpoint cannot replay or reverse it. A
+duplicate, generation gap or regression, digest mismatch, or shadow-local
+failure disables and discards the disposable graph without changing the
+canonical result.
+
+The graph contains $R=8+\operatorname{round}(24S)$ roots and at most
+$K=128+\operatorname{round}(512F+512T)$ leaves. Root and leaf beams,
+representatives, neighbor degree, activated consolidation leaves, and cadence
+are likewise fixed functions of F/S/T. Storage is initialized once to
+$R+K+KE$ embedding slots and $KD$ neighbor slots. Normal mutation, recall, and
+internal consolidation each have closed-form comparison ceilings derived from
+those capacities; no source identifier or modality participates in routing or
+capacity. Consolidation rebalances leaves, updates root centroids, and refreshes
+only a fixed number of activated leaf neighborhoods.
+
+The disposable graph is unavailable after restart until an explicit measured
+rebuild from authoritative SQLite completes. That rebuild currently visits
+retained history linearly, so it remains a named production-cutover blocker.
+The experiment therefore establishes implementation and measurement seams for
+fixed sparse activation; it does not replace exact retrieval, make the shadow
+authoritative, or claim bounded startup or live behavior.
+
 Rollback snapshots move the private accumulator map, working-memory records,
 and their blob-reference vectors out of the generic context copy and restore
 their ownership immediately afterward. The active source's bounded scalar
@@ -141,6 +214,32 @@ builder. The normal core, storage, retrieval, feedback, episode, object-store,
 working-memory, signal-counter, and rate-observation paths are not maintenance
 steps.
 
+Emotional cascade metadata is hydrated into a private, rebuildable processor
+cache keyed by memory id and base embedding id. The cache preserves the SQL
+contract for shared embeddings by retaining every member row, deriving current
+intensity and half-life bonus with the same per-embedding minima, and retaining
+only flashbulb rows in recency order for source discovery. Emotional
+consolidation overwrites the affected embedding family, cascade propagation
+applies the existing maxima, storage and shallow consolidation append rows, and
+eviction removes them. Journal-aware rollback discards and rehydrates this
+database-derived cache, while arbitrary custom pipelines retain the complete
+snapshot path. This changes execution ownership only; source thresholds,
+tie order, traversal, decay, updates, and persisted rows are unchanged.
+When multiple emotional sources require traversal, the implementation batches
+them in source-order groups of at most 64 and propagates a bit per source
+through the same breadth-first levels. Each bit retains its source-specific
+radius, and reached embeddings are emitted at the first depth observed for
+that source. Batches are processed in original source order, so the existing
+first-source-wins update rule is unchanged. This shares edge visits without
+using source identity or modality as an optimization key.
+The cache also records the memory nodes from which each source could still
+expand within its radius. An incrementally inserted association can therefore
+advance the fixed point without another traversal when neither endpoint lies
+in any source's expansion footprint. A topology rebuild invalidates the
+footprint conservatively. Ordinary unconnected non-source inserts and
+monotone increases to target emotional values likewise preserve the fixed
+point; source changes and target-value decreases still re-arm it.
+
 Shallow consolidation is embedding-only. It clusters eligible long-term
 memories, writes an `ASSOCIATION` centroid node for each cluster, assigns source
 memories to the cluster, and emits `derived_from` edges. If durable `LABEL`
@@ -158,19 +257,51 @@ batch semantic extraction job.
 Production retrieval discovers a broad but bounded vector seed set from durable
 memory embeddings. Before the seed cap, it removes directed `supersedes`
 targets and collapses near-duplicate embedding families to one representative.
-The family index uses complementary 32-block Cauchy--Schwarz upper bounds in
-the stored coordinate system and a normalized Walsh--Hadamard basis, followed
-by exact cosine checks. Each upper bound is sound, so taking their minimum
-cannot exclude a pair meeting the cosine threshold. The complementary bases
-avoid broad exact pairwise work for both sparse coordinate-aligned vectors and
-dense Hadamard-aligned vectors; arbitrary adversarial surfaces may still reach
-the exact fallback. If the private vector cache is unavailable, durable
+The family index accumulates exact squared coordinate differences in
+16-coordinate vectorized blocks and rejects a pair as soon as a completed
+block exceeds the complete squared-distance limit implied by the cosine
+threshold. Surviving pairs use complementary
+32-block Cauchy--Schwarz upper bounds in the stored coordinate system and a
+normalized Walsh--Hadamard basis, followed by exact cosine checks. The partial
+distance condition remains sound because every omitted term is nonnegative;
+both upper bounds are also sound, so none can exclude a pair meeting the cosine
+threshold. The complementary bases avoid broad exact
+pairwise work for both sparse coordinate-aligned vectors and dense
+Hadamard-aligned vectors; arbitrary adversarial surfaces may still reach the
+exact fallback. The normalized vector and both block-norm summaries are
+immutable functions of an embedding, so the private surface computes them on
+first family use and retains them with that entry. Replacing a current surface
+entry replaces its summaries as part of the same cache mutation. This removes
+repeated normalization and Walsh--Hadamard construction without changing
+family order, comparison arithmetic, or fallback behavior. If the private
+vector cache is unavailable, durable
 processing rebuilds it once from the complete persisted surface and immediately
 applies the same family and supersession filters before truncation. A failed
 rebuild installs a failure sentinel rather than repeating the two complete
 surface scans on every request. A unique cached vector retains every long-term
 memory metadata alternative that shares its base embedding, and query-time
 eligibility chooses a nonsuperseded sibling without duplicating vector storage.
+The cache separately indexes entries that have at least one long-term metadata
+alternative. Retrieval applies the existing timestamp, current-surface, and
+supersession predicates to that subset before evaluating vector distance, so
+signal-only historical embeddings do not enter the distance kernel. This is an
+execution-only index: it does not change the eligible set, distance expression,
+tie order, family collapse, or source and modality semantics.
+Alongside the shared association fanout cache, an internal execution sidecar
+maintains, for each supersession target, the earliest start timestamp of an
+eligible replacement. Retrieval tests that timestamp directly instead of
+rebuilding a target set by scanning every incoming edge. Memory storage
+publishes its already-committed supersession decisions into the fanout cache
+and rebuilds the sidecar index; missing target metadata invalidates the cache
+and returns to authoritative SQLite rehydration. Neither structure is part of
+the public processor layout. The strict replacement-before-query predicate and
+base embedding identity remain unchanged.
+The emotional-metadata portion of the sidecar is trusted only by the
+engine-owned operation root that maintains it. A caller-supplied root's
+transaction view invalidates that sidecar before forwarding its first SQL
+statement, so a custom transaction that updates emotional columns directly
+cannot leave a valid-looking stale fixed point for a later operation in the
+same transaction. Cache-only custom roots retain their exact rollback snapshot.
 The fallback executes a demand-driven sequence of ordered SQL pages
 over the current and historical vector surfaces. Each page joins memory
 metadata and applies kind, timestamp, and supersession eligibility before
@@ -185,14 +316,34 @@ cache is built and incrementally updated from the processor's latest
 reconstruction surface, even when a test or storage policy intentionally omits
 the corresponding persisted-current write. A valid cache therefore performs
 distance ordering and cosine-family accounting on latest vectors. If that cache
-is unavailable while the processor surface is complete, durable retrieval
-rebuilds a current-only cache from the processor surface and ephemeral retrieval
-scans that surface directly without mutating the registry. Only an incomplete
-processor surface falls back to SQL; in that recovery case the query substitutes
-each latest reconstruction before cross-page family accounting. Base families
+is unavailable while the processor surface is complete and original-base
+lineage remains available, durable retrieval rebuilds a current-only cache from
+the processor surface and ephemeral retrieval scans that surface directly
+without mutating the registry. Missing base lineage or an incomplete processor
+surface falls back to SQL; in that recovery case the query substitutes each
+latest reconstruction before cross-page family accounting. Base families
 that converge after reconstruction therefore consume one current-family slot
 and cannot stop selection early. Current per-memory reconstructions remain
 distinct rows and the corresponding base row for that same memory is excluded.
+The same registry keeps an exact index of supersession-eligible historical
+memory rows and the base lineage of each current row. Memory storage first
+ranks the current surface and records its exact cutoff. When current and
+historical populations are identical except for explicitly tracked changed
+memories, deterministic embedding-id and memory-id tie orders agree, and every
+changed historical row is outside that cutoff, the current result proves that
+the historical top-k contributes no unseen candidate. The historical scan is
+then skipped; any ambiguous lineage, reversed tie order, or failed cutoff proof
+falls back to the complete eligible historical scan. A historical embedding
+referenced by more than one eligible memory also disables both
+current-population shortcuts: the historical query ranks embeddings before
+expanding every memory sibling, whereas the current surface ranks per-memory
+rows. The complete embedding-level pass therefore preserves sibling fanout even
+when the per-memory candidate limit is saturated. This proof changes neither
+the candidate population nor the chosen supersession edges, but the current
+surface distance pass remains proportional to that surface.
+Rollback and flush recovery also rehydrate each current entry's original base
+ID from `memories.embedding_id`; they never infer it from the reconstructed
+surface.
 When constructive recall is disabled, both restart hydration and cache-loss
 rebuild select the base embedding and ignore reconstruction/current surfaces.
 This recovery path

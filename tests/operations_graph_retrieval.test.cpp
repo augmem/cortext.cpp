@@ -1,8 +1,10 @@
 #include "test_helpers.hpp"
+#include "../src/operations/association_fanout_cache_internal.hpp"
 #include "../src/operations/constructive_recall_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cortext/core/utils.hpp>
@@ -17,9 +19,11 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -450,6 +454,90 @@ TEST_CASE ("Graph retrieval keeps historical memory before its replacement time"
   const auto out = processor.Process (MakeSignal (UnitVec (0), 3000));
   REQUIRE_FALSE (out.candidate_memory_ids.empty ());
   REQUIRE (out.candidate_memory_ids.front () == 10LL);
+
+  const auto at_replacement
+      = processor.Process (MakeSignal (UnitVec (0), 5000));
+  REQUIRE (std::find (at_replacement.candidate_memory_ids.begin (),
+                      at_replacement.candidate_memory_ids.end (), 10LL)
+           != at_replacement.candidate_memory_ids.end ());
+
+  const auto after_replacement
+      = processor.Process (MakeSignal (UnitVec (0), 5001));
+  REQUIRE (std::find (after_replacement.candidate_memory_ids.begin (),
+                      after_replacement.candidate_memory_ids.end (), 10LL)
+           == after_replacement.candidate_memory_ids.end ());
+}
+
+TEST_CASE ("Family features are cached and replaced with their embedding",
+           "[operations][graph][retrieval][cache][family]")
+{
+  namespace surface_cache
+      = operations::historical_surface_search_cache_internal;
+  ProcessorContext pctx;
+  REQUIRE (surface_cache::Reset (
+      pctx, {}, { surface_cache::Entry { 100, 10, 1000, "LONG_TERM",
+                                        "source-a", UnitVec (0), 100 } }));
+
+  auto state = surface_cache::Find (pctx);
+  REQUIRE (state);
+  REQUIRE_FALSE (state->current_entries[0].family_features.has_value ());
+  const auto &first
+      = surface_cache::FamilyFeatures (state->current_entries[0]);
+  REQUIRE (first.normalized[0] == Catch::Approx (1.0f));
+  REQUIRE (state->current_entries[0].family_features.has_value ());
+  const auto *cached = &*state->current_entries[0].family_features;
+  REQUIRE (&surface_cache::FamilyFeatures (state->current_entries[0])
+           == cached);
+
+  surface_cache::UpsertCurrent (
+      pctx, { 200, 10, 1001, "LONG_TERM", "source-b", UnitVec (1), 100 });
+  state = surface_cache::Find (pctx);
+  REQUIRE (state);
+  REQUIRE_FALSE (state->current_entries[0].family_features.has_value ());
+  const auto &replacement
+      = surface_cache::FamilyFeatures (state->current_entries[0]);
+  REQUIRE (replacement.normalized[0] == Catch::Approx (0.0f));
+  REQUIRE (replacement.normalized[1] == Catch::Approx (1.0f));
+  surface_cache::Erase (pctx);
+}
+
+TEST_CASE ("Supersession eligibility index invalidates only for indexed "
+           "source changes",
+           "[operations][graph][retrieval][supersession][cache][scaling]")
+{
+  ProcessorContext pctx;
+  pctx.UpsertRetrievalSurface (
+      { 20, 200, 5000, 5000, 0, 0, 0, 0, "LONG_TERM", "replacement",
+        "text", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+  auto &cache = pctx.association_fanout_cache;
+  cache.valid = true;
+  cache.out_by_source[20].push_back (
+      { 10, 100, "supersedes", 1.0, 5000 });
+  cache.in_by_target[10].push_back (
+      { 20, 200, "supersedes", 1.0, 5000 });
+  operations::association_fanout_cache::BuildSupersessionEligibility (
+      cache, pctx);
+  auto sidecar = operations::execution_cache_sidecar_internal::Find (pctx);
+  REQUIRE (sidecar);
+  REQUIRE (sidecar->supersession_eligibility.valid);
+  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10)
+           == 5000);
+
+  pctx.UpsertRetrievalSurface (
+      { 30, 300, 6000, 6000, 0, 0, 0, 0, "LONG_TERM", "unrelated",
+        "audio", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (1) });
+  REQUIRE (sidecar->supersession_eligibility.valid);
+
+  pctx.UpsertRetrievalSurface (
+      { 20, 200, 7000, 7000, 0, 0, 0, 0, "LONG_TERM", "replacement",
+        "image", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+  operations::association_fanout_cache::NotifyRetrievalSurfaceChanged (
+      pctx, 20);
+  REQUIRE_FALSE (sidecar->supersession_eligibility.valid);
+  operations::association_fanout_cache::BuildSupersessionEligibility (
+      cache, pctx);
+  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10)
+           == 7000);
 }
 
 TEST_CASE ("Graph retrieval temporal score decays across multi-month ages",
@@ -799,7 +887,32 @@ TEST_CASE ("Graph retrieval cache rebuild uses base embedding when constructive 
   REQUIRE (target != ranked.end ());
   REQUIRE (target->embedding_id == 100LL);
   REQUIRE (target->score > 0.99);
+  REQUIRE (operations::historical_surface_search_cache_internal::
+               BaseEmbeddingIdForMemory (pctx, 10LL, 0)
+           == 100LL);
   operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Current surface upsert preserves original base embedding lineage",
+           "[operations][graph][retrieval][constructive_recall][cache]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  ProcessorContext pctx;
+  const Eigen::VectorXf base = UnitVec (0);
+  const Eigen::VectorXf reconstructed = UnitVec (1);
+  REQUIRE (cache::Reset (
+      pctx, { { 100LL, 10LL, 1000LL, "LONG_TERM", "source", base } },
+      { { 100LL, 10LL, 0, std::string (), std::string (), base, 100LL } }));
+  cache::UpsertCurrent (
+      pctx, { 101LL, 10LL, 0, std::string (), std::string (), reconstructed });
+  REQUIRE (cache::BaseEmbeddingIdForMemory (pctx, 10LL, 0) == 100LL);
+  const auto state = cache::Find (pctx);
+  REQUIRE (state);
+  REQUIRE (state->current_entries.at (
+               state->current_memory_index.at (10LL)).embedding_id
+           == 101LL);
+  cache::Erase (pctx);
 }
 
 TEST_CASE ("Graph retrieval returns refreshed output after reconstruction",
@@ -1016,6 +1129,8 @@ TEST_CASE ("Graph retrieval soundly collapses cosine-near families before KNN ca
   REQUIRE (std::find (out.candidate_memory_ids.begin (),
                       out.candidate_memory_ids.end (), kTargetMemoryId)
            != out.candidate_memory_ids.end ());
+  REQUIRE (
+      operations::retrieval_trace::GetLastFamilyExactComparisonCount () > 0);
 }
 
 TEST_CASE ("Graph retrieval bounds exact family checks on diverse embeddings",
@@ -1048,7 +1163,7 @@ TEST_CASE ("Graph retrieval bounds exact family checks on diverse embeddings",
   constexpr std::size_t kAllPairs
       = static_cast<std::size_t> (kEmbeddingDim)
         * static_cast<std::size_t> (kEmbeddingDim - 1) / 2;
-  REQUIRE (exact_comparisons > 0);
+  REQUIRE (exact_comparisons == 0);
   REQUIRE (exact_comparisons < kAllPairs / 4);
 }
 
@@ -1083,7 +1198,7 @@ TEST_CASE ("Graph retrieval bounds exact family checks on dense orthogonal "
   constexpr std::size_t kAllPairs
       = static_cast<std::size_t> (kEmbeddingDim)
         * static_cast<std::size_t> (kEmbeddingDim - 1) / 2;
-  REQUIRE (exact_comparisons > 0);
+  REQUIRE (exact_comparisons == 0);
   REQUIRE (exact_comparisons < kAllPairs / 4);
 }
 
@@ -1304,7 +1419,7 @@ TEST_CASE ("Graph retrieval SQL fallback performance probe",
   operations::historical_surface_search_cache_internal::
       SetProcessorSurfaceComplete (pctx, processor_surface_complete);
   operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
-      pctx);
+      pctx, true);
   auto signal = MakeSignal (UnitVec (0), 1000000000);
   signal.retention = Retention::Ephemeral;
   std::vector<double> elapsed_ms;
@@ -1414,6 +1529,64 @@ TEST_CASE ("Graph retrieval cache rebuild accepts shared base embeddings",
       [] (const auto &entry) { return entry.embedding_id == 100; });
   REQUIRE (shared_entry != state->entries.end ());
   REQUIRE (shared_entry->memory_references.size () == 1);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval cache rebuild covers association supersession "
+           "candidates",
+           "[operations][graph][retrieval][cache][supersession]"
+           "[association]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+  store->Execute (
+      "UPDATE memories SET kind = 'ASSOCIATION' WHERE memory_id = 10");
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  ProcessorContext::RetrievalSurfaceEntry association_surface;
+  association_surface.memory_id = 10;
+  association_surface.embedding_id = 100;
+  association_surface.start_ts = 1000;
+  association_surface.kind = "ASSOCIATION";
+  association_surface.vector_seed_eligible = false;
+  association_surface.embedding = UnitVec (0);
+  pctx.UpsertRetrievalSurface (std::move (association_surface));
+  auto signal = MakeSignal (UnitVec (0), 2000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  const auto state
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (state);
+  REQUIRE (state->supersession_entry_by_memory.contains (10));
+  REQUIRE (state->current_memory_index.contains (10));
+  REQUIRE (operations::historical_surface_search_cache_internal::
+               CurrentPopulationCoversHistorical (*state, -1));
+
+  operations::historical_surface_search_cache_internal::
+      SetProcessorSurfaceComplete (pctx, true);
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx, true);
+  OperationContext recovery_ctx (signal, pctx, cfg, store.get ());
+  recovery_ctx.SetShouldCheckRetrieval (true);
+  recovery_ctx.SetWriteExclusionTs (signal.timestamp);
+  auto recovery_tx = store->Begin ();
+  operation.Execute (recovery_ctx, *recovery_tx);
+  recovery_tx->Rollback ();
+  const auto recovered
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (recovered);
+  REQUIRE (recovered->current_memory_index.contains (10));
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 
@@ -1663,6 +1836,34 @@ TEST_CASE ("Graph retrieval fallback preserves overfetch after database reconstr
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 
+TEST_CASE ("Historical search recovery rejects recycled context state",
+           "[operations][graph][retrieval][cache][regression]")
+{
+  alignas (ProcessorContext) std::byte storage[sizeof (ProcessorContext)];
+  auto *prior = std::construct_at (
+      reinterpret_cast<ProcessorContext *> (storage));
+  operations::historical_surface_search_cache_internal::
+      SetCurrentSurfaceDatabaseCurrent (*prior, true);
+  operations::historical_surface_search_cache_internal::
+      SetProcessorSurfaceComplete (*prior, true);
+  std::destroy_at (prior);
+
+  auto *current = std::construct_at (
+      reinterpret_cast<ProcessorContext *> (storage));
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      *current);
+  REQUIRE (operations::historical_surface_search_cache_internal::
+               RecoveryFailed (*current));
+  REQUIRE_FALSE (operations::historical_surface_search_cache_internal::
+                     CurrentSurfaceDatabaseCurrent (*current));
+  const auto state
+      = operations::historical_surface_search_cache_internal::Find (*current);
+  REQUIRE (state != nullptr);
+  REQUIRE_FALSE (state->processor_surface_complete);
+  operations::historical_surface_search_cache_internal::Erase (*current);
+  std::destroy_at (current);
+}
+
 TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstructions",
            "[operations][graph][retrieval][cache][sql][reconstruction]")
 {
@@ -1774,7 +1975,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
   operations::historical_surface_search_cache_internal::
       SetProcessorSurfaceComplete (pctx, true);
   operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
-      pctx);
+      pctx, true);
   OperationContext recovery_ctx (signal, pctx, cfg, store.get ());
   recovery_ctx.SetShouldCheckRetrieval (true);
   recovery_ctx.SetWriteExclusionTs (signal.timestamp);
@@ -1841,5 +2042,41 @@ TEST_CASE ("Historical search cache append retains memory alternative",
   REQUIRE (state->entries.size () == 1);
   REQUIRE (state->entries.front ().memory_references.size () == 1);
   REQUIRE (state->entries.front ().memory_references.front ().memory_id == 10);
+  REQUIRE (state->long_term_entry_indices
+           == std::vector<std::size_t>{ 0 });
+  REQUIRE (state->long_term_index_positions.at (0) == 0);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Historical search cache tracks only long-term distance rows",
+           "[operations][graph][retrieval][cache][eligibility]")
+{
+  using operations::historical_surface_search_cache_internal::Entry;
+  ProcessorContext pctx;
+  REQUIRE (operations::historical_surface_search_cache_internal::Reset (
+      pctx,
+      { Entry{ 100, 10, 1000, "LONG_TERM", "a", UnitVec (0) },
+        Entry{ 101, 11, 1001, "SIGNAL", "b", UnitVec (1) },
+        Entry{ 102, 12, 1002, "LONG_TERM", "c", UnitVec (2) } }));
+
+  auto state
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (state != nullptr);
+  REQUIRE (state->long_term_entry_indices
+           == std::vector<std::size_t>{ 0, 2 });
+
+  operations::historical_surface_search_cache_internal::RemoveEmbedding (
+      pctx, 100);
+  state = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (state->entries.size () == 2);
+  REQUIRE (state->entries[0].embedding_id == 102);
+  REQUIRE (state->long_term_entry_indices
+           == std::vector<std::size_t>{ 0 });
+  REQUIRE (state->long_term_index_positions.at (0) == 0);
+
+  operations::historical_surface_search_cache_internal::Append (
+      pctx, { 103, 13, 1003, "SIGNAL", "d", UnitVec (3) });
+  REQUIRE (state->long_term_entry_indices
+           == std::vector<std::size_t>{ 0 });
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
