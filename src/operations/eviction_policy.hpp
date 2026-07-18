@@ -27,7 +27,7 @@ struct EvictionFrontier
 inline std::string
 EvictionWhereClause (const EvictionFrontier &frontier)
 {
-  std::string where = "WHERE m.strength < ? AND m.kind = 'LONG_TERM'";
+  std::string where = "WHERE rif.strength < ? AND m.kind = 'LONG_TERM'";
   if (frontier.consolidation_gate_active)
     {
       where += " AND m.created_at < ?";
@@ -142,14 +142,16 @@ LoadEvictableMemoryIds (Transaction &tx, const EvictionFrontier &frontier,
 
   std::string where = "WHERE m.memory_id IN ("
                       + MakePlaceholders (memory_ids.size ())
-                      + ") AND m.strength < ? AND m.kind = 'LONG_TERM'";
+                      + ") AND rif.strength < ? AND m.kind = 'LONG_TERM'";
   if (frontier.consolidation_gate_active)
     {
       where += " AND m.created_at < ?";
     }
 
   auto rows = tx.Execute (
-      "SELECT m.memory_id FROM memories m " + where,
+      "SELECT m.memory_id FROM memories m "
+      "JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
+          + where,
       params);
   for (const auto &row : rows)
     {

@@ -1,6 +1,7 @@
 #include "cortext/operations/detect_memory_usage.hpp"
 
 #include "neuromodulator_internal.hpp"
+#include "signal_record_rollback_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -191,6 +192,9 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 
               const double gain
                   = neuromodulation::ValueUpdateGain (p_ctx.neuromod_da);
+              signal_record_rollback_internal::
+                  PreserveProceduralValueBeforeUpdate (
+                      p_ctx, key, event.memory_id);
               double &q = p_ctx.procedural_store[key][event.memory_id];
               q = core::Clamp (q + gain * std::max (0.0, p_ctx.delta_reward),
                                0.0, 1.0);

@@ -2906,7 +2906,11 @@ therefore does not create an episode, signal, working-memory row,
 long-term memory, blob, or searchable embedding, and it does not update
 normal throughput observations. The single `consolidation_state` output
 is an ordered hint for the caller; it does not schedule maintenance work
-by itself.
+by itself. In addition to the throughput classifier below, the private
+active-epoch store raises `Required` when its event, mutation, or
+allocated-byte safety ceiling is reached. That boundary is source- and
+modality-independent, remains asserted if ignored, and is cleared only
+after a successful forced-maintenance commit publishes a fresh epoch.
 
 A caller can use the engine hints as the external scheduling rule. Since
 the last committed forced request, including a coherent no-op with no
@@ -2947,7 +2951,7 @@ p_rearm(F,S,T) = p(F,S,T)
                  + (1 - p(F,S,T)) * T
 p_drift(F,S,T) = 1 - p(F,S,T)
 
-consolidation_state =
+throughput_state =
   None,        if armed = false
                OR memories_since_consolidation <= 0
                OR range <= numeric_epsilon
@@ -2959,16 +2963,19 @@ consolidation_state =
 The required branch is evaluated first. Since
 `consolidation_escalation(T)` is always greater than one, the required
 boundary is strictly below the recommendation boundary after every floor
-or peak update. Elapsed wall or event time and arbitrary memory counts
-do not enter the state decision; backlog is only a positive-work guard.
-An explicit force request starts consolidation independently and its
-output state is `None`. A committed forced request acknowledges the
-active excursion by persisting `armed=false`, even when no coherent
-cluster exists. The acknowledgment resets the next event-derived range
-to the current rate: both floor and peak become that rate. This prevents
-a historical spike from suppressing recommendations after a throughput
-regime shift. Ordinary throughput observations establish a new peak and
-rearm the classifier only after the observed relative range is material:
+or peak update. Elapsed wall or event time and arbitrary durable memory
+counts do not enter the throughput decision; backlog is only a
+positive-work guard. The caller-facing state is `Required` whenever the
+bounded active epoch has reached a safety ceiling, and otherwise equals
+`throughput_state`. An explicit force request starts consolidation
+independently and its output state is `None`. A committed forced request
+acknowledges the active excursion by persisting `armed=false`, even when
+no coherent cluster exists. The acknowledgment resets the next
+event-derived range to the current rate: both floor and peak become that
+rate. This prevents a historical spike from suppressing recommendations
+after a throughput regime shift. Ordinary throughput observations
+establish a new peak and rearm the classifier only after the observed
+relative range is material:
 (*r*<sub>*p**e**a**k*</sub> − *r*<sub>*f**l**o**o**r*</sub>)/max (*r*<sub>*p**e**a**k*</sub>, *ϵ*) ≥ *p*<sub>*d**r**i**f**t*</sub>.
 Because *p* is clamped to \[0.20, 0.70\], the material drawdown remains
 between 0.30 and 0.80 across the complete knob domain, including
@@ -5495,6 +5502,86 @@ it does not construct a second single-signal memory alongside the
 accumulated unit. The Durable packet is the last signal in the flushed
 unit exactly once.
 
+### Lazy retrieval-inhibition state and the active epoch
+
+Migration 28 keeps the existing `memories` columns but adds a private
+SQLite recovery clock, generation resets, per-memory anchored inhibition
+state, an expiry index, and a connection-local temporary effective-value
+view. The persistent migration inventory is exactly the three state
+tables plus the expiry index; it does not install durable views or
+triggers. Retrieval competition advances one global log-recovery clock
+per event, materializes only rows whose exact suppression has crossed
+the existing 10<sup>−9</sup> active threshold, and updates only newly
+suppressed losers. A full-recovery interval advances a generation; older
+rows are materialized in bounded batches and reset markers are pruned
+after their generation has no remaining active rows. Internal reads that
+depend on strength, suppression, or the suppression timestamp use the
+temporary effective view. Compatibility handling conservatively
+materializes and rebuilds the private representation around every
+caller-supplied SQL statement because aliases, wildcards, views,
+subqueries, and triggers cannot be classified safely from SQL text. A
+caller mutation also invalidates every database-derived processor cache
+before the statement executes.
+
+The authoritative signal mutation still commits once to persistent
+SQLite. After that commit, a separate connection-local in-memory SQLite
+database publishes only the current recovery clock and active-generation
+inhibition rows. It never mirrors durable memory, signal, embedding,
+association, or payload history. A failed persistent commit restores the
+pre-signal processor snapshot; a failed post-commit epoch publication
+discards and rebuilds the disposable database from persistent authority
+without replaying the committed signal. Natural returns after
+publication. Durable follows the identical path and then executes only
+the named WAL checkpoint barrier.
+
+The active epoch records event, changed-row, and allocated-byte measures
+with harness safety ceilings of 512 events, 32,768 mutations, and 64
+MiB. Reaching a ceiling raises the existing `Required` consolidation
+hint before an honoring caller can enter another event. Ignoring the
+hint neither starts another epoch nor drops mutations. A successful
+explicit consolidation rebuilds the disposable epoch and resets its
+mutable measures; a failed consolidation leaves the old epoch intact.
+These are harness-scoped ceilings, not a claim that every production
+workload is globally bounded.
+
+### Bounded activation observation shadow
+
+A separate private experiment observes whether long-lived retrieval can
+use a fixed-size sparse activation graph. It is disabled unless the
+internal `CORTEXT_BOUNDED_ACTIVATION_SHADOW` flag is set, cannot select
+candidates or scores, and never writes canonical tables.
+`SignalProcessor` prepares a lookup against the last published shadow
+generation, commits the ordinary persistent SQLite transaction, and only
+then publishes the immutable observation once. Nested processing
+journals its prepared observations while SQLite uses savepoints;
+releasing a nested savepoint never publishes. The outermost root commit
+publishes the journal in event order, while an outer rollback discards
+the complete journal. Rollback, cancellation, or commit failure
+therefore leaves the published generation unchanged. Natural and Durable
+share this publication edge; Durable’s later checkpoint cannot replay or
+reverse it. A duplicate, generation gap or regression, digest mismatch,
+or shadow-local failure disables and discards the disposable graph
+without changing the canonical result.
+
+The graph contains *R* = 8 + round (24*S*) roots and at most
+*K* = 128 + round (512*F* + 512*T*) leaves. Root and leaf beams,
+representatives, neighbor degree, activated consolidation leaves, and
+cadence are likewise fixed functions of F/S/T. Storage is initialized
+once to *R* + *K* + *K**E* embedding slots and *K**D* neighbor slots.
+Normal mutation, recall, and internal consolidation each have
+closed-form comparison ceilings derived from those capacities; no source
+identifier or modality participates in routing or capacity.
+Consolidation rebalances leaves, updates root centroids, and refreshes
+only a fixed number of activated leaf neighborhoods.
+
+The disposable graph is unavailable after restart until an explicit
+measured rebuild from authoritative SQLite completes. That rebuild
+currently visits retained history linearly, so it remains a named
+production-cutover blocker. The experiment therefore establishes
+implementation and measurement seams for fixed sparse activation; it
+does not replace exact retrieval, make the shadow authoritative, or
+claim bounded startup or live behavior.
+
 Rollback snapshots move the private accumulator map, working-memory
 records, and their blob-reference vectors out of the generic context
 copy and restore their ownership immediately afterward. The active
@@ -5556,6 +5643,34 @@ clusterer, shallow consolidation, and graph builder. The normal core,
 storage, retrieval, feedback, episode, object-store, working-memory,
 signal-counter, and rate-observation paths are not maintenance steps.
 
+Emotional cascade metadata is hydrated into a private, rebuildable
+processor cache keyed by memory id and base embedding id. The cache
+preserves the SQL contract for shared embeddings by retaining every
+member row, deriving current intensity and half-life bonus with the same
+per-embedding minima, and retaining only flashbulb rows in recency order
+for source discovery. Emotional consolidation overwrites the affected
+embedding family, cascade propagation applies the existing maxima,
+storage and shallow consolidation append rows, and eviction removes
+them. Journal-aware rollback discards and rehydrates this
+database-derived cache, while arbitrary custom pipelines retain the
+complete snapshot path. This changes execution ownership only; source
+thresholds, tie order, traversal, decay, updates, and persisted rows are
+unchanged. When multiple emotional sources require traversal, the
+implementation batches them in source-order groups of at most 64 and
+propagates a bit per source through the same breadth-first levels. Each
+bit retains its source-specific radius, and reached embeddings are
+emitted at the first depth observed for that source. Batches are
+processed in original source order, so the existing first-source-wins
+update rule is unchanged. This shares edge visits without using source
+identity or modality as an optimization key. The cache also records the
+memory nodes from which each source could still expand within its
+radius. An incrementally inserted association can therefore advance the
+fixed point without another traversal when neither endpoint lies in any
+source’s expansion footprint. A topology rebuild invalidates the
+footprint conservatively. Ordinary unconnected non-source inserts and
+monotone increases to target emotional values likewise preserve the
+fixed point; source changes and target-value decreases still re-arm it.
+
 Shallow consolidation is embedding-only. It clusters eligible long-term
 memories, writes an `ASSOCIATION` centroid node for each cluster,
 assigns source memories to the cluster, and emits `derived_from` edges.
@@ -5574,47 +5689,100 @@ edges, not a batch semantic extraction job.
 Production retrieval discovers a broad but bounded vector seed set from
 durable memory embeddings. Before the seed cap, it removes directed
 `supersedes` targets and collapses near-duplicate embedding families to
-one representative. The family index uses complementary 32-block
-Cauchy–Schwarz upper bounds in the stored coordinate system and a
-normalized Walsh–Hadamard basis, followed by exact cosine checks. Each
-upper bound is sound, so taking their minimum cannot exclude a pair
-meeting the cosine threshold. The complementary bases avoid broad exact
-pairwise work for both sparse coordinate-aligned vectors and dense
+one representative. The family index accumulates exact squared
+coordinate differences in 16-coordinate vectorized blocks and rejects a
+pair as soon as a completed block exceeds the complete squared-distance
+limit implied by the cosine threshold. Surviving pairs use complementary
+32-block Cauchy–Schwarz upper bounds in the stored coordinate system and
+a normalized Walsh–Hadamard basis, followed by exact cosine checks. The
+partial distance condition remains sound because every omitted term is
+nonnegative; both upper bounds are also sound, so none can exclude a
+pair meeting the cosine threshold. The complementary bases avoid broad
+exact pairwise work for both sparse coordinate-aligned vectors and dense
 Hadamard-aligned vectors; arbitrary adversarial surfaces may still reach
-the exact fallback. If the private vector cache is unavailable, durable
+the exact fallback. The normalized vector and both block-norm summaries
+are immutable functions of an embedding, so the private surface computes
+them on first family use and retains them with that entry. Replacing a
+current surface entry replaces its summaries as part of the same cache
+mutation. This removes repeated normalization and Walsh–Hadamard
+construction without changing family order, comparison arithmetic, or
+fallback behavior. If the private vector cache is unavailable, durable
 processing rebuilds it once from the complete persisted surface and
 immediately applies the same family and supersession filters before
 truncation. A failed rebuild installs a failure sentinel rather than
 repeating the two complete surface scans on every request. A unique
 cached vector retains every long-term memory metadata alternative that
 shares its base embedding, and query-time eligibility chooses a
-nonsuperseded sibling without duplicating vector storage. The fallback
-executes a demand-driven sequence of ordered SQL pages over the current
-and historical vector surfaces. Each page joins memory metadata and
-applies kind, timestamp, and supersession eligibility before distance
-ordering, excludes a historical row when that memory already has a
-current reconstruction, collapses byte-identical historical vectors, and
-uses a second application of the existing F/S/T-derived seed-search
-breadth as its row bound. One in-memory cosine-family index spans every
-page; paging stops when the ordinary semantic-family seed budget is full
-or the eligible surface is exhausted. Processor hydration tracks
-persisted-current-surface currency and processor-surface completeness
-independently. The private current-vector search cache is built and
-incrementally updated from the processor’s latest reconstruction
-surface, even when a test or storage policy intentionally omits the
-corresponding persisted-current write. A valid cache therefore performs
-distance ordering and cosine-family accounting on latest vectors. If
-that cache is unavailable while the processor surface is complete,
-durable retrieval rebuilds a current-only cache from the processor
-surface and ephemeral retrieval scans that surface directly without
-mutating the registry. Only an incomplete processor surface falls back
-to SQL; in that recovery case the query substitutes each latest
-reconstruction before cross-page family accounting. Base families that
-converge after reconstruction therefore consume one current-family slot
-and cannot stop selection early. Current per-memory reconstructions
-remain distinct rows and the corresponding base row for that same memory
-is excluded. When constructive recall is disabled, both restart
-hydration and cache-loss rebuild select the base embedding and ignore
+nonsuperseded sibling without duplicating vector storage. The cache
+separately indexes entries that have at least one long-term metadata
+alternative. Retrieval applies the existing timestamp, current-surface,
+and supersession predicates to that subset before evaluating vector
+distance, so signal-only historical embeddings do not enter the distance
+kernel. This is an execution-only index: it does not change the eligible
+set, distance expression, tie order, family collapse, or source and
+modality semantics. Alongside the shared association fanout cache, an
+internal execution sidecar maintains, for each supersession target, the
+earliest start timestamp of an eligible replacement. Retrieval tests
+that timestamp directly instead of rebuilding a target set by scanning
+every incoming edge. Memory storage publishes its already-committed
+supersession decisions into the fanout cache and rebuilds the sidecar
+index; missing target metadata invalidates the cache and returns to
+authoritative SQLite rehydration. Neither structure is part of the
+public processor layout. The strict replacement-before-query predicate
+and base embedding identity remain unchanged. The emotional-metadata
+portion of the sidecar is trusted only by the engine-owned operation
+root that maintains it. A caller-supplied root’s transaction view
+invalidates that sidecar before forwarding its first SQL statement, so a
+custom transaction that updates emotional columns directly cannot leave
+a valid-looking stale fixed point for a later operation in the same
+transaction. Cache-only custom roots retain their exact rollback
+snapshot. The fallback executes a demand-driven sequence of ordered SQL
+pages over the current and historical vector surfaces. Each page joins
+memory metadata and applies kind, timestamp, and supersession
+eligibility before distance ordering, excludes a historical row when
+that memory already has a current reconstruction, collapses
+byte-identical historical vectors, and uses a second application of the
+existing F/S/T-derived seed-search breadth as its row bound. One
+in-memory cosine-family index spans every page; paging stops when the
+ordinary semantic-family seed budget is full or the eligible surface is
+exhausted. Processor hydration tracks persisted-current-surface currency
+and processor-surface completeness independently. The private
+current-vector search cache is built and incrementally updated from the
+processor’s latest reconstruction surface, even when a test or storage
+policy intentionally omits the corresponding persisted-current write. A
+valid cache therefore performs distance ordering and cosine-family
+accounting on latest vectors. If that cache is unavailable while the
+processor surface is complete and original-base lineage remains
+available, durable retrieval rebuilds a current-only cache from the
+processor surface and ephemeral retrieval scans that surface directly
+without mutating the registry. Missing base lineage or an incomplete
+processor surface falls back to SQL; in that recovery case the query
+substitutes each latest reconstruction before cross-page family
+accounting. Base families that converge after reconstruction therefore
+consume one current-family slot and cannot stop selection early. Current
+per-memory reconstructions remain distinct rows and the corresponding
+base row for that same memory is excluded. The same registry keeps an
+exact index of supersession-eligible historical memory rows and the base
+lineage of each current row. Memory storage first ranks the current
+surface and records its exact cutoff. When current and historical
+populations are identical except for explicitly tracked changed
+memories, deterministic embedding-id and memory-id tie orders agree, and
+every changed historical row is outside that cutoff, the current result
+proves that the historical top-k contributes no unseen candidate. The
+historical scan is then skipped; any ambiguous lineage, reversed tie
+order, or failed cutoff proof falls back to the complete eligible
+historical scan. A historical embedding referenced by more than one
+eligible memory also disables both current-population shortcuts: the
+historical query ranks embeddings before expanding every memory sibling,
+whereas the current surface ranks per-memory rows. The complete
+embedding-level pass therefore preserves sibling fanout even when the
+per-memory candidate limit is saturated. This proof changes neither the
+candidate population nor the chosen supersession edges, but the current
+surface distance pass remains proportional to that surface. Rollback and
+flush recovery also rehydrate each current entry’s original base ID from
+`memories.embedding_id`; they never infer it from the reconstructed
+surface. When constructive recall is disabled, both restart hydration
+and cache-loss rebuild select the base embedding and ignore
 reconstruction/current surfaces. This recovery path preserves an
 eligible target behind 900 closer ineligible rows and preserves an
 eligible sibling of a superseded shared embedding. A separate 600-member
@@ -5856,6 +6024,20 @@ The current branch includes the following implementation-level changes:
 <td>same SQL semantics, lower repeated parse overhead</td>
 </tr>
 <tr>
+<td>retrieval-induced inhibition</td>
+<td>replace per-event recovery of every active row with a persistent
+global log clock, indexed exact-threshold expiry, generation resets, and
+a bounded connection-local SQLite active-epoch projection; publish the
+projection only after the shared persistent commit</td>
+<td>effective strength, suppression, timestamp, <span
+class="math inline">10<sup>−9</sup></span> freeze, restart, rollback,
+caller SQL, eviction, and deterministic ranking remain exact;
+publication failure rebuilds from persistent authority without replay;
+Natural and Durable use the same transaction and Durable adds only its
+checkpoint barrier; no source-id or modality branch and no full-history
+projection</td>
+</tr>
+<tr>
 <td>vector ranking</td>
 <td>bounded top-k selection and architecture SIMD kernels in the vector
 path</td>
@@ -5863,16 +6045,18 @@ path</td>
 </tr>
 <tr>
 <td>retrieval seed surface</td>
-<td>current-memory embedding lookup with pre-cap supersession filtering
-and complementary sound 32-block Cauchy–Schwarz bounds in the stored and
-Walsh–Hadamard bases followed by exact cosine family checks; shared
-vectors retain all long-term metadata alternatives; the private search
-cache follows the processor’s latest reconstruction surface
-independently of persisted-current materialization; cache loss uses the
-complete processor surface directly or, only when that surface is
-incomplete, metadata-eligible, distance-ordered, F/S/T-bounded SQL pages
-feeding one cross-page cosine-family index that substitutes latest
-reconstructions before accounting</td>
+<td>current-memory embedding lookup with pre-cap supersession filtering;
+immutable normalized and stored/Hadamard block summaries cached per
+private surface entry; exact partial squared-distance rejection plus
+complementary sound 32-block Cauchy–Schwarz bounds in the stored and
+Walsh–Hadamard bases before exact cosine family checks; shared vectors
+retain all long-term metadata alternatives; the private search cache
+follows the processor’s latest reconstruction surface independently of
+persisted-current materialization; cache loss uses the complete
+processor surface directly or, only when that surface is incomplete,
+metadata-eligible, distance-ordered, F/S/T-bounded SQL pages feeding one
+cross-page cosine-family index that substitutes latest reconstructions
+before accounting</td>
 <td>latest reconstruction and eligible shared-embedding siblings remain
 visible, byte-distinct near-duplicate boilerplate and stale base
 families that converge after reconstruction cannot consume the
@@ -5898,6 +6082,16 @@ directional <code>supersedes</code> relations define families but are
 not activation edges</td>
 </tr>
 <tr>
+<td>supersession eligibility</td>
+<td>derive target-to-earliest-replacement timestamps in an internal
+execution sidecar beside the shared association fanout cache and
+incrementally publish committed MemoryStorage supersession edges instead
+of invalidating and rebuilding all fanout rows</td>
+<td>exact edge direction, base embedding ids, strict timestamp boundary,
+source/modality independence, SQLite fallback, rollback rehydration, and
+the public processor layout are retained</td>
+</tr>
+<tr>
 <td>reconstruction</td>
 <td>knob-bounded retrieval-time reconstruction append</td>
 <td>constructive recall remains non-decoder and can be disabled
@@ -5914,12 +6108,15 @@ payloads</td>
 <td>maintain private current/base embedding surfaces in a process-wide
 lifecycle registry, including signal-only rows that affect the
 sqlite-vec population; rank into typed borrowed/owned candidates; reuse
-the query norm across exact cosine checks</td>
+the query norm across exact cosine checks; track the exact historical
+supersession population and current/base mismatches so a current top-k
+cutoff can prove when no unseen historical row can enter the result</td>
 <td>the registry follows processor teardown across sequential thread
 migration and mirrors authoritative SQL write decisions; the same
 candidate population, K, filters, tie order, cosine results, thresholds,
-and supersession edges are retained; SQL remains the fallback and no
-public header or API layout changes</td>
+and supersession edges are retained; ambiguous lineage or tie order
+falls back to the complete eligible scan; SQL remains the final fallback
+and no public header or API layout changes</td>
 </tr>
 <tr>
 <td>graph retrieval</td>
@@ -5931,19 +6128,44 @@ semantic seed surface</td>
 </tr>
 <tr>
 <td>rollback snapshots</td>
-<td>detach rebuildable durable caches, move the private accumulator map,
-and detach working-memory signal-record and blob-reference vectors
-before copying remaining processor state; journal active-source vector
-lengths for ordinary appends and lazily deep-back up only the active
-source before accepted storage, flush reset, or interrupt reset can
-mutate prior records; trim working-memory appends and move an evicted
-slot’s record ownership into the journal; reserve a full-map hook for
-explicit foreign-source accumulator-topology mutation</td>
+<td>detach rebuildable durable caches, deep-copy the internal
+execution-sidecar state only for full snapshots, move the private
+accumulator map, and detach working-memory signal-record and
+blob-reference vectors before copying remaining processor state; journal
+active-source vector lengths for ordinary appends and lazily deep-back
+up only the active source before accepted storage, flush reset, or
+interrupt reset can mutate prior records; trim working-memory appends
+and move an evicted slot’s record ownership into the journal; reserve a
+full-map hook for explicit foreign-source accumulator-topology
+mutation</td>
 <td>non-boundary Natural ingestion does not recopy the growing pending
 unit or source map; a one-source flush does not copy unrelated
 open-source or working-memory history; failed writes and public no-store
 queries restore durable and volatile state exactly; public state layout
 and retention semantics are unchanged</td>
+</tr>
+<tr>
+<td>emotional cascade metadata</td>
+<td>maintain a private rebuildable cache of per-memory emotional rows,
+per-embedding shared-member minima, recency-ordered flashbulb sources,
+and the expandable topology footprint of the last fixed point; update it
+at the same successful storage, consolidation, cascade, association, and
+eviction decisions and rehydrate it after journal-aware rollback;
+caller-supplied roots invalidate the sidecar before forwarding their
+first transaction statement, while cache-only roots retain their exact
+snapshot; share breadth-first edge visits across source-order 64-bit
+batches while retaining a distinct visited bit and radius for every
+source</td>
+<td>source eligibility and stable tie order, shared-embedding
+<code>MIN</code>/<code>MAX</code> semantics, shortest depth per source,
+first-source-wins ordering, custom raw-SQL updates within the current
+transaction, update decisions, and durable database state match the
+scalar path; an inserted edge outside every source’s remaining-radius
+footprint advances the fixed point without a graph walk, topology
+rebuilds invalidate conservatively, batches continue for arbitrary
+source counts, and neither path keys behavior by source id or modality;
+ordinary engine-owned snapshot work still copies zero store-sized cache
+entries</td>
 </tr>
 <tr>
 <td>synaptic tagging</td>
@@ -6009,6 +6231,61 @@ mutation requests a full-map backup and the combined operation fails.
 These are source-health and work-count proofs. They do not reproduce the
 full 15,500-packet observation and do not turn the exact durable
 candidate scan into an asymptotically flat store search.
+
+The later active-epoch cutover targets the remaining
+store-size-dependent retrieval-inhibition recovery directly. A complete
+15,695-packet Natural replay kept the active epoch within its harness
+ceilings: the observed high-water marks were 512 events, 1,859 distinct
+mutations, and 180,224 allocated bytes, with no over-limit event. The
+caller honored 127 consolidations. Across the audit’s first and last
+five eligible windows, `Competition.rif_recovery_active_sql` changed
+from 0.008629 to 0.009038 ms, a 1.047 ratio. The whole write path did
+not plateau: mean process time rose from 2.265 to 5.507 ms and
+throughput fell from 36.27 to 9.14 packets/s. This run therefore
+verifies the lazy-RIF hotspot and the scoped epoch ceilings, while
+leaving graph retrieval, memory storage, and emotional propagation as
+measured contributors. It is not a long-horizon or production-wide
+boundedness claim.
+
+The observation-only bounded activation graph was then implemented
+behind a default-off private flag and evaluated directly in compiled C++
+over 35,496 256-dimensional embeddings with 512 age-stratified queries.
+At F=S=T=0.5 it held 20 roots, 640 leaves, 24 diverse representatives
+per leaf, and eight neighbors per leaf. Normal update work reached 163
+comparisons against a fixed 196 ceiling; internal consolidation reached
+28,462 against 29,360; and recall reached 996 against 1,196. Mean exact
+top-16 identifier recall was 0.0562, duplicate-equivalent recall 0.1190,
+best cosine 0.9445, and exact-neighbor semantic coverage 0.9545. These
+results closely reproduce the separate prototype observation while
+measuring the code that is actually wired to the processor lifecycle.
+Deterministic common-pipeline tests produce identical candidate order,
+state digest, and work for two versus four sources, text/audio/image
+labels, and Natural versus Durable retention. The graph still loses
+exact identifier recall and requires an O(N) restart rebuild, so it
+remains diagnostic evidence rather than a retrieval cutover.
+
+After the nested-transaction lifecycle repair, the fixed allocation was
+19,180,880 bytes at F=S=T=0.5, including a journal sized by the existing
+consolidation interval. An immediate RAII scope owns each prepared
+journal entry, so exceptions during object-store or rollback-snapshot
+setup clear the root journal even before the main processing guard is
+active. A repaired 15,695-packet Natural replay published all 15,695
+events without a bound or generation failure and preserved the current
+flag-off behavior and logical-database digests. Its mean process cost
+was 2.1077 ms versus 1.9115 ms in the paired flag-off artifact, a 10.26%
+increase; end-to-end mean and wall time were 0.65% lower within run
+noise. The repaired 2,016-message Durable replay likewise preserved
+current flag-off behavior and database digests, with mean process cost
+up 6.16% and end-to-end mean up 5.49%. These are observation costs, not
+evidence that the present graph satisfies the retrieval-shape objective.
+
+For subsequent candidates, the optimization objective ranks a bounded,
+repeatable retrieval envelope ahead of maximum write throughput. A
+modest measured write regression is acceptable when consolidation
+produces stable peaks and troughs, a material reset, and a more
+cycle-symmetric retrieval sawtooth. Write cost remains a reported
+tradeoff, and this preference does not substitute for replay evidence or
+authorize a semantic cutover.
 
 On 2026-06-30, a full Meta MSC replay rerun verified the retrieval-cache
 optimization on the same 9,130-turn slice used for the hosted
@@ -6125,6 +6402,35 @@ current-source run also failed the ratio gates: 1.633813 for
 latency, and 0.844665 for messages/s. This confirms that the non-flat
 conclusion is not an artifact of the realtime SQLite benchmark profile.
 
+A later shared-path audit used the owner-authorized 15,695-packet
+Natural corpus and its 2,016-message Durable form. The retained exact
+historical coverage proof and batched emotional traversal produced a
+Natural mean process time of 2.197 ms and wall time of 746,302 ms. Its
+audited tail still failed: process final-five/first-five was 1.575951
+and throughput was 0.331728. Graph retrieval contributed 0.473572 ms
+(43.7% of the process delta), emotional cascade 0.146594 ms, and memory
+storage 0.124507 ms. The corresponding Durable run used the identical
+ingestion algorithm plus its checkpoint edge, averaged 10.148 ms process
+time, and completed in 75,684 ms. It also remained non-flat: process
+ratio 1.839862 and throughput failure, with graph retrieval contributing
+3.289430 ms, commit 1.144678 ms, and the checkpoint edge 0.699095 ms of
+the positive delta. The Natural behavior/logical-database digests are
+`e4f843e017902bb04f10e6b57bafeb9e850d663f8dc3719970fa94ffd189f3de` and
+`76ee7281189b3b4446361a125a6f64090599049d6c6f2d6a257da916eff10adf`; the
+Durable digests are
+`25762284607b1851ea89189e073332b78d3d8fa8126e6c038e3b396c174ff463` and
+`1c067e1dde67e5d288656bc137b4206bcbd2c1a76c1c0e95a9391318b7ec5267`.
+These are exact harness results, not production-wide boundedness
+evidence.
+
+The storage-cost audit contract was subsequently tightened to count
+`rif_recovery_clock`, `rif_generation_resets`, and `rif_active_state` at
+every store checkpoint, and to reject any Durable event reporting a
+failed WAL checkpoint. The saved shared-path profiles above predate
+those added fields, so their timings and digests remain historical
+measurements but do not satisfy the current audit schema. A current-gate
+replay is required before using them as cutover evidence.
+
 Explicit consolidation required a separate lifecycle proof because force
 persistence broadly prunes and rewrites embedding rows. Candidate 34 now
 rebuilds the historical search registry from authoritative SQL only
@@ -6168,6 +6474,79 @@ expected to flatten it. Changing the candidate contract,
 consolidation/tiering/eviction semantics, storage/index backend, public
 processor-state ownership, or fixed proof gate requires separate
 approval.
+
+A later 15,695-packet natural-retention profile separated this retained
+scan into static surface eligibility and dynamic retrieval work. In its
+fixed late 200-packet window, the reference path evaluated a mean 38,074
+embedding rows per retrieval although only 1,345 survived the existing
+eligibility predicate. An incrementally maintained long-term-reference
+index moved the unchanged timestamp, current-surface, and supersession
+predicate ahead of distance evaluation. It reduced evaluated distance
+rows to 3,211 (-91.6%), distance time from 4.459 ms to 0.376 ms
+(-91.6%), and cached seed search from 13.561 ms to 9.575 ms (-29.4%). A
+fixed-timestamp paired replay produced identical ordered behavior and
+SQL-dump digests. The remaining family-comparison cost still grew with
+the eligible surface. A subsequent exact rejection uses the identity
+‖*a* − *b*‖<sup>2</sup> = ‖*a*‖<sup>2</sup> + ‖*b*‖<sup>2</sup> − 2*a* ⋅ *b*:
+while accumulating squared coordinate differences, a partial sum already
+above the maximum distance compatible with the duplicate threshold
+soundly rejects that pair. Near-threshold pairs continue through the
+existing Cauchy–Schwarz bounds and exact cosine check. In a corrected
+fixed-clock, `--reuse-db` late-store pair, it reduced mean family
+comparison from 1.757 to 0.798 ms, exact checks from 7,654 to 3.81 per
+event, graph time from 2.321 to 1.349 ms, and process time from 4.974 to
+4.417 ms. Event behavior and canonical logical-database digests matched
+exactly. Total latency was unchanged because hydration dominated the
+slice. A fresh 200-packet pair also matched behavior and logical
+database state and showed no process or total-latency regression. This
+is an exact constant-factor reduction, not proof of bounded retrieval
+latency.
+
+The retained partial-distance loop was subsequently evaluated in fixed
+16-coordinate vectorized blocks. Computing through the end of a block
+cannot invalidate rejection: squared coordinate contributions are
+nonnegative, so a completed block above the threshold proves the
+complete distance is also above it. On a fixed-clock copied-late
+200-packet pair, the block form preserved the event behavior oracle
+exactly while reducing mean family-bound comparison from 0.736 to 0.424
+ms (-42.4%), cached graph seed work from 1.195 to 0.887 ms (-25.8%), and
+process time from 6.912 to 6.741 ms (-2.5%). The fresh pair also
+preserved the behavior oracle and improved process time. Total late
+latency changed by about +1.1%, within the 10% regression gate. This
+remains an exact constant-factor contributor repair; it does not
+establish a flat tail or sublinear exact nearest-neighbor search.
+
+The subsequent immutable-feature cache removes repeated construction of
+the same normalized vector and the same stored/Hadamard block summaries.
+In a fixed-clock copied-late 200-packet pair, it preserved both the
+behavior and logical-database digests, reduced family-feature
+construction from 0.216 to 0.049 ms per packet (-77.3%), and reduced
+mean process time from 2.494 to 2.275 ms (-8.8%). The cache changes no
+candidate population or rank and is replaced whenever its embedding
+entry is replaced.
+
+The emotional topology footprint was evaluated over all 15,695 packets.
+It preserved the full behavior and logical-database digests, reduced
+cascade traversal executions from 3,244 to 1,664, and lowered the late
+five-window cascade mean from 0.235 to 0.144 ms. Mean process time
+changed from 2.056 to 2.039 ms. The overall plateau gate still failed:
+exact supersession selection and graph seed work remained store-size
+dependent. These results support the two exact contributor repairs, not
+a bounded-tail claim.
+
+The final current-tree replay enabled both repairs by default and again
+processed all 15,695 packets. It preserved the event-behavior digest
+`1b5b29f3cd342b94b7438b90940c2da1e896f869777aba02cb2ce4790109e452` and
+canonical logical-database digest
+`551f5aabf8c9cf1cdddaaf4adbc2b83119474d46553610380f8001d1c51005e1`. Mean
+process time was 2.116 ms and mean end-to-end time was 48.739 ms. The
+current plateau audit still rejected the tail: final-five/first-five
+ratios were 1.699 for `MemoryStorage`, 2.059 for supersession-edge work,
+1.380 for process time, and 0.344 for throughput. The final artifact
+therefore proves semantic equivalence for this replay and preserves the
+measured exact constant-factor improvements, but it does not prove
+bounded Natural writes or authorize a production-wide flat-storage
+claim.
 
 ## Standard Eviction-Frontier Estimate
 

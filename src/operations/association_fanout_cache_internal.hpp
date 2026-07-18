@@ -3,6 +3,7 @@
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
+#include "execution_cache_sidecar_internal.hpp"
 #include <algorithm>
 #include <any>
 #include <cmath>
@@ -110,7 +111,7 @@ UpsertFanoutEdge (
     std::vector<ProcessorContext::AssociationFanoutEdge> &edges,
     long long memory_id, long long embedding_id, const std::string &edge_type,
     double weight, long long last_reinforced, double *old_weight,
-    long long *old_last_reinforced)
+    long long *old_last_reinforced, long long *old_embedding_id)
 {
   for (auto &edge : edges)
     {
@@ -123,6 +124,10 @@ UpsertFanoutEdge (
           if (old_last_reinforced)
             {
               *old_last_reinforced = edge.last_reinforced;
+            }
+          if (old_embedding_id)
+            {
+              *old_embedding_id = edge.embedding_id;
             }
           edge.embedding_id = embedding_id;
           edge.weight = weight;
@@ -138,7 +143,8 @@ UpsertFanoutEdge (
 }
 
 inline void
-UpsertAssociation (ProcessorContext::AssociationFanoutCache &cache,
+UpsertAssociation (ProcessorContext &p_ctx,
+                   ProcessorContext::AssociationFanoutCache &cache,
                    long long source_memory_id, long long target_memory_id,
                    long long source_embedding_id, long long target_embedding_id,
                    const std::string &edge_type, double weight,
@@ -149,17 +155,29 @@ UpsertAssociation (ProcessorContext::AssociationFanoutCache &cache,
     {
       return;
     }
+  if (edge_type == "supersedes")
+    execution_cache_sidecar_internal::Ensure (p_ctx)
+        ->supersession_eligibility.valid = false;
   double old_weight = 0.0;
   long long old_last_reinforced = 0;
+  long long old_target_embedding_id = 0;
   auto &out_edges = cache.out_by_source[source_memory_id];
   const bool inserted = UpsertFanoutEdge (
       out_edges, target_memory_id, target_embedding_id, edge_type, weight,
-      last_reinforced, &old_weight, &old_last_reinforced);
+      last_reinforced, &old_weight, &old_last_reinforced,
+      &old_target_embedding_id);
 
   auto &in_edges = cache.in_by_target[target_memory_id];
   (void)UpsertFanoutEdge (in_edges, source_memory_id, source_embedding_id,
                           edge_type, weight, last_reinforced, nullptr,
-                          nullptr);
+                          nullptr, nullptr);
+
+  if (inserted || old_target_embedding_id != target_embedding_id)
+    {
+      auto state = execution_cache_sidecar_internal::Ensure (p_ctx);
+      state->association_topology_changes.inserted_edges.emplace_back (
+          source_memory_id, target_memory_id);
+    }
 
   if (inserted)
     {
@@ -181,6 +199,70 @@ UpsertAssociation (ProcessorContext::AssociationFanoutCache &cache,
     }
 }
 
+inline void
+BuildSupersessionEligibility (
+    ProcessorContext::AssociationFanoutCache &cache,
+    const ProcessorContext &p_ctx)
+{
+  auto &eligibility = execution_cache_sidecar_internal::Ensure (p_ctx)
+                          ->supersession_eligibility;
+  eligibility.activation_ts_by_target.clear ();
+  eligibility.activation_ts_by_target.reserve (
+      cache.in_by_target.size ());
+  for (const auto &[target_memory_id, edges] : cache.in_by_target)
+    {
+      std::optional<long long> activation_ts;
+      for (const auto &edge : edges)
+        {
+          if (edge.edge_type != "supersedes")
+            continue;
+          const auto surface_it
+              = p_ctx.retrieval_surface_index.find (edge.memory_id);
+          if (surface_it == p_ctx.retrieval_surface_index.end ()
+              || surface_it->second >= p_ctx.retrieval_surface_cache.size ())
+            continue;
+          const auto &replacement
+              = p_ctx.retrieval_surface_cache[surface_it->second];
+          if (replacement.memory_id <= 0 || replacement.embedding_id <= 0
+              || replacement.start_ts < 0
+              || (replacement.kind != "LONG_TERM"
+                  && replacement.kind != "ASSOCIATION"))
+            continue;
+          activation_ts = activation_ts
+                              ? std::min (*activation_ts,
+                                          replacement.start_ts)
+                              : replacement.start_ts;
+        }
+      if (activation_ts)
+        eligibility.activation_ts_by_target.emplace (
+            target_memory_id, *activation_ts);
+    }
+  eligibility.valid = true;
+}
+
+inline void
+InvalidateSupersessionEligibility (const ProcessorContext &p_ctx)
+{
+  const auto state = execution_cache_sidecar_internal::Find (p_ctx);
+  if (state)
+    state->supersession_eligibility.valid = false;
+}
+
+inline void
+NotifyRetrievalSurfaceChanged (const ProcessorContext &p_ctx,
+                               long long memory_id)
+{
+  const auto edges = p_ctx.association_fanout_cache.out_by_source.find (
+      memory_id);
+  if (edges == p_ctx.association_fanout_cache.out_by_source.end ())
+    return;
+  if (std::any_of (edges->second.begin (), edges->second.end (),
+                   [] (const auto &edge) {
+                     return edge.edge_type == "supersedes";
+                   }))
+    InvalidateSupersessionEligibility (p_ctx);
+}
+
 inline ProcessorContext::AssociationFanoutCache *
 Ensure (Store *store, ProcessorContext &p_ctx)
 {
@@ -189,13 +271,19 @@ Ensure (Store *store, ProcessorContext &p_ctx)
       return nullptr;
     }
   auto &cache = p_ctx.association_fanout_cache;
+  const auto sidecar = execution_cache_sidecar_internal::Ensure (p_ctx);
+  auto &eligibility = sidecar->supersession_eligibility;
   if (cache.valid
       && cache.last_fingerprint_check_signal == p_ctx.signals_processed)
     {
+      if (!eligibility.valid)
+        BuildSupersessionEligibility (cache, p_ctx);
       return &cache;
     }
   if (cache.valid && cache.consolidation_count == p_ctx.consolidation_count)
     {
+      if (!eligibility.valid)
+        BuildSupersessionEligibility (cache, p_ctx);
       return &cache;
     }
 
@@ -204,6 +292,8 @@ Ensure (Store *store, ProcessorContext &p_ctx)
     {
       cache.last_fingerprint_check_signal = p_ctx.signals_processed;
       cache.consolidation_count = p_ctx.consolidation_count;
+      if (!eligibility.valid)
+        BuildSupersessionEligibility (cache, p_ctx);
       return &cache;
     }
 
@@ -212,6 +302,12 @@ Ensure (Store *store, ProcessorContext &p_ctx)
   cache.consolidation_count = p_ctx.consolidation_count;
   cache.out_by_source.clear ();
   cache.in_by_target.clear ();
+  eligibility.valid = false;
+  eligibility.activation_ts_by_target.clear ();
+  auto &topology_changes = sidecar->association_topology_changes;
+  topology_changes.reset = true;
+  topology_changes.inserted_edges.clear ();
+  sidecar->emotional_cascade_topology_footprint.valid = false;
 
   auto rows = store->Execute (
       "SELECT a.source_memory_id, a.target_memory_id, a.edge_type, "
@@ -267,6 +363,7 @@ Ensure (Store *store, ProcessorContext &p_ctx)
   cache.weight_sum_micros = fingerprint.weight_sum_micros;
   cache.last_reinforced_sum = fingerprint.last_reinforced_sum;
   cache.valid = true;
+  BuildSupersessionEligibility (cache, p_ctx);
   return &cache;
 }
 

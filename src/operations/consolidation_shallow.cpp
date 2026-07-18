@@ -1,6 +1,7 @@
 #include "cortext/internal/cancellation.hpp"
 #include "cortext/operations/consolidation_shallow.hpp"
 #include "historical_surface_search_cache_internal.hpp"
+#include "emotional_metadata_cache_internal.hpp"
 
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -218,6 +219,11 @@ ConsolidationShallow::Execute (OperationContext &context, Transaction &tx) const
                       static_cast<long long> (now_ts) });
 
           auto &p_ctx = context.GetProcessorContext ();
+          emotional_metadata_cache_internal::Upsert (
+              p_ctx,
+              { centroid_memory_id, centroid_embedding_id,
+                static_cast<long long> (now_ts), false, 0.0, 0.0, 0.0, 0,
+                0.0 });
           p_ctx.UpsertAssociationCache (
               centroid_memory_id, centroid_embedding_id, centroid_vec, true);
           ProcessorContext::RetrievalSurfaceEntry surface_entry;
