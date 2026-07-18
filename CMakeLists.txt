@@ -671,10 +671,6 @@ if(CORTEXT_ENABLE_MSAN AND NOT EMSCRIPTEN)
   message(STATUS "MemorySanitizer enabled for cortext")
 endif()
 
-if(BUILD_TESTING)
-  target_compile_definitions(cortext PRIVATE CORTEXT_TESTING=1)
-endif()
-
 if(EMSCRIPTEN)
   target_compile_options(cortext PRIVATE
     -O3
@@ -831,6 +827,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  target_compile_definitions(cortext PRIVATE CORTEXT_TESTING=1)
   add_subdirectory(tests)
 endif()
 
