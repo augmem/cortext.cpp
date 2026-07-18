@@ -157,8 +157,8 @@ ExecuteCascade (const std::shared_ptr<Store> &store, bool commit = true)
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   ProcessorContext processor_context;
-  OperationContext context (
-      MakeSignal (1'000'000), processor_context, cfg, store.get ());
+  const Signal signal = MakeSignal (1'000'000);
+  OperationContext context (signal, processor_context, cfg, store.get ());
   auto transaction = store->Begin ();
   PropagateEmotionalCascade operation;
   operation.Execute (context, *transaction);
@@ -184,8 +184,8 @@ ExecuteCascadeWithMetadataCache (
   ProcessorContext processor_context;
   operations::emotional_metadata_cache_internal::Reset (
       processor_context, std::move (metadata));
-  OperationContext context (
-      MakeSignal (1'000'000), processor_context, cfg, store.get ());
+  const Signal signal = MakeSignal (1'000'000);
+  OperationContext context (signal, processor_context, cfg, store.get ());
   auto transaction = store->Begin ();
   PropagateEmotionalCascade operation;
   operation.Execute (context, *transaction);
@@ -599,8 +599,8 @@ TEST_CASE ("PropagateEmotionalCascade skips a stable fixed-point traversal",
         { 3, 3, 3'000'000, false, 0.0, 0.0, 0.0, 0, 0.0 } });
 
   auto execute = [&] (uint64_t timestamp) {
-    OperationContext context (
-        MakeSignal (timestamp), processor_context, cfg, store.get ());
+    const Signal signal = MakeSignal (timestamp);
+    OperationContext context (signal, processor_context, cfg, store.get ());
     auto transaction = store->Begin ();
     PropagateEmotionalCascade operation;
     operation.Execute (context, *transaction);
@@ -694,8 +694,8 @@ TEST_CASE ("Ordinary unconnected storage preserves the emotional fixed point",
         { 2, 2, 3'000'000, false, 0.0, 0.0, 0.0, 0, 0.0 } });
 
   auto execute = [&] (uint64_t timestamp) {
-    OperationContext context (
-        MakeSignal (timestamp), processor_context, cfg, store.get ());
+    const Signal signal = MakeSignal (timestamp);
+    OperationContext context (signal, processor_context, cfg, store.get ());
     auto transaction = store->Begin ();
     PropagateEmotionalCascade operation;
     operation.Execute (context, *transaction);
