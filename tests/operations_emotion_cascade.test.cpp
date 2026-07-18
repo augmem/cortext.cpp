@@ -87,6 +87,24 @@ TotalChanges (Store &store)
   return std::any_cast<long long> (rows[0].at ("total_changes"));
 }
 
+class ScopedExecutionCacheSidecar
+{
+public:
+  explicit ScopedExecutionCacheSidecar (ProcessorContext &context)
+      : context_ (context)
+  {
+    operations::execution_cache_sidecar_internal::Erase (context_);
+  }
+
+  ~ScopedExecutionCacheSidecar ()
+  {
+    operations::execution_cache_sidecar_internal::Erase (context_);
+  }
+
+private:
+  ProcessorContext &context_;
+};
+
 class RawEmotionalMutationThenCascade final : public IOperation
 {
 public:
@@ -157,6 +175,7 @@ ExecuteCascade (const std::shared_ptr<Store> &store, bool commit = true)
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
   const Signal signal = MakeSignal (1'000'000);
   OperationContext context (signal, processor_context, cfg, store.get ());
   auto transaction = store->Begin ();
@@ -182,6 +201,7 @@ ExecuteCascadeWithMetadataCache (
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
   operations::emotional_metadata_cache_internal::Reset (
       processor_context, std::move (metadata));
   const Signal signal = MakeSignal (1'000'000);
@@ -209,6 +229,7 @@ TEST_CASE ("Emotional metadata cache preserves shared embedding minima",
            "[operations][emotion_cascade][metadata_cache][shared_embedding]")
 {
   ProcessorContext pctx;
+  ScopedExecutionCacheSidecar sidecar_scope (pctx);
   operations::emotional_metadata_cache_internal::Reset (
       pctx,
       { { 10, 100, 2000, true, 0.9, 0.8, 3.0, 1, 0.5 },
@@ -400,10 +421,7 @@ TEST_CASE ("PropagateEmotionalCascade uses a millisecond consolidation window",
   cortext::testing::RequireEncoder (cfg);
   cfg.stability = 0.0; // Five-minute source window.
   ProcessorContext pctx;
-  // This white-box operation test bypasses SignalProcessor, whose lifecycle
-  // normally owns and clears the private execution sidecar. Ensure a reused
-  // stack address cannot inherit cache state from an earlier direct test.
-  operations::execution_cache_sidecar_internal::Erase (pctx);
+  ScopedExecutionCacheSidecar sidecar_scope (pctx);
   Signal signal = MakeSignal (now_ms);
   OperationContext ctx (signal, pctx, cfg, store.get ());
   auto tx = store->Begin ();
@@ -592,6 +610,7 @@ TEST_CASE ("PropagateEmotionalCascade skips a stable fixed-point traversal",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
   operations::emotional_metadata_cache_internal::Reset (
       processor_context,
       { { 1, 1, 3'000'000, true, 0.9, 0.9, 2.0, 2, 0.5 },
@@ -688,6 +707,7 @@ TEST_CASE ("Ordinary unconnected storage preserves the emotional fixed point",
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
   ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
   operations::emotional_metadata_cache_internal::Reset (
       processor_context,
       { { 1, 1, 3'000'000, true, 0.9, 0.9, 2.0, 1, 0.5 },
