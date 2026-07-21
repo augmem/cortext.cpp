@@ -3,13 +3,15 @@ id: consolidation-drift-rearm-pr-monitor-worktree-entry
 task_id: consolidation-drift-retrigger
 owner_role: implementer
 lane_id: consolidation-drift-retrigger
-status: active
+status: monitoring
+implementation_status: complete
+monitor_status: activating
 source_of_truth: current repository, current user corrections, this goal, task comments, exact private profiles and audits, and GitHub PR 6 only after implementation completion
 model: gpt-5.6-terra
 reasoning: high
 model_selection_basis: cross-cutting C++ and SQLite implementation, deterministic bounded-work proof, research traceability, and PR ownership
 canonical_monitor_entry: true
-updated_at: 20260721T001500Z
+updated_at: 20260721T051726Z
 ---
 <!-- mdscript: use the mdscript-exec skill -->
 
@@ -36,16 +38,20 @@ updated_at: 20260721T001500Z
 * focused production-default derivation, route work, active-epoch reset, shared Natural/Durable path, Durable-barrier non-replay, source/modality, Python audit, and evidence-builder tests pass on the current release build
 * all algorithm and experiment changes, accepted adverse timing, maturity boundary, failed-recenter rollback repair, and nonclaims are recorded in `docs/paper/sections/10_implementation.qmd` and `docs/paper/sections/11_optimization.qmd`; the regenerated manuscript SHA-256 is `f7ed5d59cadeb0cc3194da92ea4f574e20f0a030e5aa28e6ff54cefdd44a43de`
 * the full media-enabled CTest suite passes 39,151 assertions in 688 cases, including failure injection proving a failed recenter preserves the existing effort and node budget; the complete Python tool suite passes 159 tests; `git diff --check` passes
-* the current-state overlay, rebuilt 69-record manifest, and fail-closed audit have SHA-256 values `ad5eb97044e3db7b41b25bfae4715f375dc748ecb0326c26f40926f38f2ff73b`, `c32dd391ff4aa3db22ae1c49948939d4604b732c777e45c5c8be338170f175b6`, and `2463560aa3b2c9860c026c39f036e726f32fd0d8bc521c701a9bbc34fdfde640`; the audit passes with 69/69 inventory records and no uncovered inventory, claim mismatch, proof-level violation, or ownership violation
+* the current-state overlay, rebuilt 69-record manifest, and fail-closed audit have SHA-256 values `89b32a782b0164e82c1b76e230baabdd47827aab00355ec817aaab40e18eb354`, `18f544b6b4cd0d0e7337d99e2381fa7c346d304bf083f265a5b5151beb275ae0`, and `53a648cd6e3c6079c6ade1cd175a1617caf180714e72152c7f37d6ca14a7443f`; the audit passes with 69/69 inventory records and no uncovered inventory, claim mismatch, proof-level violation, or ownership violation
+* the recursive blind-review loop is complete: round-one and round-two findings were repaired, and the fresh round-three cumulative reviewer proved the scoped implementation/source-health claim at P1 with no findings or residuals
+* the verified tree was committed and pushed without force as `6ac1e3121e4be9aa456c7ac93fdb4b09ea34023d`; PR 6 was updated with the current contract, proof, review trail, and nonclaims; exact-head CI is in progress
 
-## Remaining Execution
+## PR Monitor Hot Path
 
-* continue the required diminishing-severity fresh recursive `gabe-review` loop over the repaired complete current diff and intended scoped claim; resolve every required finding and preserve residuals
-* after implementation, proof, paper, and review all pass, update the existing branch and PR 6 without force; do not merge or close
-* only after the goal is achieved, resume the ten-minute PR monitor in this task; do not let monitoring interrupt implementation again
+* implementation, proof, paper, recursive review, branch push, and PR update are complete; do not reopen implementation without changed CI, review, discussion, conflict, or base-drift evidence
+* every ten minutes in this current task, refresh PR 6 exact head, checks, mergeability, reviews, review requests, comments, and unresolved threads; compare with the prior state and report only changes
+* repair only in-scope failures or review findings with proportionate proof and the required fresh review; push without force and update this goal to the new exact head
+* stop and deactivate the heartbeat when the PR merges or closes externally, repair exceeds scope, target drift is unrecoverable, or authority is explicitly denied
+* do not merge or close; do not release, deploy, publish, or widen the scoped bounded-retrieval claim
 * re-enter with `/mdscript-exec {{repository}}/comments/consolidation-drift-retrigger/20260716T205900Z-orchestrator-goal-mdscript-converted.mdscript.md#resume-goal`
 
 ## Completion Boundary
 
-* mark implementation complete only when current binaries, artifacts, paper, full tests, and recursive review agree on the scoped claim: knob-derived bounded retrieval sawtooth, accepted retrieval quality, one Natural/Durable operation path with Durable checkpoint only, and modality/source-id agnosticism
+* implementation is complete because current binaries, artifacts, paper, full tests, and recursive review agree on the scoped claim: knob-derived bounded retrieval sawtooth, accepted retrieval quality, one Natural/Durable operation path with Durable checkpoint only, and modality/source-id agnosticism
 * keep whole-engine raw process reset, bounded whole-engine restart, Durable plateau, production-wide boundedness, merge, release, deployment, and publication explicitly unclaimed
