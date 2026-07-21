@@ -81,7 +81,11 @@ ApplyRIFRecovery (OperationContext &context, Transaction &tx, long long now_ts,
   const auto calibration_memory_ids
       = sidecar->rif_active_epoch.calibration_memory_ids;
   const auto result = rif_state_internal::AdvanceRecovery (
-      tx, now_ts, recovery_time, calibration_memory_ids);
+      tx, now_ts, recovery_time, calibration_memory_ids,
+      sidecar->rif_active_epoch.limits.row_batch_size);
+  sidecar->rif_active_epoch.row_batch_high_water = std::max (
+      sidecar->rif_active_epoch.row_batch_high_water,
+      result.maximum_statement_rows);
   sidecar->rif_active_epoch.calibration_memory_ids.clear ();
   rif_active_epoch_cache_internal::StageClock (
       sidecar->rif_active_epoch, result.clock.generation,

@@ -1,6 +1,7 @@
 #include "cortext/operations/write_gate.hpp"
 
 #include "neuromodulator_internal.hpp"
+#include "../experimental_env.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -10,6 +11,64 @@
 
 namespace cortext::operations
 {
+
+namespace
+{
+
+enum class WriteGateProfileReason
+{
+  Ephemeral = 1,
+  NoTrigger = 2,
+  NoAccumulator = 3,
+  Forced = 4,
+  ScoreAccepted = 5,
+  ScoreRejected = 6,
+};
+
+bool
+ProfileWriteGateEnabled ()
+{
+  return internal::experimental_env::Flag ("CORTEXT_PROFILE_WORK_COUNTERS");
+}
+
+void
+RecordWriteGateProfile (OperationContext &context, bool flush,
+                        bool spike_bypass, bool accumulator_available,
+                        double n_signals, double coverage,
+                        double window_score, double threshold_dynamic,
+                        double refractory_multiplier, double write_scale,
+                        double effective_threshold, double score_margin,
+                        bool force_write, bool write_accumulator,
+                        WriteGateProfileReason reason)
+{
+  if (!ProfileWriteGateEnabled ())
+    return;
+
+  context.AddOperationTiming ("WriteGate.flush_trigger", flush ? 1.0 : 0.0);
+  context.AddOperationTiming ("WriteGate.spike_bypass",
+                              spike_bypass ? 1.0 : 0.0);
+  context.AddOperationTiming ("WriteGate.accumulator_available",
+                              accumulator_available ? 1.0 : 0.0);
+  context.AddOperationTiming ("WriteGate.n_signals", n_signals);
+  context.AddOperationTiming ("WriteGate.coverage", coverage);
+  context.AddOperationTiming ("WriteGate.window_score", window_score);
+  context.AddOperationTiming ("WriteGate.threshold_dynamic",
+                              threshold_dynamic);
+  context.AddOperationTiming ("WriteGate.refractory_multiplier",
+                              refractory_multiplier);
+  context.AddOperationTiming ("WriteGate.write_scale", write_scale);
+  context.AddOperationTiming ("WriteGate.effective_threshold",
+                              effective_threshold);
+  context.AddOperationTiming ("WriteGate.score_margin", score_margin);
+  context.AddOperationTiming ("WriteGate.force_write",
+                              force_write ? 1.0 : 0.0);
+  context.AddOperationTiming ("WriteGate.write_accumulator",
+                              write_accumulator ? 1.0 : 0.0);
+  context.AddOperationTiming ("WriteGate.reason_code",
+                              static_cast<double> (reason));
+}
+
+} // namespace
 
 void
 ComputeWriteGate::Execute (OperationContext &context,
@@ -29,6 +88,10 @@ ComputeWriteGate::Execute (OperationContext &context,
     {
       context.SetAccumulatorWriteDecision (false);
       context.SetWriteDecision (false);
+      RecordWriteGateProfile (
+          context, flush, spike_bypass, false, 0.0, 0.0, 0.0,
+          context.GetThresholdTDynamic (), 1.0, 1.0, 0.0, 0.0, false,
+          false, WriteGateProfileReason::Ephemeral);
       telemetry::AddCounter ("cortext.retention.ephemeral_no_store_total", 1);
       telemetry::LogDebug ("cortext.write_gate", {
         telemetry::Attribute::String ("retention", "ephemeral"),
@@ -41,6 +104,10 @@ ComputeWriteGate::Execute (OperationContext &context,
     {
       // No flush trigger - no write decision
       context.SetAccumulatorWriteDecision (false);
+      RecordWriteGateProfile (
+          context, flush, spike_bypass, false, 0.0, 0.0, 0.0,
+          context.GetThresholdTDynamic (), 1.0, 1.0, 0.0, 0.0, false,
+          false, WriteGateProfileReason::NoTrigger);
       return;
     }
 
@@ -50,6 +117,10 @@ ComputeWriteGate::Execute (OperationContext &context,
     {
       // No accumulator state - fall back to per-signal gate
       context.SetAccumulatorWriteDecision (false);
+      RecordWriteGateProfile (
+          context, flush, spike_bypass, false, 0.0, 0.0, 0.0,
+          context.GetThresholdTDynamic (), 1.0, 1.0, 0.0, 0.0, false,
+          false, WriteGateProfileReason::NoAccumulator);
       return;
     }
 
@@ -95,6 +166,15 @@ ComputeWriteGate::Execute (OperationContext &context,
   const bool force_write = spike_bypass || RetentionForcesWrite (signal.retention);
   const bool write_accumulator
       = force_write || (flush && (S_window > theta_accumulator));
+
+  RecordWriteGateProfile (
+      context, flush, spike_bypass, true, static_cast<double> (n), coverage,
+      S_window, T_dynamic, M_write_refrac, write_scale, theta_accumulator,
+      S_window - theta_accumulator, force_write, write_accumulator,
+      force_write ? WriteGateProfileReason::Forced
+                  : (write_accumulator
+                         ? WriteGateProfileReason::ScoreAccepted
+                         : WriteGateProfileReason::ScoreRejected));
 
   context.SetAccumulatorWriteDecision (write_accumulator);
   context.SetWriteDecision (write_accumulator);

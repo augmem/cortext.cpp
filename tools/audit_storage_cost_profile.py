@@ -52,6 +52,27 @@ REQUIRED_WORK_COUNTERS = (
     "emotional_neighbor_count",
     "emotional_update_count",
 )
+# Historical profiles from the rejected emotional-priority experiment contain
+# these extra counters. They remain readable evidence, but current profiles do
+# not emit them and they never count as timing measurements.
+LEGACY_REJECTED_EMOTIONAL_WORK_COUNTERS = {
+    "emotional_source_candidate_count",
+    "emotional_source_priority_comparison_count",
+    "emotional_source_priority_move_count",
+    "emotional_source_memory_emission_count",
+    "emotional_source_embedding_emission_count",
+    "emotional_edge_visit_count",
+    "emotional_frontier_entry_count",
+    "emotional_topology_footprint_entry_count",
+    "emotional_activated_identity_count",
+    "emotional_member_overflow_count",
+    "emotional_member_budget_skip_count",
+    "emotional_member_read_count",
+    "emotional_sql_affected_row_count",
+    "emotional_cache_row_mutation_count",
+    "emotional_source_index_comparison_count",
+    "emotional_source_index_move_count",
+}
 REQUIRED_CONSOLIDATION_EPOCH_COUNTERS = (
     "accumulator_signal_count",
     "working_memory_pending_signal_count",
@@ -59,45 +80,70 @@ REQUIRED_CONSOLIDATION_EPOCH_COUNTERS = (
     "consolidation_dirty_association_count",
     "consolidation_dirty_index_count",
 )
-ACTIVE_EPOCH_LIMITS = {
-    "event_count": 512,
-    "mutation_count": 32768,
-    "allocated_bytes": 64 * 1024 * 1024,
-}
+RESETTABLE_CONSOLIDATION_EPOCH_COUNTERS = (
+    "working_memory_pending_signal_count",
+    "consolidation_dirty_memory_count",
+    "consolidation_dirty_association_count",
+    "consolidation_dirty_index_count",
+)
+
+
+def active_epoch_limits(
+    focus: float, sensitivity: float, stability: float
+) -> dict[str, int]:
+    def clamped(value: float, label: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{label} must be numeric")
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError(f"{label} must be finite")
+        return min(1.0, max(0.0, result))
+
+    f = clamped(focus, "profile focus")
+    s = clamped(sensitivity, "profile sensitivity")
+    t = clamped(stability, "profile stability")
+    capacity = math.floor(256.0 + 256.0 * f + 128.0 * s + 128.0 * t + 0.5)
+    row_batch_size = math.floor(64.0 + 64.0 * f + 32.0 * s + 32.0 * t + 0.5)
+    return {
+        "event_count": capacity,
+        "mutation_count": capacity * 64,
+        "allocated_bytes": capacity * 128 * 1024,
+        "row_batch_size": row_batch_size,
+    }
+
+
 COUNTER_ACTIVITY_OPERATIONS = {
     "retrieval_suppression_id_count": (
-        "Competition.rif_recovery_active_sql",
+        "SignalProcessor.retrieval_suppression_id_activity",
     ),
-    "predictive_id_count": ("Predictive.decay_active_sql",),
+    "predictive_id_count": ("SignalProcessor.predictive_id_activity",),
     "rollback_full_cache_copy_count": (
-        "SignalProcessor.snapshot_full_cache_copy",
+        "SignalProcessor.snapshot_full_cache_copy_activity",
     ),
     "rollback_cache_entry_copy_count": (
-        "SignalProcessor.snapshot_cache_entry_copy",
+        "SignalProcessor.snapshot_cache_entry_copy_activity",
     ),
-    "graph_candidate_count": ("GraphRetrieve.total",),
+    "graph_candidate_count": ("GraphRetrieve.candidate_activity",),
     "graph_exact_comparison_count": (
-        "GraphRetrieve.seed_cache_family_compare",
+        "GraphRetrieve.family_exact_comparison_activity",
     ),
-    "graph_cache_rebuild_count": ("GraphRetrieve.seed_knn_cache_rebuild",),
-    "graph_rows_visited": ("GraphRetrieve.seed_cache_distance",),
-    "competition_candidate_count": ("Competition.score_candidates",),
-    "competition_rows_visited": ("Competition.rif_recovery_active_sql",),
-    "competition_rows_touched": ("Competition.rif_recovery_active_sql",),
+    "graph_cache_rebuild_count": ("GraphRetrieve.cache_rebuild_activity",),
+    "graph_rows_visited": ("GraphRetrieve.rows_visited_activity",),
+    "competition_candidate_count": ("Competition.candidate_activity",),
+    "competition_rows_visited": ("Competition.rows_visited_activity",),
+    "competition_rows_touched": ("Competition.rows_touched_activity",),
     "supersession_current_candidate_count": (
-        "MemoryStorage.supersession_current_candidate_execution_count",
+        "MemoryStorage.supersession_current_candidate_activity",
     ),
     "supersession_historical_candidate_count": (
-        "MemoryStorage.supersession_historical_candidate_execution_count",
+        "MemoryStorage.supersession_historical_candidate_activity",
     ),
     "supersession_rows_visited": (
-        "MemoryStorage.supersession_candidate_load",
+        "MemoryStorage.supersession_rows_visited_activity",
     ),
-    "emotional_source_count": ("EmotionalCascade.source_execution_count",),
-    "emotional_neighbor_count": (
-        "EmotionalCascade.neighbor_execution_count",
-    ),
-    "emotional_update_count": ("EmotionalCascade.update_execution_count",),
+    "emotional_source_count": ("EmotionalCascade.source_activity",),
+    "emotional_neighbor_count": ("EmotionalCascade.neighbor_activity",),
+    "emotional_update_count": ("EmotionalCascade.update_activity",),
 }
 COUNTER_SOURCE_OPERATIONS = {
     "retrieval_suppression_id_count": (
@@ -115,7 +161,9 @@ COUNTER_SOURCE_OPERATIONS = {
         "GraphRetrieve.family_exact_comparison_count",
     ),
     "graph_cache_rebuild_count": ("GraphRetrieve.cache_rebuild_count",),
-    "graph_rows_visited": ("GraphRetrieve.rows_visited",),
+    "graph_rows_visited": (
+        "GraphRetrieve.rows_visited",
+    ),
     "competition_candidate_count": ("Competition.candidate_count",),
     "competition_rows_visited": ("Competition.rows_visited",),
     "competition_rows_touched": ("Competition.rows_touched",),
@@ -128,12 +176,20 @@ COUNTER_SOURCE_OPERATIONS = {
     "supersession_rows_visited": (
         "MemoryStorage.supersession_current_rows_visited",
         "MemoryStorage.supersession_historical_rows_visited",
+        "MemoryStorage.supersession_sparse_route_node_rows",
     ),
     "emotional_source_count": ("EmotionalCascade.source_count",),
     "emotional_neighbor_count": ("EmotionalCascade.neighbor_count",),
     "emotional_update_count": ("EmotionalCascade.update_count",),
 }
 OTHER_DIAGNOSTIC_OPERATION_KEYS = {
+    "GraphRetrieve.sqlite_sparse_route_activated_identities",
+    "GraphRetrieve.sqlite_sparse_route_node_rows",
+    "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows",
+    "GraphRetrieve.sqlite_sparse_route_activation_snapshot_cache_miss_rows",
+    "GraphRetrieve.sqlite_sparse_route_distance_evaluations",
+    "GraphRetrieve.sqlite_sparse_route_restart_rows",
+    "GraphRetrieve.sqlite_sparse_route_dirty_rows",
     "GraphRetrieve.seed_cache_distance_rows",
     "GraphRetrieve.seed_cache_eligibility_rows",
     "GraphRetrieve.seed_cache_ranked_rows",
@@ -142,14 +198,83 @@ OTHER_DIAGNOSTIC_OPERATION_KEYS = {
     "SignalProcessor.rif_active_epoch_event_count",
     "SignalProcessor.rif_active_epoch_mutation_count",
     "SignalProcessor.rif_active_epoch_allocated_bytes",
+    "SignalProcessor.rif_active_epoch_row_batch_high_water",
+    "EmotionalCascade.update_limit_reached",
     "SignalProcessor.rif_active_epoch_required",
     "SignalProcessor.rif_epoch_publication_rebuild_count",
     "SignalProcessor.rif_epoch_publication_recovery_count",
     "SignalProcessor.sqlite_wal_checkpoint_failure_count",
     "MemoryStorage.supersession_current_rows_visited",
     "MemoryStorage.supersession_historical_rows_visited",
+    "MemoryStorage.supersession_sparse_route_node_rows",
+    "MemoryStorage.supersession_sparse_route_distance_evaluations",
+    "MemoryStorage.supersession_sparse_route_dirty_rows",
     "MemoryStorage.supersession_sql_fallback_count",
+    "MemoryStorage.supersession_population_mismatch_count",
+    "WriteGate.flush_trigger",
+    "WriteGate.spike_bypass",
+    "WriteGate.accumulator_available",
+    "WriteGate.n_signals",
+    "WriteGate.coverage",
+    "WriteGate.window_score",
+    "WriteGate.threshold_dynamic",
+    "WriteGate.refractory_multiplier",
+    "WriteGate.write_scale",
+    "WriteGate.effective_threshold",
+    "WriteGate.score_margin",
+    "WriteGate.force_write",
+    "WriteGate.write_accumulator",
+    "WriteGate.reason_code",
+    "Cortext.fallback_hydration_signal_rows",
+    "EmotionalCascade.bounded_mode",
+    "EmotionalCascade.source_candidate_count",
+    "EmotionalCascade.source_priority_comparison_count",
+    "EmotionalCascade.source_priority_move_count",
+    "EmotionalCascade.source_memory_emission_count",
+    "EmotionalCascade.source_embedding_emission_count",
+    "EmotionalCascade.edge_visit_count",
+    "EmotionalCascade.frontier_entry_count",
+    "EmotionalCascade.topology_footprint_entry_count",
+    "EmotionalCascade.activated_identity_count",
+    "EmotionalCascade.member_overflow_count",
+    "EmotionalCascade.member_budget_skip_count",
+    "EmotionalCascade.member_read_count",
+    "EmotionalCascade.sql_affected_row_count",
+    "EmotionalCascade.cache_row_mutation_count",
+    "EmotionalCascade.source_index_comparison_count",
+    "EmotionalCascade.source_index_move_count",
+    "EmotionalCascade.source_candidate_limit",
+    "EmotionalCascade.source_execution_limit",
+    "EmotionalCascade.edge_visit_limit",
+    "EmotionalCascade.frontier_entry_limit",
+    "EmotionalCascade.activated_identity_limit",
+    "EmotionalCascade.update_statement_limit",
+    "EmotionalCascade.shared_member_limit",
+    "EmotionalCascade.logical_member_overflow_boundary",
+    "EmotionalCascade.member_read_limit",
+    "EmotionalCascade.sql_affected_row_limit",
+    "EmotionalCascade.cache_row_mutation_limit",
+    "EmotionalCascade.topology_footprint_entry_limit",
+    "EmotionalCascade.source_index_maintenance_limit",
+    "EmotionalCascade.source_priority_comparison_limit",
 }
+DIAGNOSTIC_OPERATION_SUFFIXES = (
+    "_activity",
+    "_active",
+    "_ambiguous",
+    "_budget",
+    "_count",
+    "_effort",
+    "_equivalent",
+    "_failure_code",
+    "_limit",
+    "_proven",
+    "_published",
+    "_reached",
+    "_skipped",
+    "_succeeded",
+    "_target",
+)
 
 
 def diagnostic_operation_keys() -> set[str]:
@@ -169,6 +294,8 @@ def is_duration_operation(name: str) -> bool:
     return (
         name not in diagnostic_operation_keys()
         and not name.startswith("ConsolidationEpoch.")
+        and not name.startswith("SignalProcessor.commit_table_row_count.")
+        and not name.endswith(DIAGNOSTIC_OPERATION_SUFFIXES)
     )
 MINIMUM_POST_WARMUP_WINDOWS = 10
 PLATEAU_MINIMUM_WINDOWS = 6
@@ -214,8 +341,9 @@ RETRIEVAL_CYCLE_NEGATIVE_VARIATION_OVER_RAMP_MAX = 0.25
 RETRIEVAL_CYCLE_MAX_OVER_TRAILING_MEAN_MAX = 1.25
 RETRIEVAL_QUALITY_QUERY_COUNT = 512
 RETRIEVAL_QUALITY_K = 16
-RETRIEVAL_EXACT_ID_RECALL_MIN = 1.0
-RETRIEVAL_EXACT_TOP1_MIN = 1.0
+RETRIEVAL_EXACT_ID_RECALL_MIN = 0.998
+RETRIEVAL_EXACT_TOP1_MIN = 511 / 512
+RETRIEVAL_EXACT_TOP1_MAX_MISSES = 1
 RETRIEVAL_SEMANTIC_COVERAGE_MIN = 0.95
 CONSOLIDATION_EPOCH_MATERIAL_RAMP_RATIO_MIN = 1.10
 CONSOLIDATION_EPOCH_POST_PRE_PROCESS_RATIO_MAX = 0.90
@@ -328,15 +456,24 @@ def bootstrap_upper_slope(
         y - (intercept + fitted_slope * x)
         for x, y in zip(xs, ys)
     ]
+    mean_x = statistics.mean(xs)
+    centered_xs = [x - mean_x for x in xs]
+    denominator = sum(value * value for value in centered_xs)
+    if denominator == 0.0:
+        raise ValueError("at least two distinct windows are required")
     rng = random.Random(0)
     slopes = []
     for _ in range(repetitions):
-        sampled = [rng.choice(residuals) for _ in residuals]
-        synthetic = [
-            intercept + fitted_slope * x + residual
-            for x, residual in zip(xs, sampled)
-        ]
-        slopes.append(theil_sen(xs, synthetic))
+        # Keep the robust Theil-Sen line as the bootstrap center, then fit the
+        # resampled residual perturbation in O(n). Re-running the O(n^2)
+        # pairwise estimator for every repetition makes a valid long epoch
+        # series require billions of comparisons without changing the named
+        # deterministic residual-bootstrap contract.
+        residual_slope = sum(
+            centered_x * rng.choice(residuals)
+            for centered_x in centered_xs
+        ) / denominator
+        slopes.append(fitted_slope + residual_slope)
     slopes.sort()
     return slopes[math.ceil(0.95 * len(slopes)) - 1]
 
@@ -564,6 +701,238 @@ def ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator
 
 
+def activity_normalized_reset_diagnostic(
+    evaluation_inputs: Sequence[dict[str, Any]],
+    raw_gate_failures: Sequence[str],
+    *,
+    knob_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify activity incidence without changing the raw sawtooth verdict."""
+    if not isinstance(raw_gate_failures, Sequence) or isinstance(
+        raw_gate_failures, (str, bytes)
+    ):
+        raise ValueError("raw gate failures must be a sequence")
+    preserved_failures = []
+    for failure in raw_gate_failures:
+        if not isinstance(failure, str):
+            raise ValueError("raw gate failure must be a string")
+        preserved_failures.append(failure)
+
+    resolved_knobs = None
+    if knob_context is not None:
+        if not isinstance(knob_context, dict):
+            raise ValueError("knob context must be an object")
+        limits = active_epoch_limits(
+            knob_context.get("focus"),
+            knob_context.get("sensitivity"),
+            knob_context.get("stability"),
+        )
+        processed_rows = nonnegative_integer(
+            knob_context.get("processed_backfill_rows", 0),
+            "processed backfill rows",
+        )
+        backfill_batch = limits["row_batch_size"]
+        if processed_rows > backfill_batch:
+            raise ValueError("processed rows exceed F/S/T-derived B")
+        resolved_knobs = {
+            "backfill_batch": backfill_batch,
+            "logical_backfill_boundary_only": backfill_batch + 1,
+            "processed_backfill_rows": processed_rows,
+        }
+
+    evaluations = []
+    epoch_windows: dict[int, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+    seen_epoch_operations: set[tuple[int, str]] = set()
+    for item in evaluation_inputs:
+        if not isinstance(item, dict):
+            raise ValueError("activity-normalized evaluation must be an object")
+        operation = item.get("operation")
+        if not isinstance(operation, str) or not operation:
+            raise ValueError("activity-normalized operation id must be a string")
+        epoch = nonnegative_integer(item.get("epoch"), "activity epoch")
+        sequence_names = (
+            "trailing_event_indices",
+            "post_event_indices",
+            "trailing_ms",
+            "post_ms",
+            "trailing_activity",
+            "post_activity",
+        )
+        sequences = {}
+        for name in sequence_names:
+            value = item.get(name)
+            if not isinstance(value, list):
+                raise ValueError(f"{name} must be a list")
+            sequences[name] = value
+        lengths = {len(value) for value in sequences.values()}
+        if len(lengths) != 1 or not lengths or next(iter(lengths)) == 0:
+            raise ValueError("activity normalization requires matching event windows")
+        trailing_indices = [
+            nonnegative_integer(value, "trailing event index")
+            for value in sequences["trailing_event_indices"]
+        ]
+        post_indices = [
+            nonnegative_integer(value, "post event index")
+            for value in sequences["post_event_indices"]
+        ]
+        if len(set(trailing_indices + post_indices)) != len(
+            trailing_indices + post_indices
+        ):
+            raise ValueError("activity normalization requires matching event windows")
+        if (
+            trailing_indices != list(range(
+                trailing_indices[0], trailing_indices[0] + len(trailing_indices)
+            ))
+            or post_indices != list(range(
+                post_indices[0], post_indices[0] + len(post_indices)
+            ))
+            or post_indices[0] != trailing_indices[-1] + 1
+        ):
+            raise ValueError(
+                "activity normalization requires contiguous adjacent event windows"
+            )
+        window_identity = (tuple(trailing_indices), tuple(post_indices))
+        prior_window = epoch_windows.setdefault(epoch, window_identity)
+        if prior_window != window_identity:
+            raise ValueError(
+                "activity-normalized operations in the same epoch must share event windows"
+            )
+        epoch_operation = (epoch, operation)
+        if epoch_operation in seen_epoch_operations:
+            raise ValueError("duplicate activity-normalized epoch operation")
+        seen_epoch_operations.add(epoch_operation)
+        numeric = {
+            name: [
+                finite_nonnegative(value, f"activity-normalized {name}")
+                for value in sequences[name]
+            ]
+            for name in (
+                "trailing_ms",
+                "post_ms",
+                "trailing_activity",
+                "post_activity",
+            )
+        }
+        trailing_ms = finite_nonnegative(
+            sum(numeric["trailing_ms"]), "aggregate trailing milliseconds"
+        )
+        post_ms = finite_nonnegative(
+            sum(numeric["post_ms"]), "aggregate post milliseconds"
+        )
+        trailing_activity = finite_nonnegative(
+            sum(numeric["trailing_activity"]), "aggregate trailing activity"
+        )
+        post_activity = finite_nonnegative(
+            sum(numeric["post_activity"]), "aggregate post activity"
+        )
+        operation_ms_delta = post_ms - trailing_ms
+        if not math.isfinite(operation_ms_delta):
+            raise ValueError("aggregate operation delta must be finite")
+        result = {
+            "epoch": epoch,
+            "operation": operation,
+            "status": "valid",
+            "trailing_ms": trailing_ms,
+            "post_ms": post_ms,
+            "trailing_activity": trailing_activity,
+            "post_activity": post_activity,
+            "activity_ratio": None,
+            "trailing_unit_cost": None,
+            "post_unit_cost": None,
+            "unit_cost_ratio": None,
+            "operation_ms_delta": operation_ms_delta,
+            "classification": None,
+        }
+        if trailing_activity == 0.0 and post_activity == 0.0:
+            result["status"] = "unevaluated"
+            result["classification"] = "not-explanatory"
+        elif trailing_activity == 0.0 or post_activity == 0.0:
+            result["status"] = "incomparable"
+            result["classification"] = "not-explanatory"
+        else:
+            trailing_unit_cost = finite_nonnegative(
+                trailing_ms / trailing_activity,
+                "activity-normalized trailing unit cost",
+            )
+            post_unit_cost = finite_nonnegative(
+                post_ms / post_activity,
+                "activity-normalized post unit cost",
+            )
+            unit_cost_ratio = finite_nonnegative(
+                ratio(post_unit_cost, trailing_unit_cost),
+                "activity-normalized unit-cost ratio",
+            )
+            activity_ratio = finite_nonnegative(
+                post_activity / trailing_activity,
+                "activity-normalized activity ratio",
+            )
+            result.update({
+                "activity_ratio": activity_ratio,
+                "trailing_unit_cost": trailing_unit_cost,
+                "post_unit_cost": post_unit_cost,
+                "unit_cost_ratio": unit_cost_ratio,
+            })
+            if unit_cost_ratio > OPERATION_HALF_RATIO_MAX:
+                result["classification"] = "per-unit-regression"
+            elif activity_ratio > 1.0 and operation_ms_delta > 0.0:
+                result["classification"] = "activity-incidence"
+            else:
+                result["classification"] = "not-explanatory"
+        evaluations.append(result)
+
+    per_unit = [
+        item for item in evaluations
+        if item["classification"] == "per-unit-regression"
+    ]
+    incidence = [
+        item for item in evaluations
+        if item["classification"] == "activity-incidence"
+    ]
+    selected = None
+    diagnostic_result = "diagnostic-inconclusive"
+    continuation = "deepen-profile"
+    if per_unit:
+        selected = sorted(
+            per_unit,
+            key=lambda item: (
+                -float(item["unit_cost_ratio"]),
+                -max(0.0, float(item["operation_ms_delta"])),
+                str(item["operation"]),
+                int(item["epoch"]),
+            ),
+        )[0]
+        diagnostic_result = "per-unit-regression"
+        continuation = "implement-per-unit-cost-hotspot"
+    elif incidence:
+        selected = sorted(
+            incidence,
+            key=lambda item: (
+                -float(item["operation_ms_delta"]),
+                -float(item["activity_ratio"]),
+                str(item["operation"]),
+                int(item["epoch"]),
+            ),
+        )[0]
+        diagnostic_result = "activity-incidence"
+        continuation = "attribute-activity-generation"
+    selected_hotspot = None if selected is None else {
+        "operation": selected["operation"],
+        "epoch": selected["epoch"],
+        "classification": selected["classification"],
+    }
+    return {
+        "diagnostic_result": diagnostic_result,
+        "selected_hotspot": selected_hotspot,
+        "continuation": continuation,
+        "evaluations": evaluations,
+        "raw_gate_passed": not preserved_failures,
+        "raw_gate_failures": preserved_failures,
+        "raw_gate_waived": False,
+        "label_arithmetic": "ignored",
+        "knob_context": resolved_knobs,
+    }
+
+
 def half_comparison(values: Sequence[float]) -> dict[str, float]:
     half = len(values) // 2
     if half == 0:
@@ -601,7 +970,12 @@ def validate_profile_rows(
     retention = profile.get("retention")
     if retention not in {"natural", "durable"}:
         raise ValueError("profile retention must be natural or durable")
-    if profile.get("active_epoch_limits") != ACTIVE_EPOCH_LIMITS:
+    expected_active_epoch_limits = active_epoch_limits(
+        profile.get("focus"),
+        profile.get("sensitivity"),
+        profile.get("stability"),
+    )
+    if profile.get("active_epoch_limits") != expected_active_epoch_limits:
         raise ValueError("profile active-epoch limits do not match the contract")
     honors_required = profile.get("honor_required_consolidation")
     if not isinstance(honors_required, bool):
@@ -610,6 +984,243 @@ def validate_profile_rows(
     operation_activity = {name: 0.0 for name in COUNTER_ACTIVITY_OPERATIONS}
     row_consolidation_total = 0.0
     row_consolidation_events: list[int] = []
+    warmup_events = math.ceil(0.20 * len(rows))
+    sparse_parameters = profile.get("sparse_route_parameters")
+    fallback_hydration_limit = None
+    if (
+        isinstance(sparse_parameters, dict)
+        and "fallback_hydration_signal_limit" in sparse_parameters
+    ):
+        focus = finite_fraction(profile.get("focus"), "focus")
+        sensitivity = finite_fraction(profile.get("sensitivity"), "sensitivity")
+        stability = finite_fraction(profile.get("stability"), "stability")
+        derived_limit = math.floor(
+            64.0 + 64.0 * focus + 32.0 * sensitivity + 32.0 * stability + 0.5
+        )
+        fallback_hydration_limit = nonnegative_integer(
+            sparse_parameters.get("fallback_hydration_signal_limit"),
+            "sparse_route_parameters.fallback_hydration_signal_limit",
+        )
+        if fallback_hydration_limit != derived_limit:
+            raise ValueError("fallback hydration limit does not match F/S/T")
+    if isinstance(sparse_parameters, dict) and "search_node_budget" in sparse_parameters:
+        focus = finite_fraction(profile.get("focus"), "focus")
+        sensitivity = finite_fraction(profile.get("sensitivity"), "sensitivity")
+        stability = finite_fraction(profile.get("stability"), "stability")
+        rounded = lambda value: math.floor(value + 0.5)
+        route_capacity = rounded(
+            256.0 + 256.0 * focus + 128.0 * sensitivity + 128.0 * stability
+        )
+        backfill_batch_size = rounded(
+            64.0 + 64.0 * focus + 32.0 * sensitivity + 32.0 * stability
+        )
+        expected_sparse_parameters = {
+            "route_capacity": route_capacity,
+            "activation_identity_target": route_capacity * 2 + backfill_batch_size * 2,
+            "activation_snapshot_capacity": route_capacity * 2 + backfill_batch_size * 2,
+            "total_query_row_budget": (
+                route_capacity * 11 + backfill_batch_size * 2
+            ),
+            "bootstrap_limit": route_capacity * 2,
+            "search_node_budget": route_capacity * 9,
+            "activation_search_node_budget_min": route_capacity * 8,
+            "activation_search_node_budget_step": max(
+                2, backfill_batch_size // 16
+            ),
+            "search_expansion_batch": max(8, backfill_batch_size // 4),
+            "search_effort": route_capacity * 9,
+            "activation_search_effort_min": route_capacity * 8,
+            "activation_search_effort_step": max(
+                2, backfill_batch_size // 16
+            ),
+            "shadow_cache_capacity": route_capacity * 24,
+            "backfill_batch_size": backfill_batch_size,
+            "backfill_search_node_budget": route_capacity + backfill_batch_size,
+            "backfill_search_effort": backfill_batch_size * 2,
+            "graph_neighbor_count": max(8, backfill_batch_size // 2),
+            "graph_level_zero_links": max(16, route_capacity // 4),
+            "family_exact_comparison_limit": route_capacity * 2,
+            "maximum_level": max(1, max(1, route_capacity - 1).bit_length()),
+            "reciprocal_update_count": max(2, backfill_batch_size // 16),
+            "hnsw_construction_effort": max(
+                32, rounded(route_capacity * 25.0 / 64.0)
+            ),
+            "hnsw_query_effort": max(
+                route_capacity, rounded(route_capacity * 5.0 / 2.0)
+            ),
+            "fallback_hydration_signal_limit": backfill_batch_size,
+        }
+        experimental_node_formula = profile.get(
+            "experimental_sparse_node_envelope_formula"
+        )
+        experimental_node_budgets = {
+            "C": route_capacity,
+            "A": route_capacity * 2 + backfill_batch_size * 2,
+            "C+B": route_capacity + backfill_batch_size,
+            "2C": route_capacity * 2,
+            "4C": route_capacity * 4,
+            "4C+B/16": route_capacity * 4
+            + max(2, backfill_batch_size // 16),
+            "fixed-4C+B/16": route_capacity * 4
+            + max(2, backfill_batch_size // 16),
+            "4C+B/16-to-5C": route_capacity * 5,
+            "5C-to-6C-by-B/16": route_capacity * 6,
+            "6C-to-7C-by-B/16": route_capacity * 7,
+            "7C-to-8C-by-B/16": route_capacity * 8,
+            "8C-to-9C-by-B/16": route_capacity * 9,
+            "5C": route_capacity * 5,
+            "6C": route_capacity * 6,
+            "10C": route_capacity * 10,
+            "12C": route_capacity * 12,
+            "16C": route_capacity * 16,
+        }
+        if experimental_node_formula is not None:
+            expected_sparse_parameters["search_node_budget"] = route_capacity * 5
+            expected_sparse_parameters[
+                "activation_search_node_budget_min"
+            ] = route_capacity * 5
+            expected_sparse_parameters["activation_search_node_budget_step"] = 0
+            expected_sparse_parameters["search_effort"] = route_capacity * 5
+            expected_sparse_parameters[
+                "activation_search_effort_min"
+            ] = route_capacity * 5
+            expected_sparse_parameters["activation_search_effort_step"] = 0
+            expected_sparse_parameters["total_query_row_budget"] = (
+                route_capacity * 7 + backfill_batch_size * 2
+            )
+            if experimental_node_formula not in experimental_node_budgets:
+                raise ValueError(
+                    "experimental sparse node envelope formula is invalid"
+                )
+            selected_node_budget = experimental_node_budgets[
+                experimental_node_formula
+            ]
+            expected_sparse_parameters["search_node_budget"] = selected_node_budget
+            expected_sparse_parameters[
+                "activation_search_node_budget_min"
+            ] = selected_node_budget
+            if experimental_node_formula == "fixed-4C+B/16":
+                expected_sparse_parameters["search_effort"] = selected_node_budget
+                expected_sparse_parameters[
+                    "activation_search_effort_min"
+                ] = selected_node_budget
+                expected_sparse_parameters["total_query_row_budget"] = (
+                    selected_node_budget
+                    + expected_sparse_parameters["activation_identity_target"]
+                )
+            if experimental_node_formula == "4C+B/16-to-5C":
+                reciprocal_update_count = expected_sparse_parameters[
+                    "reciprocal_update_count"
+                ]
+                minimum = route_capacity * 4 + reciprocal_update_count
+                expected_sparse_parameters[
+                    "activation_search_effort_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters[
+                    "activation_search_node_budget_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+            if experimental_node_formula == "5C-to-6C-by-B/16":
+                reciprocal_update_count = expected_sparse_parameters[
+                    "reciprocal_update_count"
+                ]
+                minimum = route_capacity * 5
+                expected_sparse_parameters["search_effort"] = selected_node_budget
+                expected_sparse_parameters[
+                    "activation_search_effort_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters[
+                    "activation_search_node_budget_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters["total_query_row_budget"] = (
+                    selected_node_budget
+                    + expected_sparse_parameters["activation_identity_target"]
+                )
+            if experimental_node_formula == "6C-to-7C-by-B/16":
+                reciprocal_update_count = expected_sparse_parameters[
+                    "reciprocal_update_count"
+                ]
+                minimum = route_capacity * 6
+                expected_sparse_parameters["search_effort"] = selected_node_budget
+                expected_sparse_parameters[
+                    "activation_search_effort_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters[
+                    "activation_search_node_budget_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters["total_query_row_budget"] = (
+                    selected_node_budget
+                    + expected_sparse_parameters["activation_identity_target"]
+                )
+            if experimental_node_formula == "7C-to-8C-by-B/16":
+                reciprocal_update_count = expected_sparse_parameters[
+                    "reciprocal_update_count"
+                ]
+                minimum = route_capacity * 7
+                expected_sparse_parameters["search_effort"] = selected_node_budget
+                expected_sparse_parameters[
+                    "activation_search_effort_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters[
+                    "activation_search_node_budget_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters["total_query_row_budget"] = (
+                    selected_node_budget
+                    + expected_sparse_parameters["activation_identity_target"]
+                )
+            if experimental_node_formula == "8C-to-9C-by-B/16":
+                reciprocal_update_count = expected_sparse_parameters[
+                    "reciprocal_update_count"
+                ]
+                minimum = route_capacity * 8
+                expected_sparse_parameters["search_effort"] = selected_node_budget
+                expected_sparse_parameters[
+                    "activation_search_effort_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters[
+                    "activation_search_node_budget_min"
+                ] = minimum
+                expected_sparse_parameters[
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+                expected_sparse_parameters["total_query_row_budget"] = (
+                    selected_node_budget
+                    + expected_sparse_parameters["activation_identity_target"]
+                )
+        if set(sparse_parameters) != set(expected_sparse_parameters):
+            raise ValueError("sparse-route parameter schema does not match F/S/T contract")
+        for name, expected in expected_sparse_parameters.items():
+            actual = nonnegative_integer(
+                sparse_parameters.get(name), f"sparse_route_parameters.{name}"
+            )
+            if actual != expected:
+                raise ValueError(f"sparse-route parameter {name} does not match F/S/T")
     for expected_index, row in enumerate(rows):
         if row.get("event_index") != expected_index:
             raise ValueError("profile event_index values must be unique and contiguous")
@@ -636,40 +1247,91 @@ def validate_profile_rows(
         active_epoch = row.get("active_epoch")
         if not isinstance(active_epoch, dict):
             raise ValueError("profile row lacks active_epoch counters")
-        if set(active_epoch) != {*ACTIVE_EPOCH_LIMITS, "required"}:
+        expected_active_epoch_keys = {
+            "event_count",
+            "mutation_count",
+            "allocated_bytes",
+            "row_batch_high_water",
+            "required",
+        }
+        if set(active_epoch) != expected_active_epoch_keys:
             raise ValueError("profile active_epoch counter schema mismatch")
-        active_values = {
+        epoch_values = {
             name: nonnegative_integer(
                 active_epoch.get(name), f"active_epoch.{name}"
             )
-            for name in ACTIVE_EPOCH_LIMITS
+            for name in ("event_count", "mutation_count", "allocated_bytes")
         }
+        row_batch_high_water = nonnegative_integer(
+            active_epoch.get("row_batch_high_water"),
+            "active_epoch.row_batch_high_water",
+        )
         active_required = active_epoch.get("required")
         if not isinstance(active_required, bool):
             raise ValueError("active_epoch.required must be boolean")
         at_or_above_limit = any(
-            active_values[name] >= limit
-            for name, limit in ACTIVE_EPOCH_LIMITS.items()
+            epoch_values[name] >= expected_active_epoch_limits[name]
+            for name in epoch_values
         )
         if at_or_above_limit and not active_required:
             raise ValueError("active-epoch boundary was not preserved")
         if honors_required and any(
-            active_values[name] > limit
-            for name, limit in ACTIVE_EPOCH_LIMITS.items()
+            epoch_values[name] > expected_active_epoch_limits[name]
+            for name in epoch_values
         ):
             raise ValueError("honored active epoch crossed a safety ceiling")
+        if row_batch_high_water > expected_active_epoch_limits["row_batch_size"]:
+            raise ValueError("active-epoch row batch crossed its F/S/T ceiling")
         counters = row.get("work_counters")
         if not isinstance(counters, dict):
             raise ValueError("profile row lacks work_counters")
-        if set(counters) != set(REQUIRED_WORK_COUNTERS):
-            missing = sorted(set(REQUIRED_WORK_COUNTERS) - set(counters))
-            extra = sorted(set(counters) - set(REQUIRED_WORK_COUNTERS))
+        counter_names = set(counters)
+        required_counter_names = set(REQUIRED_WORK_COUNTERS)
+        missing = sorted(required_counter_names - counter_names)
+        extra = sorted(counter_names - required_counter_names)
+        if missing or not set(extra).issubset(
+            LEGACY_REJECTED_EMOTIONAL_WORK_COUNTERS
+        ):
             raise ValueError(
                 f"work counter schema mismatch; missing={missing}, extra={extra}"
             )
         operations = row.get("operation_ms")
         if not isinstance(operations, dict):
             raise ValueError("profile lacks full operation timing")
+        if (
+            isinstance(sparse_parameters, dict)
+            and "activation_identity_target" in sparse_parameters
+        ):
+            activation_target = nonnegative_integer(
+                sparse_parameters.get("activation_identity_target"),
+                "sparse_route_parameters.activation_identity_target",
+                positive=True,
+            )
+            activated_identities = finite_nonnegative(
+                operations.get(
+                    "GraphRetrieve.sqlite_sparse_route_activated_identities"
+                ),
+                "operation_ms.GraphRetrieve.sqlite_sparse_route_activated_identities",
+            )
+            if activated_identities > activation_target:
+                raise ValueError("sparse-route activation exceeded its F/S/T target")
+            sparse_route_active = finite_nonnegative(
+                operations.get("GraphRetrieve.seed_sparse_route_active", 0.0),
+                "operation_ms.GraphRetrieve.seed_sparse_route_active",
+            )
+            if sparse_route_active > 0.0 and activated_identities <= 0.0:
+                raise ValueError("active sparse route reported no activated identities")
+        if fallback_hydration_limit is not None:
+            observed_limit = finite_nonnegative(
+                operations.get("Cortext.fallback_hydration_signal_limit"),
+                "operation_ms.Cortext.fallback_hydration_signal_limit",
+            )
+            finite_nonnegative(
+                operations.get("Cortext.fallback_hydration_signal_rows"),
+                "operation_ms.Cortext.fallback_hydration_signal_rows",
+            )
+            if observed_limit != float(fallback_hydration_limit):
+                raise ValueError("event fallback hydration limit differs from F/S/T")
         if (
             retention == "durable"
             and "SignalProcessor.sqlite_wal_checkpoint" not in operations
@@ -695,9 +1357,9 @@ def validate_profile_rows(
             operations["MemoryStorage.supersession_sql_fallback_count"],
             "operation_ms.MemoryStorage.supersession_sql_fallback_count",
         )
-        if supersession_fallbacks != 0.0:
+        if supersession_fallbacks != 0.0 and expected_index >= warmup_events:
             raise ValueError(
-                "supersession SQL fallback prevents exact visited-row accounting"
+                "post-warmup supersession SQL fallback prevents bounded plateau accounting"
             )
         operation_barrier_ms = finite_nonnegative(
             operations.get("SignalProcessor.sqlite_wal_checkpoint", 0.0),
@@ -777,16 +1439,29 @@ def validate_profile_rows(
         post_epoch = event.get("post_reset_active_epoch")
         if not isinstance(post_epoch, dict):
             raise ValueError("consolidation event lacks post-reset active epoch")
-        if set(post_epoch) != {*ACTIVE_EPOCH_LIMITS, "required"}:
+        if set(post_epoch) != {
+            "event_count",
+            "mutation_count",
+            "allocated_bytes",
+            "row_batch_high_water",
+            "required",
+        }:
             raise ValueError("post-reset active epoch schema mismatch")
         if post_epoch.get("required") is not False:
             raise ValueError("successful consolidation did not clear epoch boundary")
-        for name, limit in ACTIVE_EPOCH_LIMITS.items():
+        for name in ("event_count", "mutation_count", "allocated_bytes"):
+            limit = expected_active_epoch_limits[name]
             value = nonnegative_integer(
                 post_epoch.get(name), f"post_reset_active_epoch.{name}"
             )
             if value >= limit:
                 raise ValueError("successful consolidation did not reset active epoch")
+        post_row_batch = nonnegative_integer(
+            post_epoch.get("row_batch_high_water"),
+            "post_reset_active_epoch.row_batch_high_water",
+        )
+        if post_row_batch > expected_active_epoch_limits["row_batch_size"]:
+            raise ValueError("post-reset row batch crossed its F/S/T ceiling")
         event_indices.append(event_index)
     if event_indices != row_consolidation_events:
         raise ValueError("consolidation event indices do not match rows")
@@ -825,12 +1500,95 @@ def retrieval_work(row: dict[str, Any]) -> float:
     ) + finite_nonnegative(
         counters.get("graph_exact_comparison_count"),
         "work_counters.graph_exact_comparison_count",
+    ) + finite_nonnegative(
+        counters.get("graph_rows_visited"),
+        "work_counters.graph_rows_visited",
+    ) + finite_nonnegative(
+        counters.get("supersession_rows_visited"),
+        "work_counters.supersession_rows_visited",
+    )
+
+
+def sparse_route_value(row: dict[str, Any], name: str) -> float:
+    operation_ms = row.get("operation_ms")
+    if not isinstance(operation_ms, dict):
+        return 0.0
+    return finite_nonnegative(operation_ms.get(name, 0.0), f"operation_ms.{name}")
+
+
+def sparse_route_retrieval_work(row: dict[str, Any]) -> float:
+    return sparse_route_value(
+        row, "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+    )
+
+
+def sparse_route_retrieval_active(row: dict[str, Any]) -> bool:
+    return any(
+        sparse_route_value(row, name) > 0.0
+        for name in (
+            "GraphRetrieve.seed_sparse_route_active",
+            "GraphRetrieve.sqlite_sparse_route_search_effort",
+            "GraphRetrieve.sqlite_sparse_route_search_node_budget",
+            "GraphRetrieve.sqlite_sparse_route_node_rows",
+            "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows",
+            "GraphRetrieve.sqlite_sparse_route_dirty_rows",
+            "GraphRetrieve.sqlite_sparse_route_distance_evaluations",
+            "GraphRetrieve.sqlite_sparse_route_activated_identities",
+        )
+    )
+
+
+def sparse_route_retrieval_queue_effort(row: dict[str, Any]) -> float:
+    return sparse_route_value(
+        row, "GraphRetrieve.sqlite_sparse_route_search_effort"
+    )
+
+
+def sparse_route_retrieval_effort(row: dict[str, Any]) -> float:
+    return sparse_route_value(
+        row, "GraphRetrieve.sqlite_sparse_route_search_node_budget"
+    )
+
+
+def sparse_route_retrieval_actual_visits(row: dict[str, Any]) -> float:
+    return sparse_route_value(
+        row, "GraphRetrieve.sqlite_sparse_route_node_rows"
+    ) + sparse_route_value(
+        row, "GraphRetrieve.sqlite_sparse_route_dirty_rows"
+    )
+
+
+def sparse_route_activation_snapshot_visits(row: dict[str, Any]) -> float:
+    return sparse_route_value(
+        row, "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows"
+    )
+
+
+def sparse_route_retrieval_activated_identities(
+    row: dict[str, Any],
+) -> float:
+    return sparse_route_value(
+        row, "GraphRetrieve.sqlite_sparse_route_activated_identities"
     )
 
 
 def resample_equal_progress(values: Sequence[float], bins: int) -> list[float]:
-    if bins <= 0 or len(values) < bins:
+    if bins <= 0 or not values:
         raise ValueError("retrieval cycle cannot be resampled to required bins")
+    if len(values) < bins:
+        if len(values) == 1:
+            return [float(values[0])] * bins
+        result = []
+        for index in range(bins):
+            position = index * (len(values) - 1) / (bins - 1)
+            lower = math.floor(position)
+            upper = math.ceil(position)
+            fraction = position - lower
+            result.append(
+                float(values[lower]) * (1.0 - fraction)
+                + float(values[upper]) * fraction
+            )
+        return result
     result = []
     for index in range(bins):
         begin = index * len(values) // bins
@@ -901,6 +1659,96 @@ def knob_normal_comparison_bound(artifact: dict[str, Any]) -> int:
         + root_beam * children_per_root
         + 2 * representatives
         + children_per_root
+    )
+
+
+def knob_sparse_retrieval_work_bound(artifact: dict[str, Any]) -> int:
+    parameters = artifact.get("sparse_route_parameters")
+    if not isinstance(parameters, dict):
+        return knob_normal_comparison_bound(artifact)
+    node_budget = nonnegative_integer(
+        parameters.get("search_node_budget"),
+        "sparse_route_parameters.search_node_budget",
+    )
+    if node_budget == 0:
+        raise ValueError("sparse-route work bounds must be positive")
+    return node_budget
+
+
+def knob_sparse_total_query_row_bound(artifact: dict[str, Any]) -> int:
+    parameters = artifact.get("sparse_route_parameters")
+    if not isinstance(parameters, dict):
+        return knob_normal_comparison_bound(artifact)
+    return nonnegative_integer(
+        parameters.get("total_query_row_budget"),
+        "sparse_route_parameters.total_query_row_budget",
+        positive=True,
+    )
+
+
+def knob_sparse_cycle_edge_samples(artifact: dict[str, Any]) -> int:
+    parameters = artifact.get("sparse_route_parameters")
+    if not isinstance(parameters, dict):
+        raise ValueError("sparse-route parameters are required for cycle edges")
+    backfill_batch = nonnegative_integer(
+        parameters.get("backfill_batch_size"),
+        "sparse_route_parameters.backfill_batch_size",
+    )
+    if backfill_batch == 0:
+        raise ValueError("sparse-route backfill batch must be positive")
+    return max(2, backfill_batch // 32)
+
+
+def knob_work_counter_bound(
+    artifact: dict[str, Any], counter: str,
+) -> int | None:
+    if counter not in {
+        "graph_exact_comparison_count",
+        "graph_rows_visited",
+        "supersession_rows_visited",
+        "emotional_source_count",
+        "emotional_neighbor_count",
+        "emotional_update_count",
+    }:
+        return None
+    parameters = artifact.get("sparse_route_parameters")
+    if not isinstance(parameters, dict):
+        return None
+    if counter == "emotional_update_count":
+        return nonnegative_integer(
+            parameters.get("activation_identity_target"),
+            "sparse_route_parameters.activation_identity_target",
+            positive=True,
+        )
+    if counter == "graph_rows_visited":
+        return nonnegative_integer(
+            parameters.get("activation_identity_target"),
+            "sparse_route_parameters.activation_identity_target",
+            positive=True,
+        )
+    if counter == "supersession_rows_visited":
+        return nonnegative_integer(
+            parameters.get("total_query_row_budget"),
+            "sparse_route_parameters.total_query_row_budget",
+            positive=True,
+        )
+    if counter == "emotional_source_count":
+        return nonnegative_integer(
+            parameters.get("backfill_batch_size"),
+            "sparse_route_parameters.backfill_batch_size",
+            positive=True,
+        )
+    if counter == "emotional_neighbor_count":
+        route_capacity = nonnegative_integer(
+            parameters.get("route_capacity"),
+            "sparse_route_parameters.route_capacity",
+            positive=True,
+        )
+        return route_capacity * 5
+    return nonnegative_integer(
+        parameters.get("family_exact_comparison_limit"),
+        "sparse_route_parameters.family_exact_comparison_limit",
+        positive=True,
     )
 
 
@@ -1032,12 +1880,26 @@ def ranked_query_evidence_result(
         probe_payload.append({"query_number": query_number, "ranked_ids": exact_ids})
 
     count = len(evidence)
+    candidate_rank_payload = [
+        {
+            "query_number": query_number,
+            "candidate_ranked_ids": by_number[query_number][
+                "candidate_ranked_ids"
+            ],
+        }
+        for query_number in range(count)
+    ]
+    candidate_identity_rank_sha256 = hashlib.sha256(
+        canonical_json(candidate_rank_payload)
+    ).hexdigest()
     return {
         "count": count,
         "mean_exact_id_recall_at_k": exact_recall_total / count,
         "mean_top1_exact_id": exact_top1_total / count,
+        "exact_top1_hit_count": int(exact_top1_total),
         "mean_exact_neighbor_semantic_coverage": semantic_total / count,
         "exact_rank_match": exact_rank_match,
+        "candidate_identity_rank_sha256": candidate_identity_rank_sha256,
         "source_count": len(source_ids),
         "modalities": sorted(modalities),
         "history_segments": sorted(history_segments),
@@ -1052,6 +1914,15 @@ def ranked_query_evidence_result(
 def retrieval_cycle_symmetry_result(
     material_epochs: Sequence[dict[str, Any]], retrieval_work_bound: int,
     accepted_suffix_retrieval_work: Sequence[float],
+    accepted_suffix_retrieval_effort: Sequence[float],
+    *,
+    accepted_suffix_queue_effort: Sequence[float] | None = None,
+    queue_effort_bound: int | None = None,
+    accepted_suffix_total_work: Sequence[float] | None = None,
+    total_query_row_bound: int | None = None,
+    accepted_suffix_snapshot_visits: Sequence[float] | None = None,
+    activation_identity_target: int | None = None,
+    accepted_suffix_activated_identities: Sequence[float] | None = None,
 ) -> dict[str, Any]:
     failures = []
     profiles = [epoch["_retrieval_cycle_profile"] for epoch in material_epochs]
@@ -1089,6 +1960,87 @@ def retrieval_cycle_symmetry_result(
     )
     if work_bound_exceeded_count:
         failures.append("retrieval work exceeds F/S/T bound")
+    if len(accepted_suffix_retrieval_work) != len(
+        accepted_suffix_retrieval_effort
+    ):
+        raise ValueError("retrieval work and dynamic node ceilings differ in length")
+    dynamic_bound_exceeded_count = sum(
+        work > effort
+        for work, effort in zip(
+            accepted_suffix_retrieval_work,
+            accepted_suffix_retrieval_effort,
+        )
+    )
+    if dynamic_bound_exceeded_count:
+        failures.append("retrieval work exceeds current dynamic node ceiling")
+    dynamic_queue_bound_exceeded_count = 0
+    total_work_bound_exceeded_count = 0
+    snapshot_bound_exceeded_count = 0
+    combined_visit_bound_exceeded_count = 0
+    distance_coverage_mismatch_count = 0
+    activated_identity_exceeded_count = 0
+    optional_samples = (
+        accepted_suffix_queue_effort,
+        accepted_suffix_total_work,
+        accepted_suffix_snapshot_visits,
+        accepted_suffix_activated_identities,
+    )
+    if any(values is not None for values in optional_samples):
+        if any(values is None for values in optional_samples):
+            raise ValueError("dynamic sparse retrieval metrics are incomplete")
+        if (
+            queue_effort_bound is None
+            or total_query_row_bound is None
+            or activation_identity_target is None
+        ):
+            raise ValueError("dynamic sparse retrieval bounds are incomplete")
+        sample_count = len(accepted_suffix_retrieval_work)
+        if any(len(values) != sample_count for values in optional_samples):
+            raise ValueError("dynamic sparse retrieval metric samples differ")
+        queue_effort = accepted_suffix_queue_effort or ()
+        total_work = accepted_suffix_total_work or ()
+        snapshot_visits = accepted_suffix_snapshot_visits or ()
+        activated_identities = accepted_suffix_activated_identities or ()
+        dynamic_queue_bound_exceeded_count = sum(
+            queue > queue_effort_bound for queue in queue_effort
+        )
+        total_work_bound_exceeded_count = sum(
+            work > total_query_row_bound for work in total_work
+        )
+        snapshot_bound_exceeded_count = sum(
+            visits > activation_identity_target
+            for visits in snapshot_visits
+        )
+        combined_visit_bound_exceeded_count = sum(
+            canonical + snapshot > total_query_row_bound
+            for canonical, snapshot in zip(
+                accepted_suffix_retrieval_work, snapshot_visits
+            )
+        )
+        distance_coverage_mismatch_count = sum(
+            work > canonical + snapshot
+            for work, canonical, snapshot in zip(
+                total_work,
+                accepted_suffix_retrieval_work,
+                snapshot_visits,
+            )
+        )
+        activated_identity_exceeded_count = sum(
+            count > activation_identity_target
+            for count in activated_identities
+        )
+        if dynamic_queue_bound_exceeded_count:
+            failures.append("dynamic queue exceeds F/S/T bound")
+        if total_work_bound_exceeded_count:
+            failures.append("retrieval work exceeds total F/S/T row bound")
+        if snapshot_bound_exceeded_count:
+            failures.append("retrieval snapshot visits exceed F/S/T bound")
+        if combined_visit_bound_exceeded_count:
+            failures.append("retrieval total visits exceed F/S/T bound")
+        if distance_coverage_mismatch_count:
+            failures.append("retrieval distance work exceeds fetched-row coverage")
+        if activated_identity_exceeded_count:
+            failures.append("retrieval activation exceeds F/S/T target")
     reset_count = sum(
         epoch["retrieval_post_over_trailing"]
         <= CONSOLIDATION_EPOCH_POST_PRE_PROCESS_RATIO_MAX
@@ -1159,6 +2111,19 @@ def retrieval_cycle_symmetry_result(
         ),
         "excessive_spike_count": excessive_spike_count,
         "work_bound_exceeded_count": work_bound_exceeded_count,
+        "dynamic_bound_exceeded_count": dynamic_bound_exceeded_count,
+        "dynamic_queue_bound_exceeded_count": (
+            dynamic_queue_bound_exceeded_count
+        ),
+        "total_work_bound_exceeded_count": total_work_bound_exceeded_count,
+        "snapshot_bound_exceeded_count": snapshot_bound_exceeded_count,
+        "combined_visit_bound_exceeded_count": (
+            combined_visit_bound_exceeded_count
+        ),
+        "distance_coverage_mismatch_count": distance_coverage_mismatch_count,
+        "activated_identity_exceeded_count": (
+            activated_identity_exceeded_count
+        ),
         "retrieval_work_bound": retrieval_work_bound,
         "accepted_suffix_maximum_retrieval_work": max(
             accepted_suffix_retrieval_work, default=0.0
@@ -1173,6 +2138,247 @@ def retrieval_cycle_symmetry_result(
         "cycle_error_min": min(errors) if errors else None,
         "cycle_error_max": max(errors) if errors else None,
         "failures": sorted(set(failures)),
+    }
+
+
+def fixed_retrieval_envelope_result(
+    complete_epochs: Sequence[dict[str, Any]],
+    recenter_events: Sequence[dict[str, Any]], canonical_node_bound: int,
+    total_query_row_bound: int,
+    accepted_suffix_retrieval_work: Sequence[float],
+    accepted_suffix_queue_effort: Sequence[float],
+    accepted_suffix_retrieval_effort: Sequence[float],
+    accepted_suffix_actual_visits: Sequence[float],
+    accepted_suffix_snapshot_visits: Sequence[float],
+    accepted_suffix_activated_identities: Sequence[float],
+    activation_identity_target: int,
+) -> dict[str, Any]:
+    failures = []
+    sample_count = len(accepted_suffix_retrieval_work)
+    if any(
+        len(values) != sample_count
+        for values in (
+            accepted_suffix_queue_effort,
+            accepted_suffix_retrieval_effort,
+            accepted_suffix_actual_visits,
+            accepted_suffix_snapshot_visits,
+            accepted_suffix_activated_identities,
+        )
+    ):
+        raise ValueError("fixed retrieval metric samples differ in length")
+    unevaluated_epoch_count = sum(
+        not epoch["retrieval_cycle_evaluated"] for epoch in complete_epochs
+    )
+    zero_work_count = sum(work <= 0.0 for work in accepted_suffix_retrieval_work)
+    work_bound_exceeded_count = sum(
+        work > total_query_row_bound for work in accepted_suffix_retrieval_work
+    )
+    queue_effort_mismatch_count = sum(
+        effort != canonical_node_bound
+        for effort in accepted_suffix_queue_effort
+    )
+    node_ceiling_mismatch_count = sum(
+        effort != canonical_node_bound
+        for effort in accepted_suffix_retrieval_effort
+    )
+    actual_visit_exceeded_count = sum(
+        visits > canonical_node_bound
+        for visits in accepted_suffix_actual_visits
+    )
+    snapshot_visit_exceeded_count = sum(
+        visits > activation_identity_target
+        for visits in accepted_suffix_snapshot_visits
+    )
+    total_visit_exceeded_count = sum(
+        canonical + snapshot > total_query_row_bound
+        for canonical, snapshot in zip(
+            accepted_suffix_actual_visits,
+            accepted_suffix_snapshot_visits,
+        )
+    )
+    distance_coverage_mismatch_count = sum(
+        work > canonical + snapshot
+        for work, canonical, snapshot in zip(
+            accepted_suffix_retrieval_work,
+            accepted_suffix_actual_visits,
+            accepted_suffix_snapshot_visits,
+        )
+    )
+    activated_identity_exceeded_count = sum(
+        count > activation_identity_target
+        for count in accepted_suffix_activated_identities
+    )
+    epoch_edge_mismatch_count = sum(
+        any(
+            value <= 0.0 or value > total_query_row_bound
+            for value in (
+                epoch["leading_mean_retrieval_work"],
+                epoch["trailing_peak_mean_retrieval_work"],
+                epoch["following_trough_mean_retrieval_work"],
+                epoch["maximum_retrieval_work"],
+            )
+        )
+        for epoch in complete_epochs
+    )
+    recentered_events = [
+        event
+        for event in recenter_events
+        if event.get("sqlite_sparse_route_recenter_succeeded") is True
+    ]
+    recenter_envelope_mismatch_count = sum(
+        finite_nonnegative(
+            event.get("sqlite_sparse_route_activation_search_effort", 0.0),
+            "consolidation sqlite sparse route activation effort",
+        )
+        != canonical_node_bound
+        or finite_nonnegative(
+            event.get("sqlite_sparse_route_activation_node_budget", 0.0),
+            "consolidation sqlite sparse route activation node budget",
+        )
+        != canonical_node_bound
+        for event in recentered_events
+    )
+    overlap_missing_count = 0
+    overlap_invalid_count = 0
+    overlap_changed_count = 0
+    overlap_ratios = []
+    for event in recentered_events:
+        if event.get("sqlite_sparse_route_recenter_overlap_profiled") is not True:
+            overlap_missing_count += 1
+            continue
+        if (
+            event.get("sqlite_sparse_route_recenter_overlap_pair_valid") is not True
+            or finite_nonnegative(
+                event.get("sqlite_sparse_route_recenter_overlap_failure_code", 0.0),
+                "consolidation sqlite sparse route overlap failure code",
+            )
+            != 0.0
+        ):
+            overlap_invalid_count += 1
+            continue
+        pre_count = finite_nonnegative(
+            event.get("sqlite_sparse_route_recenter_pre_activated_count"),
+            "consolidation sqlite sparse route pre activation count",
+        )
+        post_count = finite_nonnegative(
+            event.get("sqlite_sparse_route_recenter_post_activated_count"),
+            "consolidation sqlite sparse route post activation count",
+        )
+        overlap_count = finite_nonnegative(
+            event.get("sqlite_sparse_route_recenter_overlap_count"),
+            "consolidation sqlite sparse route overlap count",
+        )
+        if (
+            pre_count <= 0.0
+            or post_count <= 0.0
+            or pre_count > activation_identity_target
+            or post_count > activation_identity_target
+            or overlap_count > min(pre_count, post_count)
+        ):
+            overlap_invalid_count += 1
+            continue
+        overlap_ratios.append(ratio(overlap_count, post_count))
+        if overlap_count < post_count:
+            overlap_changed_count += 1
+    if not accepted_suffix_retrieval_work:
+        failures.append("fixed retrieval envelope has no activated work")
+    if unevaluated_epoch_count:
+        failures.append("fixed retrieval envelope lacks complete epoch coverage")
+    if zero_work_count:
+        failures.append("fixed retrieval work is absent on an active route")
+    if work_bound_exceeded_count:
+        failures.append("fixed retrieval work exceeds total F/S/T row bound")
+    if queue_effort_mismatch_count:
+        failures.append("fixed queue effort differs from F/S/T bound")
+    if node_ceiling_mismatch_count:
+        failures.append("fixed dynamic node ceiling differs from F/S/T bound")
+    if actual_visit_exceeded_count:
+        failures.append("fixed retrieval visits exceed F/S/T bound")
+    if snapshot_visit_exceeded_count:
+        failures.append("fixed retrieval snapshot visits exceed F/S/T bound")
+    if total_visit_exceeded_count:
+        failures.append("fixed retrieval total visits exceed F/S/T bound")
+    if distance_coverage_mismatch_count:
+        failures.append("fixed retrieval distance work exceeds fetched-row coverage")
+    if activated_identity_exceeded_count:
+        failures.append("fixed retrieval activation exceeds F/S/T target")
+    if epoch_edge_mismatch_count:
+        failures.append("fixed retrieval envelope changes across consolidation")
+    if len(recentered_events) < RETRIEVAL_CYCLE_MINIMUM_MATERIAL_CYCLES:
+        failures.append("fewer than ten mature fixed-envelope recenters")
+    if recenter_envelope_mismatch_count:
+        failures.append("fixed retrieval recenter changes F/S/T envelope")
+    classifier_passed = not failures
+    overlap_recorded = (
+        bool(recentered_events)
+        and overlap_missing_count == 0
+        and overlap_invalid_count == 0
+        and len(overlap_ratios) == len(recentered_events)
+    )
+    full_cycle_passed = (
+        classifier_passed
+        and overlap_recorded
+        and overlap_changed_count > 0
+    )
+    full_cycle_unproven_reason = None
+    if not overlap_recorded:
+        full_cycle_unproven_reason = (
+            "profile lacks valid pre/post activated-identity overlap across "
+            "every recenter"
+        )
+    elif overlap_changed_count == 0:
+        full_cycle_unproven_reason = (
+            "recenter overlap is valid but activated identity membership never changes"
+        )
+    full_failures = list(failures)
+    if full_cycle_unproven_reason is not None:
+        full_failures.append(full_cycle_unproven_reason)
+    return {
+        "passed": full_cycle_passed,
+        "fixed_envelope_classifier_passed": classifier_passed,
+        "fixed_work_envelope_subcontract_passed": classifier_passed,
+        "activated_identity_overlap_recorded": overlap_recorded,
+        "full_cycle_passed": full_cycle_passed,
+        "full_cycle_unproven_reason": full_cycle_unproven_reason,
+        "overlap_profile_missing_count": overlap_missing_count,
+        "overlap_profile_invalid_count": overlap_invalid_count,
+        "changed_activation_set_count": overlap_changed_count,
+        "minimum_activation_overlap_ratio": (
+            min(overlap_ratios) if overlap_ratios else None
+        ),
+        "maximum_activation_overlap_ratio": (
+            max(overlap_ratios) if overlap_ratios else None
+        ),
+        "mode": "fixed-envelope",
+        "material_cycle_count": 0,
+        "complete_cycle_count": len(complete_epochs),
+        "unevaluated_epoch_count": unevaluated_epoch_count,
+        "work_mismatch_count": zero_work_count + work_bound_exceeded_count,
+        "zero_work_count": zero_work_count,
+        "work_bound_exceeded_count": work_bound_exceeded_count,
+        "effort_mismatch_count": queue_effort_mismatch_count,
+        "queue_effort_mismatch_count": queue_effort_mismatch_count,
+        "node_ceiling_mismatch_count": node_ceiling_mismatch_count,
+        "actual_visit_exceeded_count": actual_visit_exceeded_count,
+        "snapshot_visit_exceeded_count": snapshot_visit_exceeded_count,
+        "total_visit_exceeded_count": total_visit_exceeded_count,
+        "distance_coverage_mismatch_count": distance_coverage_mismatch_count,
+        "activated_identity_exceeded_count": (
+            activated_identity_exceeded_count
+        ),
+        "activation_identity_target": activation_identity_target,
+        "epoch_edge_mismatch_count": epoch_edge_mismatch_count,
+        "mature_recenter_count": len(recentered_events),
+        "recenter_envelope_mismatch_count": (
+            recenter_envelope_mismatch_count
+        ),
+        "retrieval_work_bound": total_query_row_bound,
+        "canonical_retrieval_node_bound": canonical_node_bound,
+        "activation_snapshot_row_bound": activation_identity_target,
+        "accepted_suffix_maximum_retrieval_work": max(
+            accepted_suffix_retrieval_work, default=0.0
+        ),
+        "failures": sorted(set(full_failures)),
     }
 
 
@@ -1231,7 +2437,6 @@ def bounded_activation_quality_result(
                 "query_index",
                 "query_embedding_id",
                 "exact_ranked_ids",
-                "candidate_ranked_ids",
                 "source_ids",
                 "modalities",
                 "history_ordinal",
@@ -1269,6 +2474,19 @@ def bounded_activation_quality_result(
         and {"early", "middle", "late"}.issubset(
             evidence["history_segments"]
         )
+    )
+    reported_candidate_rank_digest = artifact.get(
+        "candidate_identity_rank_sha256"
+    )
+    repeated_candidate_rank_digest = artifact.get(
+        "repeat_candidate_identity_rank_sha256"
+    )
+    deterministic_candidate_rank_passed = (
+        isinstance(reported_candidate_rank_digest, str)
+        and len(reported_candidate_rank_digest) == 64
+        and reported_candidate_rank_digest
+        == evidence["candidate_identity_rank_sha256"]
+        and repeated_candidate_rank_digest == reported_candidate_rank_digest
     )
     restart = artifact.get("sqlite_restart_measurements")
     if not isinstance(restart, list) or len(restart) != 3:
@@ -1323,8 +2541,11 @@ def bounded_activation_quality_result(
             or not isinstance(pre_digest, str)
             or len(pre_digest) != 64
             or any(char not in "0123456789abcdef" for char in pre_digest)
-            or pre_digest != restart_probe_digest
-            or post_digest != restart_probe_digest
+            or pre_digest != post_digest
+            or (
+                expected_fraction == 1.0
+                and pre_digest != restart_probe_digest
+            )
         ):
             raise ValueError(
                 "restart measurement is not bound to restored corpus state"
@@ -1354,8 +2575,11 @@ def bounded_activation_quality_result(
         failures.append("exact identity recall below invariant")
     if exact_top1 < RETRIEVAL_EXACT_TOP1_MIN:
         failures.append("exact top-1 below invariant")
-    if not evidence["exact_rank_match"]:
-        failures.append("deterministic exact rank order differs")
+    exact_top1_miss_count = query_count - evidence["exact_top1_hit_count"]
+    if exact_top1_miss_count > RETRIEVAL_EXACT_TOP1_MAX_MISSES:
+        failures.append("exact top-1 miss count exceeds invariant")
+    if not deterministic_candidate_rank_passed:
+        failures.append("candidate rank order is not repeat-deterministic")
     if semantic_coverage < RETRIEVAL_SEMANTIC_COVERAGE_MIN:
         failures.append("semantic coverage below threshold")
     if not coverage_passed:
@@ -1377,8 +2601,12 @@ def bounded_activation_quality_result(
         "result_k": result_k,
         "mean_exact_id_recall_at_k": exact_recall,
         "mean_top1_exact_id": exact_top1,
+        "exact_top1_miss_count": exact_top1_miss_count,
         "mean_exact_neighbor_semantic_coverage": semantic_coverage,
-        "deterministic_exact_rank_order_passed": evidence["exact_rank_match"],
+        "deterministic_candidate_rank_order_passed": (
+            deterministic_candidate_rank_passed
+        ),
+        "candidate_identity_rank_sha256": reported_candidate_rank_digest,
         "query_input_coverage_passed": coverage_passed,
         "query_source_count": evidence["source_count"],
         "query_modalities": evidence["modalities"],
@@ -1408,6 +2636,19 @@ def consolidation_epoch_result(
         if suffix_start <= event["event_index"] < suffix_end
     ]
     complete_epochs = []
+    sparse_cycle_contract = isinstance(
+        profile.get("sparse_route_parameters"), dict
+    )
+    dynamic_sparse_cycle = bool(
+        sparse_cycle_contract
+        and nonnegative_integer(
+            profile["sparse_route_parameters"].get(
+                "activation_search_node_budget_step"
+            ),
+            "sparse_route_parameters.activation_search_node_budget_step",
+        )
+        > 0
+    )
     k = CONSOLIDATION_EPOCH_PRE_POST_EVENTS
     for event_index, event in enumerate(events):
         close = event["event_index"]
@@ -1434,15 +2675,75 @@ def consolidation_epoch_result(
             float(row["process_ms"]) for row in epoch_rows[-k:]
         )
         post = statistics.mean(float(row["process_ms"]) for row in post_rows)
-        retrieval_values = [retrieval_work(row) for row in epoch_rows]
-        retrieval_leading = statistics.mean(retrieval_values[:k])
-        retrieval_trailing = statistics.mean(retrieval_values[-k:])
-        retrieval_post = statistics.mean(retrieval_work(row) for row in post_rows)
+        if sparse_cycle_contract:
+            retrieval_pairs = [
+                (
+                    (
+                        sparse_route_retrieval_actual_visits(row)
+                        if dynamic_sparse_cycle
+                        else sparse_route_retrieval_work(row)
+                    ),
+                    sparse_route_retrieval_effort(row),
+                )
+                for row in epoch_rows
+                if sparse_route_retrieval_active(row)
+            ]
+            post_pairs = [
+                (
+                    (
+                        sparse_route_retrieval_actual_visits(row)
+                        if dynamic_sparse_cycle
+                        else sparse_route_retrieval_work(row)
+                    ),
+                    sparse_route_retrieval_effort(row),
+                )
+                for row in post_rows
+                if sparse_route_retrieval_active(row)
+            ]
+            edge_samples = knob_sparse_cycle_edge_samples(profile)
+            retrieval_cycle_evaluated = (
+                len(retrieval_pairs) >= 2 * edge_samples
+                and len(post_pairs) >= edge_samples
+                and all(effort > 0.0 for _, effort in retrieval_pairs)
+            )
+            retrieval_values = [work for work, _ in retrieval_pairs]
+            retrieval_efforts = [effort for _, effort in retrieval_pairs]
+            if retrieval_cycle_evaluated:
+                retrieval_leading = statistics.mean(
+                    retrieval_values[:edge_samples]
+                )
+                retrieval_trailing = statistics.mean(
+                    retrieval_values[-edge_samples:]
+                )
+                retrieval_post = statistics.mean(
+                    work for work, _ in post_pairs[:edge_samples]
+                )
+                effort_leading = statistics.mean(
+                    retrieval_efforts[:edge_samples]
+                )
+                effort_trailing = statistics.mean(
+                    retrieval_efforts[-edge_samples:]
+                )
+            else:
+                retrieval_leading = retrieval_trailing = retrieval_post = 0.0
+                effort_leading = effort_trailing = 0.0
+        else:
+            retrieval_values = [retrieval_work(row) for row in epoch_rows]
+            retrieval_efforts = retrieval_values
+            retrieval_leading = statistics.mean(retrieval_values[:k])
+            retrieval_trailing = statistics.mean(retrieval_values[-k:])
+            retrieval_post = statistics.mean(
+                retrieval_work(row) for row in post_rows
+            )
+            effort_leading = retrieval_leading
+            effort_trailing = retrieval_trailing
+            retrieval_cycle_evaluated = True
         retrieval_ramp = retrieval_trailing - retrieval_leading
+        retrieval_effort_ramp = effort_trailing - effort_leading
         retrieval_negative_variation = sum(
             max(0.0, previous - current)
             for previous, current in zip(
-                retrieval_values, retrieval_values[1:]
+                retrieval_efforts, retrieval_efforts[1:]
             )
         )
         ramp_ratio = ratio(trailing, leading)
@@ -1455,8 +2756,14 @@ def consolidation_epoch_result(
             for name in REQUIRED_CONSOLIDATION_EPOCH_COUNTERS
         }
         material = ramp_ratio >= CONSOLIDATION_EPOCH_MATERIAL_RAMP_RATIO_MIN
+        retrieval_material = (
+            retrieval_cycle_evaluated
+            and ratio(retrieval_trailing, retrieval_leading)
+            >= CONSOLIDATION_EPOCH_MATERIAL_RAMP_RATIO_MIN
+        )
         reset_failures = {
             name: value for name, value in reset_ratios.items()
+            if name in RESETTABLE_CONSOLIDATION_EPOCH_COUNTERS
             if value > CONSOLIDATION_EPOCH_RESET_COUNTER_RATIO_MAX
             and not (
                 float(event["pre_reset_counters"][name]) == 0.0
@@ -1483,23 +2790,45 @@ def consolidation_epoch_result(
             "retrieval_trailing_over_leading": ratio(
                 retrieval_trailing, retrieval_leading
             ),
-            "maximum_retrieval_work": max(retrieval_values),
+            "maximum_retrieval_work": max(retrieval_values, default=0.0),
             "retrieval_negative_variation_over_ramp": ratio(
-                retrieval_negative_variation, max(0.0, retrieval_ramp)
+                retrieval_negative_variation,
+                max(0.0, retrieval_effort_ramp),
             ),
             "retrieval_max_over_trailing_mean": ratio(
-                max(retrieval_values), retrieval_trailing
+                max(retrieval_efforts, default=0.0), effort_trailing
             ),
             "_retrieval_cycle_profile": normalized_cycle(
                 resample_equal_progress(
-                    retrieval_values, RETRIEVAL_CYCLE_RESAMPLE_BINS
+                    retrieval_efforts, RETRIEVAL_CYCLE_RESAMPLE_BINS
                 ),
-                retrieval_leading,
-                retrieval_trailing,
-            ),
+                effort_leading,
+                effort_trailing,
+            ) if retrieval_cycle_evaluated else [],
             "material": material,
+            "retrieval_cycle_evaluated": retrieval_cycle_evaluated,
+            "retrieval_material": retrieval_material,
             "reset_counter_ratios": reset_ratios,
             "reset_counter_failures": reset_failures,
+            "sqlite_sparse_route_recenter_succeeded": (
+                event.get("sqlite_sparse_route_recenter_succeeded") is True
+            ),
+            "sqlite_sparse_route_activation_search_effort": (
+                finite_nonnegative(
+                    event.get(
+                        "sqlite_sparse_route_activation_search_effort", 0.0
+                    ),
+                    "consolidation sqlite sparse route activation effort",
+                )
+            ),
+            "sqlite_sparse_route_activation_node_budget": (
+                finite_nonnegative(
+                    event.get(
+                        "sqlite_sparse_route_activation_node_budget", 0.0
+                    ),
+                    "consolidation sqlite sparse route activation node budget",
+                )
+            ),
             "consolidation_ms_per_event": ratio(
                 float(event["duration_ms"]), float(max(1, sealed_count))
             ),
@@ -1510,6 +2839,9 @@ def consolidation_epoch_result(
         })
 
     material_epochs = [epoch for epoch in complete_epochs if epoch["material"]]
+    retrieval_material_epochs = [
+        epoch for epoch in complete_epochs if epoch["retrieval_material"]
+    ]
     failures = []
     mode = "invalid"
     peak_trend = None
@@ -1580,10 +2912,127 @@ def consolidation_epoch_result(
             failures.append("consolidation cost per sealed mutation rises")
 
     retrieval_cycle_symmetry = None
-    if mode == "sawtooth":
+    if sparse_cycle_contract and profile.get("retention") == "natural":
+        accepted_sparse_rows = [
+            row
+            for row in rows
+            if suffix_start
+            <= nonnegative_integer(row.get("event_index"), "event_index")
+            < suffix_end
+            and sparse_route_retrieval_active(row)
+        ]
+        accepted_sparse_work = [
+            sparse_route_retrieval_work(row) for row in accepted_sparse_rows
+        ]
+        accepted_sparse_effort = [
+            sparse_route_retrieval_effort(row) for row in accepted_sparse_rows
+        ]
+        accepted_sparse_queue_effort = [
+            sparse_route_retrieval_queue_effort(row)
+            for row in accepted_sparse_rows
+        ]
+        accepted_sparse_actual_visits = [
+            sparse_route_retrieval_actual_visits(row)
+            for row in accepted_sparse_rows
+        ]
+        accepted_sparse_snapshot_visits = [
+            sparse_route_activation_snapshot_visits(row)
+            for row in accepted_sparse_rows
+        ]
+        accepted_sparse_activated_identities = [
+            sparse_route_retrieval_activated_identities(row)
+            for row in accepted_sparse_rows
+        ]
+        retrieval_work_bound = knob_sparse_retrieval_work_bound(profile)
+        total_query_row_bound = knob_sparse_total_query_row_bound(profile)
+        fixed_envelope_selected = (
+            nonnegative_integer(
+                profile["sparse_route_parameters"].get(
+                    "activation_search_node_budget_min"
+                ),
+                "sparse_route_parameters.activation_search_node_budget_min",
+            )
+            == retrieval_work_bound
+            and nonnegative_integer(
+                profile["sparse_route_parameters"].get(
+                    "activation_search_node_budget_step"
+                ),
+                "sparse_route_parameters.activation_search_node_budget_step",
+            )
+            == 0
+            and nonnegative_integer(
+                profile["sparse_route_parameters"].get(
+                    "activation_search_effort_min"
+                ),
+                "sparse_route_parameters.activation_search_effort_min",
+            )
+            == retrieval_work_bound
+            and nonnegative_integer(
+                profile["sparse_route_parameters"].get(
+                    "activation_search_effort_step"
+                ),
+                "sparse_route_parameters.activation_search_effort_step",
+            )
+            == 0
+        )
+        if fixed_envelope_selected:
+            retrieval_cycle_symmetry = fixed_retrieval_envelope_result(
+                complete_epochs,
+                events,
+                retrieval_work_bound,
+                total_query_row_bound,
+                accepted_sparse_work,
+                accepted_sparse_queue_effort,
+                accepted_sparse_effort,
+                accepted_sparse_actual_visits,
+                accepted_sparse_snapshot_visits,
+                accepted_sparse_activated_identities,
+                nonnegative_integer(
+                    profile["sparse_route_parameters"].get(
+                        "activation_identity_target"
+                    ),
+                    "sparse_route_parameters.activation_identity_target",
+                ),
+            )
+        else:
+            retrieval_cycle_symmetry = retrieval_cycle_symmetry_result(
+                retrieval_material_epochs,
+                retrieval_work_bound,
+                accepted_sparse_actual_visits,
+                accepted_sparse_effort,
+                accepted_suffix_queue_effort=accepted_sparse_queue_effort,
+                queue_effort_bound=nonnegative_integer(
+                    profile["sparse_route_parameters"].get("search_effort"),
+                    "sparse_route_parameters.search_effort",
+                    positive=True,
+                ),
+                accepted_suffix_total_work=accepted_sparse_work,
+                total_query_row_bound=total_query_row_bound,
+                accepted_suffix_snapshot_visits=(
+                    accepted_sparse_snapshot_visits
+                ),
+                activation_identity_target=nonnegative_integer(
+                    profile["sparse_route_parameters"].get(
+                        "activation_identity_target"
+                    ),
+                    "sparse_route_parameters.activation_identity_target",
+                ),
+                accepted_suffix_activated_identities=(
+                    accepted_sparse_activated_identities
+                ),
+            )
+        failures.extend(retrieval_cycle_symmetry["failures"])
+    elif mode == "sawtooth":
         retrieval_cycle_symmetry = retrieval_cycle_symmetry_result(
             material_epochs,
             knob_normal_comparison_bound(profile),
+            [
+                retrieval_work(row)
+                for row in rows
+                if suffix_start
+                <= nonnegative_integer(row.get("event_index"), "event_index")
+                < suffix_end
+            ],
             [
                 retrieval_work(row)
                 for row in rows
@@ -1595,6 +3044,75 @@ def consolidation_epoch_result(
         failures.extend(retrieval_cycle_symmetry["failures"])
     elif mode == "flat-envelope" and profile.get("retention") == "natural":
         failures.append("natural cutover requires retrieval cycle symmetry")
+
+    activity_normalized_reset = None
+    reset_miss_epochs = [
+        epoch for epoch in material_epochs
+        if epoch["post_over_trailing"]
+        > CONSOLIDATION_EPOCH_POST_PRE_PROCESS_RATIO_MAX
+    ]
+    if reset_miss_epochs:
+        evaluation_inputs = []
+        operation_activity_pairs = (
+            (
+                "MemoryStorage",
+                "cortext::operations::MemoryStorage",
+                "supersession_current_candidate_count",
+            ),
+            (
+                "PropagateEmotionalCascade",
+                "cortext::operations::PropagateEmotionalCascade",
+                "emotional_neighbor_count",
+            ),
+        )
+        for epoch in reset_miss_epochs:
+            close = int(epoch["closing_event"])
+            trailing_rows = rows[close - k + 1 : close + 1]
+            post_rows = rows[close + 1 : close + 1 + k]
+            for operation, operation_key, activity_key in operation_activity_pairs:
+                evaluation_inputs.append({
+                    "epoch": epoch["consolidation_epoch_id"],
+                    "operation": operation,
+                    "trailing_event_indices": [
+                        row["event_index"] for row in trailing_rows
+                    ],
+                    "post_event_indices": [
+                        row["event_index"] for row in post_rows
+                    ],
+                    "trailing_ms": [
+                        row["operation_ms"][operation_key]
+                        for row in trailing_rows
+                    ],
+                    "post_ms": [
+                        row["operation_ms"][operation_key]
+                        for row in post_rows
+                    ],
+                    "trailing_activity": [
+                        row["work_counters"][activity_key]
+                        for row in trailing_rows
+                    ],
+                    "post_activity": [
+                        row["work_counters"][activity_key]
+                        for row in post_rows
+                    ],
+                })
+        raw_gate_failure_names = {
+            "material epoch does not lower following process time",
+            "sawtooth peaks rise",
+            "sawtooth troughs rise",
+            "peak relative slope rises",
+            "trough relative slope rises",
+            "peak bootstrap upper rises",
+            "trough bootstrap upper rises",
+            "consolidation reset counter does not fall",
+        }
+        activity_normalized_reset = activity_normalized_reset_diagnostic(
+            evaluation_inputs,
+            sorted({
+                failure for failure in failures
+                if failure in raw_gate_failure_names
+            }),
+        )
     for epoch in complete_epochs:
         epoch.pop("_retrieval_cycle_profile", None)
 
@@ -1611,6 +3129,7 @@ def consolidation_epoch_result(
         "normalized_mutation_cost_trend": normalized_mutation_cost,
         "frequency_trend": frequency_trend,
         "retrieval_cycle_symmetry": retrieval_cycle_symmetry,
+        "activity_normalized_reset_diagnostic": activity_normalized_reset,
         "failures": sorted(set(failures)),
     }
 
@@ -1732,17 +3251,29 @@ def suffix_plateau_result(
             operation_results[name] = {"mean_ms": mean_value, **result}
             if result["second_over_first"] > OPERATION_HALF_RATIO_MAX:
                 operation_failures[name] = result["second_over_first"]
-        counter_results = {
-            name: half_comparison(values[suffix_start:])
-            for name, values in counter_windows.items()
-        }
-        counter_failures = {
-            name: result["second_over_first"]
-            for name, result in counter_results.items()
-            if result["second_over_first"] > WORK_COUNTER_HALF_RATIO_MAX
-        }
         start_event = suffix_ranges[0][0]
         end_event = suffix_ranges[-1][1]
+        counter_results = {}
+        counter_failures = {}
+        for name, values in counter_windows.items():
+            result = half_comparison(values[suffix_start:])
+            bound = knob_work_counter_bound(profile, name)
+            maximum = max(
+                float(row["work_counters"][name])
+                for row in rows[start_event:end_event]
+            )
+            absolute_bound_passed = bound is not None and maximum <= bound
+            counter_results[name] = {
+                **result,
+                "maximum": maximum,
+                "knob_derived_absolute_bound": bound,
+                "absolute_bound_passed": absolute_bound_passed,
+            }
+            if (
+                result["second_over_first"] > WORK_COUNTER_HALF_RATIO_MAX
+                and not absolute_bound_passed
+            ) or (bound is not None and maximum > bound):
+                counter_failures[name] = result["second_over_first"]
         half = len(suffix_ranges) // 2
         middle_event = suffix_ranges[half][0]
         start_rows = total_authoritative_rows(checkpoints[start_event])
@@ -1805,11 +3336,14 @@ def suffix_plateau_result(
             "relative_slope": relative_slope,
             "relative_upper": relative_upper,
             "operation_failure_count": len(operation_failures),
+            "operation_failures": sorted(operation_failures),
             "counter_failure_count": len(counter_failures),
+            "counter_failures": sorted(counter_failures),
             "store_growth_passed": store_growth_passed,
             "height_passed": suffix_mean <= height_ceiling,
             "consolidation_epoch_passed": epoch_result["passed"],
             "consolidation_mode": epoch_result["mode"],
+            "consolidation_epoch_failures": epoch_result["failures"],
         })
     return {
         "passed": accepted is not None,

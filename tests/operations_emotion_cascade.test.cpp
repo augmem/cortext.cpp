@@ -2,11 +2,16 @@
 #include "test_helpers.hpp"
 #include "../src/operations/association_fanout_cache_internal.hpp"
 #include "../src/operations/emotional_metadata_cache_internal.hpp"
+#include "../src/operations/sparse_retrieval_knobs_internal.hpp"
+#include "../src/operations/signal_record_rollback_internal.hpp"
+#include <array>
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <filesystem>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 
 #include <cortext/core/knobs.hpp>
@@ -143,6 +148,52 @@ private:
   mutable int call_count_ = 0;
 };
 
+class CascadeThenFailOnce final : public IOperation
+{
+public:
+  void
+  Execute (OperationContext &context, Transaction &tx) const override
+  {
+    PropagateEmotionalCascade cascade;
+    cascade.Execute (context, tx);
+    if (fail_once_)
+      {
+        fail_once_ = false;
+        throw std::runtime_error ("forced cascade rollback");
+      }
+  }
+
+private:
+  mutable bool fail_once_ = true;
+};
+
+class ScopedTempDatabase
+{
+public:
+  ScopedTempDatabase ()
+      : path_ (cortext::testing::UniqueTempPath (
+            "cortext_emotional_cascade_", ".db"))
+  {
+  }
+
+  ~ScopedTempDatabase ()
+  {
+    std::error_code error;
+    std::filesystem::remove (path_, error);
+    std::filesystem::remove (path_.string () + "-wal", error);
+    std::filesystem::remove (path_.string () + "-shm", error);
+  }
+
+  const std::filesystem::path &
+  Path () const
+  {
+    return path_;
+  }
+
+private:
+  std::filesystem::path path_;
+};
+
 static double
 RunCustomRawEmotionalMutation (bool cascade_on_next_call,
                                bool use_store = false)
@@ -167,13 +218,15 @@ RunCustomRawEmotionalMutation (bool cascade_on_next_call,
 }
 
 static std::unordered_map<std::string, double>
-ExecuteCascade (const std::shared_ptr<Store> &store, bool commit = true)
+ExecuteCascade (const std::shared_ptr<Store> &store, bool commit = true,
+                double focus = 0.5, double sensitivity = 0.5,
+                double stability = 0.5)
 {
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
+  cfg.focus = focus;
+  cfg.sensitivity = sensitivity;
+  cfg.stability = stability;
   ProcessorContext processor_context;
   ScopedExecutionCacheSidecar sidecar_scope (processor_context);
   const Signal signal = MakeSignal (1'000'000);
@@ -224,6 +277,7 @@ TEST_CASE ("EmotionCascadeParams derives from knobs correctly",
   REQUIRE (params2.cascade_radius == 5); // round(lerp(1, 5, 1)) = 5
   REQUIRE (params2.cascade_decay == Catch::Approx (0.3).margin (1e-6)); // lerp(0.7, 0.3, 1)
 }
+
 
 TEST_CASE ("Emotional metadata cache preserves shared embedding minima",
            "[operations][emotion_cascade][metadata_cache][shared_embedding]")
@@ -279,6 +333,28 @@ TEST_CASE ("Emotional metadata cache preserves shared embedding minima",
   REQUIRE_FALSE (cache.values_by_embedding.contains (100));
   REQUIRE (cache.source_query_order
            == std::vector<long long>{ 20 });
+}
+
+TEST_CASE ("Emotional source index retains only its newest bounded prefix",
+           "[operations][emotion_cascade][metadata_cache][bounds]")
+{
+  ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
+  std::vector<operations::execution_cache_sidecar_internal::
+                  EmotionalMemoryMetadata>
+      rows;
+  for (long long memory_id = 1; memory_id <= 5; ++memory_id)
+    rows.push_back (
+        { memory_id, memory_id, memory_id, true, 0.8, 0.9, 2.0, 1,
+          0.5 });
+  operations::emotional_metadata_cache_internal::Reset (
+      processor_context, std::move (rows), 3);
+  const auto state
+      = operations::emotional_metadata_cache_internal::FindState (
+          processor_context);
+  REQUIRE (state);
+  REQUIRE (state->emotional_metadata.source_query_order
+           == std::vector<long long>{ 5, 4, 3 });
 }
 
 TEST_CASE ("CascadeRadius and CascadeDecay knob values",
@@ -748,6 +824,8 @@ TEST_CASE ("PropagateEmotionalCascade batches more than 64 sources exactly",
 {
   cortext::testing::ScopedEnvVar profile (
       "CORTEXT_PROFILE_EMOTIONAL_CASCADE", "1");
+  cortext::testing::ScopedEnvVar collapse (
+      "CORTEXT_EXPERIMENT_EMOTIONAL_WINNER_COLLAPSE", "1");
   auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
   cortext::testing::InitializeCoreSchema (*store);
   constexpr long long kTargetMemoryId = 1000;
@@ -762,8 +840,179 @@ TEST_CASE ("PropagateEmotionalCascade batches more than 64 sources exactly",
 
   const auto timings = ExecuteCascade (store);
   REQUIRE (timings.at ("EmotionalCascade.source_count") == 70.0);
-  REQUIRE (timings.at ("EmotionalCascade.neighbor_count") == 70.0);
+  // The shared bit-mask traversal may observe the target from every source,
+  // but first-source-wins means only one winning source/target pair should be
+  // materialized and executed.
+  REQUIRE (timings.at ("EmotionalCascade.neighbor_count") == 1.0);
+  REQUIRE (timings.at ("EmotionalCascade.neighbor_execution_count") == 1.0);
+  REQUIRE (timings.at ("EmotionalCascade.reachable_pair_count") == 70.0);
+  REQUIRE (timings.at ("EmotionalCascade.edge_visit_count") == 70.0);
   REQUIRE (timings.at ("EmotionalCascade.update_count") == 1.0);
   REQUIRE (MemoryIntensity (*store, kTargetMemoryId)
            == Catch::Approx (0.45).margin (1e-9));
+}
+
+TEST_CASE ("PropagateEmotionalCascade edge experiment uses the knob-derived "
+           "physical ceiling",
+           "[operations][emotion_cascade][bounds][edge_visit]")
+{
+  cortext::testing::ScopedEnvVar profile (
+      "CORTEXT_PROFILE_EMOTIONAL_CASCADE", "1");
+  cortext::testing::ScopedEnvVar collapse (
+      "CORTEXT_EXPERIMENT_EMOTIONAL_WINNER_COLLAPSE", "1");
+  cortext::testing::ScopedEnvVar edge_limit (
+      "CORTEXT_EXPERIMENT_EMOTIONAL_EDGE_LIMIT", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  constexpr double kFocus = 0.0;
+  constexpr double kSensitivity = 0.0;
+  constexpr double kStability = 0.0;
+  const long long limit = operations::sparse_retrieval_knobs_internal::
+      PublicQueryNodeBudget (kFocus, kSensitivity, kStability);
+  REQUIRE (limit == 1280);
+  SeedCascadeMemory (*store, 1, 1);
+  SetCascadeSource (*store, 1, 0.9, 1, 0.9);
+  for (long long target = 2; target <= limit + 8; ++target)
+    {
+      SeedCascadeMemory (*store, target, target);
+      AddCascadeEdge (*store, 1, target);
+    }
+
+  const auto timings = ExecuteCascade (
+      store, true, kFocus, kSensitivity, kStability);
+  REQUIRE (timings.at ("EmotionalCascade.edge_visit_limit") == limit);
+  REQUIRE (timings.at ("EmotionalCascade.edge_visit_count") == limit);
+  REQUIRE (timings.at ("EmotionalCascade.edge_visit_limit_reached") == 1.0);
+  REQUIRE (timings.at ("EmotionalCascade.neighbor_count") <= limit);
+}
+
+TEST_CASE ("PropagateEmotionalCascade bounds source inspection and execution "
+           "from the same knobs",
+           "[operations][emotion_cascade][bounds][source]")
+{
+  cortext::testing::ScopedEnvVar profile (
+      "CORTEXT_PROFILE_EMOTIONAL_CASCADE", "1");
+  cortext::testing::ScopedEnvVar collapse (
+      "CORTEXT_EXPERIMENT_EMOTIONAL_WINNER_COLLAPSE", "1");
+  cortext::testing::ScopedEnvVar edge_limit (
+      "CORTEXT_EXPERIMENT_EMOTIONAL_EDGE_LIMIT", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  constexpr double kFocus = 0.0;
+  constexpr double kSensitivity = 0.0;
+  constexpr double kStability = 0.0;
+  const long long inspection_limit
+      = operations::sparse_retrieval_knobs_internal::PublicQueryNodeBudget (
+          kFocus, kSensitivity, kStability);
+  const long long execution_limit
+      = operations::sparse_retrieval_knobs_internal::BackfillBatchSize (
+          kFocus, kSensitivity, kStability);
+  REQUIRE (inspection_limit == 1280);
+  REQUIRE (execution_limit == 64);
+  for (long long source = 1; source <= inspection_limit + 8; ++source)
+    {
+      SeedCascadeMemory (*store, source, source);
+      SetCascadeSource (*store, source, 0.9, 1, 0.5);
+    }
+
+  const auto timings = ExecuteCascade (
+      store, true, kFocus, kSensitivity, kStability);
+  REQUIRE (timings.at ("EmotionalCascade.source_inspection_limit")
+           == inspection_limit);
+  REQUIRE (timings.at ("EmotionalCascade.source_inspection_count")
+           == inspection_limit);
+  REQUIRE (timings.at ("EmotionalCascade.source_execution_count")
+           == inspection_limit);
+  REQUIRE (timings.at ("EmotionalCascade.source_limit")
+           == execution_limit);
+  REQUIRE (timings.at ("EmotionalCascade.source_count") == execution_limit);
+  REQUIRE (timings.at ("EmotionalCascade.source_limit_reached") == 1.0);
+}
+
+TEST_CASE ("PropagateEmotionalCascade caps writes at a knob-derived identity "
+           "envelope",
+           "[operations][emotion_cascade][bounds][knobs]")
+{
+  cortext::testing::ScopedEnvVar profile (
+      "CORTEXT_PROFILE_EMOTIONAL_CASCADE", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  constexpr double kFocus = 0.0;
+  constexpr double kSensitivity = 0.0;
+  constexpr double kStability = 0.0;
+  const int update_limit
+      = operations::sparse_retrieval_knobs_internal::
+            ActivationIdentityTarget (kFocus, kSensitivity, kStability);
+  REQUIRE (update_limit == 640);
+
+  SeedCascadeMemory (*store, 1, 1);
+  SetCascadeSource (*store, 1, 0.9, 1, 0.9);
+  for (long long target = 2; target <= update_limit + 3; ++target)
+    SeedCascadeMemory (*store, target, target);
+  AddCascadeEdge (*store, 1, 2);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = kFocus;
+  cfg.sensitivity = kSensitivity;
+  cfg.stability = kStability;
+  ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
+  std::vector<operations::execution_cache_sidecar_internal::
+                  EmotionalMemoryMetadata>
+      metadata;
+  metadata.reserve (static_cast<std::size_t> (update_limit + 3));
+  metadata.push_back (
+      { 1, 1, 1'000'000, true, 0.9, 0.9, 2.0, 1, 0.9 });
+  for (long long target = 2; target <= update_limit + 3; ++target)
+    metadata.push_back (
+        { target, target, 1'000'000, false, 0.0, 0.0, 0.0, 0, 0.0 });
+  operations::emotional_metadata_cache_internal::Reset (
+      processor_context, std::move (metadata));
+  auto execute = [&] (uint64_t timestamp) {
+    const Signal signal = MakeSignal (timestamp);
+    OperationContext context (signal, processor_context, cfg, store.get ());
+    auto transaction = store->Begin ();
+    PropagateEmotionalCascade operation;
+    operation.Execute (context, *transaction);
+    transaction->Commit ();
+    return context.GetOperationTimings ();
+  };
+
+  // Establish a real fixed point before the reachable topology expands.
+  const auto initial = execute (1'000'000);
+  REQUIRE (initial.at ("EmotionalCascade.update_count") == 1.0);
+  REQUIRE (initial.at ("EmotionalCascade.update_limit_reached") == 0.0);
+
+  for (long long target = 3; target <= update_limit + 3; ++target)
+    {
+      AddCascadeEdge (*store, 1, target);
+      operations::association_fanout_cache::UpsertAssociation (
+          processor_context, processor_context.association_fanout_cache,
+          1, target, 1, target, "co_occurs", 1.0, 1'000'001);
+    }
+
+  const auto timings = execute (1'000'001);
+  REQUIRE (timings.at ("EmotionalCascade.update_limit") == update_limit);
+  REQUIRE (timings.at ("EmotionalCascade.update_count") == update_limit);
+  REQUIRE (timings.at ("EmotionalCascade.update_limit_reached") == 1.0);
+  const auto changed = store->Execute (
+      "SELECT COUNT(*) AS n FROM memories "
+      "WHERE memory_id >= 2 AND emotional_intensity > 0.0");
+  REQUIRE (changed.size () == 1);
+  REQUIRE (store::AnyToLongLong (changed[0].at ("n"))
+           == update_limit + 1);
+
+  // A saturated pass is an incomplete prefix, not a fixed point. Reusing the
+  // same ProcessorContext must revisit the unresolved tail on the next event.
+  const auto resumed = execute (1'000'002);
+  REQUIRE (resumed.at ("EmotionalCascade.source_count") == 1.0);
+  REQUIRE (resumed.at ("EmotionalCascade.update_limit_reached") == 0.0);
+  REQUIRE (resumed.at ("EmotionalCascade.update_count") == 1.0);
+  const auto all_changed = store->Execute (
+      "SELECT COUNT(*) AS n FROM memories "
+      "WHERE memory_id >= 2 AND emotional_intensity > 0.0");
+  REQUIRE (all_changed.size () == 1);
+  REQUIRE (store::AnyToLongLong (all_changed[0].at ("n"))
+           == update_limit + 2);
 }

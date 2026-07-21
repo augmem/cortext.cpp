@@ -63,26 +63,46 @@ struct SeedCacheProfile
   std::size_t eligibility_rows = 0;
   std::size_t ranked_rows = 0;
   std::size_t selected_rows = 0;
+  std::size_t sqlite_sparse_route_activated_identities = 0;
+  std::size_t sqlite_sparse_route_node_rows = 0;
+  std::size_t sqlite_sparse_route_activation_snapshot_rows = 0;
+  std::size_t sqlite_sparse_route_activation_snapshot_cache_miss_rows = 0;
+  std::size_t sqlite_sparse_route_distance_evaluations = 0;
+  std::size_t sqlite_sparse_route_search_effort = 0;
+  std::size_t sqlite_sparse_route_search_node_budget = 0;
+  std::size_t sqlite_sparse_route_restart_rows = 0;
+  std::size_t sqlite_sparse_route_dirty_rows = 0;
+  int sqlite_sparse_route_search_failure_code = 0;
+  bool sparse_route_used = false;
 };
 
-thread_local std::size_t *g_family_exact_comparison_counter = nullptr;
+struct FamilyExactComparisonBudget
+{
+  std::size_t used = 0;
+  std::size_t limit = 0;
+  bool record_trace = true;
+};
+
+thread_local FamilyExactComparisonBudget *g_family_exact_comparison_budget
+    = nullptr;
 
 class ScopedFamilyExactComparisonCounter
 {
 public:
-  explicit ScopedFamilyExactComparisonCounter (std::size_t *counter)
-      : previous_ (g_family_exact_comparison_counter)
+  explicit ScopedFamilyExactComparisonCounter (
+      FamilyExactComparisonBudget *budget)
+      : previous_ (g_family_exact_comparison_budget)
   {
-    g_family_exact_comparison_counter = counter;
+    g_family_exact_comparison_budget = budget;
   }
 
   ~ScopedFamilyExactComparisonCounter ()
   {
-    g_family_exact_comparison_counter = previous_;
+    g_family_exact_comparison_budget = previous_;
   }
 
 private:
-  std::size_t *previous_ = nullptr;
+  FamilyExactComparisonBudget *previous_ = nullptr;
 };
 
 void
@@ -326,6 +346,8 @@ RefreshProcessorSurfaces (Transaction &tx, ProcessorContext &p_ctx,
       historical_surface_search_cache_internal::
           SetCurrentSurfaceDatabaseCurrent (p_ctx, false);
     }
+  retrieval_trace::RecordSurfaceUpsert (
+      memory_id, new_embedding_id, ToFloatVector (embedding));
 }
 
 void
@@ -432,11 +454,22 @@ public:
             continue;
           }
 
+        if (g_family_exact_comparison_budget
+            && g_family_exact_comparison_budget->used
+                   >= g_family_exact_comparison_budget->limit)
+          {
+            // The candidate remains eligible when the bounded duplicate test
+            // cannot make another exact comparison. Output cardinality and
+            // ranking remain independently bounded downstream.
+            return false;
+          }
+        if (g_family_exact_comparison_budget)
+          ++g_family_exact_comparison_budget->used;
 #ifdef CORTEXT_TESTING
-        retrieval_trace::IncrementLastFamilyExactComparisonCount ();
+        if (!g_family_exact_comparison_budget
+            || g_family_exact_comparison_budget->record_trace)
+          retrieval_trace::IncrementLastFamilyExactComparisonCount ();
 #endif
-        if (g_family_exact_comparison_counter)
-          ++*g_family_exact_comparison_counter;
         double cosine = 0.0;
         for (Eigen::Index dimension = 0;
              dimension < candidate.normalized.size (); ++dimension)
@@ -672,10 +705,14 @@ LoadHistoricalSeedRowsFromCache (
 
 std::optional<std::vector<std::map<std::string, std::any>>>
 LoadCurrentSeedRowsFromCache (
-    const ProcessorContext &p_ctx, const Eigen::VectorXf &query_embedding,
+    Store *store, const ProcessorContext &p_ctx,
+    const Eigen::VectorXf &query_embedding,
     long long exclusion_ts, int candidate_limit,
     const auto &superseded_memory_ids,
-    double duplicate_threshold, SeedCacheProfile *profile)
+    double duplicate_threshold, SeedCacheProfile *profile,
+    bool sparse_route_enabled,
+    bool sqlite_sparse_route_enabled,
+    std::size_t sparse_route_capacity)
 {
   const auto state
       = historical_surface_search_cache_internal::Find (p_ctx);
@@ -694,29 +731,111 @@ LoadCurrentSeedRowsFromCache (
       return std::vector<std::map<std::string, std::any>>{};
     }
 
+  const bool use_sparse_route
+      = sparse_route_enabled && entry_count > sparse_route_capacity;
+  std::vector<std::size_t> candidate_indices;
+  if (use_sparse_route)
+    {
+      auto mutable_state
+          = historical_surface_search_cache_internal::FindMutable (p_ctx);
+      auto sqlite_route
+          = mutable_state && store && sqlite_sparse_route_enabled
+                ? historical_surface_search_cache_internal::
+                      OpenSQLiteSparseRoute (*mutable_state, *store)
+                : nullptr;
+      auto route
+          = mutable_state && !sqlite_route && !sqlite_sparse_route_enabled
+                ? historical_surface_search_cache_internal::EnsureSparseRoute (
+                      *mutable_state)
+                : nullptr;
+      if (sqlite_route)
+        {
+          const auto dirty_rows = historical_surface_search_cache_internal::
+              StageSQLiteSparseRouteDirtyForSearch (
+                  *mutable_state, *sqlite_route);
+          if (!dirty_rows)
+            return std::nullopt;
+          if (profile)
+            {
+              profile->sqlite_sparse_route_dirty_rows = *dirty_rows;
+              profile->sqlite_sparse_route_search_effort
+                  = sqlite_route->ActivationSearchEffort ();
+              profile->sqlite_sparse_route_search_node_budget
+                  = sqlite_route->ActivationSearchNodeBudget ();
+            }
+        }
+      const auto memory_ids = sqlite_route
+                                  ? sqlite_route->SearchActivated (
+                                      query_embedding)
+                              : route
+                                  ? route->Search (query_embedding,
+                                                   sparse_route_capacity)
+                                  : std::nullopt;
+      if (!memory_ids)
+        {
+          if (profile && sqlite_route)
+            profile->sqlite_sparse_route_search_failure_code
+                = sqlite_route->LastSearchFailureCode ();
+          return std::nullopt;
+        }
+      if (profile)
+        {
+          profile->sparse_route_used = true;
+          profile->sqlite_sparse_route_activated_identities
+              = memory_ids->size ();
+        }
+      if (profile && sqlite_route)
+        {
+          profile->sqlite_sparse_route_node_rows
+              = sqlite_route->LastSearchNodeRows ();
+          profile->sqlite_sparse_route_activation_snapshot_rows
+              = sqlite_route->LastActivationSnapshotRows ();
+          profile->sqlite_sparse_route_activation_snapshot_cache_miss_rows
+              = sqlite_route->LastActivationSnapshotCacheMissRows ();
+          profile->sqlite_sparse_route_distance_evaluations
+              = sqlite_route->LastSearchDistanceEvaluations ();
+          profile->sqlite_sparse_route_restart_rows
+              = sqlite_route->RestartRowsLoaded ();
+        }
+      candidate_indices.reserve (memory_ids->size ());
+      for (const long long memory_id : *memory_ids)
+        {
+          const auto index = state->current_memory_index.find (memory_id);
+          if (index == state->current_memory_index.end ()
+              || index->second >= entry_count)
+            return std::nullopt;
+          candidate_indices.push_back (index->second);
+        }
+    }
+
   const auto distance_started = std::chrono::steady_clock::now ();
-  using RowMajorMatrix
-      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-  const Eigen::Map<const RowMajorMatrix> matrix (
-      state->current_search.data (), static_cast<Eigen::Index> (entry_count),
-      embedding_dim);
   auto &distance_scratch = state->distance_scratch;
-  distance_scratch.resize (entry_count);
-  Eigen::Map<Eigen::VectorXf> distances (
-      distance_scratch.data (), static_cast<Eigen::Index> (entry_count));
-  distances = (matrix.rowwise () - query_embedding.transpose ())
-                  .rowwise ()
+  if (!use_sparse_route)
+    {
+      distance_scratch.resize (entry_count);
+      for (std::size_t index = 0; index < entry_count; ++index)
+        distance_scratch[index]
+            = (state->current_entries[index].embedding - query_embedding)
                   .squaredNorm ();
+    }
   if (profile)
-    profile->distance_rows += entry_count;
+    profile->distance_rows
+        += use_sparse_route ? candidate_indices.size () : entry_count;
   AddSeedCachePhaseTime (profile, &SeedCacheProfile::distance_ms,
                          distance_started);
   const auto eligibility_started = std::chrono::steady_clock::now ();
   auto &ranked = state->ranked_scratch;
   ranked.clear ();
-  ranked.reserve (entry_count);
-  for (std::size_t index = 0; index < entry_count; ++index)
+  ranked.reserve (use_sparse_route ? candidate_indices.size ()
+                                   : entry_count);
+  const std::size_t eligibility_count
+      = use_sparse_route ? candidate_indices.size () : entry_count;
+  for (std::size_t candidate_index = 0;
+       candidate_index < eligibility_count; ++candidate_index)
     {
+      const std::size_t index = use_sparse_route
+                                    ? candidate_indices[candidate_index]
+                                    : candidate_index;
       const auto &entry = state->current_entries[index];
       if (entry.memory_id <= 0 || entry.embedding_id <= 0
           || entry.embedding.size () != embedding_dim)
@@ -732,11 +851,13 @@ LoadCurrentSeedRowsFromCache (
           || superseded_memory_ids.Contains (entry.memory_id))
         continue;
       ranked.push_back (
-          { index, distances[static_cast<Eigen::Index> (index)] });
+          { index, use_sparse_route
+                       ? (entry.embedding - query_embedding).squaredNorm ()
+                       : distance_scratch[index] });
     }
   if (profile)
     {
-      profile->eligibility_rows += entry_count;
+      profile->eligibility_rows += eligibility_count;
       profile->ranked_rows += ranked.size ();
     }
   AddSeedCachePhaseTime (profile, &SeedCacheProfile::eligibility_ms,
@@ -1446,6 +1567,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   auto started = std::chrono::steady_clock::now ();
   retrieval_trace::ClearLastSelectedEmbeddingOrder ();
   retrieval_trace::ClearLastRankedCandidates ();
+  retrieval_trace::ClearLastSeedCandidates ();
+  retrieval_trace::ClearLastExactSeedCandidates ();
   retrieval_trace::ClearLastRejectedCandidates ();
   retrieval_trace::ClearLastEvidencePackets ();
   retrieval_trace::ClearLastRetrievalSummary ();
@@ -1486,9 +1609,28 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       = !constructive_recall::Disabled ();
   const bool profile_graph_retrieval = internal::experimental_env::Flag (
       "CORTEXT_PROFILE_GRAPH_RETRIEVAL");
-  std::size_t family_exact_comparison_count = 0;
+  // SQLite-backed HNSW is the normal internal retrieval route. The flag is a
+  // private rollback hook for experiments; it does not select another public
+  // write or retrieval API.
+  const bool sqlite_sparse_route_enabled = internal::experimental_env::Bool (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", true);
+  const bool sparse_route_enabled
+      = sqlite_sparse_route_enabled
+        || internal::experimental_env::Flag ("CORTEXT_HNSW_SPARSE_ROUTE");
+  const bool any_sparse_route_enabled
+      = sparse_route_enabled || sqlite_sparse_route_enabled;
+  const bool capture_sparse_exact_control
+      = any_sparse_route_enabled && internal::experimental_env::Flag (
+                                    "CORTEXT_CAPTURE_HNSW_EXACT_CONTROL");
+  const auto sparse_route_parameters
+      = sparse_retrieval_route_sqlite_internal::DeriveParameters (F, S, T);
+  const std::size_t sparse_route_capacity
+      = sparse_route_parameters.route_capacity;
+  FamilyExactComparisonBudget family_exact_comparison_budget {
+    0, sparse_route_parameters.family_exact_comparison_limit, true
+  };
   ScopedFamilyExactComparisonCounter family_counter_scope (
-      profile_graph_retrieval ? &family_exact_comparison_count : nullptr);
+      &family_exact_comparison_budget);
   std::size_t cache_rebuild_count = 0;
   auto profile_timing =
       [&context, profile_graph_retrieval] (
@@ -1524,6 +1666,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   std::unordered_set<long long> seen_seed_memory_ids;
   bool sql_fallback_rows_current = false;
   bool cache_search_available = false;
+  // Ephemeral retrieval may consume an already-installed cache, but must not
+  // create processor-owned state when it falls back to SQL.
+  if (signal.retention != Retention::Ephemeral)
+    historical_surface_search_cache_internal::SetSparseRouteParameters (
+        p_ctx, sparse_route_parameters);
   auto surface_search_state
       = historical_surface_search_cache_internal::Find (p_ctx);
   SeedCacheProfile seed_cache_profile;
@@ -1536,13 +1683,23 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   if (cache_surface_usable (surface_search_state))
     {
       auto current_knn_rows = LoadCurrentSeedRowsFromCache (
-          p_ctx, signal.embedding, static_cast<long long> (exclusion_ts),
+          context.GetStore (), p_ctx, signal.embedding,
+          static_cast<long long> (exclusion_ts),
           seed_search_limit, superseded_memory_ids, duplicate_threshold,
-          seed_cache_profile_ptr);
-      auto historical_knn_rows = LoadHistoricalSeedRowsFromCache (
-          p_ctx, signal.embedding, static_cast<long long> (exclusion_ts),
-          seed_search_limit, superseded_memory_ids, duplicate_threshold,
-          seed_cache_profile_ptr);
+          seed_cache_profile_ptr, any_sparse_route_enabled,
+          sqlite_sparse_route_enabled,
+          sparse_route_capacity);
+      std::optional<std::vector<std::map<std::string, std::any>>>
+          historical_knn_rows;
+      if (any_sparse_route_enabled
+          && surface_search_state->processor_surface_complete)
+        historical_knn_rows
+            = std::vector<std::map<std::string, std::any>>{};
+      else
+        historical_knn_rows = LoadHistoricalSeedRowsFromCache (
+            p_ctx, signal.embedding, static_cast<long long> (exclusion_ts),
+            seed_search_limit, superseded_memory_ids, duplicate_threshold,
+            seed_cache_profile_ptr);
       if (current_knn_rows && historical_knn_rows)
         {
           cache_search_available = true;
@@ -1581,6 +1738,51 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       context.AddOperationTiming (
           "GraphRetrieve.seed_cache_selected_rows",
           static_cast<double> (seed_cache_profile.selected_rows));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_activated_identities",
+          static_cast<double> (
+              seed_cache_profile.sqlite_sparse_route_activated_identities));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_node_rows",
+          static_cast<double> (
+              seed_cache_profile.sqlite_sparse_route_node_rows));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows",
+          static_cast<double> (
+              seed_cache_profile
+                  .sqlite_sparse_route_activation_snapshot_rows));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_activation_snapshot_cache_miss_rows",
+          static_cast<double> (
+              seed_cache_profile
+                  .sqlite_sparse_route_activation_snapshot_cache_miss_rows));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_distance_evaluations",
+          static_cast<double> (
+              seed_cache_profile.sqlite_sparse_route_distance_evaluations));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_search_effort",
+          static_cast<double> (
+              seed_cache_profile.sqlite_sparse_route_search_effort));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_search_node_budget",
+          static_cast<double> (
+              seed_cache_profile.sqlite_sparse_route_search_node_budget));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_restart_rows",
+          static_cast<double> (
+              seed_cache_profile.sqlite_sparse_route_restart_rows));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_dirty_rows",
+          static_cast<double> (
+              seed_cache_profile.sqlite_sparse_route_dirty_rows));
+      context.AddOperationTiming (
+          "GraphRetrieve.sqlite_sparse_route_search_failure_code",
+          static_cast<double> (
+              seed_cache_profile.sqlite_sparse_route_search_failure_code));
+      context.AddOperationTiming (
+          "GraphRetrieve.seed_sparse_route_active",
+          seed_cache_profile.sparse_route_used ? 1.0 : 0.0);
     }
 
   if (!cache_search_available && surface_search_state
@@ -1594,9 +1796,11 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           surface_search_state
               = historical_surface_search_cache_internal::Find (p_ctx);
           if (auto current_knn_rows = LoadCurrentSeedRowsFromCache (
-                  p_ctx, signal.embedding,
+                  context.GetStore (), p_ctx, signal.embedding,
                   static_cast<long long> (exclusion_ts), seed_search_limit,
-                  superseded_memory_ids, duplicate_threshold, nullptr))
+                  superseded_memory_ids, duplicate_threshold, nullptr,
+                  any_sparse_route_enabled, sqlite_sparse_route_enabled,
+                  sparse_route_capacity))
             {
               cache_search_available = true;
               AppendUniqueRows (rows, std::move (*current_knn_rows),
@@ -1629,13 +1833,23 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           if (cache_surface_usable (surface_search_state))
             {
               auto current_knn_rows = LoadCurrentSeedRowsFromCache (
-                  p_ctx, signal.embedding,
+                  context.GetStore (), p_ctx, signal.embedding,
                   static_cast<long long> (exclusion_ts), seed_search_limit,
-                  superseded_memory_ids, duplicate_threshold, nullptr);
-              auto historical_knn_rows = LoadHistoricalSeedRowsFromCache (
-                  p_ctx, signal.embedding,
-                  static_cast<long long> (exclusion_ts), seed_search_limit,
-                  superseded_memory_ids, duplicate_threshold, nullptr);
+                  superseded_memory_ids, duplicate_threshold, nullptr,
+                  any_sparse_route_enabled, sqlite_sparse_route_enabled,
+                  sparse_route_capacity);
+              std::optional<
+                  std::vector<std::map<std::string, std::any>>>
+                  historical_knn_rows;
+              if (any_sparse_route_enabled
+                  && surface_search_state->processor_surface_complete)
+                historical_knn_rows
+                    = std::vector<std::map<std::string, std::any>>{};
+              else
+                historical_knn_rows = LoadHistoricalSeedRowsFromCache (
+                    p_ctx, signal.embedding,
+                    static_cast<long long> (exclusion_ts), seed_search_limit,
+                    superseded_memory_ids, duplicate_threshold, nullptr);
               if (current_knn_rows && historical_knn_rows)
                 {
                   cache_search_available = true;
@@ -1679,55 +1893,117 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       profile_timing ("GraphRetrieve.seed_knn_sql", section_start);
     }
 
-  start_profile_timing ();
-  std::vector<Candidate> seeded;
-  seeded.reserve (rows.size ());
-  for (const auto &row : rows)
+  std::optional<std::vector<std::map<std::string, std::any>>>
+      exact_control_rows;
+  if (capture_sparse_exact_control && cache_search_available)
     {
-      Candidate candidate;
-      candidate.memory_id = AnyLongLong (row, "memory_id");
-      candidate.embedding_id = AnyLongLong (row, "embedding_id");
-      candidate.start_ts = AnyLongLong (row, "start_ts");
-      auto it_embedding = row.find ("embedding");
-      if (candidate.memory_id <= 0 || candidate.embedding_id <= 0
-          || superseded_memory_ids.Contains (candidate.memory_id)
-          || it_embedding == row.end ()
-          || !AnyToEmbedding (it_embedding->second, embedding_dim,
-                              candidate.embedding))
+      surface_search_state
+          = historical_surface_search_cache_internal::Find (p_ctx);
+      if (cache_surface_usable (surface_search_state)
+          && surface_search_state->processor_surface_complete)
         {
-          continue;
+          FamilyExactComparisonBudget exact_control_family_budget {
+            0, sparse_route_parameters.family_exact_comparison_limit, false
+          };
+          ScopedFamilyExactComparisonCounter exact_control_family_scope (
+              &exact_control_family_budget);
+          exact_control_rows = LoadCurrentSeedRowsFromCache (
+              context.GetStore (), p_ctx, signal.embedding,
+              static_cast<long long> (exclusion_ts), seed_search_limit,
+              superseded_memory_ids, duplicate_threshold, nullptr, false,
+              false, sparse_route_capacity);
         }
-      if (constructive_recall_enabled)
-        {
-          if (!sql_fallback_rows_current
-              && !RefreshCandidateFromProcessorSurface (
-                  p_ctx, candidate, embedding_dim))
-            {
+    }
+  else if (capture_sparse_exact_control && !rows.empty ())
+    {
+      // During bounded legacy backfill, or after a fail-closed route miss,
+      // the production path deliberately falls back to the exact SQL seed
+      // query. That result is both the candidate and its exact control; only
+      // an active sparse route needs a second full-surface oracle pass.
+      exact_control_rows = rows;
+    }
+
+  start_profile_timing ();
+  const auto build_seeded = [&] (
+                                const auto &seed_rows,
+                                bool rows_are_current) {
+    std::vector<Candidate> result;
+    result.reserve (seed_rows.size ());
+    for (const auto &row : seed_rows)
+      {
+        Candidate candidate;
+        candidate.memory_id = AnyLongLong (row, "memory_id");
+        candidate.embedding_id = AnyLongLong (row, "embedding_id");
+        candidate.start_ts = AnyLongLong (row, "start_ts");
+        auto it_embedding = row.find ("embedding");
+        if (candidate.memory_id <= 0 || candidate.embedding_id <= 0
+            || superseded_memory_ids.Contains (candidate.memory_id)
+            || it_embedding == row.end ()
+            || !AnyToEmbedding (it_embedding->second, embedding_dim,
+                                candidate.embedding))
+          continue;
+        if (constructive_recall_enabled)
+          {
+            if (!rows_are_current
+                && !RefreshCandidateFromProcessorSurface (
+                    p_ctx, candidate, embedding_dim))
               (void)RefreshCandidateToCurrentSurface (
                   tx, candidate, embedding_dim);
-            }
-        }
-      candidate.seed_score = core::Map01 (
-          Cosine (signal.embedding, candidate.embedding));
-      candidate.source_confidence = OriginalEvidenceConfidence (
-                                        p_ctx, candidate.memory_id,
-                                        signal.embedding)
-                                        .value_or (candidate.seed_score);
-      candidate.temporal_score = TemporalScore (
-          signal.timestamp, candidate.start_ts, F, S, T);
-      candidate.score = SemanticFirstScore (
-          candidate.seed_score, candidate.temporal_score);
-      candidate.direct_seed = true;
-      seeded.push_back (std::move (candidate));
-    }
-  if (sql_fallback_rows_current)
+          }
+        candidate.seed_score = core::Map01 (
+            Cosine (signal.embedding, candidate.embedding));
+        candidate.source_confidence = OriginalEvidenceConfidence (
+                                          p_ctx, candidate.memory_id,
+                                          signal.embedding)
+                                          .value_or (candidate.seed_score);
+        candidate.temporal_score = TemporalScore (
+            signal.timestamp, candidate.start_ts, F, S, T);
+        candidate.score = SemanticFirstScore (
+            candidate.seed_score, candidate.temporal_score);
+        candidate.direct_seed = true;
+        result.push_back (std::move (candidate));
+      }
+    if (rows_are_current)
+      SortAndLimitCandidates (result, seed_limit);
+    else
+      result = SelectFamilyRepresentatives (
+          std::move (result), duplicate_threshold, seed_limit);
+    return result;
+  };
+  std::vector<Candidate> seeded
+      = build_seeded (rows, sql_fallback_rows_current);
+  bool capture_seed_trace = false;
+#ifdef CORTEXT_TESTING
+  capture_seed_trace = true;
+#else
+  capture_seed_trace = internal::experimental_env::Flag (
+      "CORTEXT_CAPTURE_RETRIEVAL_SEEDS");
+#endif
+  if (capture_seed_trace)
     {
-      SortAndLimitCandidates (seeded, seed_limit);
-    }
-  else
-    {
-      seeded = SelectFamilyRepresentatives (
-          std::move (seeded), duplicate_threshold, seed_limit);
+      const auto trace_candidates = [] (const auto &candidates) {
+        std::vector<retrieval_trace::RankedCandidate> traced;
+        traced.reserve (candidates.size ());
+        for (const auto &candidate : candidates)
+          {
+            retrieval_trace::RankedCandidate trace;
+            trace.embedding_id = candidate.embedding_id;
+            trace.memory_id = candidate.memory_id;
+            trace.score = candidate.score;
+            trace.relevance = candidate.seed_score;
+            trace.temporal_score = candidate.temporal_score;
+            trace.evidence_confidence = candidate.source_confidence;
+            trace.activation.base_level = candidate.seed_score;
+            trace.activation.activation_total = candidate.score;
+            traced.push_back (trace);
+          }
+        return traced;
+      };
+      retrieval_trace::SetLastSeedCandidates (
+          trace_candidates (seeded));
+      if (exact_control_rows)
+        retrieval_trace::SetLastExactSeedCandidates (
+            trace_candidates (build_seeded (*exact_control_rows, false)));
     }
   profile_timing ("GraphRetrieve.seed_rank", section_start);
 
@@ -2138,10 +2414,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                                   ranked_all.empty () ? 0.0 : 1.0);
       context.AddOperationTiming (
           "GraphRetrieve.family_exact_comparison_count",
-          static_cast<double> (family_exact_comparison_count));
+          static_cast<double> (family_exact_comparison_budget.used));
       context.AddOperationTiming (
           "GraphRetrieve.family_exact_comparison_activity",
-          family_exact_comparison_count > 0 ? 1.0 : 0.0);
+          family_exact_comparison_budget.used > 0 ? 1.0 : 0.0);
       context.AddOperationTiming (
           "GraphRetrieve.cache_rebuild_count",
           static_cast<double> (cache_rebuild_count));

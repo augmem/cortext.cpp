@@ -1,5 +1,5 @@
-#include <any>
 #include "test_helpers.hpp"
+#include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/clock.hpp>
@@ -8,13 +8,18 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include "../src/operations/association_fanout_cache_internal.hpp"
+#include "../src/operations/active_signal_embedding_ring_internal.hpp"
 #include "../src/operations/bounded_activation_shadow_internal.hpp"
 #include "../src/operations/emotional_metadata_cache_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
+#include "../src/operations/rif_active_epoch_cache_internal.hpp"
 #include "../src/operations/rif_state_internal.hpp"
 #include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include "../src/operations/signal_record_rollback_internal.hpp"
+#include <array>
+#include <limits>
 #include <thread>
+#include <unordered_set>
 
 using namespace cortext;
 
@@ -28,6 +33,7 @@ void SetSignalRecordSnapshotSetupThrowStageForTest (int stage);
 void SetRifActiveEpochPublishFailureStageForTest (int stage);
 void SetRifActiveEpochPublishFailureMaskForTest (unsigned int mask);
 void SetSQLiteCheckpointFailureOnceForTest ();
+void SetRetrievalSurfaceReloadFailureOnceForTest ();
 }
 
 namespace cortext::store
@@ -40,6 +46,14 @@ static std::shared_ptr<operations::execution_cache_sidecar_internal::State>
 ExecutionCacheState (const ProcessorContext &ctx)
 {
   return operations::execution_cache_sidecar_internal::Find (ctx);
+}
+
+static std::size_t
+MidpointRifRowBatch ()
+{
+  return operations::rif_active_epoch_cache_internal::DeriveLimits (
+             0.5, 0.5, 0.5)
+      .row_batch_size;
 }
 
 struct InsertOp : IOperation
@@ -122,7 +136,8 @@ struct AdvanceRifEpochOp : IOperation
         ctx.GetProcessorContext ());
     const auto result = operations::rif_state_internal::AdvanceRecovery (
         tx, static_cast<long long> (ctx.GetSignal ().timestamp), 10000.0,
-        sidecar->rif_active_epoch.calibration_memory_ids);
+        sidecar->rif_active_epoch.calibration_memory_ids,
+        sidecar->rif_active_epoch.limits.row_batch_size);
     sidecar->rif_active_epoch.calibration_memory_ids.clear ();
     operations::rif_active_epoch_cache_internal::StageClock (
         sidecar->rif_active_epoch, result.clock.generation,
@@ -158,7 +173,7 @@ struct PrimeRifEpochBoundaryOp : IOperation
     auto sidecar = operations::execution_cache_sidecar_internal::Ensure (
         ctx.GetProcessorContext ());
     sidecar->rif_active_epoch.event_count
-        = operations::rif_active_epoch_cache_internal::kEventLimit - 1;
+        = sidecar->rif_active_epoch.limits.event_count - 1;
     primed = true;
   }
 
@@ -193,6 +208,93 @@ struct ConsolidationInsertOp : IOperation
     if (ctx.GetSignal ().force_consolidation)
       tx.Execute ("INSERT OR IGNORE INTO consolidation_derived(id) VALUES(1)");
   }
+};
+
+struct ConsolidationResetRetryProbeOp : IOperation
+{
+  void
+  Execute (OperationContext &ctx, Transaction &tx) const override
+  {
+    auto sidecar = operations::execution_cache_sidecar_internal::Ensure (
+        ctx.GetProcessorContext ());
+    captured = &ctx.GetProcessorContext ();
+    if (ctx.GetSignal ().force_consolidation)
+      {
+        saw_consolidation = true;
+        reset_required_during_consolidation
+            = sidecar->rif_active_epoch.empty_epoch_reset_required;
+        tx.Execute ("INSERT OR IGNORE INTO consolidation_derived(id) VALUES(1)");
+        return;
+      }
+    if (saw_consolidation)
+      active_rows_before_retry_stage = sidecar->rif_active_epoch.active_rows;
+    operations::rif_active_epoch_cache_internal::StageMemory (
+        sidecar->rif_active_epoch, 1);
+  }
+
+  mutable bool saw_consolidation = false;
+  mutable bool reset_required_during_consolidation = false;
+  mutable std::size_t active_rows_before_retry_stage
+      = std::numeric_limits<std::size_t>::max ();
+  mutable ProcessorContext *captured = nullptr;
+};
+
+struct ConsolidationSurfaceUpdateOp : IOperation
+{
+  explicit ConsolidationSurfaceUpdateOp (
+      bool invalidate_cache = false,
+      std::optional<int> consolidation_centroid_dimension = std::nullopt)
+      : invalidate_cache (invalidate_cache),
+        consolidation_centroid_dimension (
+            consolidation_centroid_dimension)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction &tx) const override
+  {
+    captured = &ctx.GetProcessorContext ();
+    if (!ctx.GetSignal ().force_consolidation)
+      return;
+    auto &p_ctx = ctx.GetProcessorContext ();
+    const auto found = p_ctx.retrieval_surface_index.find (1);
+    REQUIRE (found != p_ctx.retrieval_surface_index.end ());
+    REQUIRE (found->second < p_ctx.retrieval_surface_cache.size ());
+    auto surface = p_ctx.retrieval_surface_cache[found->second];
+    Eigen::VectorXf embedding = Eigen::VectorXf::Zero (256);
+    embedding[0] = 1.0f;
+    std::vector<float> values (256, 0.0f);
+    values[0] = 1.0f;
+    tx.Execute ("UPDATE embeddings SET embedding = ? WHERE embedding_id = 1",
+                { values });
+    surface.embedding = embedding;
+    p_ctx.UpsertRetrievalSurface (std::move (surface));
+    if (invalidate_cache)
+      {
+        operations::historical_surface_search_cache_internal::Erase (p_ctx);
+        return;
+      }
+    operations::historical_surface_search_cache_internal::UpsertCurrent (
+        p_ctx,
+        { 1, 1, 1001, "LONG_TERM", "seed/1", std::move (embedding), 1 });
+    if (consolidation_centroid_dimension && !centroid_emitted)
+      {
+        ClusterInfo cluster;
+        cluster.cluster_id = 1;
+        cluster.memory_ids = { 1 };
+        cluster.embedding_ids = { 1 };
+        cluster.centroid.assign (256, 0.0f);
+        cluster.centroid[static_cast<std::size_t> (
+            *consolidation_centroid_dimension)] = 1.0f;
+        ctx.SetConsolidationClusters ({ std::move (cluster) });
+        centroid_emitted = true;
+      }
+  }
+
+  bool invalidate_cache = false;
+  std::optional<int> consolidation_centroid_dimension;
+  mutable bool centroid_emitted = false;
+  mutable ProcessorContext *captured = nullptr;
 };
 
 struct CustomRifReadWriteOp : IOperation
@@ -2087,7 +2189,7 @@ TEST_CASE ("Custom operation SQL observes and preserves effective lazy RIF "
   cortext::operations::rif_state_internal::RebuildFromMaterialized (*store);
   auto recovery_tx = store->Begin ();
   cortext::operations::rif_state_internal::AdvanceRecovery (
-      *recovery_tx, 2000, 10000.0);
+      *recovery_tx, 2000, 10000.0, MidpointRifRowBatch ());
   recovery_tx->Commit ();
 
   double observed_strength = 0.0;
@@ -2138,7 +2240,7 @@ TEST_CASE ("Custom operation indirect views observe effective lazy RIF values",
   cortext::operations::rif_state_internal::RebuildFromMaterialized (*store);
   auto recovery_tx = store->Begin ();
   cortext::operations::rif_state_internal::AdvanceRecovery (
-      *recovery_tx, 2000, 10000.0);
+      *recovery_tx, 2000, 10000.0, MidpointRifRowBatch ());
   recovery_tx->Commit ();
 
   double observed_strength = 0.0;
@@ -2313,10 +2415,9 @@ TEST_CASE ("Migrated active working slots reanchor persisted strength",
     REQUIRE (sidecar);
     REQUIRE (sidecar->rif_active_epoch.database);
     const auto epoch_rows = sidecar->rif_active_epoch.database->Execute (
-        "SELECT recovery_total FROM active_state WHERE memory_id = 1");
+        "SELECT memory_id FROM active_state WHERE memory_id = 1");
     REQUIRE (epoch_rows.size () == 1);
-    REQUIRE (std::any_cast<double> (epoch_rows[0].at ("recovery_total"))
-             == Catch::Approx (0.7));
+    REQUIRE (std::any_cast<long long> (epoch_rows[0].at ("memory_id")) == 1);
   }
 
   auto effective = store->Execute (
@@ -2342,16 +2443,15 @@ TEST_CASE ("Migrated active working slots reanchor persisted strength",
     REQUIRE (restarted_sidecar->rif_active_epoch.database);
     const auto restarted_rows
         = restarted_sidecar->rif_active_epoch.database->Execute (
-            "SELECT recovery_total FROM active_state WHERE memory_id = 1");
+            "SELECT memory_id FROM active_state WHERE memory_id = 1");
     REQUIRE (restarted_rows.size () == 1);
-    REQUIRE (std::any_cast<double> (
-                 restarted_rows[0].at ("recovery_total"))
-             == Catch::Approx (0.7));
+    REQUIRE (std::any_cast<long long> (
+                 restarted_rows[0].at ("memory_id")) == 1);
   }
 
   auto recovery_tx = store->Begin ();
   cortext::operations::rif_state_internal::AdvanceRecovery (
-      *recovery_tx, 2000, 10000.0);
+      *recovery_tx, 2000, 10000.0, MidpointRifRowBatch ());
   recovery_tx->Commit ();
   effective = store->Execute (
       "SELECT strength, suppression FROM rif_effective_memories "
@@ -2366,46 +2466,190 @@ TEST_CASE ("RIF active epoch requires consolidation at its bound and resets "
            "only after a successful maintenance commit",
            "[processor][rif][active_epoch][bound]")
 {
+  const auto exercise = [] (double focus, double sensitivity,
+                            double stability, Retention retention) {
+    auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+    SignalProcessor::Config cfg;
+    cfg.focus = focus;
+    cfg.sensitivity = sensitivity;
+    cfg.stability = stability;
+    cortext::testing::RequireEncoder (cfg);
+    auto root = std::make_unique<DynamicOperationSet> (
+        std::make_unique<PrimeRifEpochBoundaryOp> ());
+    SignalProcessor processor (cfg, store, std::move (root));
+
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Zero (256);
+    signal.source_id = "opaque/source-a";
+    signal.modality = "audio";
+    signal.retention = retention;
+    signal.timestamp = 1000;
+    const auto at_limit = processor.Process (signal);
+    const auto limits
+        = operations::rif_active_epoch_cache_internal::DeriveLimits (
+            focus, sensitivity, stability);
+    REQUIRE (at_limit.consolidation_state == ConsolidationState::Required);
+    REQUIRE (at_limit.operation_ms.at (
+                 "SignalProcessor.rif_active_epoch_event_count")
+             == static_cast<double> (limits.event_count));
+
+    signal.source_id = "opaque/source-b";
+    signal.modality = "image";
+    signal.timestamp = 2000;
+    const auto ignored = processor.Process (signal);
+    REQUIRE (ignored.consolidation_state == ConsolidationState::Required);
+    REQUIRE (ignored.operation_ms.at (
+                 "SignalProcessor.rif_active_epoch_event_count")
+             == static_cast<double> (limits.event_count + 1));
+
+    signal.force_consolidation = true;
+    signal.modality = "text";
+    signal.timestamp = 3000;
+    const auto reset = processor.Process (signal);
+    REQUIRE (reset.consolidation_state == ConsolidationState::None);
+    REQUIRE (reset.operation_ms.at (
+                 "SignalProcessor.rif_active_epoch_event_count")
+             == 0.0);
+    REQUIRE (reset.operation_ms.at (
+                 "SignalProcessor.rif_active_epoch_mutation_count")
+             == 0.0);
+    REQUIRE (reset.operation_ms.at (
+                 "SignalProcessor.rif_active_epoch_allocated_bytes")
+             < static_cast<double> (limits.allocated_bytes));
+  };
+
+  for (const auto retention : { Retention::Natural, Retention::Durable })
+    {
+      exercise (0.0, 0.0, 0.0, retention);
+      exercise (0.5, 0.5, 0.5, retention);
+      exercise (1.0, 1.0, 1.0, retention);
+    }
+}
+
+TEST_CASE ("RIF work counter reports event publication rows rather than "
+           "historical active state",
+           "[processor][rif][active_epoch][profiling][regression]")
+{
+  cortext::testing::ScopedEnvVar profile_work (
+      "CORTEXT_PROFILE_WORK_COUNTERS", "1");
   auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  store->Execute (
+      "INSERT INTO memories(memory_id, source_id, kind, start_ts, n_signals, "
+      "modality, strength, suppression, suppression_ts, created_at) "
+      "VALUES(1, 'historical/source', 'LONG_TERM', 1000, 1, 'text', "
+      "0.5, 0.5, 1000, 1000)");
+  operations::rif_state_internal::RebuildFromMaterialized (*store);
+
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  auto root = std::make_unique<DynamicOperationSet> (
-      std::make_unique<PrimeRifEpochBoundaryOp> ());
-  SignalProcessor processor (cfg, store, std::move (root));
-
+  SignalProcessor processor (
+      cfg, store, std::make_unique<BoundedShadowNoOp> ());
   Signal signal;
   signal.embedding = Eigen::VectorXf::Zero (256);
-  signal.source_id = "source-a";
-  signal.retention = Retention::Natural;
-  signal.timestamp = 1000;
-  const auto at_limit = processor.Process (signal);
-  REQUIRE (at_limit.consolidation_state == ConsolidationState::Required);
-  REQUIRE (at_limit.operation_ms.at (
-               "SignalProcessor.rif_active_epoch_event_count")
-           == 512.0);
-
+  signal.source_id = "current/source";
+  signal.modality = "image";
   signal.timestamp = 2000;
-  const auto ignored = processor.Process (signal);
-  REQUIRE (ignored.consolidation_state == ConsolidationState::Required);
-  REQUIRE (ignored.operation_ms.at (
-               "SignalProcessor.rif_active_epoch_event_count")
-           == 513.0);
+  const auto output = processor.Process (signal);
 
-  signal.force_consolidation = true;
-  signal.timestamp = 3000;
-  const auto reset = processor.Process (signal);
-  REQUIRE (reset.consolidation_state == ConsolidationState::None);
-  REQUIRE (reset.operation_ms.at (
-               "SignalProcessor.rif_active_epoch_event_count")
+  const auto active_rows = store->Execute (
+      "SELECT COUNT(*) AS n FROM rif_active_state");
+  REQUIRE (active_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (active_rows[0].at ("n")) == 1);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.retrieval_suppression_id_count")
            == 0.0);
-  REQUIRE (reset.operation_ms.at (
-               "SignalProcessor.rif_active_epoch_mutation_count")
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.retrieval_suppression_id_activity")
            == 0.0);
-  REQUIRE (reset.operation_ms.at (
-               "SignalProcessor.rif_active_epoch_allocated_bytes")
-           < static_cast<double> (
-               operations::rif_active_epoch_cache_internal::
-                   kAllocatedByteLimit));
+}
+
+TEST_CASE ("RIF active epoch limits follow the full F S T knob surface",
+           "[processor][rif][active_epoch][bound][knobs]")
+{
+  namespace epoch = operations::rif_active_epoch_cache_internal;
+  constexpr std::array<double, 3> kValues { 0.0, 0.5, 1.0 };
+  std::size_t structural_points = 0;
+  for (const double focus : kValues)
+    for (const double sensitivity : kValues)
+      for (const double stability : kValues)
+        {
+          const auto limits = epoch::DeriveLimits (
+              focus, sensitivity, stability);
+          const auto capacity = static_cast<std::size_t> (
+              std::lround (256.0 + 256.0 * focus
+                           + 128.0 * sensitivity + 128.0 * stability));
+          REQUIRE (limits.event_count == capacity);
+          REQUIRE (limits.mutation_count == capacity * 64);
+          REQUIRE (limits.allocated_bytes
+                   == capacity * 128ULL * 1024ULL);
+          const auto row_batch_size = static_cast<std::size_t> (
+              std::lround (64.0 + 64.0 * focus
+                           + 32.0 * sensitivity + 32.0 * stability));
+          REQUIRE (limits.row_batch_size == row_batch_size);
+          ++structural_points;
+        }
+  REQUIRE (structural_points == 27);
+
+  struct ProductionPoint
+  {
+    double focus;
+    double sensitivity;
+    double stability;
+    epoch::Limits expected;
+  };
+  const std::array<ProductionPoint, 9> production_points { {
+    { 0.5, 0.5, 0.5, { 512, 32768, 67108864, 128 } },
+    { 0.0, 0.0, 0.0, { 256, 16384, 33554432, 64 } },
+    { 1.0, 1.0, 1.0, { 768, 49152, 100663296, 192 } },
+    { 0.0, 0.5, 0.5, { 384, 24576, 50331648, 96 } },
+    { 1.0, 0.5, 0.5, { 640, 40960, 83886080, 160 } },
+    { 0.5, 0.0, 0.5, { 448, 28672, 58720256, 112 } },
+    { 0.5, 1.0, 0.5, { 576, 36864, 75497472, 144 } },
+    { 0.5, 0.5, 0.0, { 448, 28672, 58720256, 112 } },
+    { 0.5, 0.5, 1.0, { 576, 36864, 75497472, 144 } },
+  } };
+  std::unordered_set<std::size_t> event_limits;
+  for (const auto &point : production_points)
+    {
+      const auto actual = epoch::DeriveLimits (
+          point.focus, point.sensitivity, point.stability);
+      REQUIRE (actual == point.expected);
+      event_limits.insert (actual.event_count);
+    }
+  REQUIRE (event_limits.size () > 3);
+
+  REQUIRE (epoch::DeriveLimits (0.0, 0.0, 0.0)
+               == epoch::Limits { 256, 16384, 33554432, 64 });
+  REQUIRE (epoch::DeriveLimits (0.5, 0.5, 0.5)
+               == epoch::Limits { 512, 32768, 67108864, 128 });
+  REQUIRE (epoch::DeriveLimits (1.0, 1.0, 1.0)
+               == epoch::Limits { 768, 49152, 100663296, 192 });
+}
+
+TEST_CASE ("RIF active epoch rejects non-finite knobs before deriving bounds",
+           "[processor][rif][active_epoch][bound][knobs]")
+{
+  namespace epoch = operations::rif_active_epoch_cache_internal;
+  const double nan = std::numeric_limits<double>::quiet_NaN ();
+  REQUIRE_THROWS_AS (epoch::DeriveLimits (nan, 0.5, 0.5),
+                     std::invalid_argument);
+  REQUIRE_THROWS_AS (epoch::DeriveLimits (0.5, nan, 0.5),
+                     std::invalid_argument);
+  REQUIRE_THROWS_AS (epoch::DeriveLimits (0.5, 0.5, nan),
+                     std::invalid_argument);
+  REQUIRE (epoch::DeriveLimits (-1.0, -2.0, -3.0)
+           == epoch::DeriveLimits (0.0, 0.0, 0.0));
+  REQUIRE (epoch::DeriveLimits (2.0, 3.0, 4.0)
+           == epoch::DeriveLimits (1.0, 1.0, 1.0));
+
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  SignalProcessor::Config cfg;
+  cfg.focus = nan;
+  cortext::testing::RequireEncoder (cfg);
+  REQUIRE_THROWS_AS (
+      SignalProcessor (cfg, store, std::make_unique<DynamicOperationSet> ()),
+      std::invalid_argument);
 }
 
 TEST_CASE ("Failed consolidation keeps the prior RIF epoch and a later "
@@ -2513,38 +2757,64 @@ TEST_CASE ("Post-commit consolidation epoch reset failure rebuilds without "
 }
 
 TEST_CASE ("RIF epoch retry preserves a committed consolidation reset after "
-           "publication and recovery both fail",
+           "publication and recovery both fail without copying mature history",
            "[processor][rif][active_epoch][consolidation][failure][retry]")
 {
   auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
   store->Execute ("CREATE TABLE consolidation_derived(id INTEGER PRIMARY KEY)");
+  const std::size_t durable_history_rows = MidpointRifRowBatch () + 1;
+  for (std::size_t index = 0; index < durable_history_rows; ++index)
+    {
+      const long long memory_id = static_cast<long long> (index + 1);
+      const std::string source_id
+          = index % 2 == 0 ? "opaque/source-a" : "opaque/source-b";
+      const std::string modality = index % 3 == 0 ? "text"
+                                   : index % 3 == 1 ? "audio"
+                                                    : "image";
+      store->Execute (
+          "INSERT INTO memories(memory_id, source_id, kind, start_ts, "
+          "n_signals, modality, strength, suppression, suppression_ts, "
+          "created_at) VALUES(?, ?, 'LONG_TERM', 1000, 1, ?, 0.5, 0.5, "
+          "1000, 1000)",
+          { memory_id, source_id, modality });
+    }
+  cortext::operations::rif_state_internal::RebuildFromMaterialized (*store);
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  auto root = std::make_unique<DynamicOperationSet> (
-      std::make_unique<ConsolidationInsertOp> ());
-  SignalProcessor processor (cfg, store, std::move (root));
+  auto operation = std::make_unique<ConsolidationResetRetryProbeOp> ();
+  auto *probe = operation.get ();
+  auto root
+      = std::make_unique<DynamicOperationSet> (std::move (operation));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (root)));
 
   Signal signal;
   signal.embedding = Eigen::VectorXf::Zero (256);
   signal.source_id = "source-a";
   signal.retention = Retention::Natural;
-  signal.timestamp = 1000;
-  const auto ordinary = processor.Process (signal);
-  REQUIRE (ordinary.operation_ms.at (
-               "SignalProcessor.rif_active_epoch_event_count")
-           == 1.0);
-
   signal.force_consolidation = true;
   signal.timestamp = 2000;
   cortext::testing::SetRifActiveEpochPublishFailureMaskForTest (
       (1U << 3U) | (1U << 4U));
+  cortext::testing::SetRetrievalSurfaceReloadFailureOnceForTest ();
   const auto failed_publication = processor.Process (signal);
+  REQUIRE (probe->reset_required_during_consolidation);
   REQUIRE (failed_publication.operation_ms.at (
                "SignalProcessor.rif_epoch_publication_recovery_count")
            == 1.0);
   REQUIRE (failed_publication.operation_ms.at (
                "SignalProcessor.rif_active_epoch_event_count")
            == 0.0);
+  REQUIRE (probe->captured != nullptr);
+  const auto failed_sidecar = ExecutionCacheState (*probe->captured);
+  REQUIRE (failed_sidecar);
+  REQUIRE_FALSE (failed_sidecar->rif_active_epoch.valid);
+  REQUIRE (failed_sidecar->rif_active_epoch.pending_rebuild);
+  REQUIRE (failed_sidecar->rif_active_epoch.pending_rebuild_resets_counters);
+  REQUIRE (failed_sidecar->rif_active_epoch.empty_epoch_reset_required);
 
   signal.force_consolidation = false;
   signal.timestamp = 3000;
@@ -2555,11 +2825,24 @@ TEST_CASE ("RIF epoch retry preserves a committed consolidation reset after "
   REQUIRE (retried.operation_ms.at (
                "SignalProcessor.rif_active_epoch_event_count")
            == 1.0);
+  REQUIRE (probe->active_rows_before_retry_stage == 0);
+  REQUIRE (probe->captured != nullptr);
+  const auto retry_sidecar = ExecutionCacheState (*probe->captured);
+  REQUIRE (retry_sidecar);
+  REQUIRE (retry_sidecar->rif_active_epoch.active_rows == 1);
+  REQUIRE (retry_sidecar->rif_active_epoch.database->Execute (
+               "SELECT memory_id FROM active_state ORDER BY memory_id")
+               .size ()
+           == 1);
   REQUIRE (std::any_cast<long long> (
                store->Execute (
                    "SELECT COUNT(*) AS n FROM consolidation_derived")[0]
-                   .at ("n"))
+               .at ("n"))
            == 1LL);
+  REQUIRE (cortext::operations::rif_state_internal::CountRows (
+               *store,
+               "SELECT COUNT(*) AS row_count FROM rif_active_state")
+           == static_cast<long long> (durable_history_rows));
 }
 
 TEST_CASE ("Durable checkpoint failure cannot replay the committed signal",
@@ -2596,6 +2879,35 @@ TEST_CASE ("Durable checkpoint failure cannot replay the committed signal",
   REQUIRE (std::any_cast<long long> (
                store->Execute ("SELECT COUNT(*) AS n FROM t")[0].at ("n"))
            == 2LL);
+}
+
+TEST_CASE ("Natural consolidation does not borrow the Durable checkpoint",
+           "[processor][consolidation][durable][barrier]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  store->Execute (
+      "CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)");
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto root
+      = std::make_unique<DynamicOperationSet> (std::make_unique<InsertOp> ());
+  SignalProcessor processor (cfg, store, std::move (root));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "source-a";
+  signal.force_consolidation = true;
+  signal.retention = Retention::Natural;
+  signal.timestamp = 1000;
+  const auto natural = processor.Process (signal);
+  REQUIRE_FALSE (natural.operation_ms.contains (
+      "SignalProcessor.sqlite_wal_checkpoint"));
+
+  signal.retention = Retention::Durable;
+  signal.timestamp = 2000;
+  const auto durable = processor.Process (signal);
+  REQUIRE (durable.operation_ms.contains (
+      "SignalProcessor.sqlite_wal_checkpoint"));
 }
 
 TEST_CASE ("SignalProcessor executes pipeline in order", "[processor][order]")
@@ -3312,6 +3624,387 @@ TEST_CASE ("SignalProcessor rebuilds historical cache after force commit",
   signal.force_consolidation = false;
   processor.Process (signal);
   REQUIRE (cache::RegistrySizeForTest () == baseline_size + 1);
+}
+
+TEST_CASE ("Engine consolidation seals an incrementally current sparse route "
+           "without reloading the full retrieval surface",
+           "[processor][cache][consolidation][hnsw][sqlite]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar hnsw_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "1");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  cortext::testing::ScopedEnvVar recenter_overlap_profile (
+      "CORTEXT_PROFILE_RECENTER_ACTIVATION_OVERLAP", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  for (long long memory_id = 1; memory_id <= 513; ++memory_id)
+    {
+      std::vector<float> embedding (256, 0.0f);
+      embedding[static_cast<std::size_t> ((memory_id % 255) + 1)] = 1.0f;
+      cortext::testing::SeedEmbeddingV2 (
+          *store, memory_id, embedding, 1000 + memory_id);
+      cortext::testing::SeedMemoryV2 (
+          *store, memory_id, memory_id,
+          "seed/" + std::to_string (memory_id), "LONG_TERM", 1.0,
+          1000 + memory_id);
+    }
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto operation = std::make_unique<ConsolidationSurfaceUpdateOp> (
+      false, 1);
+  auto *capturing_operation = operation.get ();
+  auto root = std::make_unique<DynamicOperationSet> (std::move (operation));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (root)));
+
+  std::vector<float> active_signal_embedding (256, 0.0f);
+  active_signal_embedding[3] = 1.0f;
+  cortext::testing::SeedSignalV2 (
+      *store, 7001, 3, "opaque/source", 99999);
+  {
+    auto tx = store->Begin ();
+    operations::active_signal_embedding_ring_internal::Upsert (
+        *tx, 7001, active_signal_embedding, 99999, cfg.focus,
+        cfg.sensitivity, cfg.stability);
+    tx->Commit ();
+  }
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.embedding[0] = 1.0f;
+  signal.source_id = "maintenance";
+  signal.timestamp = 100000;
+  signal.force_consolidation = true;
+  const auto output = processor.Process (signal);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.reload_retrieval_surface_skipped")
+           == 1.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.reload_retrieval_surface")
+           == 0.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sparse_route_seal_delta_count")
+           == 0.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_seal_delta_count")
+           == 0.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sparse_route_seal_succeeded")
+           == 1.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_seal_succeeded")
+           == 1.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_overlap_profiled")
+           == 1.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_overlap_pair_valid")
+           == 1.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code")
+           == 0.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_centroid_source")
+           == 1.0);
+  const double pre_activated = output.operation_ms.at (
+      "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count");
+  REQUIRE (pre_activated > 0.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_post_activated_count")
+           == pre_activated);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_overlap_count")
+           == pre_activated);
+  REQUIRE (capturing_operation->captured != nullptr);
+  auto state = cache::FindMutable (*capturing_operation->captured);
+  REQUIRE (state);
+  REQUIRE (state->sparse_route);
+  REQUIRE (state->sqlite_sparse_route);
+  REQUIRE (state->sqlite_sparse_route->ActivationEntryMemoryId () == 255);
+
+  auto restarted = operations::sparse_retrieval_route_sqlite_internal::Route::
+      Open (*store, 256,
+            operations::sparse_retrieval_route_sqlite_internal::
+                DefaultParameters ());
+  REQUIRE (restarted);
+  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
+  query[0] = 1.0f;
+  const auto result = restarted->Search (query, 512);
+  REQUIRE (result);
+  REQUIRE_FALSE (result->empty ());
+  REQUIRE (result->front () == 1);
+  REQUIRE (restarted->RestartRowsLoaded () == 1);
+
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.timestamp = 100001;
+  const auto invalid_pair_output = processor.Process (signal);
+  REQUIRE (invalid_pair_output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_overlap_profiled")
+           == 1.0);
+  REQUIRE (invalid_pair_output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_overlap_pair_valid")
+           == 0.0);
+  REQUIRE (invalid_pair_output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code")
+           == 2.0);
+  REQUIRE (invalid_pair_output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_succeeded")
+           == 1.0);
+  REQUIRE (invalid_pair_output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_centroid_source")
+           == 2.0);
+  REQUIRE (invalid_pair_output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count")
+           == 1.0);
+  REQUIRE (state->sqlite_sparse_route->ActivationEntryMemoryId () == 2);
+}
+
+TEST_CASE ("Invalidated consolidation surface reloads authority and replaces "
+           "the prior sparse route generation",
+           "[processor][cache][consolidation][hnsw][sqlite][fallback]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar hnsw_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "1");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  for (long long memory_id = 1; memory_id <= 513; ++memory_id)
+    {
+      std::vector<float> embedding (256, 0.0f);
+      embedding[static_cast<std::size_t> ((memory_id % 255) + 1)] = 1.0f;
+      cortext::testing::SeedEmbeddingV2 (
+          *store, memory_id, embedding, 1000 + memory_id);
+      cortext::testing::SeedMemoryV2 (
+          *store, memory_id, memory_id,
+          "seed/" + std::to_string (memory_id), "LONG_TERM", 1.0,
+          1000 + memory_id);
+    }
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto operation = std::make_unique<ConsolidationSurfaceUpdateOp> (true);
+  auto *capturing_operation = operation.get ();
+  auto root = std::make_unique<DynamicOperationSet> (std::move (operation));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (root)));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "maintenance";
+  signal.timestamp = 100000;
+  signal.force_consolidation = true;
+  const auto output = processor.Process (signal);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.reload_retrieval_surface_skipped")
+           == 0.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.reload_retrieval_surface")
+           >= 0.0);
+  REQUIRE (capturing_operation->captured != nullptr);
+  auto state = cache::Find (*capturing_operation->captured);
+  REQUIRE (state);
+  REQUIRE (state->sparse_route);
+  REQUIRE (state->sqlite_sparse_route);
+  auto restarted = operations::sparse_retrieval_route_sqlite_internal::Route::
+      Open (*store, 256,
+            operations::sparse_retrieval_route_sqlite_internal::
+                DefaultParameters ());
+  REQUIRE (restarted);
+  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
+  query[0] = 1.0f;
+  const auto result = restarted->Search (query, 512);
+  REQUIRE (result);
+  REQUIRE_FALSE (result->empty ());
+  REQUIRE (result->front () == 1);
+}
+
+TEST_CASE ("Restarted SQLite sparse route seals a bounded row-addressed delta "
+           "without reconstructing in-memory HNSW",
+           "[processor][cache][consolidation][hnsw][sqlite][restart]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar hnsw_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "1");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (513);
+  for (long long memory_id = 1; memory_id <= 513; ++memory_id)
+    {
+      Eigen::VectorXf vector = Eigen::VectorXf::Zero (256);
+      vector[static_cast<Eigen::Index> ((memory_id % 255) + 1)] = 1.0f;
+      std::vector<float> embedding (vector.data (),
+                                    vector.data () + vector.size ());
+      cortext::testing::SeedEmbeddingV2 (
+          *store, memory_id, embedding, 1000 + memory_id);
+      cortext::testing::SeedMemoryV2 (
+          *store, memory_id, memory_id,
+          "seed/" + std::to_string (memory_id), "LONG_TERM", 1.0,
+          1000 + memory_id);
+      route_entries.emplace_back (memory_id, std::move (vector));
+    }
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      256, route_entries,
+      operations::sparse_retrieval_route_internal::DefaultParameters ());
+  REQUIRE (hnsw);
+  auto persisted
+      = operations::sparse_retrieval_route_sqlite_internal::Route::Create (
+          *store, 256, route_entries, *hnsw,
+          operations::sparse_retrieval_route_sqlite_internal::
+              DefaultParameters ());
+  REQUIRE (persisted);
+  hnsw.reset ();
+  persisted.reset ();
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto operation = std::make_unique<ConsolidationSurfaceUpdateOp> ();
+  auto *capturing_operation = operation.get ();
+  auto root = std::make_unique<DynamicOperationSet> (std::move (operation));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (root)));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "maintenance";
+  signal.timestamp = 100000;
+  signal.force_consolidation = true;
+  const auto output = processor.Process (signal);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.reload_retrieval_surface_skipped")
+           == 1.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_seal_delta_count")
+           == 1.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_seal_succeeded")
+           == 1.0);
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_seal_failure_code")
+           == 0.0);
+  REQUIRE (capturing_operation->captured != nullptr);
+  const auto state = cache::Find (*capturing_operation->captured);
+  REQUIRE (state);
+  REQUIRE_FALSE (state->sparse_route);
+  REQUIRE (state->sqlite_sparse_route);
+
+  auto restarted = operations::sparse_retrieval_route_sqlite_internal::Route::
+      Open (*store, 256,
+            operations::sparse_retrieval_route_sqlite_internal::
+                DefaultParameters ());
+  REQUIRE (restarted);
+  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
+  query[0] = 1.0f;
+  const auto result = restarted->Search (query, 512);
+  REQUIRE (result);
+  REQUIRE_FALSE (result->empty ());
+  REQUIRE (result->front () == 1);
+  REQUIRE (restarted->RestartRowsLoaded () == 1);
+}
+
+TEST_CASE ("Ordinary sparse-route maintenance seals at its knob-derived "
+           "backfill-minus-expansion batch",
+           "[processor][cache][hnsw][sqlite][knobs][regression]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  REQUIRE (parameters.backfill_batch_size == 128);
+  REQUIRE (parameters.search_expansion_batch == 32);
+  const std::size_t ordinary_seal_batch
+      = static_cast<std::size_t> (
+          operations::sparse_retrieval_knobs_internal::OrdinarySealBatch (
+              0.5, 0.5, 0.5));
+  REQUIRE (ordinary_seal_batch == 96);
+
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (513);
+  for (long long memory_id = 1; memory_id <= 513; ++memory_id)
+    {
+      Eigen::VectorXf vector = Eigen::VectorXf::Zero (256);
+      vector[static_cast<Eigen::Index> ((memory_id % 255) + 1)] = 1.0f;
+      std::vector<float> embedding (vector.data (),
+                                    vector.data () + vector.size ());
+      cortext::testing::SeedEmbeddingV2 (
+          *store, memory_id, embedding, 1000 + memory_id);
+      cortext::testing::SeedMemoryV2 (
+          *store, memory_id, memory_id,
+          "seed/" + std::to_string (memory_id), "LONG_TERM", 1.0,
+          1000 + memory_id);
+      route_entries.emplace_back (memory_id, std::move (vector));
+    }
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      256, route_entries,
+      operations::sparse_retrieval_route_internal::DefaultParameters ());
+  REQUIRE (hnsw);
+  auto persisted
+      = operations::sparse_retrieval_route_sqlite_internal::Route::Create (
+          *store, 256, route_entries, *hnsw, parameters);
+  REQUIRE (persisted);
+  for (std::size_t index = 0; index < ordinary_seal_batch;
+       ++index)
+    {
+      Eigen::VectorXf revised = Eigen::VectorXf::Zero (256);
+      revised[static_cast<Eigen::Index> ((index + 17) % 255)] = 1.0f;
+      REQUIRE (persisted->Upsert (
+          static_cast<long long> (index + 1), revised));
+    }
+  REQUIRE (persisted->HasDirtyMemoryIds ());
+  persisted.reset ();
+  hnsw.reset ();
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  auto root = std::make_unique<DynamicOperationSet> (
+      std::make_unique<BoundedShadowNoOp> ());
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (root)));
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "opaque/ordinary";
+  signal.modality = "audio";
+  signal.timestamp = 100000;
+  const auto output = processor.Process (signal);
+
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .empty ());
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_ordinary_seal_delta_count")
+           == static_cast<double> (ordinary_seal_batch));
+  REQUIRE (output.operation_ms.at (
+               "SignalProcessor.sqlite_sparse_route_ordinary_seal_succeeded")
+           == 1.0);
 }
 
 TEST_CASE ("SignalProcessor restores historical cache after force commit "

@@ -10,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,7 @@ struct RecoveryResult
 {
   std::size_t expired_rows = 0;
   std::size_t retired_rows = 0;
+  std::size_t maximum_statement_rows = 0;
   bool generation_reset = false;
   std::vector<long long> changed_memory_ids;
   Clock clock;
@@ -130,12 +132,14 @@ PruneRetiredGenerationResets (Executor &executor)
 
 inline std::vector<long long>
 MaterializeRetiredBatch (Transaction &tx, long long current_generation,
-                         std::size_t limit = 64)
+                         std::size_t row_batch_size)
 {
+  if (row_batch_size == 0)
+    throw std::invalid_argument ("RIF row batch is zero");
   const auto rows = tx.Execute (
       "SELECT memory_id FROM rif_active_state "
       "WHERE generation < ? ORDER BY generation, memory_id LIMIT ?",
-      { current_generation, static_cast<long long> (limit) });
+      { current_generation, static_cast<long long> (row_batch_size) });
   std::vector<long long> memory_ids;
   memory_ids.reserve (rows.size ());
   for (const auto &row : rows)
@@ -194,14 +198,16 @@ LoadMemoryIdsWhere (Transaction &tx, const std::string &where_sql,
 
 inline std::vector<long long>
 RecoverMemoryIds (Transaction &tx, const std::vector<long long> &memory_ids,
-                  long long now_ts, double recovery_time)
+                  long long now_ts, double recovery_time,
+                  std::size_t row_batch_size)
 {
-  constexpr std::size_t kChunkSize = 400;
+  if (row_batch_size == 0)
+    throw std::invalid_argument ("RIF row batch is zero");
   for (std::size_t begin = 0; begin < memory_ids.size ();
-       begin += kChunkSize)
+       begin += row_batch_size)
     {
       const std::size_t end
-          = std::min (memory_ids.size (), begin + kChunkSize);
+          = std::min (memory_ids.size (), begin + row_batch_size);
       std::vector<std::any> params;
       params.reserve (11 + end - begin);
       params.insert (params.end (), {
@@ -229,52 +235,73 @@ RecoverMemoryIds (Transaction &tx, const std::vector<long long> &memory_ids,
 
 inline void
 UpsertActiveMemoryIdsAtClock (Transaction &tx,
-                              const std::vector<long long> &memory_ids)
+                              const std::vector<long long> &memory_ids,
+                              std::size_t row_batch_size)
 {
   if (memory_ids.empty ())
     return;
-  std::vector<std::any> ids;
-  ids.reserve (memory_ids.size ());
-  for (const long long memory_id : memory_ids)
-    ids.push_back (memory_id);
-  tx.Execute (
-      "INSERT OR REPLACE INTO rif_active_state("
-      "memory_id, generation, anchor_suppression, recovery_total, "
-      "anchor_log_factor, expires_log_factor) "
-      "SELECT m.memory_id, c.generation, m.suppression, "
-      "       m.strength + m.suppression, c.log_factor, "
-      "       c.log_factor + ln(1e-9 / m.suppression) "
-      "FROM memories m CROSS JOIN rif_recovery_clock c "
-      "WHERE c.singleton = 1 AND m.memory_id IN ("
-          + Placeholders (memory_ids.size ()) + ") "
-      "  AND m.suppression > 1e-9",
-      ids);
+  if (row_batch_size == 0)
+    throw std::invalid_argument ("RIF row batch is zero");
+  for (std::size_t begin = 0; begin < memory_ids.size ();
+       begin += row_batch_size)
+    {
+      const std::size_t end
+          = std::min (memory_ids.size (), begin + row_batch_size);
+      std::vector<std::any> ids;
+      ids.reserve (end - begin);
+      for (std::size_t index = begin; index < end; ++index)
+        ids.push_back (memory_ids[index]);
+      tx.Execute (
+          "INSERT OR REPLACE INTO rif_active_state("
+          "memory_id, generation, anchor_suppression, recovery_total, "
+          "anchor_log_factor, expires_log_factor) "
+          "SELECT m.memory_id, c.generation, m.suppression, "
+          "       m.strength + m.suppression, c.log_factor, "
+          "       c.log_factor + ln(1e-9 / m.suppression) "
+          "FROM memories m CROSS JOIN rif_recovery_clock c "
+          "WHERE c.singleton = 1 AND m.memory_id IN ("
+              + Placeholders (end - begin) + ") "
+          "  AND m.suppression > 1e-9",
+          ids);
+    }
 }
 
 inline std::vector<long long>
 CalibrateMemoryIdsAtClock (Transaction &tx,
                            const std::vector<long long> &memory_ids,
-                           double recovery_time)
+                           double recovery_time,
+                           std::size_t row_batch_size)
 {
   if (memory_ids.empty ())
     return {};
+  if (row_batch_size == 0)
+    throw std::invalid_argument ("RIF row batch is zero");
   const Clock clock = LoadClock (tx);
-  std::vector<std::any> ids;
-  ids.reserve (memory_ids.size ());
-  for (const long long memory_id : memory_ids)
-    ids.push_back (memory_id);
-  const std::string placeholders = Placeholders (memory_ids.size ());
-  tx.Execute ("DELETE FROM rif_active_state WHERE memory_id IN ("
-                  + placeholders + ")",
-              ids);
-  RecoverMemoryIds (tx, memory_ids, clock.last_ts, recovery_time);
-  UpsertActiveMemoryIdsAtClock (tx, memory_ids);
+  for (std::size_t begin = 0; begin < memory_ids.size ();
+       begin += row_batch_size)
+    {
+      const std::size_t end
+          = std::min (memory_ids.size (), begin + row_batch_size);
+      std::vector<std::any> ids;
+      ids.reserve (end - begin);
+      for (std::size_t index = begin; index < end; ++index)
+        ids.push_back (memory_ids[index]);
+      tx.Execute ("DELETE FROM rif_active_state WHERE memory_id IN ("
+                      + Placeholders (end - begin) + ")",
+                  ids);
+    }
+  RecoverMemoryIds (
+      tx, memory_ids, clock.last_ts, recovery_time, row_batch_size);
+  UpsertActiveMemoryIdsAtClock (tx, memory_ids, row_batch_size);
   return memory_ids;
 }
 
 inline RecoveryResult
-AdvanceRecovery (Transaction &tx, long long now_ts, double recovery_time)
+AdvanceRecovery (Transaction &tx, long long now_ts, double recovery_time,
+                 std::size_t row_batch_size)
 {
+  if (row_batch_size == 0)
+    throw std::invalid_argument ("RIF row batch is zero");
   const Clock before = LoadClock (tx);
   const double elapsed
       = static_cast<double> (now_ts - before.last_ts);
@@ -294,8 +321,10 @@ AdvanceRecovery (Transaction &tx, long long now_ts, double recovery_time)
           "UPDATE rif_recovery_clock SET log_factor = 0.0, last_ts = ? "
           "WHERE singleton = 1",
           { now_ts });
-      auto retired = MaterializeRetiredBatch (tx, before.generation);
-      return { 0, retired.size (), false, std::move (retired),
+      auto retired = MaterializeRetiredBatch (
+          tx, before.generation, row_batch_size);
+      return { 0, retired.size (), retired.size (), false,
+               std::move (retired),
                { before.generation, 0.0, now_ts } };
     }
 
@@ -311,8 +340,10 @@ AdvanceRecovery (Transaction &tx, long long now_ts, double recovery_time)
           "SET generation = generation + 1, log_factor = 0.0, last_ts = ? "
           "WHERE singleton = 1",
           { now_ts });
-      auto retired = MaterializeRetiredBatch (tx, before.generation + 1);
-      return { 0, retired.size (), true, std::move (retired),
+      auto retired = MaterializeRetiredBatch (
+          tx, before.generation + 1, row_batch_size);
+      return { 0, retired.size (), retired.size (), true,
+               std::move (retired),
                { before.generation + 1, 0.0, now_ts } };
     }
 
@@ -330,45 +361,76 @@ AdvanceRecovery (Transaction &tx, long long now_ts, double recovery_time)
       { next_log_factor, now_ts });
 
   const std::vector<std::any> due_params {
-    before.generation, next_log_factor
+    before.generation, next_log_factor,
+    static_cast<long long> (row_batch_size)
   };
-  auto expired = LoadMemoryIdsWhere (
-      tx, "generation = ? AND expires_log_factor >= ?", due_params);
+  const auto expired_rows = tx.Execute (
+      "SELECT memory_id FROM rif_active_state "
+      "WHERE generation = ? AND expires_log_factor >= ? "
+      "ORDER BY expires_log_factor DESC, memory_id LIMIT ?",
+      due_params);
+  std::vector<long long> expired;
+  expired.reserve (expired_rows.size ());
+  for (const auto &row : expired_rows)
+    {
+      const long long memory_id = GetInt64 (row, "memory_id", 0);
+      if (memory_id > 0)
+        expired.push_back (memory_id);
+    }
   if (!expired.empty ())
     {
-      MaterializeWhere (tx,
-                        "generation = ? AND expires_log_factor >= ?",
-                        due_params);
-      tx.Execute (
-          "DELETE FROM rif_active_state "
-          "WHERE generation = ? AND expires_log_factor >= ?",
-          due_params);
+      std::vector<std::any> expired_params;
+      expired_params.reserve (expired.size ());
+      for (const long long memory_id : expired)
+        expired_params.push_back (memory_id);
+      const std::string placeholders = Placeholders (expired.size ());
+      MaterializeWhere (
+          tx, "memory_id IN (" + placeholders + ")", expired_params);
+      tx.Execute ("DELETE FROM rif_active_state WHERE memory_id IN ("
+                      + placeholders + ")",
+                  expired_params);
     }
-  auto retired = MaterializeRetiredBatch (tx, before.generation);
+  auto retired = MaterializeRetiredBatch (
+      tx, before.generation, row_batch_size);
   const std::size_t retired_count = retired.size ();
   std::vector<long long> changed = expired;
   changed.insert (changed.end (), retired.begin (), retired.end ());
-  return { expired.size (), retired_count, false, std::move (changed),
+  return { expired.size (), retired_count,
+           std::max (expired.size (), retired_count), false,
+           std::move (changed),
            { before.generation, next_log_factor, now_ts } };
 }
 
 inline RecoveryResult
 AdvanceRecovery (Transaction &tx, long long now_ts, double recovery_time,
-                 const std::vector<long long> &calibration_memory_ids)
+                 const std::vector<long long> &calibration_memory_ids,
+                 std::size_t row_batch_size)
 {
   if (calibration_memory_ids.empty ())
-    return AdvanceRecovery (tx, now_ts, recovery_time);
-  std::vector<std::any> calibration_params;
-  calibration_params.reserve (calibration_memory_ids.size ());
-  for (const long long memory_id : calibration_memory_ids)
-    calibration_params.push_back (memory_id);
-  tx.Execute ("DELETE FROM rif_active_state WHERE memory_id IN ("
-                  + Placeholders (calibration_memory_ids.size ()) + ")",
-              calibration_params);
-  auto result = AdvanceRecovery (tx, now_ts, recovery_time);
+    return AdvanceRecovery (tx, now_ts, recovery_time, row_batch_size);
+  if (row_batch_size == 0)
+    throw std::invalid_argument ("RIF row batch is zero");
+  for (std::size_t begin = 0; begin < calibration_memory_ids.size ();
+       begin += row_batch_size)
+    {
+      const std::size_t end = std::min (
+          calibration_memory_ids.size (), begin + row_batch_size);
+      std::vector<std::any> calibration_params;
+      calibration_params.reserve (end - begin);
+      for (std::size_t index = begin; index < end; ++index)
+        calibration_params.push_back (calibration_memory_ids[index]);
+      tx.Execute ("DELETE FROM rif_active_state WHERE memory_id IN ("
+                      + Placeholders (end - begin) + ")",
+                  calibration_params);
+    }
+  auto result = AdvanceRecovery (
+      tx, now_ts, recovery_time, row_batch_size);
   const auto calibrated = RecoverMemoryIds (
-      tx, calibration_memory_ids, now_ts, recovery_time);
-  UpsertActiveMemoryIdsAtClock (tx, calibrated);
+      tx, calibration_memory_ids, now_ts, recovery_time, row_batch_size);
+  UpsertActiveMemoryIdsAtClock (tx, calibrated, row_batch_size);
+  result.maximum_statement_rows = std::max (
+      result.maximum_statement_rows,
+      std::min (calibration_memory_ids.size (), row_batch_size));
   result.changed_memory_ids.insert (result.changed_memory_ids.end (),
                                     calibrated.begin (), calibrated.end ());
   return result;

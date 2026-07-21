@@ -1,5 +1,6 @@
 // tests/operations_consolidation.test.cpp
 #include <Eigen/Dense>
+#include <array>
 #include <any>
 #include <iostream>
 #include <catch2/catch_approx.hpp>
@@ -14,6 +15,7 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/schema.hpp>
 #include "../src/operations/consolidation_throughput_state_internal.hpp"
+#include "../src/operations/sparse_retrieval_knobs_internal.hpp"
 #include <string>
 
 using namespace cortext;
@@ -144,6 +146,9 @@ TEST_CASE ("Consolidation throughput trigger fraction is monotonic in F/S/T",
   REQUIRE (throughput::DriftRearmFraction (0.5, 0.5, 0.8)
            > throughput::DriftRearmFraction (0.5, 0.5, 0.2));
   REQUIRE (throughput::DriftRearmFraction (0.5, 0.5, 1.0) >= 0.30);
+  REQUIRE (throughput::MinimumBacklog (0.0, 0.0, 0.0) == 64);
+  REQUIRE (throughput::MinimumBacklog (0.5, 0.5, 0.5) == 128);
+  REQUIRE (throughput::MinimumBacklog (1.0, 1.0, 1.0) == 192);
 }
 
 TEST_CASE ("Consolidation throughput observation tracks moving floor and peak",
@@ -198,50 +203,61 @@ TEST_CASE ("Consolidation state boundaries are inclusive and required-first",
       = throughput::TriggerFraction (focus, sensitivity, stability);
   const double required
       = throughput::RequiredTriggerFraction (focus, sensitivity, stability);
+  const long long backlog
+      = throughput::MinimumBacklog (focus, sensitivity, stability);
 
   REQUIRE (throughput::Classify (
-               state, std::nextafter (recommended, 1.0), 1,
+               state, required, backlog - 1, focus, sensitivity, stability)
+           == ConsolidationState::None);
+
+  REQUIRE (throughput::Classify (
+               state, std::nextafter (recommended, 1.0), backlog,
                focus, sensitivity, stability)
            == ConsolidationState::None);
   REQUIRE (throughput::Classify (
-               state, recommended, 1, focus, sensitivity, stability)
+               state, recommended, backlog, focus, sensitivity, stability)
            == ConsolidationState::Recommended);
   REQUIRE (throughput::Classify (
-               state, std::nextafter (required, 1.0), 1,
+               state, std::nextafter (required, 1.0), backlog,
                focus, sensitivity, stability)
            == ConsolidationState::Recommended);
   REQUIRE (throughput::Classify (
-               state, required, 1, focus, sensitivity, stability)
+               state, required, backlog, focus, sensitivity, stability)
            == ConsolidationState::Required);
 }
 
 TEST_CASE ("Consolidation state follows the ordered throughput drawdown",
            "[operations][consolidation][hint]")
 {
+  namespace throughput
+      = operations::consolidation_throughput_state_internal;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
   cfg.sensitivity = 0.5;
   cfg.stability = 0.5;
+  const int backlog = static_cast<int> (
+      throughput::MinimumBacklog (
+          cfg.focus, cfg.sensitivity, cfg.stability));
 
   SECTION ("bootstrap has no range")
     {
       const auto output = RunConsolidationHint (
-          cfg, { 4.0, 4.0, 4.0, 3 });
+          cfg, { 4.0, 4.0, 4.0, backlog });
       REQUIRE (output.consolidation_state == ConsolidationState::None);
     }
 
   SECTION ("rate above recommendation boundary is none")
     {
       const auto output = RunConsolidationHint (
-          cfg, { 2.0, 10.0, 7.0, 3 });
+          cfg, { 2.0, 10.0, 7.0, backlog });
       REQUIRE (output.consolidation_state == ConsolidationState::None);
     }
 
   SECTION ("drawdown enters recommended band")
     {
       const auto output = RunConsolidationHint (
-          cfg, { 2.0, 10.0, 5.0, 3 });
+          cfg, { 2.0, 10.0, 5.0, backlog });
       REQUIRE (output.consolidation_state
                == ConsolidationState::Recommended);
     }
@@ -249,7 +265,7 @@ TEST_CASE ("Consolidation state follows the ordered throughput drawdown",
   SECTION ("deeper drawdown enters required band")
     {
       const auto output = RunConsolidationHint (
-          cfg, { 2.0, 10.0, 3.0, 3 });
+          cfg, { 2.0, 10.0, 3.0, backlog });
       REQUIRE (output.consolidation_state == ConsolidationState::Required);
     }
 
@@ -270,7 +286,7 @@ TEST_CASE ("Consolidation state follows the ordered throughput drawdown",
   SECTION ("explicit consolidation input emits none")
     {
       const auto output = RunConsolidationHint (
-          cfg, { 2.0, 10.0, 2.0, 3 }, "test/source", "text", true);
+          cfg, { 2.0, 10.0, 2.0, backlog }, "test/source", "text", true);
       REQUIRE (output.consolidation_state == ConsolidationState::None);
     }
 }
@@ -283,17 +299,19 @@ TEST_CASE ("Consolidation recommendation rearms after a lower throughput regime"
   constexpr double focus = 0.5;
   constexpr double sensitivity = 0.5;
   constexpr double stability = 0.5;
+  const long long backlog
+      = throughput::MinimumBacklog (focus, sensitivity, stability);
   ProcessorContext pctx;
   throughput::Reset (pctx, { 2.0, 100.0, true, true });
 
-  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
+  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, backlog, focus,
                                  sensitivity, stability)
            != ConsolidationState::None);
   throughput::Acknowledge (pctx, 3.0);
   REQUIRE_FALSE (throughput::Find (pctx).armed);
   REQUIRE (throughput::Find (pctx).floor == 3.0);
   REQUIRE (throughput::Find (pctx).peak == 3.0);
-  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
+  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, backlog, focus,
                                  sensitivity, stability)
            == ConsolidationState::None);
 
@@ -301,8 +319,9 @@ TEST_CASE ("Consolidation recommendation rearms after a lower throughput regime"
   // new event-derived range and rearms the classifier.
   throughput::Observe (pctx, 20.0, focus, sensitivity, stability);
   REQUIRE (throughput::Find (pctx).armed);
-  throughput::Observe (pctx, 3.0, focus, sensitivity, stability);
-  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
+  for (long long observation = 1; observation < backlog; ++observation)
+    throughput::Observe (pctx, 3.0, focus, sensitivity, stability);
+  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, backlog, focus,
                                  sensitivity, stability)
            != ConsolidationState::None);
 
@@ -310,8 +329,9 @@ TEST_CASE ("Consolidation recommendation rearms after a lower throughput regime"
   throughput::Acknowledge (pctx, 3.0);
   throughput::Observe (pctx, 12.0, focus, sensitivity, stability);
   REQUIRE (throughput::Find (pctx).armed);
-  throughput::Observe (pctx, 3.0, focus, sensitivity, stability);
-  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, 4, focus,
+  for (long long observation = 1; observation < backlog; ++observation)
+    throughput::Observe (pctx, 3.0, focus, sensitivity, stability);
+  REQUIRE (throughput::Classify (throughput::Find (pctx), 3.0, backlog, focus,
                                  sensitivity, stability)
            != ConsolidationState::None);
   throughput::Erase (pctx);
@@ -331,9 +351,12 @@ TEST_CASE ("Sustained throughput drift rearms consolidation after acknowledgment
           for (const double stability : knob_values)
             {
               CAPTURE (focus, sensitivity, stability);
+              const long long backlog
+                  = throughput::MinimumBacklog (
+                      focus, sensitivity, stability);
               throughput::Reset (pctx, { 20.0, 100.0, true, true });
               REQUIRE (throughput::Classify (throughput::Find (pctx), 20.0,
-                                             1, focus, sensitivity, stability)
+                                             backlog, focus, sensitivity, stability)
                        != ConsolidationState::None);
               throughput::Acknowledge (pctx, 100.0);
 
@@ -343,12 +366,24 @@ TEST_CASE ("Sustained throughput drift rearms consolidation after acknowledgment
                   throughput::Observe (pctx, static_cast<double> (rate), focus,
                                        sensitivity, stability);
                   later_hint = throughput::Classify (
-                      throughput::Find (pctx), static_cast<double> (rate), 1,
+                      throughput::Find (pctx), static_cast<double> (rate),
+                      backlog,
                       focus, sensitivity, stability);
                   if (later_hint != ConsolidationState::None)
                     {
                       break;
                     }
+                }
+
+              while (later_hint == ConsolidationState::None
+                     && throughput::Find (pctx).observations_since_ack
+                            < backlog)
+                {
+                  throughput::Observe (pctx, 0.0, focus, sensitivity,
+                                       stability);
+                  later_hint = throughput::Classify (
+                      throughput::Find (pctx), 0.0, backlog, focus,
+                      sensitivity, stability);
                 }
 
               REQUIRE (later_hint != ConsolidationState::None);
@@ -374,14 +409,24 @@ TEST_CASE ("Stable noisy throughput stays disarmed after acknowledgment",
           for (const double stability : knob_values)
             {
               CAPTURE (focus, sensitivity, stability);
+              const long long backlog
+                  = throughput::MinimumBacklog (
+                      focus, sensitivity, stability);
               throughput::Reset (pctx, { 20.0, 100.0, true, true });
               throughput::Acknowledge (pctx, 100.0);
-              for (const double rate : ordinary_noise)
+              for (long long observation = 0;
+                   observation < backlog
+                                     + static_cast<long long> (
+                                         std::size (ordinary_noise));
+                   ++observation)
                 {
+                  const double rate = ordinary_noise[
+                      static_cast<std::size_t> (observation)
+                      % std::size (ordinary_noise)];
                   throughput::Observe (pctx, rate, focus, sensitivity,
                                        stability);
                   REQUIRE (throughput::Classify (
-                               throughput::Find (pctx), rate, 1, focus,
+                               throughput::Find (pctx), rate, backlog, focus,
                                sensitivity, stability)
                            == ConsolidationState::None);
                 }
@@ -407,7 +452,12 @@ TEST_CASE ("Consolidation throughput hint ignores source and modality",
 {
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  const SetupConsolidationHintOp setup { 2.0, 10.0, 5.0, 3 };
+  const SetupConsolidationHintOp setup {
+    2.0, 10.0, 5.0,
+    static_cast<int> (
+        operations::consolidation_throughput_state_internal::MinimumBacklog (
+            cfg.focus, cfg.sensitivity, cfg.stability))
+  };
   const auto text = RunConsolidationHint (
       cfg, setup, "one/source", "text");
   const auto image = RunConsolidationHint (
@@ -675,6 +725,133 @@ TEST_CASE ("ScoreConsolidation identifies low-strength candidates",
       "WHERE ABS(COALESCE(connectivity, 0.0)) > 1e-12",
       {});
   REQUIRE (std::any_cast<long long> (connectivity_rows[0].at ("c")) == 0);
+}
+
+TEST_CASE ("ScoreConsolidation bounds its active candidate frontier from "
+           "F S T knobs",
+           "[operations][consolidation][bounded][knobs][regression]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::store::ApplyMigrations (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+  const auto candidate_limit = static_cast<std::size_t> (
+      operations::sparse_retrieval_knobs_internal::
+          ActivationIdentityTarget (
+              cfg.focus, cfg.sensitivity, cfg.stability));
+  REQUIRE (candidate_limit == 640);
+
+  Signal signal;
+  signal.timestamp = 50'000ULL;
+  signal.source_id = "opaque/consolidation";
+  signal.modality = "audio";
+  signal.force_consolidation = true;
+  signal.embedding = Eigen::VectorXf::Zero (4);
+  ProcessorContext p_ctx;
+  OperationContext ctx (signal, p_ctx, cfg, store.get ());
+
+  for (std::size_t index = 0; index <= candidate_limit; ++index)
+    {
+      const long long id = static_cast<long long> (index + 1);
+      std::vector<float> embedding (256, 0.0f);
+      embedding[index % embedding.size ()] = 1.0f;
+      store->Execute (
+          "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+          "VALUES(?, ?, ?)",
+          { id, embedding, id });
+      store->Execute (
+          "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+          "start_ts, n_signals, modality, strength, stability, redundancy, "
+          "created_at) VALUES(?, ?, ?, 'LONG_TERM', ?, 1, ?, 0.0, 0.0, "
+          "0.0, ?)",
+          { id, id, "opaque/" + std::to_string (index % 5), id,
+            index % 2 == 0 ? "audio" : "image", id });
+    }
+
+  ScoreConsolidation scorer;
+  auto tx = store->Begin ();
+  scorer.Execute (ctx, *tx);
+
+  const auto &candidates = ctx.GetConsolidationCandidates ();
+  REQUIRE (candidates.size () == candidate_limit);
+  REQUIRE (candidates.front ().memory_id == 1);
+  REQUIRE (candidates.back ().memory_id
+           == static_cast<long long> (candidate_limit));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "ScoreConsolidation.candidate_input_limit")
+           == static_cast<double> (candidate_limit));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "ScoreConsolidation.candidate_input_count")
+           == static_cast<double> (candidate_limit));
+}
+
+TEST_CASE ("ScoreConsolidation emits its full F S T derived work envelope",
+           "[operations][consolidation][bounded][knobs][ablation]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::store::ApplyMigrations (*store);
+  std::vector<float> embedding (256, 0.0f);
+  embedding[0] = 1.0f;
+  store->Execute (
+      "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+      "VALUES(1, ?, 1)",
+      { embedding });
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+      "start_ts, n_signals, modality, strength, stability, redundancy, "
+      "created_at) VALUES(1, 1, 'opaque/history', 'LONG_TERM', 1, 1, "
+      "'image', 0.0, 0.0, 0.0, 1)",
+      {});
+
+  constexpr std::array<double, 3> kValues { 0.0, 0.5, 1.0 };
+  std::size_t ablation_points = 0;
+  for (const double focus : kValues)
+    for (const double sensitivity : kValues)
+      for (const double stability : kValues)
+        {
+          SignalProcessor::Config cfg;
+          cortext::testing::RequireEncoder (cfg);
+          cfg.focus = focus;
+          cfg.sensitivity = sensitivity;
+          cfg.stability = stability;
+          Signal signal;
+          signal.timestamp = 60'000ULL + ablation_points;
+          signal.source_id
+              = "opaque/" + std::to_string (ablation_points % 4);
+          signal.modality
+              = std::array<const char *, 3> { "text", "audio", "image" }
+                    [ablation_points % 3];
+          signal.force_consolidation = true;
+          signal.embedding = Eigen::VectorXf::Zero (4);
+          ProcessorContext p_ctx;
+          OperationContext ctx (signal, p_ctx, cfg, store.get ());
+          auto tx = store->Begin ();
+          ScoreConsolidation{}.Execute (ctx, *tx);
+
+          const double expected_candidates = static_cast<double> (
+              operations::sparse_retrieval_knobs_internal::
+                  ActivationIdentityTarget (
+                      focus, sensitivity, stability));
+          const double expected_edges = static_cast<double> (
+              operations::sparse_retrieval_knobs_internal::
+                  GraphNeighborCount (
+                      focus, sensitivity, stability));
+          REQUIRE (ctx.GetOperationTimings ().at (
+                       "ScoreConsolidation.candidate_input_limit")
+                   == expected_candidates);
+          REQUIRE (ctx.GetOperationTimings ().at (
+                       "ScoreConsolidation.association_edge_limit")
+                   == expected_edges);
+          REQUIRE (ctx.GetOperationTimings ().at (
+                       "ScoreConsolidation.candidate_input_count")
+                   == 1.0);
+          ++ablation_points;
+        }
+  REQUIRE (ablation_points == 27);
 }
 
 TEST_CASE ("ScoreConsolidation forced mode preserves eligibility threshold",

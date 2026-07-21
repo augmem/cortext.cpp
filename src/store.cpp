@@ -1,7 +1,9 @@
 #include "cortext/store/sqlite_store.hpp"
+#include "store/commit_profile_internal.hpp"
 #include "store/mutation_audit_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
@@ -61,10 +63,14 @@ struct SQLiteMutationAuditState
   bool root_active = false;
   std::vector<internal::SQLiteMutationIdentity> pending;
   std::vector<PhysicalVecMutation> pending_physical;
+  std::vector<PhysicalVecMutation> committed_physical;
   std::vector<internal::SQLiteMutationIdentity> committed;
   std::unordered_map<std::string, std::string> vec_logical_ids;
   std::unordered_map<const SQLiteTransaction *, Mark> marks;
   bool trigger_journal_ready = false;
+#if defined(CORTEXT_TESTING)
+  std::size_t commit_vec_lookup_count = 0;
+#endif
 };
 
 struct SQLiteMutationAuditRegistry
@@ -72,6 +78,126 @@ struct SQLiteMutationAuditRegistry
   std::mutex mutex;
   std::unordered_map<const SQLiteStore *, SQLiteMutationAuditState> stores;
 };
+
+struct SQLiteCommitProfileState
+{
+  int cache_writes_before = 0;
+  int cache_spills_before = 0;
+  bool root_active = false;
+  std::unordered_map<std::string, std::int64_t> table_row_counts;
+  internal::SQLiteCommitProfile last;
+};
+
+struct SQLiteCommitProfileRegistry
+{
+  std::mutex mutex;
+  std::unordered_map<const SQLiteStore *, SQLiteCommitProfileState> stores;
+};
+
+SQLiteCommitProfileRegistry &
+CommitProfileRegistry ()
+{
+  static auto *registry = new SQLiteCommitProfileRegistry ();
+  return *registry;
+}
+
+bool
+CommitProfileEnabled ()
+{
+  const char *value = std::getenv ("CORTEXT_PROFILE_WORK_COUNTERS");
+  return value != nullptr && value[0] != '\0' && std::string_view (value) != "0"
+         && std::string_view (value) != "false";
+}
+
+int
+SQLiteDbStatusCurrent (sqlite3 *connection, int operation)
+{
+  int current = 0;
+  int high_water = 0;
+  if (!connection
+      || sqlite3_db_status (connection, operation, &current, &high_water, 0)
+             != SQLITE_OK)
+    return 0;
+  return current;
+}
+
+void
+BeginCommitProfile (SQLiteStore *store, sqlite3 *connection)
+{
+  if (!CommitProfileEnabled ())
+    return;
+  auto &registry = CommitProfileRegistry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  auto &state = registry.stores[store];
+  state.cache_writes_before
+      = SQLiteDbStatusCurrent (connection, SQLITE_DBSTATUS_CACHE_WRITE);
+  state.cache_spills_before
+      = SQLiteDbStatusCurrent (connection, SQLITE_DBSTATUS_CACHE_SPILL);
+  state.root_active = true;
+  state.table_row_counts.clear ();
+  state.last = {};
+}
+
+void
+ObserveCommitProfileTableMutation (SQLiteStore *store,
+                                   std::string_view table)
+{
+  if (!CommitProfileEnabled ())
+    return;
+  auto &registry = CommitProfileRegistry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  const auto it = registry.stores.find (store);
+  if (it == registry.stores.end () || !it->second.root_active)
+    return;
+  it->second.table_row_counts[std::string (table)] += 1;
+}
+
+void
+FinishCommitProfile (SQLiteStore *store, sqlite3 *connection,
+                     double sqlite_commit_ms,
+                     double mutation_audit_finalize_ms)
+{
+  if (!CommitProfileEnabled ())
+    return;
+  const int cache_writes
+      = SQLiteDbStatusCurrent (connection, SQLITE_DBSTATUS_CACHE_WRITE);
+  const int cache_spills
+      = SQLiteDbStatusCurrent (connection, SQLITE_DBSTATUS_CACHE_SPILL);
+  auto &registry = CommitProfileRegistry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  auto &state = registry.stores[store];
+  state.last.available = true;
+  state.last.sqlite_commit_ms = sqlite_commit_ms;
+  state.last.mutation_audit_finalize_ms = mutation_audit_finalize_ms;
+  state.last.cache_write_count
+      = std::max (0, cache_writes - state.cache_writes_before);
+  state.last.cache_spill_count
+      = std::max (0, cache_spills - state.cache_spills_before);
+  state.last.table_row_counts.assign (state.table_row_counts.begin (),
+                                      state.table_row_counts.end ());
+  std::sort (state.last.table_row_counts.begin (),
+             state.last.table_row_counts.end ());
+  state.table_row_counts.clear ();
+  state.root_active = false;
+}
+
+void
+DiscardCommitProfile (SQLiteStore *store)
+{
+  auto &registry = CommitProfileRegistry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  const auto it = registry.stores.find (store);
+  if (it != registry.stores.end ())
+    it->second.root_active = false;
+}
+
+void
+EraseCommitProfileStore (SQLiteStore *store)
+{
+  auto &registry = CommitProfileRegistry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  registry.stores.erase (store);
+}
 
 SQLiteMutationAuditRegistry &
 MutationAuditRegistry ()
@@ -178,6 +304,7 @@ MutationAuditPreupdateHook (void *opaque, sqlite3 *db, int operation,
   if (!opaque || !db || !table)
     return;
   auto *store = static_cast<SQLiteStore *> (opaque);
+  ObserveCommitProfileTableMutation (store, table);
   std::vector<internal::SQLiteMutationIdentity> identities;
   if (auto before = MutationAuditLogicalIdentity (db, operation, table, true))
     identities.push_back (std::move (*before));
@@ -231,35 +358,44 @@ MutationAuditVecPhysicalKey (std::string_view surface, std::int64_t row_id)
 }
 
 std::optional<std::string>
-MutationAuditResolveVecId (sqlite3 *db, std::string_view surface,
+MutationAuditResolveVecId (SQLiteStore &store, std::string_view surface,
                            std::int64_t row_id)
 {
-  const std::string sql = "SELECT id FROM \"" + std::string (surface)
-                          + "_rowids\" WHERE rowid = ?";
-  sqlite3_stmt *statement = nullptr;
-  if (sqlite3_prepare_v2 (db, sql.c_str (), -1, &statement, nullptr)
-      != SQLITE_OK)
-    return std::nullopt;
-  sqlite3_bind_int64 (statement, 1, static_cast<sqlite3_int64> (row_id));
-  std::optional<std::string> result;
-  if (sqlite3_step (statement) == SQLITE_ROW)
+  try
     {
-      if (sqlite3_column_type (statement, 0) == SQLITE_INTEGER)
-        result = std::to_string (sqlite3_column_int64 (statement, 0));
-      else if (const auto *text = sqlite3_column_text (statement, 0))
-        result = std::string (reinterpret_cast<const char *> (text));
-      else
-        result = std::to_string (row_id);
+      const auto rows = store.Execute (
+          "SELECT id FROM \"" + std::string (surface)
+              + "_rowids\" WHERE rowid = ?",
+          { static_cast<long long> (row_id) });
+      if (rows.empty ())
+        return std::nullopt;
+      const auto value = rows.front ().find ("id");
+      if (value == rows.front ().end ())
+        return std::nullopt;
+      if (value->second.type () == typeid (long long))
+        return std::to_string (std::any_cast<long long> (value->second));
+      if (value->second.type () == typeid (std::string))
+        return std::any_cast<std::string> (value->second);
+      if (!value->second.has_value ()
+          || value->second.type () == typeid (std::nullptr_t))
+        return std::to_string (row_id);
     }
-  sqlite3_finalize (statement);
-  return result;
+  catch (const std::exception &)
+    {
+    }
+  return std::nullopt;
 }
 
 void
-ResolveMutationAuditVecMutations (SQLiteMutationAuditState &state, sqlite3 *db)
+ResolveCommittedMutationAuditVecMutations (SQLiteMutationAuditState &state,
+                                            SQLiteStore &store)
 {
-  for (const auto &mutation : state.pending_physical)
+  for (const auto &mutation : state.committed_physical)
     {
+#if defined(CORTEXT_TESTING)
+      if (state.root_active)
+        state.commit_vec_lookup_count += 1;
+#endif
       const std::string physical_key
           = MutationAuditVecPhysicalKey (mutation.surface, mutation.row_id);
       std::optional<std::string> logical_id;
@@ -273,17 +409,17 @@ ResolveMutationAuditVecMutations (SQLiteMutationAuditState &state, sqlite3 *db)
       else
         {
           logical_id = MutationAuditResolveVecId (
-              db, mutation.surface, mutation.row_id);
+              store, mutation.surface, mutation.row_id);
           if (logical_id)
             state.vec_logical_ids[physical_key] = *logical_id;
         }
       if (logical_id)
-        state.pending.push_back ({
+        state.committed.push_back ({
           internal::SQLiteMutationKind::Index, mutation.surface,
           mutation.surface + ":" + MutationAuditComponent (*logical_id)
         });
     }
-  state.pending_physical.clear ();
+  state.committed_physical.clear ();
 }
 
 void
@@ -310,7 +446,7 @@ RegisterMutationAuditTransaction (SQLiteStore *store,
 void
 CommitMutationAuditTransaction (SQLiteStore *store,
                                 const SQLiteTransaction *transaction,
-                                bool root, sqlite3 *db = nullptr)
+                                bool root)
 {
   auto &registry = MutationAuditRegistry ();
   std::lock_guard<std::mutex> lock (registry.mutex);
@@ -320,11 +456,13 @@ CommitMutationAuditTransaction (SQLiteStore *store,
   it->second.marks.erase (transaction);
   if (!root)
     return;
-  if (db)
-    ResolveMutationAuditVecMutations (it->second, db);
   it->second.committed.insert (it->second.committed.end (),
                                it->second.pending.begin (),
                                it->second.pending.end ());
+  it->second.committed_physical.insert (
+      it->second.committed_physical.end (),
+      it->second.pending_physical.begin (),
+      it->second.pending_physical.end ());
   it->second.pending.clear ();
   it->second.pending_physical.clear ();
   it->second.marks.clear ();
@@ -925,11 +1063,15 @@ ResetSQLiteMutationAudit (Store *store)
     return;
   it->second.pending.clear ();
   it->second.pending_physical.clear ();
+  it->second.committed_physical.clear ();
   it->second.committed.clear ();
   it->second.vec_logical_ids = std::move (vec_logical_ids);
   it->second.marks.clear ();
   it->second.root_active = false;
   it->second.trigger_journal_ready = trigger_journal_ready;
+#if defined(CORTEXT_TESTING)
+  it->second.commit_vec_lookup_count = 0;
+#endif
 }
 
 SQLiteMutationAuditBatch
@@ -945,8 +1087,13 @@ ConsumeSQLiteCommittedMutations (Store *store)
     auto it = registry.stores.find (sqlite_store);
     if (it == registry.stores.end ())
       return {};
+    ResolveCommittedMutationAuditVecMutations (it->second, *sqlite_store);
     result.committed_hook_identities.swap (it->second.committed);
     result.trigger_journal_ready = it->second.trigger_journal_ready;
+#if defined(CORTEXT_TESTING)
+    result.commit_vec_lookup_count = it->second.commit_vec_lookup_count;
+    it->second.commit_vec_lookup_count = 0;
+#endif
   }
   if (!result.trigger_journal_ready)
     return result;
@@ -973,6 +1120,22 @@ ConsumeSQLiteCommittedMutations (Store *store)
       result.trigger_journal_ready = false;
       result.committed_trigger_identities.clear ();
     }
+  return result;
+}
+
+SQLiteCommitProfile
+ConsumeSQLiteCommitProfile (Store *store)
+{
+  auto *sqlite_store = dynamic_cast<SQLiteStore *> (store);
+  if (!sqlite_store)
+    return {};
+  auto &registry = CommitProfileRegistry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  const auto it = registry.stores.find (sqlite_store);
+  if (it == registry.stores.end ())
+    return {};
+  auto result = it->second.last;
+  it->second.last = {};
   return result;
 }
 
@@ -1328,6 +1491,7 @@ SQLiteStore::~SQLiteStore ()
       sqlite3_update_hook (connection_->GetConnection (), nullptr, nullptr);
     }
   EraseMutationAuditStore (this);
+  EraseCommitProfileStore (this);
   ClearStatementCache ();
 }
 
@@ -1405,17 +1569,20 @@ SQLiteStore::SQLiteStore (std::unique_ptr<SQLiteConnection> connection)
 #if defined(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS) && !defined(__EMSCRIPTEN__)
   TryLoadDynamicExtensions (connection_->GetConnection ());
 #endif
-  if (MutationAuditEnabled ())
+  const bool mutation_audit_enabled = MutationAuditEnabled ();
+  if (mutation_audit_enabled || CommitProfileEnabled ())
     {
-      auto &registry = MutationAuditRegistry ();
-      {
-        std::lock_guard<std::mutex> lock (registry.mutex);
-        registry.stores.try_emplace (this);
-      }
+      if (mutation_audit_enabled)
+        {
+          auto &registry = MutationAuditRegistry ();
+          std::lock_guard<std::mutex> lock (registry.mutex);
+          registry.stores.try_emplace (this);
+        }
       sqlite3_preupdate_hook (connection_->GetConnection (),
                               MutationAuditPreupdateHook, this);
-      sqlite3_update_hook (connection_->GetConnection (),
-                           MutationAuditVirtualTableUpdateHook, this);
+      if (mutation_audit_enabled)
+        sqlite3_update_hook (connection_->GetConnection (),
+                             MutationAuditVirtualTableUpdateHook, this);
     }
 }
 
@@ -1464,6 +1631,8 @@ SQLiteStore::Begin ()
   auto transaction = std::make_unique<SQLiteTransaction> (this, parent);
   SQLiteTransaction *transaction_ptr = transaction.get ();
   RegisterMutationAuditTransaction (this, transaction_ptr, parent == nullptr);
+  if (parent == nullptr)
+    BeginCommitProfile (this, connection_->GetConnection ());
   transaction_stack_.push_back (transaction_ptr);
   return transaction;
 }
@@ -1481,6 +1650,7 @@ SQLiteStore::Commit ()
 
   if (root)
     {
+      const auto sqlite_commit_start = std::chrono::steady_clock::now ();
       if (in_transaction_)
         {
           if (IsDbInTransaction ())
@@ -1489,6 +1659,19 @@ SQLiteStore::Commit ()
             }
           in_transaction_ = false;
         }
+      const double sqlite_commit_ms = std::chrono::duration<double, std::milli> (
+          std::chrono::steady_clock::now () - sqlite_commit_start)
+                                          .count ();
+      const auto audit_start = std::chrono::steady_clock::now ();
+      current_tx->is_committed_ = true;
+      transaction_stack_.pop_back ();
+      CommitMutationAuditTransaction (this, current_tx, true);
+      const double audit_ms = std::chrono::duration<double, std::milli> (
+          std::chrono::steady_clock::now () - audit_start)
+                                  .count ();
+      FinishCommitProfile (this, connection_->GetConnection (),
+                           sqlite_commit_ms, audit_ms);
+      return;
     }
   else
     {
@@ -1497,9 +1680,7 @@ SQLiteStore::Commit ()
 
   current_tx->is_committed_ = true;
   transaction_stack_.pop_back ();
-  CommitMutationAuditTransaction (
-      this, current_tx, root,
-      root ? connection_->GetConnection () : nullptr);
+  CommitMutationAuditTransaction (this, current_tx, root);
 }
 
 void
@@ -1533,6 +1714,8 @@ SQLiteStore::Rollback ()
   current_tx->is_rolled_back_ = true;
   transaction_stack_.pop_back ();
   RollbackMutationAuditTransaction (this, current_tx, root);
+  if (root)
+    DiscardCommitProfile (this);
 }
 
 void
@@ -1553,6 +1736,7 @@ SQLiteStore::CommitRootTransaction (SQLiteTransaction *transaction)
   // Only commit if this is the root transaction (no parent)
   if (transaction->parent_transaction_ == nullptr)
     {
+      const auto sqlite_commit_start = std::chrono::steady_clock::now ();
       if (in_transaction_)
         {
           if (IsDbInTransaction ())
@@ -1561,12 +1745,23 @@ SQLiteStore::CommitRootTransaction (SQLiteTransaction *transaction)
             }
           in_transaction_ = false;
         }
+      const double sqlite_commit_ms = std::chrono::duration<double, std::milli> (
+          std::chrono::steady_clock::now () - sqlite_commit_start)
+                                          .count ();
+      transaction_stack_.pop_back ();
+      const auto audit_start = std::chrono::steady_clock::now ();
+      CommitMutationAuditTransaction (this, transaction, true);
+      const double audit_ms = std::chrono::duration<double, std::milli> (
+          std::chrono::steady_clock::now () - audit_start)
+                                  .count ();
+      FinishCommitProfile (this, connection_->GetConnection (),
+                           sqlite_commit_ms, audit_ms);
+      return;
     }
 
   // Remove from stack
   transaction_stack_.pop_back ();
-  CommitMutationAuditTransaction (this, transaction, true,
-                                  connection_->GetConnection ());
+  CommitMutationAuditTransaction (this, transaction, true);
 }
 
 void
@@ -1600,6 +1795,7 @@ SQLiteStore::RollbackRootTransaction (SQLiteTransaction *transaction)
   // Remove from stack
   transaction_stack_.pop_back ();
   RollbackMutationAuditTransaction (this, transaction, true);
+  DiscardCommitProfile (this);
 }
 
 std::vector<std::map<std::string, std::any> >

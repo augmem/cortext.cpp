@@ -1,0 +1,203 @@
+{
+  "schema": "cortext_dynamic_retrieval_sawtooth_maturity_v1",
+  "production_cutover": true,
+  "decision": "8C-to-9C-by-B/16 passed extended maturity and canonical quality gates and was subsequently cut over as the production default; the canonical run did not reach the 8C floor, so the extended owner-authorized history remains the mature-cycle proof and whole-engine boundedness remains unclaimed",
+  "corpus": {
+    "kind": "owner-authorized-real-claude-append-history-diagnostic",
+    "canonical_packet_count": 15695,
+    "canonical_sha256": "17a447f237ff7dd1b732eca1a0f31e908b89b2ffdd20ae8b32df2e719a0271a2",
+    "append_record_count": 379,
+    "append_packet_count": 14685,
+    "append_raw_sha256": "3fc622ed5564d4a3bc8fc92a3a8e26cd44848776797521b50c4402afd9861ff0",
+    "append_packet_sha256": "6a3ad46de304eacc09daa1af2e6a01bba78a12f77bf44a0f364ecc917c2d0dc1",
+    "total_packet_count": 30380,
+    "combined_sha256": "d6dff35235f67a5b0b9cc169195cb225933fd8afd5dcd8f9259e481253909281",
+    "transform": "canonical UTF-16 tool-input cap, uncapped recorded tool-result text, sentence/newline split, and 400-character word-boundary chunks; no trimming, cycling, padding, or synthesis",
+    "acceptance_role": "maturity diagnostic only; does not replace the canonical acceptance corpus"
+  },
+  "quality_contract": {
+    "query_count": 512,
+    "top1_minimum": 0.998046875,
+    "top1_maximum_misses": 1,
+    "nine_run_aggregate_top1_minimum": 0.999,
+    "recall_at_16_minimum": 0.998,
+    "semantic_coverage_minimum": 0.95,
+    "deterministic_tie_order_required": true,
+    "miss_clustering_forbidden": [
+      "modality",
+      "opaque source id",
+      "memory age",
+      "knob setting"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "4C+B/16-to-5C",
+      "status": "rejected",
+      "profile_sha256": "9388bd95d1285566844da11bd80a17004a7c9e52e6a25cedfafffb0d098c25e7",
+      "retrieval_audit_sha256": "356a025910bf0fd48c2f9e2827a68e27ca49b839d346334054785d072154cb51",
+      "storage_audit_sha256": "e912782ec7e3b58139dcde1a31253e1adb73c6bbdf517222ed3ddaaa3df4b141",
+      "wall_ms": 438059,
+      "mean_process_ms": 6.02358290908497,
+      "mean_total_ms": 14.080722651612865,
+      "consolidation_runs": 72,
+      "top1_hits": 507,
+      "top1": 0.990234375,
+      "recall_at_16": 0.9772254193706379,
+      "semantic_coverage": 0.9710842225609768,
+      "deterministic_tie_order": true,
+      "late_history_top1_miss_count": 5,
+      "mature_cycle_count": 30,
+      "mature_reset_count": 30,
+      "mature_peak_half_ratio": 0.9972300155867291,
+      "mature_trough_half_ratio": 1.0003084175974268,
+      "mature_shape_p95_normalized_mae": 0.3074492430209277,
+      "work_bound_violation_count": 0,
+      "rejection_reasons": [
+        "top-1 below 0.998046875",
+        "recall at 16 below 0.998",
+        "all top-1 misses cluster in the late-history query quartile",
+        "mature cycle p95 shape error exceeds the preregistered limit"
+      ]
+    },
+    {
+      "id": "5C-to-6C-by-B/16",
+      "status": "rejected",
+      "profile_sha256": "3a2b590a0f06709bdcdfdc66b500dc6c83ca4362120659b336cc70beca1a84be",
+      "retrieval_audit_sha256": "db6636ae5d4fdc50c57334aacaaa894577830dda8005678c8676956bf5ee0450",
+      "storage_audit_sha256": "ea993adb8640b3bfaf3fd13ede09e043900b78e2760ed1d5d6510eb85372e669",
+      "wall_ms": 388336,
+      "mean_process_ms": 5.678885334529304,
+      "mean_total_ms": 12.47329932465449,
+      "consolidation_runs": 65,
+      "top1_hits": 512,
+      "top1": 1.0,
+      "recall_at_16": 0.9926506614404703,
+      "semantic_coverage": 0.9892339939024407,
+      "deterministic_tie_order": true,
+      "mature_cycle_count": 24,
+      "mature_reset_count": 24,
+      "mature_peak_half_ratio": 1.0,
+      "mature_trough_half_ratio": 0.998530029399412,
+      "mature_shape_p95_normalized_mae": 0.1308710691877862,
+      "mature_late_template_normalized_mae": 0.01371548006503459,
+      "work_bound_violation_count": 0,
+      "rejection_reasons": [
+        "recall at 16 below 0.998",
+        "whole-engine plateau false"
+      ],
+      "timing_nonclaim": "the lower wall time is not an isolated retrieval-throughput win because the live detector requested seven fewer consolidations"
+    },
+    {
+      "id": "6C-to-7C-by-B/16",
+      "status": "rejected",
+      "profile_sha256": "e3a71789973ab0d93c9e707d2254c4cff4fe07b5a73b25fa20c8245c60b7241d",
+      "retrieval_audit_sha256": "322f72cdfdfa92d8a433634612c387c7575b392dca8e390640f0c3d69c9f1ab9",
+      "storage_audit_sha256": "a0d613e410b8381109344b98d1c54da82d2a9e9d0ad03a0e1f8814f98706f5eb",
+      "wall_ms": 423535,
+      "mean_process_ms": 6.458757645523376,
+      "mean_total_ms": 13.62130139789354,
+      "consolidation_runs": 62,
+      "top1_hits": 511,
+      "top1": 0.998046875,
+      "recall_at_16": 0.9958333333333333,
+      "semantic_coverage": 0.9935689786585379,
+      "deterministic_tie_order": true,
+      "mature_cycle_count": 23,
+      "mature_reset_count": 23,
+      "mature_shape_p95_normalized_mae": 0.022170007268700928,
+      "work_bound_violation_count": 0,
+      "rejection_reasons": [
+        "recall at 16 below 0.998",
+        "whole-engine plateau false"
+      ]
+    },
+    {
+      "id": "7C-to-8C-by-B/16",
+      "status": "rejected",
+      "profile_sha256": "45bc03d61cbc4951612d3917f7deac85ced27971ebe18a956f411895e8d778da",
+      "retrieval_audit_sha256": "17f38b69c98de631bbeb9d9fe6b678b0abb2b15cd0628a04c76fbc831e4811cf",
+      "storage_audit_sha256": "2f188b097b46f3c7627d613c6cdf24116c1f670780dd173c1b76f1fcab0af1f8",
+      "wall_ms": 390079,
+      "mean_process_ms": 5.874491052929559,
+      "mean_total_ms": 12.544524463067726,
+      "consolidation_runs": 62,
+      "top1_hits": 511,
+      "top1": 0.998046875,
+      "recall_at_16": 0.9976724243537914,
+      "semantic_coverage": 0.996855945121953,
+      "deterministic_tie_order": true,
+      "mature_cycle_count": 22,
+      "mature_reset_count": 22,
+      "mature_shape_p95_normalized_mae": 0.0229932759954844,
+      "work_bound_violation_count": 0,
+      "rejection_reasons": [
+        "recall at 16 below 0.998",
+        "whole-engine plateau false"
+      ]
+    },
+    {
+      "id": "8C-to-9C-by-B/16",
+      "status": "retrieval-quality-and-extended-maturity-passed-cutover-pending",
+      "profile_sha256": "765872cb6923908f715d74baf150a1bd19495db0901c7c094928cd0f55675069",
+      "retrieval_audit_sha256": "baabdc89cded1fa68ba5452dd779d960ab333e818cac15b722a91857df8e33e5",
+      "storage_audit_sha256": "5cbd16947f0f6f39bdeafb65a859ed77ec938a5b2006c114ca38d1865de287d0",
+      "wall_ms": 435573,
+      "mean_process_ms": 6.55384486231078,
+      "mean_total_ms": 14.003883617149528,
+      "consolidation_runs": 68,
+      "top1_hits": 511,
+      "top1": 0.998046875,
+      "recall_at_16": 0.9992650661440471,
+      "semantic_coverage": 0.9985708841463422,
+      "deterministic_tie_order": true,
+      "mature_cycle_count": 20,
+      "mature_reset_count": 19,
+      "mature_peak_half_ratio": 0.9990641224662602,
+      "mature_trough_half_ratio": 0.9993599281789541,
+      "mature_shape_p95_normalized_mae": 0.1908168371510824,
+      "mature_late_template_normalized_mae": 0.07952840625801823,
+      "work_bound_violation_count": 0,
+      "canonical": {
+        "packet_count": 15695,
+        "profile_sha256": "a8bc2599f1a4c7e372421c679e340024ce9a9cc81b7039419acb6461bee88484",
+        "retrieval_audit_sha256": "a24309a967f128f5fd7f17ce04829481964d547a3be6fe7f98f1589ee182d5e4",
+        "storage_audit_sha256": "9538aafc1730fd64aa1e23ffc49637b0047f721f0f18cd4aa4c0b251d1a1f502",
+        "wall_ms": 214263,
+        "mean_process_ms": 5.233227,
+        "mean_total_ms": 13.333855,
+        "consolidation_runs": 34,
+        "top1_hits": 512,
+        "top1": 1.0,
+        "recall_at_16": 1.0,
+        "semantic_coverage": 1.0,
+        "deterministic_tie_order": true,
+        "opaque_source_count": 4,
+        "maximum_actual_retrieval_work_rows": 3064,
+        "derived_floor_rows": 3992,
+        "mature_cycle_count": 0,
+        "whole_engine_plateau": false,
+        "proof_boundary": "canonical quality passed, but the finite corpus ended before the 8C floor and therefore cannot independently prove mature sawtooth shape"
+      },
+      "unresolved": [
+        "whole-engine plateau"
+      ]
+    }
+  ],
+  "historical_experiment_binary_sha256": null,
+  "historical_experiment_binary_identity_note": "The previous digest identified an unrelated Apple-toolchain build and was removed. The original release experiment binary had already been rebuilt before its full digest was copied into this sanitized record; profile and audit digests remain preserved, and current production-default evidence is independently content-addressed by sqlite-hnsw-production-sawtooth-knob-ablation-v2.json.",
+  "focused_test": {
+    "name": "Quality-preserving experimental retrieval sawtooth keeps the canonical floor",
+    "assertions": 16,
+    "passed": true
+  },
+  "audit_fixture_tests": {
+    "count": 116,
+    "passed": true
+  },
+  "unresolved": [
+    "whole-engine Natural plateau",
+    "Durable plateau",
+    "production-wide boundedness"
+  ]
+}

@@ -1,6 +1,8 @@
 #include "cortext/operations/memory_storage.hpp"
 #include "constructive_recall_internal.hpp"
+#include "active_signal_embedding_ring_internal.hpp"
 #include "historical_surface_search_cache_internal.hpp"
+#include "retrieval_trace_state.hpp"
 #include "association_fanout_cache_internal.hpp"
 #include "emotional_metadata_cache_internal.hpp"
 #include "signal_record_rollback_internal.hpp"
@@ -142,6 +144,10 @@ struct BorrowedSupersessionCandidate
 struct CurrentSupersessionSearchProof
 {
   bool valid = false;
+  bool bounded_current_surface = false;
+  std::size_t sparse_route_node_rows = 0;
+  std::size_t sparse_route_distance_evaluations = 0;
+  std::size_t sparse_route_dirty_rows = 0;
   std::vector<long long> ranked_memory_ids;
   float cutoff_distance = 0.0f;
   long long cutoff_memory_id = 0;
@@ -393,6 +399,18 @@ LoadHistoricalSupersessionRowsFromCache (
       return std::nullopt;
     }
 
+  // Once the complete current surface is served through the bounded route,
+  // consolidation's current centroid is the active supersession identity.
+  // Historical embeddings remain durable lineage but no longer form a second
+  // competing candidate population for the same memory.
+  if (current_search_proof.bounded_current_surface
+      && state->processor_surface_complete)
+    {
+      if (coverage_proven)
+        *coverage_proven = true;
+      return std::vector<BorrowedSupersessionCandidate>{};
+    }
+
   if (historical_surface_search_cache_internal::
           CurrentPopulationCoversHistorical (*state, memory_id))
     {
@@ -489,8 +507,9 @@ LoadHistoricalSupersessionRowsFromCache (
 
 std::optional<std::vector<BorrowedSupersessionCandidate>>
 LoadCurrentSupersessionRowsFromCache (
+    Store *store,
     const std::shared_ptr<
-        const historical_surface_search_cache_internal::State> &state,
+        historical_surface_search_cache_internal::State> &state,
     const ProcessorContext &p_ctx, const Eigen::VectorXf &query_embedding,
     long long memory_id, long long end_ts, int candidate_limit,
     CurrentSupersessionSearchProof *proof, std::size_t *rows_visited)
@@ -514,31 +533,80 @@ LoadCurrentSupersessionRowsFromCache (
         proof->valid = true;
       return std::vector<BorrowedSupersessionCandidate>{};
     }
+
+  const bool use_sparse_route
+      = entry_count > state->sparse_route_parameters.route_capacity;
+  std::vector<std::size_t> candidate_indices;
+  if (use_sparse_route)
+    {
+      auto route = store
+                       ? historical_surface_search_cache_internal::
+                             OpenSQLiteSparseRoute (*state, *store)
+                       : nullptr;
+      if (!route)
+        return std::nullopt;
+      const auto dirty_rows = historical_surface_search_cache_internal::
+          StageSQLiteSparseRouteDirtyForSearch (*state, *route);
+      if (!dirty_rows)
+        return std::nullopt;
+      const auto memory_ids = route->SearchActivated (query_embedding);
+      if (!memory_ids)
+        return std::nullopt;
+      candidate_indices.reserve (memory_ids->size ());
+      for (const long long candidate_memory_id : *memory_ids)
+        {
+          const auto index
+              = state->current_memory_index.find (candidate_memory_id);
+          if (index == state->current_memory_index.end ()
+              || index->second >= entry_count)
+            return std::nullopt;
+          candidate_indices.push_back (index->second);
+        }
+      if (proof)
+        {
+          proof->bounded_current_surface = true;
+          proof->sparse_route_node_rows = route->LastSearchNodeRows ();
+          proof->sparse_route_distance_evaluations
+              = route->LastSearchDistanceEvaluations ();
+          proof->sparse_route_dirty_rows = *dirty_rows;
+        }
+    }
   using RowMajorMatrix
       = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
   const Eigen::Map<const RowMajorMatrix> matrix (
       state->current_search.data (), static_cast<Eigen::Index> (entry_count),
       embedding_dim);
+  const std::size_t comparison_count
+      = use_sparse_route ? candidate_indices.size () : entry_count;
   if (rows_visited)
-    *rows_visited = entry_count;
+    *rows_visited = comparison_count;
   auto &distance_scratch = state->distance_scratch;
-  distance_scratch.resize (entry_count);
-  Eigen::Map<Eigen::VectorXf> distances (
-      distance_scratch.data (), static_cast<Eigen::Index> (entry_count));
-  distances = (matrix.rowwise () - query_embedding.transpose ())
-                  .rowwise ()
-                  .squaredNorm ();
+  if (!use_sparse_route)
+    {
+      distance_scratch.resize (entry_count);
+      Eigen::Map<Eigen::VectorXf> distances (
+          distance_scratch.data (), static_cast<Eigen::Index> (entry_count));
+      distances = (matrix.rowwise () - query_embedding.transpose ())
+                      .rowwise ()
+                      .squaredNorm ();
+    }
   auto &ranked = state->ranked_scratch;
   ranked.clear ();
-  ranked.reserve (entry_count);
-  for (std::size_t index = 0; index < entry_count; ++index)
+  ranked.reserve (comparison_count);
+  for (std::size_t candidate = 0; candidate < comparison_count; ++candidate)
     {
+      const std::size_t index
+          = use_sparse_route ? candidate_indices[candidate] : candidate;
       const auto &entry = state->current_entries[index];
       if (entry.memory_id <= 0 || entry.embedding_id <= 0
           || entry.embedding.size () != embedding_dim)
         return std::nullopt;
-      ranked.push_back (
-          { index, distances[static_cast<Eigen::Index> (index)] });
+      ranked.push_back ({
+        index,
+        use_sparse_route
+            ? (entry.embedding - query_embedding).squaredNorm ()
+            : distance_scratch[static_cast<std::size_t> (index)]
+      });
     }
   auto by_distance = [&state] (
                          const historical_surface_search_cache_internal::RankedEntry &a,
@@ -556,7 +624,7 @@ LoadCurrentSupersessionRowsFromCache (
     }
   std::sort (ranked.begin (), ranked.end (), by_distance);
 
-  if (proof)
+  if (proof && !use_sparse_route)
     {
       proof->valid = true;
       proof->ranked_memory_ids.reserve (ranked.size ());
@@ -605,6 +673,8 @@ LoadSupersessionCandidateRows (OperationContext &context, Transaction &tx,
   SupersessionCandidateRows result;
   result.cache_owner
       = historical_surface_search_cache_internal::Find (p_ctx);
+  auto mutable_cache_owner
+      = historical_surface_search_cache_internal::FindMutable (p_ctx);
   std::unordered_set<long long> seen_memory_ids;
   std::size_t current_execution_count = 0;
   std::size_t historical_execution_count = 0;
@@ -616,7 +686,8 @@ LoadSupersessionCandidateRows (OperationContext &context, Transaction &tx,
       embedding_to_store);
   const auto current_start = SteadyClock::now ();
   auto current_cache_rows = LoadCurrentSupersessionRowsFromCache (
-      result.cache_owner, p_ctx, embedding_to_store, memory_id, end_ts,
+      context.GetStore (), mutable_cache_owner, p_ctx, embedding_to_store,
+      memory_id, end_ts,
       candidate_limit, &current_search_proof, &current_rows_visited);
   if (current_cache_rows)
     {
@@ -740,8 +811,21 @@ LoadSupersessionCandidateRows (OperationContext &context, Transaction &tx,
       "MemoryStorage.supersession_current_rows_visited",
       static_cast<double> (current_rows_visited));
   context.AddOperationTiming (
+      "MemoryStorage.supersession_sparse_route_node_rows",
+      static_cast<double> (current_search_proof.sparse_route_node_rows));
+  context.AddOperationTiming (
+      "MemoryStorage.supersession_sparse_route_distance_evaluations",
+      static_cast<double> (
+          current_search_proof.sparse_route_distance_evaluations));
+  context.AddOperationTiming (
+      "MemoryStorage.supersession_sparse_route_dirty_rows",
+      static_cast<double> (current_search_proof.sparse_route_dirty_rows));
+  context.AddOperationTiming (
       "MemoryStorage.supersession_historical_rows_visited",
       static_cast<double> (historical_rows_visited));
+  context.AddOperationTiming (
+      "MemoryStorage.supersession_rows_visited_activity",
+      current_rows_visited + historical_rows_visited > 0 ? 1.0 : 0.0);
 
   // When both cache searches completed and historical coverage was proven,
   // an empty result is exact even when the just-inserted memory is the sole
@@ -1252,44 +1336,20 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       double signal_embedding_insert_ms = 0.0;
       double signal_row_insert_ms = 0.0;
       double signal_id_select_ms = 0.0;
+      const int active_signal_embedding_capacity
+          = active_signal_embedding_ring_internal::Capacity (
+              cfg.focus, cfg.sensitivity, cfg.stability);
+      const auto ensure_signal_embedding_ring_start = SteadyClock::now ();
+      active_signal_embedding_ring_internal::EnsureCapacity (
+          *savepoint, active_signal_embedding_capacity);
+      signal_embedding_insert_ms
+          += ElapsedMillis (ensure_signal_embedding_ring_start);
       for (const auto &sig_rec : acc.signals)
         {
           const std::vector<float> signal_embedding
               = sig_rec.embedding.size () > 0
                     ? EigenToFloatVec (sig_rec.embedding)
                     : emb_vec;
-          const auto signal_embedding_start = SteadyClock::now ();
-          savepoint->Execute (insert_sql,
-                              { signal_embedding,
-                                static_cast<long long> (sig_rec.timestamp) });
-          signal_embedding_insert_ms += ElapsedMillis (signal_embedding_start);
-
-          const auto signal_embedding_id_start = SteadyClock::now ();
-          auto signal_embedding_id_rows
-              = savepoint->Execute ("SELECT last_insert_rowid() AS id", {});
-          signal_id_select_ms += ElapsedMillis (signal_embedding_id_start);
-          if (signal_embedding_id_rows.empty ()
-              || signal_embedding_id_rows[0].count ("id") == 0)
-            {
-              rollback_savepoints ();
-              telemetry::AddCounter (
-                  "cortext.memory_storage.signal_embedding_error_total", 1);
-              return;
-            }
-          const long long signal_embedding_id
-              = AnyToLongLong (signal_embedding_id_rows[0].at ("id"))
-                    .value_or (0);
-          if (signal_embedding_id <= 0)
-            {
-              rollback_savepoints ();
-              telemetry::AddCounter (
-                  "cortext.memory_storage.signal_embedding_error_total", 1);
-              return;
-            }
-          inserted_search_entries.push_back (
-              { signal_embedding_id, 0, 0, std::string (), std::string (),
-                sig_rec.embedding.size () > 0 ? sig_rec.embedding
-                                              : embedding_to_store });
 
           const auto signal_row_start = SteadyClock::now ();
           savepoint->Execute (
@@ -1297,7 +1357,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
               "  memory_id, source_id, embedding_id, timestamp, modality, "
               "  mime, blob_id, serial_position, score, created_at"
               ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              { memory_id, signal.source_id, signal_embedding_id,
+              { memory_id, signal.source_id, embedding_id,
                 static_cast<long long> (sig_rec.timestamp), sig_rec.modality,
                 sig_rec.mime,
                 sig_rec.blob_id.empty () ? std::any ()
@@ -1316,6 +1376,13 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                   = AnyToLongLong (signal_id_rows[0].at ("id"));
               if (signal_id && *signal_id > 0)
                 {
+                  const auto signal_embedding_start = SteadyClock::now ();
+                  active_signal_embedding_ring_internal::InsertAtCapacity (
+                      *savepoint, *signal_id, signal_embedding,
+                      static_cast<long long> (sig_rec.timestamp),
+                      active_signal_embedding_capacity);
+                  signal_embedding_insert_ms
+                      += ElapsedMillis (signal_embedding_start);
                   stored_signal_id = *signal_id;
                   if (sig_rec.timestamp == signal.timestamp
                       && sig_rec.modality == signal.modality)
@@ -1334,8 +1401,6 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 
       for (auto &entry : inserted_search_entries)
         {
-          // Signal-only embeddings participate in sqlite-vec's top-k
-          // population even though the subsequent memory join filters them.
           historical_surface_search_cache_internal::Append (
               p_ctx, std::move (entry));
         }
@@ -1417,6 +1482,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             }
           surface_entry.embedding = embedding_to_store;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
+          retrieval_trace::RecordSurfaceUpsert (
+              memory_id, embedding_id, ToFloatVector (embedding_to_store));
           auto &fanout_cache = p_ctx.association_fanout_cache;
           if (fanout_cache.valid && !supersession_edges.empty ())
             {
@@ -1449,11 +1516,16 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                       embedding_id, target_embedding_id, "supersedes",
                       edge.weight, static_cast<long long> (end_ts));
                 }
-              if (incrementally_maintained)
-                association_fanout_cache::BuildSupersessionEligibility (
-                    fanout_cache, p_ctx);
-              else
+              if (!incrementally_maintained)
                 fanout_cache.valid = false;
+              else
+                {
+                  const auto sidecar
+                      = execution_cache_sidecar_internal::Ensure (p_ctx);
+                  if (!sidecar->supersession_eligibility.valid)
+                    association_fanout_cache::BuildSupersessionEligibility (
+                        fanout_cache, p_ctx);
+                }
             }
           if (!constructive_recall::Disabled ()
               && !constructive_recall::CurrentSurfaceWritesDisabled ())

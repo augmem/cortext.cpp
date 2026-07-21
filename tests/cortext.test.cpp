@@ -3,6 +3,8 @@
 #include "../src/cortext_pipeline_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
 #include "../src/operations/bounded_activation_shadow_internal.hpp"
+#include "../src/operations/rif_active_epoch_cache_internal.hpp"
+#include "../src/operations/sparse_retrieval_knobs_internal.hpp"
 #include <algorithm>
 #include <array>
 #include <any>
@@ -779,7 +781,7 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     const char *secondary;
     double fixed_bound;
   };
-  constexpr std::array<CounterSpec, 17> kCounters { {
+  const std::array<CounterSpec, 17> kCounters { {
     { "retrieval_suppression_id_count",
       "SignalProcessor.retrieval_suppression_id_count", nullptr, 4096.0 },
     { "predictive_id_count", "SignalProcessor.predictive_id_count", nullptr,
@@ -791,7 +793,10 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     { "graph_candidate_count", "GraphRetrieve.candidate_count", nullptr,
       4096.0 },
     { "graph_exact_comparison_count",
-      "GraphRetrieve.family_exact_comparison_count", nullptr, 131072.0 },
+      "GraphRetrieve.family_exact_comparison_count", nullptr,
+      static_cast<double> (
+          cortext::operations::sparse_retrieval_knobs_internal::
+              FamilyExactComparisonLimit (0.5, 0.5, 0.5)) },
     { "graph_cache_rebuild_count", "GraphRetrieve.cache_rebuild_count",
       nullptr, 1.0 },
     { "graph_rows_visited", "GraphRetrieve.rows_visited", nullptr, 4096.0 },
@@ -840,6 +845,9 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     cfg.sensitivity = 0.5;
     cfg.stability = 0.5;
     cortext::testing::RequireEncoder (cfg);
+    const auto active_epoch_limits
+        = cortext::operations::rif_active_epoch_cache_internal::DeriveLimits (
+            cfg.focus, cfg.sensitivity, cfg.stability);
     const int supersession_candidate_limit
         = cortext::core::SupersessionCandidateLimit (
             cfg.focus, cfg.sensitivity, cfg.stability);
@@ -922,13 +930,15 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
 
         REQUIRE (output.operation_ms.at (
                      "SignalProcessor.rif_active_epoch_event_count")
-                 <= 512.0);
+                 <= static_cast<double> (active_epoch_limits.event_count));
         REQUIRE (output.operation_ms.at (
                      "SignalProcessor.rif_active_epoch_mutation_count")
-                 <= 32768.0);
+                 <= static_cast<double> (
+                     active_epoch_limits.mutation_count));
         REQUIRE (output.operation_ms.at (
                      "SignalProcessor.rif_active_epoch_allocated_bytes")
-                 <= 64.0 * 1024.0 * 1024.0);
+                 <= static_cast<double> (
+                     active_epoch_limits.allocated_bytes));
 
         for (const auto *operation : kSharedOperations)
           REQUIRE (output.operation_ms.contains (operation));
@@ -980,7 +990,7 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
              == 0.0);
     REQUIRE (reset.operation_ms.at (
                  "SignalProcessor.rif_active_epoch_allocated_bytes")
-             < 64.0 * 1024.0 * 1024.0);
+             < static_cast<double> (active_epoch_limits.allocated_bytes));
     const auto after_maintenance = shadow::SnapshotsForTest ();
     REQUIRE (after_maintenance.size () == 1);
     REQUIRE (after_maintenance.front ().generation
@@ -1482,6 +1492,111 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
         REQUIRE (memory.mimetype == expected_mimes.at (memory.id));
       }
   }
+}
+
+TEST_CASE ("Fallback hydration keeps a knob-bounded recent slice across "
+           "sources and modalities",
+           "[cortext][objstore][hydration][bounded][aist]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr double kFocus = 0.5;
+  constexpr double kSensitivity = 0.5;
+  constexpr double kStability = 0.5;
+  const int limit
+      = cortext::operations::sparse_retrieval_knobs_internal::
+            HydrationFallbackSignalLimit (kFocus, kSensitivity, kStability);
+  REQUIRE (limit == 128);
+
+  struct Surface
+  {
+    long long memory_id;
+    std::string source_id;
+    std::string modality;
+    std::string mime;
+  };
+  const std::array<Surface, 3> surfaces = {
+    Surface{ 101, "opaque-source-7f", "text", "text/plain" },
+    Surface{ 202, "device://opaque/91", "audio", "audio/pcm" },
+    Surface{ 303, "urn:opaque:source:ab", "image", "image/png" },
+  };
+
+  for (std::size_t surface_index = 0; surface_index < surfaces.size ();
+       ++surface_index)
+    {
+      const auto &surface = surfaces[surface_index];
+      const int row_count = limit + 7;
+      store->Execute (
+          "INSERT INTO memories(memory_id, source_id, kind, start_ts, "
+          "end_ts, n_signals, modality, created_at) "
+          "VALUES (?, ?, 'WORKING', ?, NULL, ?, ?, ?)",
+          { surface.memory_id, surface.source_id,
+            static_cast<long long> (surface_index + 1),
+            static_cast<long long> (row_count), surface.modality,
+            static_cast<long long> (surface_index + 1) });
+
+      for (int serial = 0; serial < row_count; ++serial)
+        {
+          std::vector<unsigned char> blob_id (32, 0);
+          blob_id[0] = static_cast<unsigned char> (surface_index + 1);
+          blob_id[1] = static_cast<unsigned char> (serial & 0xff);
+          blob_id[2]
+              = static_cast<unsigned char> ((serial >> 8) & 0xff);
+          const std::string marker
+              = std::to_string (surface.memory_id) + ":"
+                + std::to_string (serial);
+          const std::vector<unsigned char> payload (marker.begin (),
+                                                    marker.end ());
+          store->Execute (
+              "INSERT INTO objstore_data(id, data) VALUES (?, ?)",
+              { blob_id, payload });
+          store->Execute (
+              "INSERT INTO signals(memory_id, source_id, embedding_id, "
+              "blob_id, timestamp, modality, mime, serial_position, "
+              "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              { surface.memory_id, surface.source_id,
+                static_cast<long long> (100000 + serial), blob_id,
+                static_cast<long long> (serial), surface.modality,
+                surface.mime, static_cast<long long> (serial),
+                static_cast<long long> (serial) });
+        }
+    }
+
+  cortext::Cortext::Config cfg;
+  cfg.focus = kFocus;
+  cfg.sensitivity = kSensitivity;
+  cfg.stability = kStability;
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
+  REQUIRE (ctx != nullptr);
+  const auto hydrated = ctx->DebugHydrateForTest ({}, {});
+
+  REQUIRE (hydrated.working_memory.size () == surfaces.size ());
+  REQUIRE (hydrated.output.operation_ms.at (
+               "Cortext.fallback_hydration_signal_limit")
+           == 128.0);
+  REQUIRE (hydrated.output.operation_ms.at (
+               "Cortext.fallback_hydration_signal_rows")
+           == 384.0);
+  for (std::size_t i = 0; i < surfaces.size (); ++i)
+    {
+      const auto &surface = surfaces[i];
+      const auto &memory = hydrated.working_memory[i];
+      INFO (surface.modality);
+      REQUIRE (memory.id == surface.memory_id);
+      REQUIRE (memory.source_id == surface.source_id);
+      REQUIRE (memory.modality == surface.modality);
+      REQUIRE (memory.mimetype == surface.mime);
+      REQUIRE (memory.content.size () == static_cast<std::size_t> (limit));
+      const std::string first (memory.content.front ().begin (),
+                               memory.content.front ().end ());
+      const std::string last (memory.content.back ().begin (),
+                              memory.content.back ().end ());
+      REQUIRE (first == std::to_string (surface.memory_id) + ":7");
+      REQUIRE (last == std::to_string (surface.memory_id) + ":134");
+    }
 }
 
 TEST_CASE ("Cortext filters mixed signal blobs to the memory surface",

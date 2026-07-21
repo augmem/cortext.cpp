@@ -143,6 +143,44 @@ UpsertFanoutEdge (
 }
 
 inline void
+RecomputeSupersessionEligibilityTarget (
+    const ProcessorContext::AssociationFanoutCache &cache,
+    const ProcessorContext &p_ctx, long long target_memory_id)
+{
+  auto &eligibility = execution_cache_sidecar_internal::Ensure (p_ctx)
+                          ->supersession_eligibility;
+  eligibility.activation_ts_by_target.erase (target_memory_id);
+  const auto target = cache.in_by_target.find (target_memory_id);
+  if (target == cache.in_by_target.end ())
+    return;
+
+  std::optional<long long> activation_ts;
+  for (const auto &edge : target->second)
+    {
+      if (edge.edge_type != "supersedes")
+        continue;
+      const auto surface_it
+          = p_ctx.retrieval_surface_index.find (edge.memory_id);
+      if (surface_it == p_ctx.retrieval_surface_index.end ()
+          || surface_it->second >= p_ctx.retrieval_surface_cache.size ())
+        continue;
+      const auto &replacement
+          = p_ctx.retrieval_surface_cache[surface_it->second];
+      if (replacement.memory_id <= 0 || replacement.embedding_id <= 0
+          || replacement.start_ts < 0
+          || (replacement.kind != "LONG_TERM"
+              && replacement.kind != "ASSOCIATION"))
+        continue;
+      activation_ts = activation_ts
+                          ? std::min (*activation_ts, replacement.start_ts)
+                          : replacement.start_ts;
+    }
+  if (activation_ts)
+    eligibility.activation_ts_by_target.emplace (target_memory_id,
+                                                  *activation_ts);
+}
+
+inline void
 UpsertAssociation (ProcessorContext &p_ctx,
                    ProcessorContext::AssociationFanoutCache &cache,
                    long long source_memory_id, long long target_memory_id,
@@ -155,9 +193,10 @@ UpsertAssociation (ProcessorContext &p_ctx,
     {
       return;
     }
-  if (edge_type == "supersedes")
-    execution_cache_sidecar_internal::Ensure (p_ctx)
-        ->supersession_eligibility.valid = false;
+  const auto sidecar = execution_cache_sidecar_internal::Ensure (p_ctx);
+  const bool maintain_supersession_eligibility
+      = edge_type == "supersedes"
+        && sidecar->supersession_eligibility.valid;
   double old_weight = 0.0;
   long long old_last_reinforced = 0;
   long long old_target_embedding_id = 0;
@@ -197,6 +236,9 @@ UpsertAssociation (ProcessorContext &p_ctx,
           - std::llround (old_weight * 1000000.0));
       cache.last_reinforced_sum += last_reinforced - old_last_reinforced;
     }
+  if (maintain_supersession_eligibility)
+    RecomputeSupersessionEligibilityTarget (cache, p_ctx,
+                                            target_memory_id);
 }
 
 inline void
@@ -256,11 +298,13 @@ NotifyRetrievalSurfaceChanged (const ProcessorContext &p_ctx,
       memory_id);
   if (edges == p_ctx.association_fanout_cache.out_by_source.end ())
     return;
-  if (std::any_of (edges->second.begin (), edges->second.end (),
-                   [] (const auto &edge) {
-                     return edge.edge_type == "supersedes";
-                   }))
-    InvalidateSupersessionEligibility (p_ctx);
+  const auto sidecar = execution_cache_sidecar_internal::Find (p_ctx);
+  if (!sidecar || !sidecar->supersession_eligibility.valid)
+    return;
+  for (const auto &edge : edges->second)
+    if (edge.edge_type == "supersedes")
+      RecomputeSupersessionEligibilityTarget (
+          p_ctx.association_fanout_cache, p_ctx, edge.memory_id);
 }
 
 inline ProcessorContext::AssociationFanoutCache *

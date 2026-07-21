@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -43,6 +44,8 @@ struct EmotionalMetadataCache
       memory_ids_by_embedding;
   std::unordered_map<long long, EmotionalEmbeddingValues>
       values_by_embedding;
+  std::size_t source_query_capacity
+      = std::numeric_limits<std::size_t>::max ();
   std::vector<long long> source_query_order;
 };
 

@@ -7,6 +7,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include "association_fanout_cache_internal.hpp"
 #include "emotional_metadata_cache_internal.hpp"
+#include "sparse_retrieval_knobs_internal.hpp"
 #include "../experimental_env.hpp"
 #include <algorithm>
 #include <any>
@@ -62,13 +63,15 @@ std::vector<EmotionalSource>
 LoadEmotionalSources (Store *store, long long recent_window_ts,
                       double theta_intensity, double theta_arousal,
                       const EmotionCascadeParams &fallback,
+                      std::size_t candidate_limit,
+                      std::size_t *inspected_count,
                       std::size_t *accepted_count)
 {
   std::vector<EmotionalSource> sources;
 
   // v2: Query memories for high-intensity flashbulb memories
   // Only process recently tagged ones (within consolidation window)
-  auto rows = store->Execute (
+  std::string query =
       "SELECT source.embedding_id, source.emotional_intensity, "
       "       source.half_life_bonus, source.cascade_radius, "
       "       source.cascade_decay, "
@@ -80,11 +83,21 @@ LoadEmotionalSources (Store *store, long long recent_window_ts,
       "WHERE flashbulb = 1 AND emotional_intensity >= ?1 "
       "AND s_arousal_avg >= ?2 "
       "AND created_at >= ?3 "
-      "ORDER BY emotional_intensity DESC, source.memory_id ASC",
-      { theta_intensity, theta_arousal, recent_window_ts });
+      "ORDER BY emotional_intensity DESC, source.memory_id ASC";
+  std::vector<std::any> parameters{
+    theta_intensity, theta_arousal, recent_window_ts
+  };
+  if (candidate_limit > 0)
+    {
+      query += " LIMIT ?4";
+      parameters.emplace_back (static_cast<long long> (candidate_limit));
+    }
+  auto rows = store->Execute (query, parameters);
 
   for (const auto &row : rows)
     {
+      if (inspected_count)
+        ++*inspected_count;
       auto it_id = row.find ("embedding_id");
       auto it_intensity = row.find ("emotional_intensity");
 
@@ -166,6 +179,8 @@ LoadEmotionalSourcesFromCache (const ProcessorContext &p_ctx,
                                double theta_intensity,
                                double theta_arousal,
                                const EmotionCascadeParams &fallback,
+                               std::size_t candidate_limit,
+                               std::size_t *inspected_count,
                                std::size_t *accepted_count)
 {
   const auto state
@@ -176,6 +191,11 @@ LoadEmotionalSourcesFromCache (const ProcessorContext &p_ctx,
   const auto &cache = state->emotional_metadata;
   for (const long long memory_id : cache.source_query_order)
     {
+      if (candidate_limit > 0 && inspected_count
+          && *inspected_count >= candidate_limit)
+        break;
+      if (inspected_count)
+        ++*inspected_count;
       const auto row_it = cache.rows_by_memory.find (memory_id);
       if (row_it == cache.rows_by_memory.end ())
         continue;
@@ -321,6 +341,14 @@ RecordCascadeFixedPoint (ProcessorContext &p_ctx,
   fixed.cascade_decay = params.cascade_decay;
 }
 
+void
+InvalidateCascadeFixedPoint (ProcessorContext &p_ctx)
+{
+  const auto state = emotional_metadata_cache_internal::FindState (p_ctx);
+  if (state)
+    state->emotional_fixed_point.valid = false;
+}
+
 /// @brief Find each source's shortest positive-depth neighbors while sharing
 /// graph traversal across source-order batches.
 std::vector<std::vector<CascadeNeighbor>>
@@ -328,15 +356,28 @@ FindCascadeNeighbors (const AssociationFanoutCache &cache,
                       const std::vector<EmotionalSource> &sources,
                       const EmotionCascadeParams &fallback,
                       std::vector<std::unordered_set<long long>>
-                          *expandable_by_source)
+                          *expandable_by_source,
+                      std::size_t *reachable_pair_count,
+                      std::size_t *edge_visit_count,
+                      bool collapse_winners,
+                      std::size_t edge_visit_limit,
+                      bool *edge_visit_limit_reached)
 {
+  struct Winner
+  {
+    std::size_t source_index;
+    int depth;
+  };
   std::vector<std::vector<CascadeNeighbor>> neighbors (sources.size ());
+  std::unordered_map<long long, Winner> winners;
   if (expandable_by_source)
     expandable_by_source->assign (sources.size (), {});
   constexpr std::size_t kSourcesPerBatch = 64;
   for (std::size_t batch_begin = 0; batch_begin < sources.size ();
        batch_begin += kSourcesPerBatch)
     {
+      if (edge_visit_limit_reached && *edge_visit_limit_reached)
+        break;
       const std::size_t batch_size = std::min (
           kSourcesPerBatch, sources.size () - batch_begin);
       std::vector<std::uint64_t> active_by_depth (1, 0);
@@ -379,6 +420,15 @@ FindCascadeNeighbors (const AssociationFanoutCache &cache,
               return;
             for (const auto &edge : edge_it->second)
               {
+                if (edge_visit_limit > 0 && edge_visit_count
+                    && *edge_visit_count >= edge_visit_limit)
+                  {
+                    if (edge_visit_limit_reached)
+                      *edge_visit_limit_reached = true;
+                    break;
+                  }
+                if (edge_visit_count)
+                  ++*edge_visit_count;
                 if (edge.memory_id <= 0)
                   continue;
                 if (edge.embedding_id > 0)
@@ -410,6 +460,8 @@ FindCascadeNeighbors (const AssociationFanoutCache &cache,
           };
           for (const auto &[memory_id, frontier_mask] : frontier)
             {
+              if (edge_visit_limit_reached && *edge_visit_limit_reached)
+                break;
               const std::uint64_t source_mask = frontier_mask & active;
               if (source_mask == 0)
                 continue;
@@ -419,17 +471,42 @@ FindCascadeNeighbors (const AssociationFanoutCache &cache,
           for (const auto &[embedding_id, reached] : reached_embeddings)
             {
               std::uint64_t unseen = reached & ~seen_embeddings[embedding_id];
-              seen_embeddings[embedding_id] |= unseen;
-              while (unseen != 0)
+              seen_embeddings[embedding_id] |= reached;
+              if (reachable_pair_count)
+                *reachable_pair_count += std::popcount (unseen);
+              if (collapse_winners && unseen != 0)
                 {
                   const unsigned local = std::countr_zero (unseen);
-                  neighbors[batch_begin + local].push_back (
-                      { embedding_id, depth });
-                  unseen &= unseen - 1;
+                  const std::size_t source_index = batch_begin + local;
+                  const auto winner = winners.find (embedding_id);
+                  if (winner == winners.end ()
+                      || source_index < winner->second.source_index)
+                    winners[embedding_id] = { source_index, depth };
                 }
+              else
+                while (unseen != 0)
+                  {
+                    const unsigned local = std::countr_zero (unseen);
+                    neighbors[batch_begin + local].push_back (
+                        { embedding_id, depth });
+                    unseen &= unseen - 1;
+                  }
             }
           frontier = std::move (next_frontier);
         }
+    }
+  if (collapse_winners)
+    {
+      for (const auto &[embedding_id, winner] : winners)
+        neighbors[winner.source_index].push_back (
+            { embedding_id, winner.depth });
+      for (auto &source_neighbors : neighbors)
+        std::sort (source_neighbors.begin (), source_neighbors.end (),
+                   [] (const auto &left, const auto &right) {
+                     if (left.depth != right.depth)
+                       return left.depth < right.depth;
+                     return left.embedding_id < right.embedding_id;
+                   });
     }
   return neighbors;
 }
@@ -486,6 +563,27 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
   const auto &cfg = context.GetConfig ();
   auto params
       = EmotionCascadeParams::FromKnobs (cfg.focus, cfg.sensitivity, cfg.stability);
+  const std::size_t update_limit = static_cast<std::size_t> (
+      sparse_retrieval_knobs_internal::ActivationIdentityTarget (
+          cfg.focus, cfg.sensitivity, cfg.stability));
+  const bool collapse_winners = internal::experimental_env::Flag (
+      "CORTEXT_EXPERIMENT_EMOTIONAL_WINNER_COLLAPSE");
+  const bool bound_edge_visits = collapse_winners
+      && internal::experimental_env::Flag (
+          "CORTEXT_EXPERIMENT_EMOTIONAL_EDGE_LIMIT");
+  const std::size_t edge_visit_limit
+      = bound_edge_visits
+            ? static_cast<std::size_t> (
+                  sparse_retrieval_knobs_internal::PublicQueryNodeBudget (
+                      cfg.focus, cfg.sensitivity, cfg.stability))
+            : 0;
+  const std::size_t source_limit
+      = bound_edge_visits
+            ? static_cast<std::size_t> (
+                  sparse_retrieval_knobs_internal::BackfillBatchSize (
+                      cfg.focus, cfg.sensitivity, cfg.stability))
+            : 0;
+  const std::size_t source_inspection_limit = edge_visit_limit;
 
   const long long now_ts
       = static_cast<long long> (context.GetSignal ().timestamp);
@@ -549,6 +647,11 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
           context.AddOperationTiming ("EmotionalCascade.source_count", 0.0);
           context.AddOperationTiming (
               "EmotionalCascade.source_execution_count", 0.0);
+          context.AddOperationTiming (
+              "EmotionalCascade.source_inspection_count", 0.0);
+          context.AddOperationTiming (
+              "EmotionalCascade.source_inspection_limit",
+              static_cast<double> (source_inspection_limit));
           context.AddOperationTiming ("EmotionalCascade.source_activity", 0.0);
           context.AddOperationTiming ("EmotionalCascade.neighbor_lookup",
                                       cache_ensure_ms);
@@ -558,10 +661,28 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
           context.AddOperationTiming ("EmotionalCascade.current_values", 0.0);
           context.AddOperationTiming ("EmotionalCascade.neighbor_count", 0.0);
           context.AddOperationTiming (
+              "EmotionalCascade.reachable_pair_count", 0.0);
+          context.AddOperationTiming ("EmotionalCascade.edge_visit_count", 0.0);
+          context.AddOperationTiming (
+              "EmotionalCascade.edge_visit_limit",
+              static_cast<double> (edge_visit_limit));
+          context.AddOperationTiming (
+              "EmotionalCascade.edge_visit_limit_reached", 0.0);
+          context.AddOperationTiming (
+              "EmotionalCascade.source_limit",
+              static_cast<double> (source_limit));
+          context.AddOperationTiming (
+              "EmotionalCascade.source_limit_reached", 0.0);
+          context.AddOperationTiming (
               "EmotionalCascade.neighbor_execution_count", 0.0);
           context.AddOperationTiming ("EmotionalCascade.neighbor_activity", 0.0);
           context.AddOperationTiming ("EmotionalCascade.update_enqueue", 0.0);
           context.AddOperationTiming ("EmotionalCascade.update_count", 0.0);
+          context.AddOperationTiming (
+              "EmotionalCascade.update_limit",
+              static_cast<double> (update_limit));
+          context.AddOperationTiming (
+              "EmotionalCascade.update_limit_reached", 0.0);
           context.AddOperationTiming (
               "EmotionalCascade.update_execution_count", 0.0);
           context.AddOperationTiming ("EmotionalCascade.update_activity", 0.0);
@@ -572,15 +693,24 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
 
   // Load high-intensity emotional sources only when the fixed input changed.
   const auto source_query_start = std::chrono::steady_clock::now ();
+  std::size_t source_inspection_count = 0;
   std::size_t source_execution_count = 0;
   auto sources = use_metadata_cache
                      ? LoadEmotionalSourcesFromCache (
                            p_ctx, recent_window_ts,
                            theta_intensity, theta_arousal, params,
+                           source_inspection_limit,
+                           &source_inspection_count,
                            &source_execution_count)
                      : LoadEmotionalSources (store, recent_window_ts,
                                              theta_intensity, theta_arousal,
-                                             params, &source_execution_count);
+                                             params, source_inspection_limit,
+                                             &source_inspection_count,
+                                             &source_execution_count);
+  const bool source_limit_reached
+      = source_limit > 0 && sources.size () > source_limit;
+  if (source_limit_reached)
+    sources.resize (source_limit);
   record_timing ("EmotionalCascade.source_query", source_query_start);
   if (profile_cascade)
     {
@@ -592,6 +722,18 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
       context.AddOperationTiming (
           "EmotionalCascade.source_execution_count",
           static_cast<double> (source_execution_count));
+      context.AddOperationTiming (
+          "EmotionalCascade.source_inspection_count",
+          static_cast<double> (source_inspection_count));
+      context.AddOperationTiming (
+          "EmotionalCascade.source_inspection_limit",
+          static_cast<double> (source_inspection_limit));
+      context.AddOperationTiming (
+          "EmotionalCascade.source_limit",
+          static_cast<double> (source_limit));
+      context.AddOperationTiming (
+          "EmotionalCascade.source_limit_reached",
+          source_limit_reached ? 1.0 : 0.0);
     }
 
   if (sources.empty ())
@@ -621,10 +763,23 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
           context.AddOperationTiming ("EmotionalCascade.current_values", 0.0);
           context.AddOperationTiming ("EmotionalCascade.neighbor_count", 0.0);
           context.AddOperationTiming (
+              "EmotionalCascade.reachable_pair_count", 0.0);
+          context.AddOperationTiming ("EmotionalCascade.edge_visit_count", 0.0);
+          context.AddOperationTiming (
+              "EmotionalCascade.edge_visit_limit",
+              static_cast<double> (edge_visit_limit));
+          context.AddOperationTiming (
+              "EmotionalCascade.edge_visit_limit_reached", 0.0);
+          context.AddOperationTiming (
               "EmotionalCascade.neighbor_execution_count", 0.0);
           context.AddOperationTiming ("EmotionalCascade.neighbor_activity", 0.0);
           context.AddOperationTiming ("EmotionalCascade.update_enqueue", 0.0);
           context.AddOperationTiming ("EmotionalCascade.update_count", 0.0);
+          context.AddOperationTiming (
+              "EmotionalCascade.update_limit",
+              static_cast<double> (update_limit));
+          context.AddOperationTiming (
+              "EmotionalCascade.update_limit_reached", 0.0);
           context.AddOperationTiming (
               "EmotionalCascade.update_execution_count", 0.0);
           context.AddOperationTiming ("EmotionalCascade.update_activity", 0.0);
@@ -638,8 +793,12 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
   int max_hops = 0;
   std::size_t neighbor_count = 0;
   std::size_t neighbor_execution_count = 0;
+  std::size_t reachable_pair_count = 0;
+  std::size_t edge_visit_count = 0;
+  bool edge_visit_limit_reached = false;
   std::size_t update_count = 0;
   std::size_t update_execution_count = 0;
+  bool update_limit_reached = false;
   double neighbor_lookup_ms = 0.0;
   double cache_bfs_ms = 0.0;
   double current_values_ms = 0.0;
@@ -651,14 +810,16 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
   if (fanout_cache && fanout_cache->valid)
     {
       std::vector<std::unordered_set<long long>> expandable_by_source;
-      source_neighbors = FindCascadeNeighbors (*fanout_cache, sources,
-                                               params,
-                                               &expandable_by_source);
+      source_neighbors = FindCascadeNeighbors (
+          *fanout_cache, sources, params, &expandable_by_source,
+          &reachable_pair_count, &edge_visit_count, collapse_winners,
+          edge_visit_limit, &edge_visit_limit_reached);
       if (use_metadata_cache && emotional_state)
         {
           emotional_state->emotional_cascade_topology_footprint
-              = { true, std::move (expandable_by_source) };
-          ConsumeAssociationTopologyChanges (*emotional_state);
+              = execution_cache_sidecar_internal::
+                    EmotionalCascadeTopologyFootprint {
+                      true, std::move (expandable_by_source) };
         }
       for (const auto &neighbors : source_neighbors)
         neighbor_count += neighbors.size ();
@@ -720,6 +881,11 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
             {
               continue;
             }
+          if (update_count >= update_limit)
+            {
+              update_limit_reached = true;
+              break;
+            }
 
           const auto update_start = std::chrono::steady_clock::now ();
           Add (tx,
@@ -736,12 +902,20 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
           ++update_count;
           ++update_execution_count;
         }
+      if (update_limit_reached)
+        break;
     }
 
-  if (use_metadata_cache && fanout_cache && fanout_cache->valid)
-    RecordCascadeFixedPoint (
-        p_ctx, *fanout_cache, emotional_input_generation, recent_window_ts,
-        theta_intensity, theta_arousal, intensity_floor, params);
+  if (update_limit_reached)
+    InvalidateCascadeFixedPoint (p_ctx);
+  else if (use_metadata_cache && fanout_cache && fanout_cache->valid)
+    {
+      RecordCascadeFixedPoint (
+          p_ctx, *fanout_cache, emotional_input_generation, recent_window_ts,
+          theta_intensity, theta_arousal, intensity_floor, params);
+      if (emotional_state)
+        ConsumeAssociationTopologyChanges (*emotional_state);
+    }
 
   const auto telemetry_start = std::chrono::steady_clock::now ();
   telemetry::LogDebug("cortext.emotion_cascade", {
@@ -761,6 +935,18 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
       context.AddOperationTiming (
           "EmotionalCascade.neighbor_count",
           static_cast<double> (neighbor_count)); // Experimental count, not ms.
+      context.AddOperationTiming (
+          "EmotionalCascade.reachable_pair_count",
+          static_cast<double> (reachable_pair_count));
+      context.AddOperationTiming (
+          "EmotionalCascade.edge_visit_count",
+          static_cast<double> (edge_visit_count));
+      context.AddOperationTiming (
+          "EmotionalCascade.edge_visit_limit",
+          static_cast<double> (edge_visit_limit));
+      context.AddOperationTiming (
+          "EmotionalCascade.edge_visit_limit_reached",
+          edge_visit_limit_reached ? 1.0 : 0.0);
       context.AddOperationTiming ("EmotionalCascade.neighbor_activity",
                                   neighbor_count > 0 ? 1.0 : 0.0);
       context.AddOperationTiming (
@@ -771,6 +957,12 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
       context.AddOperationTiming (
           "EmotionalCascade.update_count",
           static_cast<double> (update_count)); // Experimental count, not ms.
+      context.AddOperationTiming (
+          "EmotionalCascade.update_limit",
+          static_cast<double> (update_limit));
+      context.AddOperationTiming (
+          "EmotionalCascade.update_limit_reached",
+          update_limit_reached ? 1.0 : 0.0);
       context.AddOperationTiming ("EmotionalCascade.update_activity",
                                   update_count > 0 ? 1.0 : 0.0);
       context.AddOperationTiming (

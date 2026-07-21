@@ -8,7 +8,11 @@
 
 #include "../../src/encoder/text_encoder_factory.hpp"
 #include "../../src/operations/bounded_activation_shadow_internal.hpp"
+#include "../../src/operations/active_signal_embedding_ring_internal.hpp"
 #include "../../src/operations/retrieval_trace_state.hpp"
+#include "../../src/operations/rif_active_epoch_cache_internal.hpp"
+#include "../../src/operations/sparse_retrieval_knobs_internal.hpp"
+#include "../../src/operations/sparse_retrieval_route_sqlite_internal.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -27,6 +31,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -76,6 +81,8 @@ struct Config
   fs::path packet_corpus;
   fs::path message_corpus;
   fs::path shadow_embedding_corpus;
+  fs::path export_shadow_embedding_corpus;
+  fs::path fixed_consolidation_indices;
   fs::path db_path = "build/chat_replay_live_run.sqlite";
   fs::path output_path = "build/chat_replay_live_run_summary.json";
   int skip_messages = 0;
@@ -83,6 +90,8 @@ struct Config
   int max_packets = -1;
   int shadow_queries = 512;
   int shadow_result_k = 16;
+  int public_retrieval_queries = 512;
+  int public_retrieval_result_k = 16;
   int skip_packets = 0;
   int media_limit = 0;
   int consolidate_every = 0;
@@ -101,6 +110,8 @@ struct Config
   bool resume_from_existing = false;
   bool profile_probes_only = false;
   bool shadow_quality_control = false;
+  bool public_retrieval_control = false;
+  bool opaque_source_control = false;
   bool checkpoint_eval_only = false;
   int progress_stride = 1000;
   std::uint64_t fixed_timestamp_base_ms = 0;
@@ -118,6 +129,104 @@ struct Config
   cortext::Retention retention = cortext::Retention::Durable;
   std::string sqlite_profile = "realtime";
 };
+
+nlohmann::json
+SparseRouteParametersJson (const Config &cfg)
+{
+  const auto parameters = cortext::operations::
+      sparse_retrieval_route_sqlite_internal::DeriveParameters (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  return {
+    { "route_capacity", parameters.route_capacity },
+    { "activation_identity_target",
+      parameters.activation_identity_target },
+    { "activation_snapshot_capacity",
+      parameters.activation_snapshot_capacity },
+    { "total_query_row_budget", parameters.total_query_row_budget },
+    { "backfill_batch_size", parameters.backfill_batch_size },
+    { "fallback_hydration_signal_limit",
+      cortext::operations::sparse_retrieval_knobs_internal::
+          HydrationFallbackSignalLimit (cfg.focus, cfg.sensitivity,
+                                        cfg.stability) },
+    { "bootstrap_limit", parameters.route_bootstrap_limit },
+    { "search_node_budget", parameters.search_node_budget },
+    { "activation_search_node_budget_min",
+      parameters.activation_search_node_budget_min },
+    { "activation_search_node_budget_step",
+      parameters.activation_search_node_budget_step },
+    { "search_expansion_batch", parameters.search_expansion_batch },
+    { "search_effort", parameters.search_ef },
+    { "activation_search_effort_min",
+      parameters.activation_search_ef_min },
+    { "activation_search_effort_step",
+      parameters.activation_search_ef_step },
+    { "shadow_cache_capacity", parameters.shadow_node_capacity },
+    { "backfill_search_node_budget",
+      parameters.backfill_search_node_budget },
+    { "backfill_search_effort", parameters.backfill_search_ef },
+    { "graph_neighbor_count", parameters.row_addressed_neighbor_count },
+    { "graph_level_zero_links", parameters.row_addressed_level_zero_links },
+    { "family_exact_comparison_limit",
+      parameters.family_exact_comparison_limit },
+    { "maximum_level", parameters.maximum_level },
+    { "reciprocal_update_count", parameters.reciprocal_update_count },
+    { "hnsw_construction_effort", parameters.hnsw.construction_effort },
+    { "hnsw_query_effort", parameters.hnsw.query_effort },
+  };
+}
+
+std::optional<std::string>
+ExperimentalSparseNodeEnvelopeFormula ()
+{
+  const char *value
+      = std::getenv ("CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE");
+  if (value == nullptr)
+    return std::nullopt;
+  const std::string selector (value);
+  if (selector == "1")
+    return "C";
+  if (selector == "2")
+    return "A";
+  if (selector == "3")
+    return "C+B";
+  if (selector == "4")
+    return "2C";
+  if (selector == "5")
+    return "5C";
+  if (selector == "6")
+    return "6C";
+  if (selector == "8")
+    return "4C";
+  if (selector == "18")
+    return "4C+B/16";
+  if (selector == "19")
+    return "fixed-4C+B/16";
+  if (selector == "20")
+    return "4C+B/16-to-5C";
+  if (selector == "21")
+    return "5C-to-6C-by-B/16";
+  if (selector == "22")
+    return "6C-to-7C-by-B/16";
+  if (selector == "23")
+    return "7C-to-8C-by-B/16";
+  if (selector == "24")
+    return "8C-to-9C-by-B/16";
+  if (selector == "10")
+    return "10C";
+  if (selector == "12")
+    return "12C";
+  if (selector == "16")
+    return "16C";
+  return std::nullopt;
+}
+
+void
+RecordSparseRouteParameters (nlohmann::json &out, const Config &cfg)
+{
+  out["sparse_route_parameters"] = SparseRouteParametersJson (cfg);
+  if (const auto formula = ExperimentalSparseNodeEnvelopeFormula ())
+    out["experimental_sparse_node_envelope_formula"] = *formula;
+}
 
 struct ShadowQualityModeMetadata
 {
@@ -1008,6 +1117,8 @@ WorkCountersJson (const cortext::Cortext::Context &ctx)
       = value ("MemoryStorage.supersession_current_rows_visited");
   const double supersession_historical_rows
       = value ("MemoryStorage.supersession_historical_rows_visited");
+  const double supersession_sparse_route_rows
+      = value ("MemoryStorage.supersession_sparse_route_node_rows");
   return {
     { "retrieval_suppression_id_count",
       value ("SignalProcessor.retrieval_suppression_id_count") },
@@ -1021,7 +1132,8 @@ WorkCountersJson (const cortext::Cortext::Context &ctx)
       value ("GraphRetrieve.family_exact_comparison_count") },
     { "graph_cache_rebuild_count",
       value ("GraphRetrieve.cache_rebuild_count") },
-    { "graph_rows_visited", value ("GraphRetrieve.rows_visited") },
+    { "graph_rows_visited",
+      value ("GraphRetrieve.rows_visited") },
     { "competition_candidate_count",
       value ("Competition.candidate_count") },
     { "competition_rows_visited", value ("Competition.rows_visited") },
@@ -1029,7 +1141,8 @@ WorkCountersJson (const cortext::Cortext::Context &ctx)
     { "supersession_current_candidate_count", supersession_current },
     { "supersession_historical_candidate_count", supersession_historical },
     { "supersession_rows_visited",
-      supersession_current_rows + supersession_historical_rows },
+      supersession_current_rows + supersession_historical_rows
+          + supersession_sparse_route_rows },
     { "emotional_source_count", value ("EmotionalCascade.source_count") },
     { "emotional_neighbor_count", value ("EmotionalCascade.neighbor_count") },
     { "emotional_update_count", value ("EmotionalCascade.update_count") },
@@ -1046,6 +1159,18 @@ RequiredOperationCounter (const cortext::Cortext::Context &ctx,
       || std::floor (value->second) != value->second)
     throw std::runtime_error ("missing or invalid operation counter: " + name);
   return static_cast<std::uint64_t> (value->second);
+}
+
+double
+OperationValue (const cortext::Cortext::Context &ctx,
+                const std::string &name)
+{
+  const auto value = ctx.output.operation_ms.find (name);
+  if (value == ctx.output.operation_ms.end ())
+      return 0.0;
+  if (!std::isfinite (value->second) || value->second < 0.0)
+    throw std::runtime_error ("invalid operation value: " + name);
+  return value->second;
 }
 
 nlohmann::json
@@ -1081,6 +1206,9 @@ ActiveEpochCountersJson (const cortext::Cortext::Context &ctx)
     { "allocated_bytes",
       RequiredOperationCounter (
           ctx, "SignalProcessor.rif_active_epoch_allocated_bytes") },
+    { "row_batch_high_water",
+      RequiredOperationCounter (
+          ctx, "SignalProcessor.rif_active_epoch_row_batch_high_water") },
     { "required",
       RequiredOperationCounter (
           ctx, "SignalProcessor.rif_active_epoch_required") == 1.0 },
@@ -1846,8 +1974,16 @@ ParseArgs (int argc, char **argv)
         cfg.message_corpus = require_value ();
       else if (arg == "--shadow-embedding-corpus")
         cfg.shadow_embedding_corpus = require_value ();
+      else if (arg == "--export-shadow-embedding-corpus")
+        cfg.export_shadow_embedding_corpus = require_value ();
+      else if (arg == "--fixed-consolidation-indices")
+        cfg.fixed_consolidation_indices = require_value ();
       else if (arg == "--shadow-quality-control")
         cfg.shadow_quality_control = true;
+      else if (arg == "--public-retrieval-control")
+        cfg.public_retrieval_control = true;
+      else if (arg == "--opaque-source-control")
+        cfg.opaque_source_control = true;
       else if (arg == "--db")
         cfg.db_path = require_value ();
       else if (arg == "--out")
@@ -1860,6 +1996,10 @@ ParseArgs (int argc, char **argv)
         cfg.shadow_queries = std::stoi (require_value ());
       else if (arg == "--shadow-result-k")
         cfg.shadow_result_k = std::stoi (require_value ());
+      else if (arg == "--public-retrieval-queries")
+        cfg.public_retrieval_queries = std::stoi (require_value ());
+      else if (arg == "--public-retrieval-result-k")
+        cfg.public_retrieval_result_k = std::stoi (require_value ());
       else if (arg == "--skip-packets")
         cfg.skip_packets = std::stoi (require_value ());
       else if (arg == "--skip-messages")
@@ -1961,6 +2101,9 @@ ParseArgs (int argc, char **argv)
       else
         throw std::runtime_error ("unknown argument: " + arg);
     }
+  if (!std::isfinite (cfg.focus) || !std::isfinite (cfg.sensitivity)
+      || !std::isfinite (cfg.stability))
+    throw std::runtime_error ("--focus/--sensitivity/--stability must be finite");
   return cfg;
 }
 
@@ -2109,8 +2252,13 @@ ReadShadowQueryProvenance (const fs::path &database_path,
       raw_database, sqlite3_close);
   sqlite3_stmt *raw_statement = nullptr;
   constexpr const char *query
-      = "SELECT embedding_id, source_id, modality FROM signals "
-        "WHERE embedding_id IS NOT NULL ORDER BY timestamp, signal_id";
+      = "SELECT m.memory_id, "
+        "       COALESCE(s.source_id, m.source_id) AS source_id, "
+        "       COALESCE(s.modality, m.modality) AS modality "
+        "FROM memories m "
+        "LEFT JOIN signals s ON s.memory_id = m.memory_id "
+        "WHERE m.kind = 'LONG_TERM' "
+        "ORDER BY m.start_ts, m.memory_id, s.serial_position, s.signal_id";
   if (sqlite3_prepare_v2 (database.get (), query, -1, &raw_statement, nullptr)
       != SQLITE_OK)
     throw std::runtime_error ("failed to query shadow provenance database: "
@@ -2118,12 +2266,12 @@ ReadShadowQueryProvenance (const fs::path &database_path,
   std::unique_ptr<sqlite3_stmt, decltype (&sqlite3_finalize)> statement (
       raw_statement, sqlite3_finalize);
 
-  std::unordered_map<long long, ShadowQueryProvenance> by_embedding;
+  std::unordered_map<long long, ShadowQueryProvenance> by_identity;
   int step = SQLITE_ROW;
   std::size_t history_ordinal = 0;
   while ((step = sqlite3_step (statement.get ())) == SQLITE_ROW)
     {
-      const auto embedding_id = sqlite3_column_int64 (statement.get (), 0);
+      const auto memory_id = sqlite3_column_int64 (statement.get (), 0);
       const auto *source = reinterpret_cast<const char *> (
           sqlite3_column_text (statement.get (), 1));
       const auto *modality = reinterpret_cast<const char *> (
@@ -2131,12 +2279,12 @@ ReadShadowQueryProvenance (const fs::path &database_path,
       if (source == nullptr || modality == nullptr)
         throw std::runtime_error (
             "shadow provenance contains a null source or modality");
-      auto &entry = by_embedding[embedding_id];
-      entry.history_ordinal
-          = std::min (entry.history_ordinal, history_ordinal);
+      auto [found, inserted] = by_identity.try_emplace (memory_id);
+      auto &entry = found->second;
+      if (inserted)
+        entry.history_ordinal = history_ordinal++;
       entry.source_id_digests.push_back (PrivateValueDigest (source));
       entry.modalities.emplace_back (modality);
-      ++history_ordinal;
     }
   if (step != SQLITE_DONE)
     throw std::runtime_error ("failed while reading shadow provenance: "
@@ -2144,13 +2292,13 @@ ReadShadowQueryProvenance (const fs::path &database_path,
 
   std::vector<ShadowQueryProvenance> result;
   result.reserve (corpus.ids.size ());
-  for (const auto embedding_id : corpus.ids)
+  for (const auto memory_id : corpus.ids)
     {
-      auto found = by_embedding.find (embedding_id);
-      if (found == by_embedding.end ())
+      auto found = by_identity.find (memory_id);
+      if (found == by_identity.end ())
         throw std::runtime_error (
-            "shadow embedding lacks authoritative signal provenance: "
-            + std::to_string (embedding_id));
+            "shadow retrieval surface lacks authoritative provenance: "
+            + std::to_string (memory_id));
       auto provenance = found->second;
       provenance.history_count = history_ordinal;
       for (auto *values : { &provenance.source_id_digests,
@@ -2579,6 +2727,75 @@ RunShadowEmbeddingQuality (const Config &cfg)
 }
 
 int
+ExportShadowEmbeddingCorpus (const Config &cfg)
+{
+  if (cfg.db_path.empty () || !fs::exists (cfg.db_path))
+    throw std::runtime_error (
+        "shadow embedding export requires an existing --db");
+  auto store = cortext::SQLiteStore::Create (cfg.db_path.string ());
+  const auto rows = store->Execute (
+      "SELECT cme.memory_id AS identity, cme.embedding "
+      "FROM current_memory_embeddings cme "
+      "JOIN memories m ON m.memory_id = cme.memory_id "
+      "WHERE m.kind = 'LONG_TERM' "
+      "ORDER BY cme.memory_id");
+  if (rows.empty ())
+    throw std::runtime_error ("shadow embedding export found no embeddings");
+
+  std::ofstream stream (cfg.export_shadow_embedding_corpus,
+                        std::ios::binary | std::ios::trunc);
+  if (!stream)
+    throw std::runtime_error ("failed to create shadow embedding corpus: "
+                              + cfg.export_shadow_embedding_corpus.string ());
+  const std::uint64_t count = rows.size ();
+  std::uint32_t dimension = 0;
+  std::vector<std::pair<long long, std::vector<unsigned char>>> records;
+  records.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      const auto id_it = row.find ("identity");
+      const auto embedding_it = row.find ("embedding");
+      if (id_it == row.end () || embedding_it == row.end ())
+        throw std::runtime_error (
+            "shadow embedding export row lacks identity or embedding");
+      const auto id = cortext::store::AnyToLongLong (id_it->second);
+      auto bytes = cortext::store::BlobFromAny (embedding_it->second);
+      if (!id || *id <= 0 || bytes.empty ()
+          || bytes.size () % sizeof (float) != 0)
+        throw std::runtime_error ("shadow embedding export row is invalid");
+      const auto row_dimension
+          = static_cast<std::uint32_t> (bytes.size () / sizeof (float));
+      if (dimension == 0)
+        dimension = row_dimension;
+      if (row_dimension != dimension)
+        throw std::runtime_error (
+            "shadow embedding export dimensions are inconsistent");
+      records.emplace_back (*id, std::move (bytes));
+    }
+  stream.write (reinterpret_cast<const char *> (&count), sizeof (count));
+  stream.write (reinterpret_cast<const char *> (&dimension),
+                sizeof (dimension));
+  for (const auto &[id, bytes] : records)
+    {
+      stream.write (reinterpret_cast<const char *> (&id), sizeof (id));
+      stream.write (reinterpret_cast<const char *> (bytes.data ()),
+                    static_cast<std::streamsize> (bytes.size ()));
+    }
+  if (!stream)
+    throw std::runtime_error ("failed while writing shadow embedding corpus");
+  std::cout << nlohmann::json (
+      { { "schema", "cortext_retrieval_surface_export_v2" },
+        { "identity_kind", "long-term-memory-id" },
+        { "population", "current-long-term-memory-embedding-surface" },
+        { "embedding_count", count },
+        { "embedding_dimension", dimension },
+        { "output", cfg.export_shadow_embedding_corpus.string () } })
+                     .dump (2)
+            << "\n";
+  return 0;
+}
+
+int
 RunPacketCorpusProfile (const Config &cfg,
                         const nlohmann::json &sqlite_profile)
 {
@@ -2612,10 +2829,64 @@ RunPacketCorpusProfile (const Config &cfg,
                                  cfg.max_packets);
   if (packets.empty ())
     throw std::runtime_error ("corpus contains no events");
+  if (!cfg.fixed_consolidation_indices.empty ()
+      && cfg.honor_required_consolidation)
+    throw std::runtime_error (
+        "--fixed-consolidation-indices and --honor-required-consolidation are mutually exclusive");
+  std::vector<std::size_t> fixed_consolidation_indices;
+  std::unordered_set<std::size_t> fixed_consolidation_index_set;
+  if (!cfg.fixed_consolidation_indices.empty ())
+    {
+      std::ifstream stream (cfg.fixed_consolidation_indices);
+      if (!stream)
+        throw std::runtime_error (
+            "failed to open fixed consolidation indices");
+      nlohmann::json encoded;
+      stream >> encoded;
+      if (!encoded.is_array ())
+        throw std::runtime_error (
+            "fixed consolidation indices must be a JSON array");
+      fixed_consolidation_indices.reserve (encoded.size ());
+      for (const auto &value : encoded)
+        {
+          if (!value.is_number_unsigned () && !value.is_number_integer ())
+            throw std::runtime_error (
+                "fixed consolidation indices must be positive integers");
+          const auto index = value.get<long long> ();
+          if (index <= 0
+              || static_cast<std::size_t> (index) > packets.size ())
+            throw std::runtime_error (
+                "fixed consolidation index is outside the replay");
+          const auto normalized = static_cast<std::size_t> (index);
+          if (!fixed_consolidation_index_set.insert (normalized).second)
+            throw std::runtime_error (
+                "fixed consolidation indices must be unique");
+          fixed_consolidation_indices.push_back (normalized);
+        }
+      if (!std::is_sorted (fixed_consolidation_indices.begin (),
+                           fixed_consolidation_indices.end ()))
+        throw std::runtime_error (
+            "fixed consolidation indices must be strictly increasing");
+    }
+  if (cfg.public_retrieval_control
+      && (cfg.public_retrieval_queries <= 0
+          || cfg.public_retrieval_result_k <= 0
+          || static_cast<std::size_t> (cfg.public_retrieval_queries)
+                 > packets.size ()))
+    throw std::runtime_error (
+        "public retrieval query count must fit the nonempty replay and result k must be positive");
+  if (cfg.opaque_source_control && !cfg.public_retrieval_control)
+    throw std::runtime_error (
+        "opaque source control requires public retrieval control");
 
   SetEnvValue ("CORTEXT_PROFILE_WORK_COUNTERS", "1", true);
   SetEnvValue ("CORTEXT_PROFILE_CONSOLIDATION_EPOCH", "1", true);
   SetEnvValue ("CORTEXT_PROFILE_EMOTIONAL_CASCADE", "1", true);
+  if (cfg.public_retrieval_control)
+    {
+      SetEnvValue ("CORTEXT_CAPTURE_RETRIEVAL_SEEDS", "1", true);
+      SetEnvValue ("CORTEXT_CAPTURE_HNSW_EXACT_CONTROL", "1", true);
+    }
   SetEnvValue ("CORTEXT_PROFILE_GRAPH_RETRIEVAL", "1", false);
 
   cortext::Cortext::Config cortext_cfg;
@@ -2629,12 +2900,21 @@ RunPacketCorpusProfile (const Config &cfg,
   auto engine = cortext::Cortext::Create (
       cortext_cfg, cfg.db_path.string (), std::move (replay_clock));
 
-  constexpr std::array<const char *, 49> kSelectedOperations {
+  constexpr std::array<const char *, 105> kSelectedOperations {
     "cortext::operations::GraphAugmentedRetrieveCandidates",
     "GraphRetrieve.total",
     "GraphRetrieve.family_index",
     "GraphRetrieve.seed_cache_family_compare",
     "GraphRetrieve.seed_cache_distance",
+    "GraphRetrieve.sqlite_sparse_route_activated_identities",
+    "GraphRetrieve.sqlite_sparse_route_node_rows",
+    "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows",
+    "GraphRetrieve.sqlite_sparse_route_distance_evaluations",
+    "GraphRetrieve.sqlite_sparse_route_search_effort",
+    "GraphRetrieve.sqlite_sparse_route_search_node_budget",
+    "GraphRetrieve.sqlite_sparse_route_restart_rows",
+    "GraphRetrieve.sqlite_sparse_route_dirty_rows",
+    "GraphRetrieve.seed_sparse_route_active",
     "GraphRetrieve.seed_knn_cache",
     "GraphRetrieve.seed_processor_surface",
     "GraphRetrieve.seed_knn_cache_rebuild",
@@ -2654,6 +2934,9 @@ RunPacketCorpusProfile (const Config &cfg,
     "MemoryStorage.supersession_historical_candidate_execution_count",
     "MemoryStorage.supersession_current_rows_visited",
     "MemoryStorage.supersession_historical_rows_visited",
+    "MemoryStorage.supersession_sparse_route_node_rows",
+    "MemoryStorage.supersession_sparse_route_distance_evaluations",
+    "MemoryStorage.supersession_sparse_route_dirty_rows",
     "MemoryStorage.supersession_sql_fallback_count",
     "cortext::operations::PropagateEmotionalCascade",
     "EmotionalCascade.source_execution_count",
@@ -2663,27 +2946,102 @@ RunPacketCorpusProfile (const Config &cfg,
     "SignalProcessor.snapshot_full_cache_copy",
     "SignalProcessor.snapshot_cache_entry_copy",
     "SignalProcessor.commit_transaction",
+    "SignalProcessor.profile_mutation_audit",
     "SignalProcessor.retrieval_suppression_id_count",
+    "SignalProcessor.retrieval_suppression_id_activity",
     "SignalProcessor.predictive_id_count",
+    "SignalProcessor.predictive_id_activity",
     "SignalProcessor.snapshot_full_cache_copy_count",
+    "SignalProcessor.snapshot_full_cache_copy_activity",
     "SignalProcessor.snapshot_cache_entry_copy_count",
+    "SignalProcessor.snapshot_cache_entry_copy_activity",
     "GraphRetrieve.candidate_count",
+    "GraphRetrieve.candidate_activity",
     "GraphRetrieve.family_exact_comparison_count",
+    "GraphRetrieve.family_exact_comparison_activity",
     "GraphRetrieve.cache_rebuild_count",
+    "GraphRetrieve.cache_rebuild_activity",
     "GraphRetrieve.rows_visited",
+    "GraphRetrieve.rows_visited_activity",
     "Competition.candidate_count",
+    "Competition.candidate_activity",
     "Competition.rows_visited",
+    "Competition.rows_visited_activity",
     "Competition.rows_touched",
+    "Competition.rows_touched_activity",
     "MemoryStorage.supersession_current_candidate_count",
+    "MemoryStorage.supersession_current_candidate_activity",
     "MemoryStorage.supersession_historical_candidate_count",
+    "MemoryStorage.supersession_historical_candidate_activity",
+    "MemoryStorage.supersession_rows_visited_activity",
     "EmotionalCascade.source_count",
+    "EmotionalCascade.source_activity",
     "EmotionalCascade.neighbor_count",
+    "EmotionalCascade.neighbor_activity",
     "EmotionalCascade.update_count",
+    "EmotionalCascade.update_activity",
+    "WriteGate.flush_trigger",
+    "WriteGate.spike_bypass",
+    "WriteGate.accumulator_available",
+    "WriteGate.n_signals",
+    "WriteGate.coverage",
+    "WriteGate.window_score",
+    "WriteGate.threshold_dynamic",
+    "WriteGate.refractory_multiplier",
+    "WriteGate.write_scale",
+    "WriteGate.effective_threshold",
+    "WriteGate.score_margin",
+    "WriteGate.force_write",
+    "WriteGate.write_accumulator",
+    "WriteGate.reason_code",
+    "SignalProcessor.sqlite_sparse_route_recenter_overlap_profiled",
+    "SignalProcessor.sqlite_sparse_route_recenter_overlap_pair_valid",
+    "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code",
+    "SignalProcessor.sqlite_sparse_route_recenter_derived_centroid",
+    "SignalProcessor.sqlite_sparse_route_recenter_centroid_source",
+    "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_post_activated_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_overlap_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_pre_node_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_post_node_count",
   };
 
   nlohmann::json rows = nlohmann::json::array ();
   nlohmann::json consolidation_events = nlohmann::json::array ();
   nlohmann::json store_checkpoints = nlohmann::json::array ();
+  nlohmann::json public_retrieval_observations
+      = nlohmann::json::array ();
+  nlohmann::json public_surface_mutations = nlohmann::json::array ();
+  cortext::operations::retrieval_trace::SetSurfaceMutationCaptureEnabled (
+      cfg.public_retrieval_control);
+  const auto append_surface_mutations
+      = [&] (std::size_t event_index, std::uint64_t timestamp,
+             const char *phase) {
+          for (const auto &mutation : cortext::operations::retrieval_trace::
+                   GetSurfaceMutations ())
+            {
+              nlohmann::json row = {
+                { "event_index", event_index },
+                { "event_phase", phase },
+                { "event_timestamp", timestamp },
+                { "action",
+                  mutation.action
+                          == cortext::operations::retrieval_trace::
+                                 SurfaceMutation::Action::Upsert
+                      ? "upsert"
+                      : "remove" },
+                { "memory_id", mutation.memory_id },
+                { "embedding_id", mutation.embedding_id },
+              };
+              if (mutation.action
+                  == cortext::operations::retrieval_trace::SurfaceMutation::
+                         Action::Upsert)
+                row["embedding"] = mutation.embedding;
+              public_surface_mutations.push_back (std::move (row));
+            }
+        };
   const std::size_t checkpoint_stride = message_mode ? 100U : 500U;
   const std::size_t leading_checkpoint
       = packets.size () % checkpoint_stride;
@@ -2708,22 +3066,133 @@ RunPacketCorpusProfile (const Config &cfg,
                           std::chrono::system_clock::now ().time_since_epoch ())
                           .count ());
       EventDoc doc {
-        static_cast<int> (index), timestamp, "profile/corpus", "text",
+        static_cast<int> (index), timestamp,
+        cfg.opaque_source_control
+            ? "profile/source/" + std::to_string (index % 4)
+            : "profile/corpus",
+        "text",
         packets[index],
       };
-      auto ctx = cfg.fixed_timestamp_base_ms > 0
-                     ? engine->ProcessTextAt (packets[index], doc.source_id,
-                                              timestamp, cfg.retention)
-                     : engine->ProcessText (packets[index], doc.source_id,
-                                            cfg.retention);
+      if (cfg.public_retrieval_control)
+        cortext::operations::retrieval_trace::ClearSurfaceMutations ();
+      auto ctx = cfg.public_retrieval_control
+                     ? cortext::internal::ReplayIngress::ProcessTextAt (
+                           *engine, packets[index], doc.source_id, timestamp,
+                           cfg.retention, true)
+                     : (cfg.fixed_timestamp_base_ms > 0
+                            ? engine->ProcessTextAt (
+                                  packets[index], doc.source_id, timestamp,
+                                  cfg.retention)
+                            : engine->ProcessText (
+                                  packets[index], doc.source_id,
+                                  cfg.retention));
+      if (cfg.public_retrieval_control)
+        {
+          const auto append_ranked = [&] (const auto &candidates) {
+            nlohmann::json ranked = nlohmann::json::array ();
+            const std::size_t limit = std::min<std::size_t> (
+                candidates.size (), static_cast<std::size_t> (
+                                       cfg.public_retrieval_result_k));
+            for (std::size_t rank = 0; rank < limit; ++rank)
+              ranked.push_back (
+                  { { "memory_id", candidates[rank].memory_id },
+                    { "embedding_id", candidates[rank].embedding_id },
+                    { "score", candidates[rank].score },
+                    { "rank", rank } });
+            return ranked;
+          };
+          nlohmann::json public_ranked = nlohmann::json::array ();
+          const std::size_t public_limit = std::min<std::size_t> (
+              ctx.retrieved_memory.size (), static_cast<std::size_t> (
+                                               cfg.public_retrieval_result_k));
+          for (std::size_t rank = 0; rank < public_limit; ++rank)
+            public_ranked.push_back (
+                { { "memory_id", ctx.retrieved_memory[rank].id },
+                  { "score", ctx.retrieved_memory[rank].composite_score },
+                  { "rank", rank } });
+          auto seed_ranked = append_ranked (
+              cortext::operations::retrieval_trace::
+                  GetLastSeedCandidates ());
+          const auto &exact_seed_candidates
+              = cortext::operations::retrieval_trace::
+                    GetLastExactSeedCandidates ();
+          const bool candidate_available
+              = !exact_seed_candidates.empty ();
+          auto exact_seed_ranked
+              = candidate_available
+                    ? append_ranked (exact_seed_candidates)
+                    : nlohmann::json (seed_ranked);
+          double semantic_coverage = 0.0;
+          bool deterministic_tie_order = true;
+          if (candidate_available && !exact_seed_candidates.empty ())
+            {
+              std::unordered_map<long long, std::size_t>
+                  candidate_positions;
+              const auto &candidate_seed_candidates
+                  = cortext::operations::retrieval_trace::
+                        GetLastSeedCandidates ();
+              for (std::size_t rank = 0;
+                   rank < candidate_seed_candidates.size (); ++rank)
+                candidate_positions.emplace (
+                    candidate_seed_candidates[rank].memory_id, rank);
+              std::optional<std::size_t> previous_common_rank;
+              std::size_t exact_hits = 0;
+              for (const auto &control_candidate : exact_seed_candidates)
+                {
+                  const auto found = candidate_positions.find (
+                      control_candidate.memory_id);
+                  if (found == candidate_positions.end ())
+                    continue;
+                  ++exact_hits;
+                  if (previous_common_rank
+                      && found->second <= *previous_common_rank)
+                    deterministic_tie_order = false;
+                  previous_common_rank = found->second;
+                }
+              semantic_coverage
+                  = static_cast<double> (exact_hits)
+                    / static_cast<double> (
+                        exact_seed_candidates.size ());
+            }
+          if (!seed_ranked.empty ())
+            public_retrieval_observations.push_back (
+                { { "event_index", index },
+                  { "query_timestamp", timestamp },
+                  { "source_id_blake3",
+                    PrivateValueDigest (doc.source_id) },
+                  { "modality", doc.modality },
+                  { "query_embedding", ctx.embedding },
+                  { "control_seed_ranked",
+                    std::move (exact_seed_ranked) },
+                  { "candidate_seed_ranked",
+                    candidate_available
+                        ? std::move (seed_ranked)
+                        : nlohmann::json::array () },
+                  { "control_graph_ranked",
+                    append_ranked (
+                        cortext::operations::retrieval_trace::
+                            GetLastRankedCandidates ()) },
+                  { "control_public_ranked", std::move (public_ranked) },
+                  { "candidate_available", candidate_available },
+                  { "semantic_coverage", semantic_coverage },
+                  { "deterministic_tie_order",
+                    deterministic_tie_order } });
+          append_surface_mutations (index, timestamp, "process");
+        }
       process_ms_total += ctx.process_ms;
       total_ms_total += ctx.total_ms;
       double event_consolidation_ms = 0.0;
       std::optional<nlohmann::json> consolidation_event;
 
-      if (cfg.honor_required_consolidation
-          && ctx.consolidation_state == cortext::ConsolidationState::Required)
+      const bool fixed_consolidation
+          = fixed_consolidation_index_set.contains (index + 1);
+      if (fixed_consolidation
+          || (cfg.honor_required_consolidation
+              && ctx.consolidation_state
+                     == cortext::ConsolidationState::Required))
         {
+          if (cfg.public_retrieval_control)
+            cortext::operations::retrieval_trace::ClearSurfaceMutations ();
           const auto consolidation_start = std::chrono::steady_clock::now ();
           auto consolidation_ctx = engine->Consolidate ();
           const double consolidation_ms = std::chrono::duration<
@@ -2736,6 +3205,8 @@ RunPacketCorpusProfile (const Config &cfg,
           consolidation_event = {
             { "event_index", index },
             { "closing_event_index", index },
+            { "one_based_event_index", index + 1 },
+            { "fixed_schedule", fixed_consolidation },
             { "consolidation_epoch_id",
               RequiredOperationCounter (
                   consolidation_ctx,
@@ -2758,6 +3229,135 @@ RunPacketCorpusProfile (const Config &cfg,
                   consolidation_ctx,
                   "ConsolidationEpoch.sealed_mutation_identity_count") },
             { "duration_ms", consolidation_ms },
+            { "operation_ms",
+              OperationTimingsJson (
+                  consolidation_ctx.output.operation_ms) },
+            { "retrieval_surface_reload_ms",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.reload_retrieval_surface") },
+            { "sparse_route_seal_ms",
+              OperationValue (consolidation_ctx,
+                              "SignalProcessor.sparse_route_seal") },
+            { "sparse_route_seal_delta_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sparse_route_seal_delta_count") },
+            { "sparse_route_seal_succeeded",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sparse_route_seal_succeeded") == 1.0 },
+            { "sqlite_sparse_route_seal_ms",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_seal") },
+            { "sqlite_sparse_route_seal_delta_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_seal_delta_count") },
+            { "sqlite_sparse_route_seal_succeeded",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_seal_succeeded")
+                  == 1.0 },
+            { "sqlite_sparse_route_seal_failure_code",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_seal_failure_code") },
+            { "sqlite_sparse_route_recenter_ms",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter") },
+            { "sqlite_sparse_route_recenter_succeeded",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_succeeded")
+                  == 1.0 },
+            { "sqlite_sparse_route_recenter_derived_centroid",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_derived_centroid")
+                  == 1.0 },
+            { "sqlite_sparse_route_recenter_centroid_source",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_centroid_source") },
+            { "sqlite_sparse_route_recenter_centroid_cluster_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count") },
+            { "sqlite_sparse_route_recenter_centroid_member_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count") },
+            { "sqlite_sparse_route_recenter_overlap_profiled",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_overlap_profiled")
+                  == 1.0 },
+            { "sqlite_sparse_route_recenter_overlap_pair_valid",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_overlap_pair_valid")
+                  == 1.0 },
+            { "sqlite_sparse_route_recenter_overlap_failure_code",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code") },
+            { "sqlite_sparse_route_recenter_pre_activated_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count") },
+            { "sqlite_sparse_route_recenter_post_activated_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_post_activated_count") },
+            { "sqlite_sparse_route_recenter_overlap_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_overlap_count") },
+            { "sqlite_sparse_route_recenter_pre_node_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_pre_node_count") },
+            { "sqlite_sparse_route_recenter_post_node_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_post_node_count") },
+            { "sqlite_sparse_route_activation_search_effort",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_activation_search_effort") },
+            { "sqlite_sparse_route_activation_node_budget",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_activation_node_budget") },
+            { "sqlite_sparse_route_backfill_ms",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill") },
+            { "sqlite_sparse_route_backfill_rows",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_rows") },
+            { "sqlite_sparse_route_backfill_published",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_published")
+                  == 1.0 },
+            { "sqlite_sparse_route_backfill_succeeded",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_succeeded")
+                  == 1.0 },
+            { "sqlite_sparse_route_backfill_failure_code",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_failure_code") },
+            { "sqlite_sparse_route_backfill_failure_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_failure_count") },
             { "pre_reset_counters",
               ConsolidationEpochCountersJson (
                   consolidation_ctx, "ConsolidationEpoch.pre") },
@@ -2771,6 +3371,8 @@ RunPacketCorpusProfile (const Config &cfg,
                   consolidation_ctx.consolidation_state) },
           };
           consolidation_events.push_back (*consolidation_event);
+          if (cfg.public_retrieval_control)
+            append_surface_mutations (index, timestamp, "consolidation");
         }
       const auto event_ended = std::chrono::steady_clock::now ();
       if (!cfg.no_profile_rows)
@@ -2861,16 +3463,37 @@ RunPacketCorpusProfile (const Config &cfg,
   out["focus"] = cfg.focus;
   out["sensitivity"] = cfg.sensitivity;
   out["stability"] = cfg.stability;
+  RecordSparseRouteParameters (out, cfg);
   out["sqlite_profile"] = sqlite_profile;
   out["full_operation_ms"] = true;
   out["behavior_oracle"] = true;
   out["profile_rows_enabled"] = !cfg.no_profile_rows;
   out["honor_required_consolidation"]
       = cfg.honor_required_consolidation;
+  out["fixed_consolidation_indices"] = fixed_consolidation_indices;
+  out["consolidation_schedule_policy"]
+      = fixed_consolidation_indices.empty ()
+            ? (cfg.honor_required_consolidation
+                   ? "live-required-hint"
+                   : "none")
+            : "fixed-one-based-control-derived-indices";
+  const auto active_epoch_limits
+      = cortext::operations::rif_active_epoch_cache_internal::DeriveLimits (
+          cfg.focus, cfg.sensitivity, cfg.stability);
   out["active_epoch_limits"] = {
-    { "event_count", 512 },
-    { "mutation_count", 32768 },
-    { "allocated_bytes", 64ULL * 1024ULL * 1024ULL },
+    { "event_count", active_epoch_limits.event_count },
+    { "mutation_count", active_epoch_limits.mutation_count },
+    { "allocated_bytes", active_epoch_limits.allocated_bytes },
+    { "row_batch_size", active_epoch_limits.row_batch_size },
+  };
+  out["active_signal_embedding_ring"] = {
+    { "capacity",
+      cortext::operations::active_signal_embedding_ring_internal::Capacity (
+          cfg.focus, cfg.sensitivity, cfg.stability) },
+    { "capacity_formula", "round(64 + 64F + 32S + 32T)" },
+    { "authority", "persistent SQLite bounded exact-vector snapshot" },
+    { "source_id_branching", false },
+    { "modality_branching", false },
   };
   out["fixed_timestamp_base_ms"] = cfg.fixed_timestamp_base_ms;
   out["fixed_timestamp_step_ms"] = cfg.fixed_timestamp_step_ms;
@@ -2885,6 +3508,165 @@ RunPacketCorpusProfile (const Config &cfg,
       = "end-anchored complete-window boundaries captured outside per-event timing";
   out["store_checkpoints"] = std::move (store_checkpoints);
   out["peak_rss_mb"] = PeakRssMb ();
+  if (cfg.public_retrieval_control)
+    {
+      if (public_retrieval_observations.size ()
+          < static_cast<std::size_t> (cfg.public_retrieval_queries))
+        throw std::runtime_error (
+            "public retrieval replay produced too few retrieval-active events");
+      std::vector<std::size_t> selected_observations;
+      selected_observations.reserve (
+          static_cast<std::size_t> (cfg.public_retrieval_queries));
+      for (int query = 0; query < cfg.public_retrieval_queries; ++query)
+        {
+          const std::size_t observation
+              = cfg.public_retrieval_queries == 1
+                    ? public_retrieval_observations.size () - 1
+                    : static_cast<std::size_t> (
+                          static_cast<long double> (query)
+                          * static_cast<long double> (
+                              public_retrieval_observations.size () - 1)
+                          / static_cast<long double> (
+                              cfg.public_retrieval_queries - 1));
+          selected_observations.push_back (observation);
+        }
+      const auto ensure_sample_value = [&] (const char *field,
+                                             const std::string &value) {
+        const auto selected_has_value = [&] {
+          return std::any_of (
+              selected_observations.begin (), selected_observations.end (),
+              [&] (std::size_t observation) {
+                return public_retrieval_observations[observation]
+                           .value (field, std::string{})
+                       == value;
+              });
+        };
+        if (selected_has_value ())
+          return;
+        const auto target = std::find_if (
+            public_retrieval_observations.begin (),
+            public_retrieval_observations.end (), [&] (const auto &row) {
+              return row.value (field, std::string{}) == value;
+            });
+        if (target == public_retrieval_observations.end ())
+          return;
+        const auto target_index = static_cast<std::size_t> (
+            std::distance (public_retrieval_observations.begin (), target));
+        if (std::find (selected_observations.begin (),
+                       selected_observations.end (), target_index)
+            != selected_observations.end ())
+          return;
+
+        std::unordered_map<std::string, std::size_t> modality_counts;
+        std::unordered_map<std::string, std::size_t> source_counts;
+        for (const auto observation : selected_observations)
+          {
+            const auto &row = public_retrieval_observations[observation];
+            ++modality_counts[row.value ("modality", std::string{})];
+            ++source_counts[row.value ("source_id_blake3", std::string{})];
+          }
+        std::size_t replace_position = selected_observations.size ();
+        std::size_t best_distance = std::numeric_limits<std::size_t>::max ();
+        for (std::size_t position = 0;
+             position < selected_observations.size (); ++position)
+          {
+            const auto observation = selected_observations[position];
+            const auto &row = public_retrieval_observations[observation];
+            if (modality_counts[row.value ("modality", std::string{})] <= 1
+                || source_counts[row.value ("source_id_blake3",
+                                             std::string{})]
+                       <= 1)
+              continue;
+            const std::size_t distance = observation > target_index
+                                             ? observation - target_index
+                                             : target_index - observation;
+            if (distance < best_distance)
+              {
+                replace_position = position;
+                best_distance = distance;
+              }
+          }
+        if (replace_position == selected_observations.size ())
+          throw std::runtime_error (
+              "public retrieval sample cannot preserve modality/source strata");
+        selected_observations[replace_position] = target_index;
+      };
+      ensure_sample_value ("modality", "text");
+      std::unordered_set<std::string> observed_sources;
+      for (const auto &row : public_retrieval_observations)
+        observed_sources.insert (
+            row.value ("source_id_blake3", std::string{}));
+      std::vector<std::string> ordered_sources (observed_sources.begin (),
+                                                observed_sources.end ());
+      std::sort (ordered_sources.begin (), ordered_sources.end ());
+      for (const auto &source : ordered_sources)
+        ensure_sample_value ("source_id_blake3", source);
+      std::sort (selected_observations.begin (), selected_observations.end ());
+
+      nlohmann::json public_retrieval_queries = nlohmann::json::array ();
+      for (std::size_t query = 0; query < selected_observations.size ();
+           ++query)
+        {
+          auto selected
+              = public_retrieval_observations[selected_observations[query]];
+          selected["query_ordinal"] = query;
+          public_retrieval_queries.push_back (std::move (selected));
+        }
+      nlohmann::json public_control = nlohmann::json::object ();
+      public_control["schema"]
+          = "cortext_current_public_retrieval_control_v1";
+      const bool candidate_available = std::all_of (
+          public_retrieval_queries.begin (),
+          public_retrieval_queries.end (), [] (const auto &query) {
+            return query.value ("candidate_available", false);
+          });
+      public_control["status"]
+          = candidate_available
+                ? "exact-public-control-and-candidate-captured"
+                : "exact-public-control-captured-candidate-pending";
+      public_control["control_path"]
+          = "GraphAugmentedRetrieveCandidates";
+      public_control["identity_kind"] = "memory-id";
+      public_control["query_count"] = cfg.public_retrieval_queries;
+      public_control["result_k"] = cfg.public_retrieval_result_k;
+      public_control["query_sampling"]
+          = "inclusive-even-retrieval-active-event-order";
+      public_control["retrieval_active_event_count"]
+          = public_retrieval_observations.size ();
+      public_control["population"]
+          = "runtime query-time eligible current long-term memory surface";
+      public_control["eligibility_semantics"] = {
+        { "timestamp_exclusion", true },
+        { "supersession_exclusion", true },
+        { "current_surface_selection", true },
+        { "family_collapse", true },
+        { "deterministic_tie_order", true },
+      };
+      public_control["source_id_semantics"] = "opaque-provenance-only";
+      public_control["modality_semantics"]
+          = "shared-post-encoding-retrieval";
+      public_control["opaque_source_control"] = cfg.opaque_source_control;
+      public_control["coverage_contract"] = {
+        { "minimum_opaque_source_ids", cfg.opaque_source_control ? 4 : 1 },
+        { "required_modalities", { "text" } },
+        { "modality_agnostic_proof",
+          "separate active-SQLite-route source/modality label-invariance regression" },
+      };
+      public_control["candidate_available"] = candidate_available;
+      public_control["production_cutover"] = false;
+      public_control["surface_mutation_schema"]
+          = "cortext_live_retrieval_surface_mutations_v1";
+      public_control["surface_mutation_order"]
+          = "event-index-then-process-before-consolidation";
+      public_control["surface_mutation_count"]
+          = public_surface_mutations.size ();
+      public_control["surface_mutations"]
+          = std::move (public_surface_mutations);
+      public_control["queries"] = std::move (public_retrieval_queries);
+      out["public_retrieval_control"] = std::move (public_control);
+    }
+  cortext::operations::retrieval_trace::SetSurfaceMutationCaptureEnabled (
+      false);
   const auto shadow_snapshots
       = cortext::operations::bounded_activation_shadow_internal::Snapshots ();
   if (!shadow_snapshots.empty ())
@@ -2978,6 +3760,8 @@ main (int argc, char **argv)
     {
       Config cfg = ParseArgs (argc, argv);
       ApplyReplayTimezone (cfg.replay_timezone);
+      if (!cfg.export_shadow_embedding_corpus.empty ())
+        return ExportShadowEmbeddingCorpus (cfg);
       if (!cfg.shadow_embedding_corpus.empty ())
         return RunShadowEmbeddingQuality (cfg);
       const nlohmann::json sqlite_profile
@@ -3541,6 +4325,7 @@ main (int argc, char **argv)
             { "sensitivity", cfg.sensitivity },
             { "stability", cfg.stability },
           };
+          RecordSparseRouteParameters (out, cfg);
           out["media_candidates_found"] = media.size ();
           out["media_attempted"] = checkpoint_media_attempted;
           out["media_processed"]
@@ -3791,6 +4576,7 @@ main (int argc, char **argv)
             { "sensitivity", cfg.sensitivity },
             { "stability", cfg.stability },
           };
+          RecordSparseRouteParameters (out, cfg);
           out["wall_ms"]
               = std::chrono::duration_cast<std::chrono::milliseconds> (
                     profile_ended - profile_started)
@@ -4425,6 +5211,7 @@ main (int argc, char **argv)
         { "sensitivity", cfg.sensitivity },
         { "stability", cfg.stability },
       };
+      RecordSparseRouteParameters (out, cfg);
       out["media_candidates_found"] = media.size ();
       out["media_attempted"] = media_attempted;
       out["media_processed"] = media_processed;

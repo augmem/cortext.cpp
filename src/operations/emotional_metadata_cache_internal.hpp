@@ -98,6 +98,14 @@ BeforeSourceQuery (const Row &left, const Row &right)
   return left.memory_id < right.memory_id;
 }
 
+inline bool
+BeforeBoundedSourceQuery (const Row &left, const Row &right)
+{
+  if (left.created_at != right.created_at)
+    return left.created_at > right.created_at;
+  return left.memory_id > right.memory_id;
+}
+
 inline void
 Upsert (ProcessorContext &p_ctx, Row row)
 {
@@ -128,10 +136,16 @@ Upsert (ProcessorContext &p_ctx, Row row)
           cache.source_query_order.begin (), cache.source_query_order.end (),
           stored,
           [&cache] (long long existing_memory_id, const Row &candidate) {
-            return BeforeSourceQuery (
-                cache.rows_by_memory.at (existing_memory_id), candidate);
+            const auto &existing
+                = cache.rows_by_memory.at (existing_memory_id);
+            return cache.source_query_capacity
+                           == std::numeric_limits<std::size_t>::max ()
+                       ? BeforeSourceQuery (existing, candidate)
+                       : BeforeBoundedSourceQuery (existing, candidate);
           });
       cache.source_query_order.insert (position, memory_id);
+      if (cache.source_query_order.size () > cache.source_query_capacity)
+        cache.source_query_order.pop_back ();
     }
   RecomputeEmbedding (cache, embedding_id);
   // A newly persisted, unconnected non-source cannot change a completed
@@ -143,13 +157,16 @@ Upsert (ProcessorContext &p_ctx, Row row)
 }
 
 inline void
-Reset (ProcessorContext &p_ctx, std::vector<Row> rows)
+Reset (ProcessorContext &p_ctx, std::vector<Row> rows,
+       std::size_t source_query_capacity
+           = std::numeric_limits<std::size_t>::max ())
 {
   const std::uint64_t next_generation
       = Ensure (p_ctx).cascade_input_generation + 1;
   auto &cache = Ensure (p_ctx);
   cache = {};
   cache.valid = true;
+  cache.source_query_capacity = source_query_capacity;
   cache.cascade_input_generation = next_generation;
   cache.rows_by_memory.reserve (rows.size ());
   cache.source_query_order.reserve (rows.size ());
@@ -203,10 +220,16 @@ OverwriteEmbedding (ProcessorContext &p_ctx, long long embedding_id,
               cache.source_query_order.begin (),
               cache.source_query_order.end (), row,
               [&cache] (long long existing_memory_id, const Row &candidate) {
-                return BeforeSourceQuery (
-                    cache.rows_by_memory.at (existing_memory_id), candidate);
+                const auto &existing
+                    = cache.rows_by_memory.at (existing_memory_id);
+                return cache.source_query_capacity
+                               == std::numeric_limits<std::size_t>::max ()
+                           ? BeforeSourceQuery (existing, candidate)
+                           : BeforeBoundedSourceQuery (existing, candidate);
               });
           cache.source_query_order.insert (position, memory_id);
+          if (cache.source_query_order.size () > cache.source_query_capacity)
+            cache.source_query_order.pop_back ();
         }
     }
   RecomputeEmbedding (cache, embedding_id);
