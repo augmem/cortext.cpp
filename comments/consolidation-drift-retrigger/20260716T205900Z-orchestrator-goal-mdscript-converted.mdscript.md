@@ -5,13 +5,13 @@ owner_role: implementer
 lane_id: consolidation-drift-retrigger
 status: monitoring
 implementation_status: complete
-monitor_status: repair-reviewed-push-pending
+monitor_status: replacement-exact-head-ci-pending
 source_of_truth: current repository, current user corrections, this goal, task comments, exact private profiles and audits, and GitHub PR 6 only after implementation completion
 model: gpt-5.6-terra
 reasoning: high
 model_selection_basis: cross-cutting C++ and SQLite implementation, deterministic bounded-work proof, research traceability, and PR ownership
 canonical_monitor_entry: true
-updated_at: 20260721T072347Z
+updated_at: 20260721T072800Z
 ---
 <!-- mdscript: use the mdscript-exec skill -->
 
@@ -40,11 +40,11 @@ updated_at: 20260721T072347Z
 * the current full media-enabled CTest suite passes 39,175 assertions in 690 cases in 287.44 seconds; focused RIF passes 312 assertions in 19 cases; the two HNSW CI regressions pass 19 assertions; WebAssembly rebuilds successfully with Emscripten 4.0.18; the complete Python tool suite passes 159 tests; patch removal/reapplication and `git diff --check` pass
 * the current-state overlay, rebuilt 70-record manifest, and fail-closed audit have raw-file SHA-256 values `39f5f41a7b126c46c859abb8bb2a67b14a2b14e8644a6f78355f4f86c6b46a1e`, `ebc47507bea5ed41311c6f52a4567b2a5ad610d0334d0bba83dc86c7aafd0b66`, and `cea9dfdca7aa8a4db57b82704963e9314386c9bd6ef2f07327c9b7f0b478bacf`; the audit passes with 70/70 inventory records and no uncovered inventory, claim mismatch, proof-level violation, or ownership violation
 * the original recursive cutover review remains complete. The exact-head CI repair then received a fresh round one that found one P2 unguarded empty-adjacency HNSW prefetch; repair tree `d3ce8c1ada4ab13023cbcd40959c8a8a878b5307` guards it and adds deterministic update/reseal coverage. A different fresh round-two reviewer proved the complete repair at the P1/P2 threshold with no blocking finding. Its sole P3 control-record hygiene residual was corrected directly; because that correction rewrote an existing continuation record and violated append-only provenance, the later single-pass record-transition review rejected the record transition and `~/.agents/projects/cortext/comments/consolidation-drift-retrigger/20260721T072347Z-implementer-pr6-record-transition-correction.mdscript.md` now discloses the mutation, supersedes the compromised continuation, synchronizes the task, and restores the missing lane-ledger history without changing code or proof
-* current PR head `5f2e3b38edbc5d582b2a0cbb37d7ec10f8ceb1cb` remains OPEN, non-draft, MERGEABLE/UNSTABLE on base `1bf3f1c5f6470bb8c4d458a0389c19c5123f9b81` with ten green checks, failed Linux sanitizer and WebAssembly checks, no review requests, and one unresolved RIF startup-order thread. Repair tree `d3ce8c1ada4ab13023cbcd40959c8a8a878b5307` is reviewed and locally proven but not yet committed or pushed; repaired-tree Linux sanitizer proof remains owned by replacement exact-head CI because sandboxed macOS ASAN cannot complete dynamic-shadow discovery before `main()`
+* repair commit `f7f0fc532dc90f59bdea1cfee2bf50bc94316a4c` is pushed on the PR branch over reviewed parent `5f2e3b38edbc5d582b2a0cbb37d7ec10f8ceb1cb`; the owning RIF startup-order thread has a proof-bearing reply and is resolved, and a sanitized repair/proof summary is on the PR. This record-only transition is the sole descendant needed to synchronize the durable monitor after that push; refresh the live exact head and its replacement checks rather than treating either historical OID as current. Repaired-tree Linux sanitizer proof remains owned by replacement exact-head CI because sandboxed macOS ASAN cannot complete dynamic-shadow discovery before `main()`
 
 ## PR Monitor Hot Path
 
-* changed exact-head CI and review evidence reopened only the RIF startup-order, HNSW speculative-prefetch, and WebAssembly width slice. That repair is locally proven and recursively reviewed; next validate this record once, commit and push without force, reply to and resolve the owning thread, then monitor replacement exact-head CI
+* changed exact-head CI and review evidence reopened only the RIF startup-order, HNSW speculative-prefetch, and WebAssembly width slice. That repair is locally proven, recursively reviewed, pushed, and its owning thread is resolved; next monitor replacement exact-head CI, repair only new in-scope failures or comments, and keep the branch synchronized with current main without merging or closing
 * every ten minutes in this current task, refresh PR 6 exact head, checks, mergeability, reviews, review requests, comments, and unresolved threads; compare with the prior state and report only changes
 * repair only in-scope failures or review findings with proportionate proof and the required fresh review; push without force and update this goal to the new exact head
 * stop and deactivate the heartbeat when the PR merges or closes externally, repair exceeds scope, target drift is unrecoverable, or authority is explicitly denied
