@@ -1,13 +1,17 @@
 // tests/migration_core.test.cpp
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include "test_helpers.hpp"
 #include <cortext/processor.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/schema.hpp>
+#include <cortext/store/utils.hpp>
 #include <cortext/processor/operation_set.hpp>
+#include <algorithm>
 #include <any>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <set>
@@ -253,6 +257,306 @@ TEST_CASE("Migration 27 adds an armed consolidation throughput latch",
             == 1);
 }
 
+TEST_CASE("Migration 28 seeds exact lazy RIF recovery state",
+          "[schema][migration][rif]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 27);
+    store->Execute(
+        "INSERT INTO memories(memory_id, source_id, kind, start_ts, "
+        "n_signals, modality, strength, suppression, suppression_ts, "
+        "created_at) VALUES(1, 'source-a', 'LONG_TERM', 100, 1, "
+        "'text', 0.6, 0.4, 100, 100)");
+
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(28) == 1);
+    auto objects = store->Execute(
+        "SELECT type, name FROM sqlite_master WHERE name IN ("
+        "'rif_recovery_clock', 'rif_generation_resets', "
+        "'rif_active_state', 'rif_effective_memories', "
+        "'idx_rif_active_due', 'rif_memories_insert_active', "
+        "'rif_memories_update_active', 'rif_memories_update_inactive', "
+        "'rif_memories_update_strength')");
+    REQUIRE(objects.size() == 4);
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_temp_master "
+        "WHERE type = 'view' AND name = 'rif_effective_memories'").size()
+        == 1);
+
+    auto clock = store->Execute(
+        "SELECT generation, log_factor, last_ts FROM rif_recovery_clock");
+    REQUIRE(clock.size() == 1);
+    REQUIRE(std::any_cast<long long>(clock[0].at("generation")) == 1);
+    REQUIRE(std::any_cast<double>(clock[0].at("log_factor")) == 0.0);
+    REQUIRE(std::any_cast<long long>(clock[0].at("last_ts")) == 100);
+
+    auto active = store->Execute(
+        "SELECT generation, anchor_suppression, recovery_total, "
+        "anchor_log_factor, expires_log_factor "
+        "FROM rif_active_state WHERE memory_id = 1");
+    REQUIRE(active.size() == 1);
+    REQUIRE(std::any_cast<long long>(active[0].at("generation")) == 1);
+    REQUIRE(std::any_cast<double>(active[0].at("anchor_suppression"))
+            == Catch::Approx(0.4));
+    REQUIRE(std::any_cast<double>(active[0].at("recovery_total"))
+            == Catch::Approx(1.0));
+    REQUIRE(std::any_cast<double>(active[0].at("anchor_log_factor"))
+            == 0.0);
+    REQUIRE(std::any_cast<double>(active[0].at("expires_log_factor")) < 0.0);
+
+    auto effective = store->Execute(
+        "SELECT strength, suppression, suppression_ts "
+        "FROM rif_effective_memories WHERE memory_id = 1");
+    REQUIRE(effective.size() == 1);
+    REQUIRE(std::any_cast<double>(effective[0].at("strength"))
+            == Catch::Approx(0.6));
+    REQUIRE(std::any_cast<double>(effective[0].at("suppression"))
+            == Catch::Approx(0.4));
+    REQUIRE(std::any_cast<long long>(effective[0].at("suppression_ts"))
+            == 100);
+
+    const auto persistent_extras = store->Execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE name LIKE 'rif_%' "
+        "  AND name NOT IN ('rif_recovery_clock', 'rif_generation_resets', "
+        "                   'rif_active_state', 'idx_rif_active_due')");
+    REQUIRE(persistent_extras.empty());
+}
+
+TEST_CASE("Migration 28 resumes an exact partial schema and is idempotent",
+          "[schema][migration][rif][partial]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 27);
+    store->Execute(
+        "CREATE TABLE rif_recovery_clock("
+        "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+        "generation INTEGER NOT NULL CHECK(generation > 0), "
+        "log_factor REAL NOT NULL, last_ts INTEGER NOT NULL)");
+    store->Execute(
+        "INSERT INTO memories(memory_id, source_id, kind, start_ts, "
+        "n_signals, modality, strength, suppression, suppression_ts, "
+        "created_at) VALUES(1, 'partial', 'LONG_TERM', 100, 1, "
+        "'image', 0.75, 0.25, 100, 100)");
+
+    cortext::store::ApplyMigrations(*store);
+    const auto first_ids
+        = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(first_ids.count(28) == 1);
+    const auto first = store->Execute(
+        "SELECT generation, log_factor, last_ts FROM rif_recovery_clock");
+    REQUIRE(first.size() == 1);
+    const auto first_active = store->Execute(
+        "SELECT memory_id FROM rif_active_state ORDER BY memory_id");
+    REQUIRE(first_active.size() == 1);
+
+    cortext::store::ApplyMigrations(*store);
+    const auto second = store->Execute(
+        "SELECT generation, log_factor, last_ts FROM rif_recovery_clock");
+    const auto second_active = store->Execute(
+        "SELECT memory_id FROM rif_active_state ORDER BY memory_id");
+    REQUIRE(second.size() == 1);
+    REQUIRE(second_active.size() == 1);
+    REQUIRE(std::any_cast<long long>(second[0].at("generation"))
+            == std::any_cast<long long>(first[0].at("generation")));
+    REQUIRE(std::any_cast<double>(second[0].at("log_factor"))
+            == std::any_cast<double>(first[0].at("log_factor")));
+    REQUIRE(std::any_cast<long long>(second[0].at("last_ts"))
+            == std::any_cast<long long>(first[0].at("last_ts")));
+    REQUIRE(std::any_cast<long long>(second_active[0].at("memory_id"))
+            == std::any_cast<long long>(first_active[0].at("memory_id")));
+}
+
+TEST_CASE("Migration 28 fails atomically on an incompatible partial schema",
+          "[schema][migration][rif][partial][rollback]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 27);
+    store->Execute("CREATE TABLE rif_recovery_clock(singleton INTEGER)");
+
+    REQUIRE_THROWS(cortext::store::ApplyMigrations(*store));
+    const auto ids
+        = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(28) == 0);
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master WHERE name = 'rif_active_state'")
+        .empty());
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master WHERE name = 'rif_effective_memories'")
+        .empty());
+}
+
+TEST_CASE("Migration 29 adds a modality and source agnostic sparse route",
+          "[schema][migration][retrieval][sqlite]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 28);
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE name LIKE 'cortext_sparse_route_%'").empty());
+
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(29) == 1);
+    const auto objects = store->Execute(
+        "SELECT type, name FROM sqlite_master WHERE name IN ("
+        "'cortext_sparse_route_meta', 'cortext_sparse_route_nodes', "
+        "'cortext_sparse_route_build', "
+        "'cortext_sparse_route_dirty', "
+        "'idx_sparse_route_nodes_active', "
+        "'idx_sparse_route_nodes_generation')");
+    REQUIRE(objects.size() == 6);
+
+    for (const auto *table : {"cortext_sparse_route_meta",
+                              "cortext_sparse_route_nodes",
+                              "cortext_sparse_route_build",
+                              "cortext_sparse_route_dirty"}) {
+        const auto columns = store->Execute(
+            std::string("PRAGMA table_info(") + table + ")");
+        REQUIRE_FALSE(columns.empty());
+        for (const auto &column : columns) {
+            const auto name = std::any_cast<std::string>(column.at("name"));
+            REQUIRE(name != "modality");
+            REQUIRE(name != "source_id");
+        }
+    }
+}
+
+TEST_CASE("Migration 29 fails atomically on an incompatible partial schema",
+          "[schema][migration][retrieval][sqlite][partial][rollback]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 28);
+    store->Execute(
+        "CREATE TABLE cortext_sparse_route_nodes(memory_id INTEGER)");
+
+    REQUIRE_THROWS(cortext::store::ApplyMigrations(*store));
+    const auto ids
+        = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(29) == 0);
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE name = 'cortext_sparse_route_meta'").empty());
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE name = 'cortext_sparse_route_build'").empty());
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE name = 'cortext_sparse_route_dirty'").empty());
+    const auto columns
+        = store->Execute("PRAGMA table_info(cortext_sparse_route_nodes)");
+    REQUIRE(columns.size() == 1);
+    REQUIRE(std::any_cast<std::string>(columns[0].at("name"))
+            == "memory_id");
+}
+
+TEST_CASE("Migration 30 moves exact signal vectors outside the global route",
+          "[schema][migration][signals][embedding_population]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 29);
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE name = 'cortext_active_signal_embeddings'").empty());
+
+    std::vector<float> legacy_embedding(256, 0.0f);
+    legacy_embedding[3] = 1.0f;
+    store->Execute(
+        "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+        "VALUES (301, ?, 1000)", {legacy_embedding});
+    store->Execute(
+        "INSERT INTO signals(signal_id, memory_id, source_id, embedding_id, "
+        "timestamp, modality, created_at) "
+        "VALUES (401, NULL, 'opaque/legacy', 301, 1000, 'audio', 1000)");
+
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(30) == 1);
+    const auto columns = store->Execute(
+        "PRAGMA table_info(cortext_active_signal_embeddings)");
+    REQUIRE(columns.size() == 5);
+    for (const auto &column : columns) {
+        const auto name = std::any_cast<std::string>(column.at("name"));
+        REQUIRE(name != "modality");
+        REQUIRE(name != "source_id");
+    }
+
+    std::vector<float> inline_embedding(256, 0.0f);
+    inline_embedding[7] = 1.0f;
+    store->Execute(
+        "INSERT INTO signals(signal_id, memory_id, source_id, embedding_id, "
+        "timestamp, modality, created_at) "
+        "VALUES (402, NULL, 'opaque/current', 301, 1001, 'image', 1001)");
+    store->Execute(
+        "INSERT INTO cortext_active_signal_embeddings("
+        "slot, signal_id, embedding, created_at, capacity) "
+        "VALUES (17, 402, ?, 1001, 128)", {inline_embedding});
+
+    const auto rows = store->Execute(
+        "SELECT signal_id, embedding FROM recent_context ORDER BY signal_id");
+    REQUIRE(rows.size() == 2);
+    std::vector<unsigned char> legacy_bytes(
+        legacy_embedding.size() * sizeof(float));
+    std::memcpy(legacy_bytes.data(), legacy_embedding.data(),
+                legacy_bytes.size());
+    std::vector<unsigned char> inline_bytes(
+        inline_embedding.size() * sizeof(float));
+    std::memcpy(inline_bytes.data(), inline_embedding.data(),
+                inline_bytes.size());
+    REQUIRE(cortext::store::BlobFromAny(rows[0].at("embedding"))
+            == legacy_bytes);
+    REQUIRE(cortext::store::BlobFromAny(rows[1].at("embedding"))
+            == inline_bytes);
+}
+
+TEST_CASE("Migration 31 persists a knob-bounded activation centroid without "
+          "modality or source labels",
+          "[schema][migration][retrieval][sqlite][activation]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 30);
+    auto before = store->Execute(
+        "PRAGMA table_info(cortext_sparse_route_meta)");
+    REQUIRE(before.size() == 7);
+
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(31) == 1);
+    const auto columns = store->Execute(
+        "PRAGMA table_info(cortext_sparse_route_meta)");
+    REQUIRE(columns.size() == 11);
+    std::unordered_set<std::string> names;
+    for (const auto &column : columns)
+        names.insert(std::any_cast<std::string>(column.at("name")));
+    REQUIRE(names.count("activation_entry_memory_id") == 1);
+    REQUIRE(names.count("activation_generation") == 1);
+    REQUIRE(names.count("activation_centroid") == 1);
+    REQUIRE(names.count("activation_identity_ids") == 1);
+    REQUIRE(names.count("modality") == 0);
+    REQUIRE(names.count("source_id") == 0);
+}
+
+TEST_CASE("Migration 34 indexes only eligible unclustered consolidation rows",
+          "[schema][migration][consolidation][bounded]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 33);
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND "
+        "name = 'idx_memories_ltm_unclustered_strength_created'").empty());
+
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(34) == 1);
+    const auto rows = store->Execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND "
+        "name = 'idx_memories_ltm_unclustered_strength_created'");
+    REQUIRE(rows.size() == 1);
+    const auto sql = std::any_cast<std::string>(rows.front().at("sql"));
+    REQUIRE(sql.find("strength, created_at, embedding_id")
+            != std::string::npos);
+    REQUIRE(sql.find("kind = 'LONG_TERM' AND cluster_id IS NULL")
+            != std::string::npos);
+}
+
 TEST_CASE("Migrations preserve 64-bit applied migration ids",
           "[schema][migration]") {
     auto store = SQLiteStore::Create(":memory:");
@@ -327,7 +631,9 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     REQUIRE(has_index("idx_memories_label_created"));
     REQUIRE(has_index("idx_memories_created_desc"));
     REQUIRE(has_index("idx_memories_ltm_strength_created"));
+    REQUIRE(has_index("idx_memories_ltm_unclustered_strength_created"));
     REQUIRE(has_index("idx_memories_pre_activation_embedding_active"));
+    REQUIRE(has_index("idx_memories_flashbulb_intensity"));
     REQUIRE_FALSE(has_index("idx_memories_strength"));
     REQUIRE_FALSE(has_index("idx_memories_working"));
     REQUIRE(has_index("idx_memories_working_active"));

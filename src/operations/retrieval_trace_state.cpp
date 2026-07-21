@@ -8,9 +8,13 @@ namespace
 
 thread_local std::vector<long long> g_last_selected_embedding_order;
 thread_local std::vector<RankedCandidate> g_last_ranked_candidates;
+thread_local std::vector<RankedCandidate> g_last_seed_candidates;
+thread_local std::vector<RankedCandidate> g_last_exact_seed_candidates;
 thread_local std::vector<RejectedCandidate> g_last_rejected_candidates;
 thread_local std::vector<EvidencePacket> g_last_evidence_packets;
 thread_local RetrievalSummary g_last_retrieval_summary;
+thread_local std::vector<SurfaceMutation> g_surface_mutations;
+thread_local bool g_surface_mutation_capture_enabled = false;
 #ifdef CORTEXT_TESTING
 thread_local std::size_t g_last_family_exact_comparison_count = 0;
 thread_local std::size_t g_last_sql_fallback_query_count = 0;
@@ -19,6 +23,53 @@ thread_local std::size_t g_last_sql_fallback_materialized_row_count = 0;
 thread_local bool g_capture_enabled = true;
 
 } // namespace
+
+void
+SetSurfaceMutationCaptureEnabled (bool enabled)
+{
+  g_surface_mutation_capture_enabled = enabled;
+  if (!enabled)
+    g_surface_mutations.clear ();
+}
+
+bool
+SurfaceMutationCaptureEnabled ()
+{
+  return g_surface_mutation_capture_enabled;
+}
+
+void
+ClearSurfaceMutations ()
+{
+  g_surface_mutations.clear ();
+}
+
+void
+RecordSurfaceUpsert (long long memory_id, long long embedding_id,
+                     std::vector<float> embedding)
+{
+  if (!g_surface_mutation_capture_enabled || memory_id <= 0
+      || embedding_id <= 0 || embedding.empty ())
+    return;
+  g_surface_mutations.push_back (
+      { SurfaceMutation::Action::Upsert, memory_id, embedding_id,
+        std::move (embedding) });
+}
+
+void
+RecordSurfaceRemove (long long memory_id)
+{
+  if (!g_surface_mutation_capture_enabled || memory_id <= 0)
+    return;
+  g_surface_mutations.push_back (
+      { SurfaceMutation::Action::Remove, memory_id, 0, {} });
+}
+
+const std::vector<SurfaceMutation> &
+GetSurfaceMutations ()
+{
+  return g_surface_mutations;
+}
 
 void
 ClearLastSelectedEmbeddingOrder ()
@@ -54,6 +105,43 @@ const std::vector<RankedCandidate> &
 GetLastRankedCandidates ()
 {
   return g_last_ranked_candidates;
+}
+
+void
+ClearLastSeedCandidates ()
+{
+  g_last_seed_candidates.clear ();
+}
+
+void
+SetLastSeedCandidates (const std::vector<RankedCandidate> &candidates)
+{
+  g_last_seed_candidates = candidates;
+}
+
+const std::vector<RankedCandidate> &
+GetLastSeedCandidates ()
+{
+  return g_last_seed_candidates;
+}
+
+void
+ClearLastExactSeedCandidates ()
+{
+  g_last_exact_seed_candidates.clear ();
+}
+
+void
+SetLastExactSeedCandidates (
+    const std::vector<RankedCandidate> &candidates)
+{
+  g_last_exact_seed_candidates = candidates;
+}
+
+const std::vector<RankedCandidate> &
+GetLastExactSeedCandidates ()
+{
+  return g_last_exact_seed_candidates;
 }
 
 void

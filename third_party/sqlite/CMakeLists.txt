@@ -173,7 +173,13 @@ target_include_directories(sqlite3
 target_compile_definitions(sqlite3 PRIVATE
     SQLITE_THREADSAFE=1
     SQLITE_ENABLE_JSON1
+    SQLITE_ENABLE_MATH_FUNCTIONS
+    SQLITE_ENABLE_PREUPDATE_HOOK=1
 )
+target_compile_definitions(sqlite3 PUBLIC SQLITE_ENABLE_PREUPDATE_HOOK=1)
+if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
+    target_link_libraries(sqlite3 PUBLIC m)
+endif()
 
 # Suppress warnings for third-party code
 if(MSVC)

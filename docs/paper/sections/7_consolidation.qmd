@@ -35,7 +35,11 @@ clusterer, shallow replay, and graph construction. Maintenance therefore does
 not create an episode, signal, working-memory row, long-term memory, blob, or
 searchable embedding, and it does not update normal throughput observations.
 The single `consolidation_state` output is an ordered hint for the caller; it
-does not schedule maintenance work by itself.
+does not schedule maintenance work by itself. In addition to the throughput
+classifier below, the private active-epoch store raises `Required` when its
+event, mutation, or allocated-byte safety ceiling is reached. That boundary is
+source- and modality-independent, remains asserted if ignored, and is cleared
+only after a successful forced-maintenance commit publishes a fresh epoch.
 
 A caller can use the engine hints as the external scheduling rule. Since the
 last committed forced request, including a coherent no-op with no persisted
@@ -73,8 +77,9 @@ z = (m_rate - r_floor) / range
 p_required(F,S,T) = p(F,S,T) / consolidation_escalation(T)
 p_rearm(F,S,T) = p(F,S,T)
                  + (1 - p(F,S,T)) * T
+p_drift(F,S,T) = 1 - p(F,S,T)
 
-consolidation_state =
+throughput_state =
   None,        if armed = false
                OR memories_since_consolidation <= 0
                OR range <= numeric_epsilon
@@ -86,17 +91,26 @@ consolidation_state =
 The required branch is evaluated first. Since
 `consolidation_escalation(T)` is always greater than one, the required boundary
 is strictly below the recommendation boundary after every floor or peak
-update. Elapsed wall or event time and arbitrary memory counts do not enter the
-state decision; backlog is only a positive-work guard. An explicit force
+update. Elapsed wall or event time and arbitrary durable memory counts do not
+enter the throughput decision; backlog is only a positive-work guard. The
+caller-facing state is `Required` whenever the bounded active epoch has reached
+a safety ceiling, and otherwise equals `throughput_state`. An explicit force
 request starts consolidation independently and its output state is `None`.
 A committed forced request acknowledges the active excursion by persisting
 `armed=false`, even when no coherent cluster exists. The acknowledgment resets
 the next event-derived range to the current rate: both floor and peak become
 that rate. This prevents a historical spike from suppressing recommendations
 after a throughput regime shift. Ordinary throughput observations establish a
-new peak and rearm the classifier only after normalized position $z$ reaches
-$p_{rearm}$; failed transactions restore the prior armed state and range. No
-count or elapsed-time horizon controls the reset. The floor, peak,
+new peak and rearm the classifier only after the observed relative range is
+material: $(r_{peak}-r_{floor})/\max(r_{peak}, \epsilon) \ge p_{drift}$.
+Because $p$ is clamped to $[0.20, 0.70]$, the material drawdown remains
+between $0.30$ and $0.80$ across the complete knob domain, including $T=1$.
+Once material, either recovery to $z \ge p_{rearm}$ or sustained degradation
+to $z \le p$ rearms the classifier. The lower branch prevents a gradually
+falling write rate from remaining permanently silent after acknowledgment,
+while the material-range guard keeps stable jitter from repeatedly rearming.
+Failed transactions restore the prior armed state and range. No count or
+elapsed-time horizon controls the reset. The floor, peak,
 initialization, and armed fields are stored in the singleton processor state row and
 participate in rollback, restart, and ephemeral-query snapshot restoration.
 The engine can recommend consolidation, but the API call is the only way to

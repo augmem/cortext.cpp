@@ -1,6 +1,11 @@
 #include "test_helpers.hpp"
 #include "../src/capi_internal.hpp"
+#include "../src/cortext_pipeline_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
+#include "../src/operations/bounded_activation_shadow_internal.hpp"
+#include "../src/operations/rif_active_epoch_cache_internal.hpp"
+#include "../src/operations/sparse_retrieval_knobs_internal.hpp"
+#include <algorithm>
 #include <array>
 #include <any>
 #include <catch2/catch_approx.hpp>
@@ -13,6 +18,7 @@
 #include <string>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <cortext/clock.hpp>
@@ -20,6 +26,7 @@
 #include <cortext/capi.h>
 #include <cortext/cortext.hpp>
 #include <cortext/internal/replay_ingress.hpp>
+#include <cortext/signal.hpp>
 #include <cortext/store/sqlite_store.hpp>
 
 namespace
@@ -480,6 +487,55 @@ TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
   REQUIRE_FALSE (ephemeral.output.stored_memory_id.has_value ());
 }
 
+TEST_CASE ("Durable flushes one shared Natural accumulator unit",
+           "[cortext][retention][accumulator][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+
+  const auto first = ctx->ProcessTextAt (
+      "A calm sentence in one pending thought.", "stream/shared", 1000ULL,
+      cortext::Retention::Natural);
+  const auto second = ctx->ProcessTextAt (
+      "A second calm sentence in the same thought.", "stream/shared",
+      2000ULL, cortext::Retention::Natural);
+  REQUIRE_FALSE (first.output.stored_memory_id.has_value ());
+  REQUIRE_FALSE (second.output.stored_memory_id.has_value ());
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM memories WHERE source_id = ?",
+               { std::string ("stream/shared") })
+               .empty ());
+
+  const auto durable = ctx->ProcessTextAt (
+      "The explicit turn closes that pending thought.", "stream/shared",
+      3000ULL, cortext::Retention::Durable);
+  REQUIRE (durable.output.stored_memory_id.has_value ());
+  const auto memory_rows = store->Execute (
+      "SELECT memory_id, n_signals FROM memories WHERE source_id = ? "
+      "AND kind = 'LONG_TERM'",
+      { std::string ("stream/shared") });
+  REQUIRE (memory_rows.size () == 1);
+  REQUIRE (AnyToLongLong (memory_rows[0].at ("n_signals")) == 3);
+  const auto signal_rows = store->Execute (
+      "SELECT timestamp, serial_position FROM signals WHERE memory_id = ? "
+      "ORDER BY serial_position",
+      { AnyToLongLong (memory_rows[0].at ("memory_id")) });
+  REQUIRE (signal_rows.size () == 3);
+  REQUIRE (AnyToLongLong (signal_rows[0].at ("timestamp")) == 1000);
+  REQUIRE (AnyToLongLong (signal_rows[1].at ("timestamp")) == 2000);
+  REQUIRE (AnyToLongLong (signal_rows[2].at ("timestamp")) == 3000);
+}
+
 TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
            "[cortext][belief_revision][eval][aist]")
 {
@@ -700,6 +756,310 @@ TEST_CASE ("Cortext media ingress validates processing inputs before use",
                                         "stream/source"));
     REQUIRE_NOTHROW (ctx->ProcessImage (pixel, 1, 1, 3, "stream/source"));
   }
+}
+
+TEST_CASE ("encoded modalities and source cardinalities share bounded work",
+           "[cortext][performance][modality][source_id]"
+           "[bounded_activation_shadow]")
+{
+  cortext::testing::ScopedEnvVar profile_work (
+      "CORTEXT_PROFILE_WORK_COUNTERS", "1");
+  cortext::testing::ScopedEnvVar profile_graph (
+      "CORTEXT_PROFILE_GRAPH_RETRIEVAL", "1");
+  cortext::testing::ScopedEnvVar profile_emotion (
+      "CORTEXT_PROFILE_EMOTIONAL_CASCADE", "1");
+  cortext::testing::ScopedEnvVar shadow_enabled (
+      "CORTEXT_BOUNDED_ACTIVATION_SHADOW", "1");
+
+  namespace shadow
+      = cortext::operations::bounded_activation_shadow_internal;
+
+  struct CounterSpec
+  {
+    const char *name;
+    const char *primary;
+    const char *secondary;
+    double fixed_bound;
+  };
+  const std::array<CounterSpec, 17> kCounters { {
+    { "retrieval_suppression_id_count",
+      "SignalProcessor.retrieval_suppression_id_count", nullptr, 4096.0 },
+    { "predictive_id_count", "SignalProcessor.predictive_id_count", nullptr,
+      4096.0 },
+    { "rollback_full_cache_copy_count",
+      "SignalProcessor.snapshot_full_cache_copy_count", nullptr, 0.0 },
+    { "rollback_cache_entry_copy_count",
+      "SignalProcessor.snapshot_cache_entry_copy_count", nullptr, 0.0 },
+    { "graph_candidate_count", "GraphRetrieve.candidate_count", nullptr,
+      4096.0 },
+    { "graph_exact_comparison_count",
+      "GraphRetrieve.family_exact_comparison_count", nullptr,
+      static_cast<double> (
+          cortext::operations::sparse_retrieval_knobs_internal::
+              FamilyExactComparisonLimit (0.5, 0.5, 0.5)) },
+    { "graph_cache_rebuild_count", "GraphRetrieve.cache_rebuild_count",
+      nullptr, 1.0 },
+    { "graph_rows_visited", "GraphRetrieve.rows_visited", nullptr, 4096.0 },
+    { "competition_candidate_count", "Competition.candidate_count", nullptr,
+      4096.0 },
+    { "competition_rows_visited", "Competition.rows_visited", nullptr,
+      4096.0 },
+    { "competition_rows_touched", "Competition.rows_touched", nullptr,
+      4096.0 },
+    { "supersession_current_candidate_count",
+      "MemoryStorage.supersession_current_candidate_count", nullptr,
+      4096.0 },
+    { "supersession_historical_candidate_count",
+      "MemoryStorage.supersession_historical_candidate_count", nullptr,
+      4096.0 },
+    { "supersession_rows_visited",
+      "MemoryStorage.supersession_current_rows_visited",
+      "MemoryStorage.supersession_historical_rows_visited", 4096.0 },
+    { "emotional_source_count", "EmotionalCascade.source_count", nullptr,
+      4096.0 },
+    { "emotional_neighbor_count", "EmotionalCascade.neighbor_count", nullptr,
+      4096.0 },
+    { "emotional_update_count", "EmotionalCascade.update_count", nullptr,
+      4096.0 },
+  } };
+  constexpr std::array<const char *, 4> kSharedOperations {
+    "cortext::operations::GraphAugmentedRetrieveCandidates",
+    "cortext::operations::ApplyRetrievalCompetition",
+    "cortext::operations::MemoryStorage",
+    "cortext::operations::PropagateEmotionalCascade",
+  };
+
+  struct RunResult
+  {
+    std::map<std::string, double> maxima;
+    std::vector<shadow::Snapshot> shadow_sequence;
+  };
+
+  auto run_cardinality = [&] (int source_count,
+                              cortext::Retention retention) {
+    auto store = std::shared_ptr<cortext::Store> (
+        cortext::SQLiteStore::Create (":memory:"));
+    cortext::testing::InitializeCoreSchema (*store);
+    cortext::SignalProcessor::Config cfg;
+    cfg.focus = 0.45;
+    cfg.sensitivity = 0.5;
+    cfg.stability = 0.5;
+    cortext::testing::RequireEncoder (cfg);
+    const auto active_epoch_limits
+        = cortext::operations::rif_active_epoch_cache_internal::DeriveLimits (
+            cfg.focus, cfg.sensitivity, cfg.stability);
+    const int supersession_candidate_limit
+        = cortext::core::SupersessionCandidateLimit (
+            cfg.focus, cfg.sensitivity, cfg.stability);
+    for (int index = 0; index <= supersession_candidate_limit; ++index)
+      {
+        std::vector<float> embedding (256, 0.0f);
+        embedding[static_cast<std::size_t> (index) % embedding.size ()]
+            = 1.0f;
+        const long long id = 100000LL + index;
+        cortext::testing::SeedEmbeddingV2 (*store, id, embedding, 1000);
+        cortext::testing::SeedMemoryV2 (
+            *store, id, id, "mixed/seed", "LONG_TERM", 1.0, 1000);
+      }
+    cortext::SignalProcessor processor (
+        cfg, store, cortext::BuildRootOperationSet (false));
+
+    RunResult result;
+    bool active_counter_seen = false;
+    for (int event = 0; event < 12; ++event)
+      {
+        const auto source
+            = "mixed/source/" + std::to_string (event % source_count);
+        const auto timestamp
+            = 1700000000000ULL + static_cast<std::uint64_t> (event) * 1000ULL;
+        cortext::Signal signal;
+        signal.embedding = Eigen::VectorXf::Zero (256);
+        signal.embedding[event % 256] = 1.0f;
+        signal.soft_anchor_embedding = signal.embedding;
+        signal.source_id = source;
+        signal.timestamp = timestamp;
+        signal.retention = retention;
+        signal.payload = std::vector<unsigned char> (
+            16, static_cast<unsigned char> (event + 1));
+        switch (event % 3)
+          {
+          case 0:
+            signal.modality = "text";
+            signal.mimetype = "text/plain";
+            break;
+          case 1:
+            signal.modality = "audio";
+            signal.mimetype = "audio/pcm;format=f32";
+            signal.sample_rate = 16000;
+            signal.num_samples = 4;
+            break;
+          default:
+            signal.modality = "image";
+            signal.mimetype = "image/raw;width=1;height=1;channels=3";
+            signal.width = 1;
+            signal.height = 1;
+            signal.channels = 3;
+            break;
+          }
+        const auto output = processor.Process (signal);
+        const auto snapshots = shadow::SnapshotsForTest ();
+        REQUIRE (snapshots.size () == 1);
+        const auto &snapshot = snapshots.front ();
+        REQUIRE (snapshot.available);
+        REQUIRE_FALSE (snapshot.disabled);
+        REQUIRE_FALSE (snapshot.restart_rebuild_required);
+        REQUIRE (snapshot.generation
+                 == static_cast<std::uint64_t> (event + 1));
+        REQUIRE (snapshot.event_index
+                 == static_cast<std::uint64_t> (event + 1));
+        REQUIRE (snapshot.root_count <= snapshot.parameters.roots);
+        REQUIRE (snapshot.leaf_count
+                 <= snapshot.parameters.leaf_capacity);
+        REQUIRE (snapshot.metrics.normal_comparisons
+                 <= snapshot.parameters.normal_comparison_bound);
+        REQUIRE (snapshot.metrics.normal_comparisons_max
+                 <= snapshot.parameters.normal_comparison_bound);
+        REQUIRE (snapshot.metrics.recall_comparisons
+                 <= snapshot.parameters.recall_comparison_bound);
+        REQUIRE (snapshot.metrics.recall_comparisons_max
+                 <= snapshot.parameters.recall_comparison_bound);
+        REQUIRE (snapshot.metrics.consolidation_comparisons_max
+                 <= snapshot.parameters.consolidation_comparison_bound);
+        REQUIRE (snapshot.metrics.allocation_after_initialization_count == 0);
+        result.shadow_sequence.push_back (snapshot);
+
+        REQUIRE (output.operation_ms.at (
+                     "SignalProcessor.rif_active_epoch_event_count")
+                 <= static_cast<double> (active_epoch_limits.event_count));
+        REQUIRE (output.operation_ms.at (
+                     "SignalProcessor.rif_active_epoch_mutation_count")
+                 <= static_cast<double> (
+                     active_epoch_limits.mutation_count));
+        REQUIRE (output.operation_ms.at (
+                     "SignalProcessor.rif_active_epoch_allocated_bytes")
+                 <= static_cast<double> (
+                     active_epoch_limits.allocated_bytes));
+
+        for (const auto *operation : kSharedOperations)
+          REQUIRE (output.operation_ms.contains (operation));
+        if (retention == cortext::Retention::Durable)
+          REQUIRE (output.operation_ms.contains (
+              "SignalProcessor.sqlite_wal_checkpoint"));
+        else
+          REQUIRE_FALSE (output.operation_ms.contains (
+              "SignalProcessor.sqlite_wal_checkpoint"));
+        for (std::size_t index = 0; index < kCounters.size (); ++index)
+          {
+            const auto &spec = kCounters[index];
+            auto value = [&] (const char *key) {
+              if (!key)
+                return 0.0;
+              const auto it = output.operation_ms.find (key);
+              return it == output.operation_ms.end () ? 0.0 : it->second;
+            };
+            const double observed = value (spec.primary) + value (spec.secondary);
+            INFO ("counter=" << spec.name << " source_count=" << source_count
+                              << " event=" << event);
+            REQUIRE (std::isfinite (observed));
+            REQUIRE (observed >= 0.0);
+            REQUIRE (observed <= spec.fixed_bound);
+            result.maxima[spec.name]
+                = std::max (result.maxima[spec.name], observed);
+            active_counter_seen = active_counter_seen || observed > 0.0;
+          }
+      }
+
+    REQUIRE (result.maxima["supersession_rows_visited"]
+             > result.maxima["supersession_current_candidate_count"]
+                   + result.maxima["supersession_historical_candidate_count"]);
+
+    const auto before_maintenance = result.shadow_sequence.back ();
+
+    cortext::Signal maintenance;
+    maintenance.embedding = Eigen::VectorXf::Zero (256);
+    maintenance.source_id = "mixed/maintenance";
+    maintenance.timestamp = 1700000013000ULL;
+    maintenance.retention = retention;
+    maintenance.force_consolidation = true;
+    const auto reset = processor.Process (maintenance);
+    REQUIRE (reset.operation_ms.at (
+                 "SignalProcessor.rif_active_epoch_event_count")
+             == 0.0);
+    REQUIRE (reset.operation_ms.at (
+                 "SignalProcessor.rif_active_epoch_mutation_count")
+             == 0.0);
+    REQUIRE (reset.operation_ms.at (
+                 "SignalProcessor.rif_active_epoch_allocated_bytes")
+             < static_cast<double> (active_epoch_limits.allocated_bytes));
+    const auto after_maintenance = shadow::SnapshotsForTest ();
+    REQUIRE (after_maintenance.size () == 1);
+    REQUIRE (after_maintenance.front ().generation
+             == before_maintenance.generation);
+    REQUIRE (after_maintenance.front ().event_index
+             == before_maintenance.event_index);
+    REQUIRE (after_maintenance.front ().state_digest
+             == before_maintenance.state_digest);
+
+    const auto source_rows = store->Execute (
+        "SELECT COUNT(DISTINCT source_id) AS n FROM signals");
+    REQUIRE (AnyToLongLong (source_rows[0].at ("n")) == source_count);
+    const auto modality_rows = store->Execute (
+        "SELECT DISTINCT modality FROM signals ORDER BY modality");
+    std::unordered_set<std::string> modalities;
+    for (const auto &row : modality_rows)
+      modalities.insert (std::any_cast<std::string> (row.at ("modality")));
+    REQUIRE (modalities
+             == std::unordered_set<std::string> { "audio", "image", "text" });
+    REQUIRE (active_counter_seen);
+    return result;
+  };
+
+  std::optional<std::vector<shadow::Snapshot>> natural_two_source_sequence;
+  for (const auto retention : { cortext::Retention::Natural,
+                                cortext::Retention::Durable })
+    {
+      const auto two_sources = run_cardinality (2, retention);
+      const auto four_sources = run_cardinality (4, retention);
+      REQUIRE (two_sources.shadow_sequence.size ()
+               == four_sources.shadow_sequence.size ());
+      for (std::size_t event = 0; event < two_sources.shadow_sequence.size ();
+           ++event)
+        {
+          const auto &two = two_sources.shadow_sequence[event];
+          const auto &four = four_sources.shadow_sequence[event];
+          REQUIRE (two.generation == four.generation);
+          REQUIRE (two.event_index == four.event_index);
+          REQUIRE (two.state_digest == four.state_digest);
+          REQUIRE (two.metrics.normal_comparisons
+                   == four.metrics.normal_comparisons);
+          REQUIRE (two.metrics.recall_comparisons
+                   == four.metrics.recall_comparisons);
+          REQUIRE (two.metrics.consolidation_comparisons
+                   == four.metrics.consolidation_comparisons);
+        }
+      if (retention == cortext::Retention::Natural)
+        natural_two_source_sequence = two_sources.shadow_sequence;
+      else
+        {
+          REQUIRE (natural_two_source_sequence.has_value ());
+          REQUIRE (natural_two_source_sequence->size ()
+                   == two_sources.shadow_sequence.size ());
+          for (std::size_t event = 0;
+               event < two_sources.shadow_sequence.size (); ++event)
+            REQUIRE (natural_two_source_sequence->at (event).state_digest
+                     == two_sources.shadow_sequence[event].state_digest);
+        }
+      for (std::size_t index = 0; index < kCounters.size (); ++index)
+        {
+          INFO ("counter=" << kCounters[index].name
+                            << " retention="
+                            << static_cast<int> (retention));
+          REQUIRE (two_sources.maxima.at (kCounters[index].name)
+                   <= kCounters[index].fixed_bound);
+          REQUIRE (four_sources.maxima.at (kCounters[index].name)
+                   <= kCounters[index].fixed_bound);
+        }
+    }
 }
 
 TEST_CASE ("timestamped replay persists working memory source timestamps",
@@ -1134,6 +1494,111 @@ TEST_CASE ("Cortext hydrates sqlite-objstore payloads",
   }
 }
 
+TEST_CASE ("Fallback hydration keeps a knob-bounded recent slice across "
+           "sources and modalities",
+           "[cortext][objstore][hydration][bounded][aist]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr double kFocus = 0.5;
+  constexpr double kSensitivity = 0.5;
+  constexpr double kStability = 0.5;
+  const int limit
+      = cortext::operations::sparse_retrieval_knobs_internal::
+            HydrationFallbackSignalLimit (kFocus, kSensitivity, kStability);
+  REQUIRE (limit == 128);
+
+  struct Surface
+  {
+    long long memory_id;
+    std::string source_id;
+    std::string modality;
+    std::string mime;
+  };
+  const std::array<Surface, 3> surfaces = {
+    Surface{ 101, "opaque-source-7f", "text", "text/plain" },
+    Surface{ 202, "device://opaque/91", "audio", "audio/pcm" },
+    Surface{ 303, "urn:opaque:source:ab", "image", "image/png" },
+  };
+
+  for (std::size_t surface_index = 0; surface_index < surfaces.size ();
+       ++surface_index)
+    {
+      const auto &surface = surfaces[surface_index];
+      const int row_count = limit + 7;
+      store->Execute (
+          "INSERT INTO memories(memory_id, source_id, kind, start_ts, "
+          "end_ts, n_signals, modality, created_at) "
+          "VALUES (?, ?, 'WORKING', ?, NULL, ?, ?, ?)",
+          { surface.memory_id, surface.source_id,
+            static_cast<long long> (surface_index + 1),
+            static_cast<long long> (row_count), surface.modality,
+            static_cast<long long> (surface_index + 1) });
+
+      for (int serial = 0; serial < row_count; ++serial)
+        {
+          std::vector<unsigned char> blob_id (32, 0);
+          blob_id[0] = static_cast<unsigned char> (surface_index + 1);
+          blob_id[1] = static_cast<unsigned char> (serial & 0xff);
+          blob_id[2]
+              = static_cast<unsigned char> ((serial >> 8) & 0xff);
+          const std::string marker
+              = std::to_string (surface.memory_id) + ":"
+                + std::to_string (serial);
+          const std::vector<unsigned char> payload (marker.begin (),
+                                                    marker.end ());
+          store->Execute (
+              "INSERT INTO objstore_data(id, data) VALUES (?, ?)",
+              { blob_id, payload });
+          store->Execute (
+              "INSERT INTO signals(memory_id, source_id, embedding_id, "
+              "blob_id, timestamp, modality, mime, serial_position, "
+              "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              { surface.memory_id, surface.source_id,
+                static_cast<long long> (100000 + serial), blob_id,
+                static_cast<long long> (serial), surface.modality,
+                surface.mime, static_cast<long long> (serial),
+                static_cast<long long> (serial) });
+        }
+    }
+
+  cortext::Cortext::Config cfg;
+  cfg.focus = kFocus;
+  cfg.sensitivity = kSensitivity;
+  cfg.stability = kStability;
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
+  REQUIRE (ctx != nullptr);
+  const auto hydrated = ctx->DebugHydrateForTest ({}, {});
+
+  REQUIRE (hydrated.working_memory.size () == surfaces.size ());
+  REQUIRE (hydrated.output.operation_ms.at (
+               "Cortext.fallback_hydration_signal_limit")
+           == 128.0);
+  REQUIRE (hydrated.output.operation_ms.at (
+               "Cortext.fallback_hydration_signal_rows")
+           == 384.0);
+  for (std::size_t i = 0; i < surfaces.size (); ++i)
+    {
+      const auto &surface = surfaces[i];
+      const auto &memory = hydrated.working_memory[i];
+      INFO (surface.modality);
+      REQUIRE (memory.id == surface.memory_id);
+      REQUIRE (memory.source_id == surface.source_id);
+      REQUIRE (memory.modality == surface.modality);
+      REQUIRE (memory.mimetype == surface.mime);
+      REQUIRE (memory.content.size () == static_cast<std::size_t> (limit));
+      const std::string first (memory.content.front ().begin (),
+                               memory.content.front ().end ());
+      const std::string last (memory.content.back ().begin (),
+                              memory.content.back ().end ());
+      REQUIRE (first == std::to_string (surface.memory_id) + ":7");
+      REQUIRE (last == std::to_string (surface.memory_id) + ":134");
+    }
+}
+
 TEST_CASE ("Cortext filters mixed signal blobs to the memory surface",
            "[cortext][hydration][aist]")
 {
@@ -1201,6 +1666,68 @@ TEST_CASE ("Cortext filters mixed signal blobs to the memory surface",
   REQUIRE (memory.mimetype == "text/plain");
   REQUIRE (memory.content.size () == 1);
   REQUIRE (TextFromMemory (memory) == source_text);
+}
+
+TEST_CASE ("Fallback hydration applies its bound after surface filtering",
+           "[cortext][objstore][hydration][bounded][aist]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kMemoryId = 702;
+  constexpr int kLimit = 128;
+  std::vector<float> embedding (256, 0.0f);
+  embedding[0] = 1.0f;
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, 0)",
+      { kMemoryId, embedding });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+      "start_ts, end_ts, n_signals, modality, strength, created_at) "
+      "VALUES (?, ?, 'opaque/mixed', 'LONG_TERM', 0, 300, ?, 'text', 1, 0)",
+      { kMemoryId, kMemoryId, static_cast<long long> (kLimit + 1) });
+
+  const std::string expected = "older matching text payload";
+  const std::vector<unsigned char> text_payload (expected.begin (),
+                                                 expected.end ());
+  const auto text_blob_rows = store->Execute (
+      "SELECT objstore_put(?1) AS id", { text_payload });
+  const auto text_blob_id = BlobFromAny (text_blob_rows[0].at ("id"));
+  store->Execute (
+      "INSERT INTO signals(memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'opaque/mixed', 0, 'text', 'text/plain', ?, 0, 0)",
+      { kMemoryId, kMemoryId, text_blob_id });
+
+  const std::vector<unsigned char> invalid_text_payload
+      = { 0, 1, 2, 3, 255 };
+  const auto invalid_blob_rows = store->Execute (
+      "SELECT objstore_put(?1) AS id", { invalid_text_payload });
+  const auto invalid_blob_id = BlobFromAny (invalid_blob_rows[0].at ("id"));
+  for (int serial = 1; serial <= kLimit; ++serial)
+    {
+      store->Execute (
+          "INSERT INTO signals(memory_id, embedding_id, source_id, "
+          "timestamp, modality, mime, blob_id, serial_position, created_at) "
+          "VALUES (?, ?, 'opaque/mixed', ?, 'text', 'text/plain', ?, ?, ?)",
+          { kMemoryId, kMemoryId, static_cast<long long> (serial),
+            invalid_blob_id, static_cast<long long> (serial),
+            static_cast<long long> (serial) });
+    }
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
+  REQUIRE (ctx != nullptr);
+  const auto hydrated = ctx->DebugHydrateForTest ({ kMemoryId }, {});
+  REQUIRE (hydrated.retrieved_memory.size () == 1);
+  REQUIRE (hydrated.retrieved_memory[0].content.size () == 1);
+  REQUIRE (TextFromMemory (hydrated.retrieved_memory[0]) == expected);
+  REQUIRE (hydrated.output.operation_ms.at (
+               "Cortext.fallback_hydration_signal_rows")
+           == 1.0);
 }
 
 TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",

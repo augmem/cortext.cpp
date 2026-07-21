@@ -55,6 +55,8 @@ const cortext_cpp_sources = &.{
     "src/operations/meta_learning_internal.cpp",
     "src/operations/graph_build.cpp",
     "src/operations/graph_retrieval.cpp",
+    "src/operations/sparse_retrieval_route_internal.cpp",
+    "src/operations/sparse_retrieval_route_sqlite_internal.cpp",
     "src/operations/eviction_policy_override.cpp",
     "src/operations/storage_pressure.cpp",
     "src/operations/retrieval_trace_state.cpp",
@@ -300,6 +302,7 @@ pub fn build(b: *std.Build) void {
     const ggml_blas_lib = b.option([]const u8, "ggml_blas_lib", "Optional path to libggml-blas");
 
     const eigen = b.dependency("eigen", .{});
+    const hnswlib = b.dependency("hnswlib", .{});
     const nlohmann_json = b.dependency("nlohmann_json", .{});
 
     const mod = b.createModule(.{
@@ -315,6 +318,21 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
         .version = .{ .major = 1, .minor = 2, .patch = 2 },
     });
+
+    // Keep Zig consumers on the same pinned hnswlib safety contract as the
+    // CMake build without mutating Zig's shared package cache.
+    const prepare_hnswlib = b.addSystemCommand(&.{"cmake"});
+    prepare_hnswlib.addPrefixedDirectoryArg(
+        "-DHNSWLIB_SOURCE_DIR=",
+        hnswlib.path(""),
+    );
+    const patched_hnswlib = prepare_hnswlib.addPrefixedOutputDirectoryArg(
+        "-DHNSWLIB_OUTPUT_DIR=",
+        "hnswlib-patched",
+    );
+    prepare_hnswlib.addArg("-P");
+    prepare_hnswlib.addFileArg(b.path("cmake/PrepareHnswlibForZig.cmake"));
+    prepare_hnswlib.addFileInput(b.path("cmake/hnswlib-prefetch-bounds.patch"));
 
     if (fetch_aist_model) {
         if (!std.mem.eql(u8, aist_model_quant, "q8_0") and
@@ -340,6 +358,7 @@ pub fn build(b: *std.Build) void {
     mod.addIncludePath(b.path("third_party/sqlite-objstore/include"));
     mod.addIncludePath(b.path("third_party/sqlite-objstore/third_party/blake3"));
     mod.addIncludePath(eigen.path(""));
+    mod.addIncludePath(patched_hnswlib);
     mod.addIncludePath(nlohmann_json.path("include"));
 
     const generated = b.addWriteFiles();
@@ -412,6 +431,8 @@ pub fn build(b: *std.Build) void {
     mod.addCMacro("SQLITE_CORE", "1");
     mod.addCMacro("SQLITE_THREADSAFE", "1");
     mod.addCMacro("SQLITE_ENABLE_JSON1", "1");
+    mod.addCMacro("SQLITE_ENABLE_MATH_FUNCTIONS", "1");
+    mod.addCMacro("SQLITE_ENABLE_PREUPDATE_HOOK", "1");
     mod.addCMacro("CORTEXT_EMBED_VEC", "1");
     mod.addCMacro("SQLITE_VEC_OMIT_FS", "1");
     mod.addCMacro("CORTEXT_EMBED_OBJSTORE", "1");

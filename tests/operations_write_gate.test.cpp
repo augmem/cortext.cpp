@@ -321,3 +321,162 @@ TEST_CASE ("ComputeWriteGate lowers threshold under high NE",
 #endif
   }
 }
+
+TEST_CASE ("ComputeWriteGate profiles every decision input without changing it",
+           "[operations][write_gate][profile]")
+{
+  cortext::testing::ScopedEnvVar profile (
+      "CORTEXT_PROFILE_WORK_COUNTERS", "1");
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
+  s.embedding.normalize ();
+  s.timestamp = 100000;
+  s.source_id = "opaque/profile/source";
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  SetupAccumulatorState (pctx, s, 0.8, 2.0, 3);
+
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFlushRequired (true);
+  ctx.SetThresholdTDynamic (0.3);
+
+  ComputeWriteGate op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  const auto &profile_values = ctx.GetOperationTimings ();
+  REQUIRE (ctx.GetAccumulatorWriteDecision ());
+  REQUIRE (profile_values.at ("WriteGate.flush_trigger") == 1.0);
+  REQUIRE (profile_values.at ("WriteGate.spike_bypass") == 0.0);
+  REQUIRE (profile_values.at ("WriteGate.accumulator_available") == 1.0);
+  REQUIRE (profile_values.at ("WriteGate.n_signals") == 3.0);
+  REQUIRE (profile_values.at ("WriteGate.write_accumulator") == 1.0);
+  REQUIRE (profile_values.at ("WriteGate.reason_code") == 5.0);
+  REQUIRE (profile_values.at ("WriteGate.window_score")
+           > profile_values.at ("WriteGate.effective_threshold"));
+  REQUIRE (profile_values.at ("WriteGate.score_margin") > 0.0);
+}
+
+TEST_CASE ("ComputeWriteGate profiles non-boundary rejection",
+           "[operations][write_gate][profile]")
+{
+  cortext::testing::ScopedEnvVar profile (
+      "CORTEXT_PROFILE_WORK_COUNTERS", "1");
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
+  s.embedding.normalize ();
+  s.timestamp = 100000;
+  s.source_id = "opaque/profile/source";
+
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  SetupAccumulatorState (pctx, s, 0.8, 2.0, 3);
+
+  OperationContext ctx (s, pctx, cfg);
+  ctx.SetFlushRequired (false);
+  ctx.SetThresholdTDynamic (0.3);
+
+  ComputeWriteGate op;
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  const auto &profile_values = ctx.GetOperationTimings ();
+  REQUIRE_FALSE (ctx.GetAccumulatorWriteDecision ());
+  REQUIRE (profile_values.at ("WriteGate.flush_trigger") == 0.0);
+  REQUIRE (profile_values.at ("WriteGate.write_accumulator") == 0.0);
+  REQUIRE (profile_values.at ("WriteGate.reason_code") == 2.0);
+}
+
+TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
+           "[operations][write_gate][profile]")
+{
+  cortext::testing::ScopedEnvVar profile (
+      "CORTEXT_PROFILE_WORK_COUNTERS", "1");
+
+  Signal s;
+  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
+  s.embedding.normalize ();
+  s.timestamp = 100000;
+  s.source_id = "opaque/profile/source";
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+
+  ComputeWriteGate op;
+
+  SECTION ("ephemeral")
+  {
+    s.retention = Retention::Ephemeral;
+    ProcessorContext pctx;
+    SetupAccumulatorState (pctx, s, 0.8, 2.0, 3);
+    OperationContext ctx (s, pctx, cfg);
+    ctx.SetFlushRequired (true);
+    ctx.SetSpikeBypass (true);
+    ctx.SetThresholdTDynamic (0.3);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+    const auto &values = ctx.GetOperationTimings ();
+    REQUIRE_FALSE (ctx.GetAccumulatorWriteDecision ());
+    REQUIRE (values.at ("WriteGate.accumulator_available") == 0.0);
+    REQUIRE (values.at ("WriteGate.write_accumulator") == 0.0);
+    REQUIRE (values.at ("WriteGate.reason_code") == 1.0);
+  }
+
+  SECTION ("no accumulator")
+  {
+    ProcessorContext pctx;
+    OperationContext ctx (s, pctx, cfg);
+    ctx.SetFlushRequired (true);
+    ctx.SetThresholdTDynamic (0.3);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+    const auto &values = ctx.GetOperationTimings ();
+    REQUIRE_FALSE (ctx.GetAccumulatorWriteDecision ());
+    REQUIRE (values.at ("WriteGate.accumulator_available") == 0.0);
+    REQUIRE (values.at ("WriteGate.write_accumulator") == 0.0);
+    REQUIRE (values.at ("WriteGate.reason_code") == 3.0);
+  }
+
+  SECTION ("forced")
+  {
+    ProcessorContext pctx;
+    SetupAccumulatorState (pctx, s, 0.1, 0.2, 2);
+    OperationContext ctx (s, pctx, cfg);
+    ctx.SetFlushRequired (false);
+    ctx.SetSpikeBypass (true);
+    ctx.SetThresholdTDynamic (0.9);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+    const auto &values = ctx.GetOperationTimings ();
+    REQUIRE (ctx.GetAccumulatorWriteDecision ());
+    REQUIRE (values.at ("WriteGate.force_write") == 1.0);
+    REQUIRE (values.at ("WriteGate.write_accumulator") == 1.0);
+    REQUIRE (values.at ("WriteGate.reason_code") == 4.0);
+  }
+
+  SECTION ("score rejected")
+  {
+    ProcessorContext pctx;
+    SetupAccumulatorState (pctx, s, 0.1, 0.2, 2);
+    OperationContext ctx (s, pctx, cfg);
+    ctx.SetFlushRequired (true);
+    ctx.SetThresholdTDynamic (0.9);
+    op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+    const auto &values = ctx.GetOperationTimings ();
+    REQUIRE_FALSE (ctx.GetAccumulatorWriteDecision ());
+    REQUIRE (values.at ("WriteGate.force_write") == 0.0);
+    REQUIRE (values.at ("WriteGate.write_accumulator") == 0.0);
+    REQUIRE (values.at ("WriteGate.reason_code") == 6.0);
+    REQUIRE (values.at ("WriteGate.score_margin") < 0.0);
+  }
+}

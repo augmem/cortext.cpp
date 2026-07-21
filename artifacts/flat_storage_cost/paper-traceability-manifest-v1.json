@@ -1,0 +1,1339 @@
+{
+  "algorithm_groups": [
+    {
+      "id": "consolidation-envelope-and-detector",
+      "paths": [
+        "src/operations/accumulator_reset.cpp",
+        "src/operations/consolidation.cpp",
+        "src/operations/consolidation_shallow.cpp",
+        "src/operations/consolidation_throughput_state_internal.hpp"
+      ]
+    },
+    {
+      "id": "shared-retention-and-rollback",
+      "paths": [
+        "src/operations/accumulator.cpp",
+        "src/operations/signal_record_rollback_internal.hpp",
+        "src/operations/write_gate.cpp",
+        "src/operations/working_memory.cpp",
+        "src/signal_processor.cpp"
+      ]
+    },
+    {
+      "id": "lazy-rif-active-epoch",
+      "paths": [
+        "src/operations/competition.cpp",
+        "src/operations/execution_cache_sidecar_internal.hpp",
+        "src/operations/memory_strength.cpp",
+        "src/operations/rif_active_epoch_cache_internal.hpp",
+        "src/operations/rif_state_internal.hpp",
+        "src/store.cpp",
+        "src/store/schema.cpp"
+      ]
+    },
+    {
+      "id": "bounded-graph-retrieval",
+      "paths": [
+        "src/operations/sparse_retrieval_knobs_internal.hpp",
+        "src/operations/bounded_activation_shadow_internal.hpp",
+        "src/operations/family_embedding_features_internal.hpp",
+        "src/operations/graph_retrieval.cpp",
+        "src/operations/historical_surface_search_cache_internal.hpp",
+        "src/operations/retrieval_trace_state.cpp",
+        "src/operations/retrieval_trace_state.hpp",
+        "src/operations/sparse_retrieval_route_internal.cpp",
+        "src/operations/sparse_retrieval_route_internal.hpp",
+        "src/operations/sparse_retrieval_route_sqlite_internal.cpp",
+        "src/operations/sparse_retrieval_route_sqlite_internal.hpp"
+      ]
+    },
+    {
+      "id": "emotional-propagation-cache",
+      "paths": [
+        "src/experimental_env.hpp",
+        "src/operations/emotion.cpp",
+        "src/operations/emotion_cascade.cpp",
+        "src/operations/emotional_metadata_cache_internal.hpp"
+      ]
+    },
+    {
+      "id": "memory-storage-and-graph-maintenance",
+      "paths": [
+        "src/operations/active_signal_embedding_ring_internal.hpp",
+        "src/operations/association_fanout_cache_internal.hpp",
+        "src/operations/detect_memory_usage.cpp",
+        "src/operations/eviction_policy.hpp",
+        "src/operations/memory_storage.cpp",
+        "src/operations/predictive.cpp",
+        "src/operations/reconsolidation.cpp",
+        "src/operations/stability.cpp"
+      ]
+    },
+    {
+      "id": "runtime-composition",
+      "paths": [
+        "src/cortext.cpp",
+        "src/cortext_pipeline_internal.hpp"
+      ]
+    },
+    {
+      "id": "bounded-work-instrumentation",
+      "paths": [
+        "src/operations/consolidation_epoch_profile_internal.hpp",
+        "src/store/commit_profile_internal.hpp",
+        "src/store/mutation_audit_internal.hpp"
+      ]
+    },
+    {
+      "id": "experiment-harness-and-audit",
+      "paths": [
+        "examples/benchmark/chat_replay_live_run.cpp",
+        "tools/audit_public_retrieval_control.py",
+        "tools/audit_storage_cost_profile.py",
+        "tools/benchmark_row_addressed_route_sqlite.py",
+        "tools/build_sqlite_hnsw_knob_ablation.py",
+        "tools/build_signal_centroid_ring_ablation.py",
+        "tools/extract_claude_session_packets.py",
+        "tools/extract_consolidation_schedule.py",
+        "tools/build_recenter_activation_overlap.py",
+        "tools/build_write_gate_incidence_attribution.py"
+      ]
+    }
+  ],
+  "base_commit": "1bf3f1c5f6470bb8c4d458a0389c19c5123f9b81",
+  "evaluated_bounded_route_variants": [
+    "reciprocal-route-only",
+    "three-sparse-graphs",
+    "construction-budget-4096",
+    "construction-budget-8192-reciprocal-64",
+    "two-graphs-construction-16384-retrieval-1280-reciprocal-64"
+  ],
+  "ownership_model": {
+    "durable_only_flush_barrier": true,
+    "manuscript_claim_fingerprints": [
+      "Natural and Durable use one ingestion algorithm",
+      "post-commit flush/checkpoint barrier"
+    ],
+    "natural_durable_shared_algorithm": true,
+    "source_claim_fingerprints": [
+      "Natural and Durable use one ingestion algorithm",
+      "post-commit flush/checkpoint barrier"
+    ]
+  },
+  "record_defaults": {
+    "source_section": {
+      "heading": "Experiment and algorithm traceability inventory",
+      "path": "docs/paper/sections/11_optimization.qmd"
+    }
+  },
+  "records": [
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "b56ea0786ff5b4a0347d0e7a6de9aa3c22223c53b478b47bdcee30fe163550be"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:Competition.rif_recovery_active_sql.suppression-cache",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "088e84fc0f75908911e1c731e1c831075f96e529956ad6d5f9383e812219ed00"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:Competition.rif_recovery_active_sql.update-returning",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "54ac53f37f4187a01147177e8927d12a602de6c0ee93270302a8e4fd4790b33a"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:EmotionalCascade.knob-derived-bounded-priority-prefix",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "0a32e2a73b19103495708ca5423d63368db7146f100bf8c6715a63e797b8b725"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:GraphRetrieve.seed_cache_family_compare.coordinate-block",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "e64d8c7babf291c29f516e1d6576b1542b4f13679b5225f0750718bfda15471d"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:GraphRetrieve.seed_cache_family_compare.precomputed-features",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "b6a379c294f4a0d05a9b35491e38d9b668b192bba899dc3bd9a71281c0686fef"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:GraphRetrieve.seed_cache_family_compare.projection-bound",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "4e7f10f89b8b41af9c92b540711855d97659c785483fef309cf694fb43f0f359"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:MemoryStorage.supersession_metric_index",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "12b0d68b0d013529b4c9eb1fda6c42a867741aed5cdcb4f469a9076b381b9fdd"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:RifActiveEpoch.row-batch-only-performance-cure",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "focused fresh/copied-late candidate window under the recorded 15,695-packet Natural profile contract",
+      "decision": "rejected",
+      "evidence_fingerprints": [
+        "4d4a50e2718a00072f815ffab657fa8975b3d314cc65d7218f1ce4aab74fd973"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "rejected:shared-shadow-sqlite-operation-view",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "candidate was removed after its failed gate"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "failed-end-anchored-plateau-reranked-to-next-independent-exact-candidate",
+      "evidence_fingerprints": [
+        "9b091c86c6ecfc37241a26465f06c427ecbbf9866036d90285072fae31c1e54f"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:accepted_tree_natural_plateau_rerank",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "recorded-measurement",
+      "evidence_fingerprints": [
+        "a090d13389c441447b71c4633f705e85e8f07e834b76d5b6887a6a644402acb7"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:active_epoch_sqlite_evaluation",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "reject-anchor-only-candidate-set-retain-anchors-only-as-bounded-sparse-graph-restart-entry",
+      "evidence_fingerprints": [
+        "5db8b893b7b26688ccb67e820f1a40485b8420c7f3d9b91d69d27448579794a7"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:anchor_only_route_feasibility",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "recorded-measurement",
+      "evidence_fingerprints": [
+        "c4f44d388da1b64b70384618ef5d09b4b3d256613e825abe394f3f249d2b6c4c"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:baseline_results",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings; 512 deterministic top-16 queries; four opaque sources; text, audio, and image post-encoding labels; two graphs; 16,384 construction and 1,280 retrieval comparisons per graph; 64 reciprocal proposals",
+      "decision": "design-direction-approved-production-proof-pending",
+      "evidence_fingerprints": [
+        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c"
+      ],
+      "evidence_kind": "modeled",
+      "inventory_id": "state:bounded_route_hybrid_observation",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "35,496 normalized 256-dimensional embeddings; 512 age-stratified top-16 queries; F=S=T=0.5; observation-only private switch",
+      "decision": "complete-promising-shadow-candidate-not-ready-for-cutover",
+      "evidence_fingerprints": [
+        "fa4230d33022df68ed23c43b290a489d0c55bb086b0ce08c1955da7c33eca152"
+      ],
+      "evidence_kind": "observation-only",
+      "inventory_id": "state:bounded_sparse_routing_observation",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "rejected-fresh-process-and-rif-regression",
+      "evidence_fingerprints": [
+        "6caf42f13c23367491ddf85f40eb5db175a58bf55000b9291a3e64ee93edb637"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:competition_rif_returning_candidate",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "rejected-fresh-process-wall-and-rif-hard-gate",
+      "evidence_fingerprints": [
+        "12723ea9a4a77d7b4ba45313b2be47b48be68bf9b659282eb0ce3a8817b3bb2e"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:competition_suppression_state_cache_candidate",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retained-hotspot-improved-plateau-still-failed-reranked",
+      "evidence_fingerprints": [
+        "bfcebb61906d51cf52925e1a008bed02859685b1093a9eaa62fc49d3a46a3ef5"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:emotional_cascade_fixed_point_full_natural",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retained-local-gates-passed-full-natural-verification-next",
+      "evidence_fingerprints": [
+        "cfc22af065c3660f609c10dfb10a31a7a4d93e6ef0d43381d845500db53bfa5e"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:emotional_cascade_fixed_point_repair",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "rejected knob-derived priority-prefix candidate; 27 F/S/T structural points; exact B and logical B+1 shared-member seams; 15,695-packet fixed-time Natural midpoint against a same-binary control and identical 118-event consolidation schedule; 512 public top-16 queries over four opaque sources; nine-point production matrix intentionally not run after midpoint fail-fast",
+      "decision": "reject-before-nine-point-ablation-for-p99-and-public-retrieval-quality",
+      "evidence_fingerprints": [
+        "b8e4c4dc7243a094fad16ec82418ff7d3ab0fe022b3b2ed4901747c00225f3ab"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:emotional_cascade_fixed_work_candidate",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "midpoint p99 and public identity-quality gates failed",
+        "nine-point knob ablation was not run after the fail-fast rejection",
+        "Durable full-horizon behavior is not proven for this rejected candidate",
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retained-full-natural-improvement-flatness-failed-reranked",
+      "evidence_fingerprints": [
+        "c437d2be35f93e92524f0108695cc90d09ed11c6ef422bb12a60cdfa75e4ffae"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:emotional_metadata_cache_repair",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "reject-all-five-single-hierarchy-bounded-link-repairs",
+      "evidence_fingerprints": [
+        "ecaa356bb3c43b5af6db667804652f864113fdfe9f9432768923ad6fccd8c726"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:fixed5c_moved_centroid_reachability",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "recorded-measurement",
+      "evidence_fingerprints": [
+        "e180d8cf1c390e364d00164d795b1dd4151a8fd18e70e9ab1e463cacdaebad8b"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:graph_eligibility_db_proof",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retained-local-improvement-full-natural-flatness-gate-failed",
+      "evidence_fingerprints": [
+        "65305ad83c3ff1cc3ef273f8ee48c80eef178d405ad96520df57a98f62d4526c"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:graph_eligibility_repair",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "rejected-fresh-and-late-total-process-wall-regression",
+      "evidence_fingerprints": [
+        "79861dbdce7c0ced9e148ceddaa784c7c329dc044c4d3b5b02847de4294d2b59"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:graph_family_precomputed_features_candidate",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "rejected-late-process-graph-and-comparison-regression",
+      "evidence_fingerprints": [
+        "e8f2e5e6c8dd1e8de539404e7b531b186e79a4878eebb54692472b23a1594b56"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:graph_family_projection_bound_candidate",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "rejected-fresh-process-and-graph-regression",
+      "evidence_fingerprints": [
+        "683631b85f811294446d98f2e66ec93151c593897d7707f4bff10fa7431a97a0"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:graph_family_vector_bound_candidate",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retained-local-improvement-full-natural-flatness-gate-failed",
+      "evidence_fingerprints": [
+        "54f9c5e9235181e534d48fc68a3828f691ba62015c722bdde8db5f6852750d7f"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:graph_partial_distance_evaluation",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retained-local-gates-passed-family-compare-next",
+      "evidence_fingerprints": [
+        "0c28a16305eaf9a2af815274e767863ee883f097e85d9635f17135b704452582"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:graph_supersession_eligibility_repair",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "rejected private fixed-6C envelope; 27 structural F/S/T points and 931 assertions; one additional 15,695-packet Natural production-default pre-screen at F=0.45, S=T=0.5 with 512 public top-16 queries; exact nine-point corpus matrix not started after fail-fast rejection",
+      "decision": "rejected-after-production-default-prescreen-hard-gates",
+      "evidence_fingerprints": [
+        "4bcece2ce0d609b506e13ce283c069bcb4d5881e67ddb11b8a18a6ef59a69049"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:hnsw_fixed_6c_experiment",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the additional production-default pre-screen failed the hard gates",
+        "zero of nine exact corpus-matrix points were run after fail-fast rejection",
+        "the production fixed-5C default was not changed",
+        "whole-engine boundedness and production cutover are not proven",
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retain-incremental-consolidation-seal-within-current-latency-tradeoff-do-not-cut-over-before-bounded-restart-and-full-horizon-close",
+      "evidence_fingerprints": [
+        "f18054ed033325c0aea69e2bc189ebaf7c9f783c05dddb77cd2058d8fe282976"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:integrated_hnsw_consolidation_seal_experiment",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "2,500 deterministic Natural packets; four opaque source ids; text, audio, and image post-encoding labels; 128 public top-16 queries; two HNSW graphs; 512-candidate sealed-plus-delta route",
+      "decision": "retain-sealed-two-hnsw-plus-exact-delta-reseal-at-512-reject-live-update-and-every-consolidation-rebuild",
+      "evidence_fingerprints": [
+        "eceaf32b550a4d511981379db3f7656bab55b44cd4400b2f7b3feded9be10aea"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:integrated_hnsw_sparse_route_experiment",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retain-live-two-graph-route-for-cross-modality-restart-cycle-latency-and-engine-integration-proof",
+      "evidence_fingerprints": [
+        "197c570cb0209b0b7d63935e1a4a6ebea2f2ca65003a6581a6f079acf82b6d7c"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:live_surface_mutation_capture_experiment",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings; four SQLite blobs; 1,024 anchors; 512 deterministic top-16 route queries; separate 1,024-embedding fresh-prefix restart",
+      "decision": "retain-row-addressed-query-seam-reject-whole-snapshot-rewrite",
+      "evidence_fingerprints": [
+        "828851ddb716b6d27a28089951550dbf2d0e51e9d7061fc5f6c62fcc620509f3"
+      ],
+      "evidence_kind": "benchmark-only",
+      "inventory_id": "state:packed_route_sqlite_representation_experiment",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "100- and 200-event Natural and Durable instrumentation smoke profiles",
+      "decision": "complete",
+      "evidence_fingerprints": [
+        "b0f4f9f49236829c7d8dc831675cabe82e04428afccfef8f72983818211c39f6"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:plateau_profiler_smoke_proof",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "select-SignalProcessor.publish_rif_active_epoch",
+      "evidence_fingerprints": [
+        "35e402a8536dbbea2e5e94991807623901fba097b9cea233da5ea78c319f4f80"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:post_emotional_priority_rejection_rerank",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "select-shared-sqlite-activation-query-distance-materialization",
+      "evidence_fingerprints": [
+        "6af1c9dfe8a1550fcaff4e574fec14d0ac74b23a2929206b71c9eb5581309ff6"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:post_hnsw_cost_attribution",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retain-query-local-persisted-distance-reuse",
+      "evidence_fingerprints": [
+        "9ef6ad6179fc870657b2bd043ff2000743263255ed90e1320e0152e2f625c61f"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:post_hnsw_query_distance_reuse",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "paired fresh and copied-late 200-event Natural and Durable windows",
+      "decision": "recorded-measurement",
+      "evidence_fingerprints": [
+        "331c3e8a352a974bd3c5247cb28ca2ab2b17681c79e5fc4e8dc8537f0004e73c"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:post_shadow_rerank",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "twenty-six-review-thread-repair-active",
+      "evidence_fingerprints": [
+        "5fa99621223ce640de1cab344a86945e7a6455ac0e5d585ad4ba6bd5a4348c09"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:pr6_exact_head_ci_repair",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retain-feasibility-only-require-live-surface-mutation-capture-before-candidate-decision",
+      "evidence_fingerprints": [
+        "47fa93e666957958f4cec485b4a6afb8fd92f0a1ea28c936dfea9e1f3592f588"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:public_hnsw_route_prototype_experiment",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retain-real-GraphRetrieve-control-capture-live-surface-candidate-proof-recorded-separately",
+      "evidence_fingerprints": [
+        "79e04b1b383acef5611d76d6128a17f0ed8283ca7317f1728b7309bba431d027"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:public_retrieval_control_capture_experiment",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "reject-current-recenter-as-retrieval-centroid-reset",
+      "evidence_fingerprints": [
+        "29a6a51e91f6e663f59cbacf675465b4c01b0376a0df49657b5f012fa2adcb65"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:recenter_activation_overlap_natural_13000_v2",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "recorded-measurement",
+      "evidence_fingerprints": [
+        "f6e20cca3c59ff1f1144496e5e3ca747df4bd31fe0026301845f6a043cad8487"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:repair_results",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "correction from 34,456 complete embedding ids to 3,172 current long-term memory identities; 512 top-16 queries; ten 128-memory-node incremental feasibility epochs; 25/50/100-percent restart probes",
+      "decision": "retain-router-feasibility-require-exact-public-control-rerun",
+      "evidence_fingerprints": [
+        "e5c2c164b8e3a329ec89d05169cf550233e57d48ad7ab858ed596f8a94d31ea8"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:retrieval_quality_control_correction",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retain-for-source-health-and-continue-full-horizon-verification",
+      "evidence_fingerprints": [
+        "ba8d896958f51050d2ca578c4aa354af9370bb33f4746b2f705e6fb086baa6e1"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:rif_active_identity_ledger",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "15,695-packet Natural replay at F=0.45, S=T=0.5; 27 structural F/S/T points; nine production-shaped reset points; B=round(64+64F+32S+32T), with neutral B=128 and 129 used only as the logical B+1 population boundary; text/audio/image labels and two opaque source ids",
+      "decision": "local-hotspot-flat-full-natural-overall-gates-failed",
+      "evidence_fingerprints": [
+        "6d2ab8e49b315093b8ce0023dae6e07b8b159ed707a89c1e9b40ff30c339d26b"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:rif_epoch_consolidation_reset_candidate",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the named RIF publication hotspot is flat but the whole-engine Natural plateau failed",
+        "mandatory Natural retrieval quality failed",
+        "Durable verification and bounded restart remain open",
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "200-event fresh and 34,256-row copied-late SQLite seals; 3,544 reciprocal route-row updates; 1,024 anchors; 512 fixed-route queries",
+      "decision": "retain-row-addressed-snapshot-for-production-shaped-engine-evaluation",
+      "evidence_fingerprints": [
+        "49561d775e1c06ba04fcf28c2f237d14c2a2d38c21beb3d446247bc9b7f015d5"
+      ],
+      "evidence_kind": "benchmark-only",
+      "inventory_id": "state:row_addressed_route_sqlite_experiment",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "paired fresh and copied-late 200-event Natural and Durable windows",
+      "decision": "rejected-numeric-acceptance-gates-failed",
+      "evidence_fingerprints": [
+        "8bf7c3b51be906c312d8a00913970547e4f4c9deb33068cd1edfd5598e263f51"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:shadow_sqlite_scoped_evaluation",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "paired fresh and copied-late 200-event Natural and Durable windows",
+      "decision": "recorded-measurement",
+      "evidence_fingerprints": [
+        "c4a5811f138462e381bbad56bb4b577307ef0b84797dfbcbbdcaf237813f25bd"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:shadow_sqlite_seam_proof",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "migration 30; 15,695-packet Natural and 2,016-message Durable replays at F=0.45, S=T=0.5; 27 structural F/S/T points; nine 2,000-packet same-knob runs with 512 public queries and four opaque source ids per run; separate text/audio/image label proof",
+      "decision": "retain-local-write-surface-repair-whole-goal-continues",
+      "evidence_fingerprints": [
+        "19cc8ea4ce28c90b828697bef4a03e70af519be85a95f6d6f75f33b0ac972986"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:signal_centroid_ring_cutover",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "whole-engine Natural and Durable plateaus are not proven",
+        "emotional traversal and whole-engine restart remain unbounded",
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retained-production-default",
+      "evidence_fingerprints": [
+        "c0333a61318ec06b2739c3d1535698a91e9bb71322d49f34946d5c6250f75a00"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:sqlite_hnsw_knob_ablation",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "production-default 8C-to-9C SQLite HNSW route; 15,695-packet Natural replay, 2,016-message Durable replay, 30,380-packet maturity extension, 27 structural F/S/T points, and nine 4,000-packet quality points with 512 controls each",
+      "decision": "retained-production-default",
+      "evidence_fingerprints": [
+        "f39c0adefee67dd5f0c9017b4b7ecfe5c71303a8f49e77dc2b9695ecc72008e5"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:sqlite_hnsw_production_cutover",
+      "proof_level": "production-path",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "retain-real-hnsw-adjacency-walk-reject-anchor-neighborhood-approximation",
+      "evidence_fingerprints": [
+        "9a7b782479af069c49b9b6a805693468651653afe0ec3006e9c2f2d7a02160f6"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:sqlite_hnsw_sparse_route_integration",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production cutover is not proven"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "rejected-fresh-process-and-wall-hard-gate",
+      "evidence_fingerprints": [
+        "bdefb3bf6651ce390f3b536ae336fd436db4c37e47f7931c70392942369cf3fc"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:supersession_metric_index_candidate",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "100- and 200-event Natural and Durable instrumentation smoke profiles",
+      "decision": "use explicit result activity markers instead of inclusive operation duration for vacuous-zero detection",
+      "evidence_fingerprints": [
+        "93bf3719b58b031954d3e1e8d8bb58b422f1d988f0a43083406cd529b98dfd10"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:work_counter_activity_repair",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
+      "decision": "rejected-recall-at-16-0.979858",
+      "evidence_fingerprints": [
+        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "d30bfc49a82969a56834a87efddd827f5c4eda4987b0dc4084415dde84facf81"
+      ],
+      "evidence_kind": "modeled",
+      "inventory_id": "bounded-route-variant:reciprocal-route-only",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "benchmark routing evidence is not production-path latency proof"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
+      "decision": "rejected-no-recall-gain-at-equal-per-graph-work",
+      "evidence_fingerprints": [
+        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "31008972639ea1a20a7bdc7ec76d8284a5a943db5b18a702fc5261f9c136f10e"
+      ],
+      "evidence_kind": "modeled",
+      "inventory_id": "bounded-route-variant:three-sparse-graphs",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "benchmark routing evidence is not production-path latency proof"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
+      "decision": "rejected-recall-at-16-0.995972",
+      "evidence_fingerprints": [
+        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "68ff8dacf45e677f4c8781c1a6a1fe6ccb16af107a424016f72c32954e7694f2"
+      ],
+      "evidence_kind": "modeled",
+      "inventory_id": "bounded-route-variant:construction-budget-4096",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "benchmark routing evidence is not production-path latency proof"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
+      "decision": "rejected-recall-at-16-0.997803",
+      "evidence_fingerprints": [
+        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "49a8e8870573f66e98eb48ba0aafa1a1a6f1a5827ee6ada2ac7e6ae1dee45b1b"
+      ],
+      "evidence_kind": "modeled",
+      "inventory_id": "bounded-route-variant:construction-budget-8192-reciprocal-64",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "benchmark routing evidence is not production-path latency proof"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
+      "decision": "selected-benchmark-design-production-proof-pending",
+      "evidence_fingerprints": [
+        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "c6d0a84a168058264ebdfdc489c94852c9d1918be430a8b661d2947d03ceb0a0"
+      ],
+      "evidence_kind": "modeled",
+      "inventory_id": "bounded-route-variant:two-graphs-construction-16384-retrieval-1280-reciprocal-64",
+      "proof_level": "benchmark-only",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "benchmark routing evidence is not production-path latency proof"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "28fe044a1fdf75d8dae19c596aec7dad6b77a3d65475c98cc2d218d79aaed431"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:consolidation-envelope-and-detector",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "1462aaf9cd47f738806bd9414848492f8a589235aef341bf8f46de1acd5dc45e"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:shared-retention-and-rollback",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "b087da4df6416d4cff2a3e26c8d45b6a329d103761355cb0d9a5048725c5b125"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:lazy-rif-active-epoch",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "2985ed022f9435c7ab8229b081a212252a2f67e11bed5dbceb86e8a9400391b7"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:bounded-graph-retrieval",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "1683a5a43aa29d5ad0e6428c310f8a6f00f8c2ca15ec2421c2a9b196ebc456f6"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:emotional-propagation-cache",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "b33dc5cacb2e538cc3a59d2d0c09872ef7b2a55731ef5eaa09b6157d88d1a586"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:memory-storage-and-graph-maintenance",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "b2302f5b6b23fb544b2807d1e5477a7175d782d891c1880e6f6c3e19be2c0214"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:runtime-composition",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "ea53b56ffeb96c27c5d86ecde2234cb38b88f8e8993f1af8da4ce963acb4d48f"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:bounded-work-instrumentation",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "branch diff from the content-addressed base; experiment scope is recorded by the associated state and candidate entries",
+      "decision": "task-owned-source-change-recorded",
+      "evidence_fingerprints": [
+        "b58c82f02ed95d695e042c1ffc91767a1da997c65c25b1fa1f34af508bd2b70d"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "algorithm:experiment-harness-and-audit",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "production-wide boundedness is not inferred from source health"
+      ]
+    }
+  ],
+  "schema": "cortext_paper_traceability_v1"
+}

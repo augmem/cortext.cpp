@@ -101,6 +101,7 @@ DecayActivePreActivation (OperationContext &context, Transaction &tx,
                                 .predictive_pre_activation_memory_ids;
   if (active_ids.empty () && active_memory_ids.empty ())
     {
+      context.AddOperationTiming ("Predictive.decay_active_sql", 0.0);
       return;
     }
 
