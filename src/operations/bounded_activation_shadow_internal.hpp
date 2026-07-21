@@ -1422,8 +1422,12 @@ RebuildFromPersistentAuthority (State &state, Store &store)
   try
     {
       const auto rows = store.Execute (
-          "SELECT s.signal_id, s.timestamp, e.embedding "
-          "FROM signals s JOIN embeddings e "
+          "SELECT s.signal_id, s.timestamp, "
+          "COALESCE(a.embedding, e.embedding) AS embedding "
+          "FROM signals s "
+          "LEFT JOIN cortext_active_signal_embeddings a "
+          "ON a.signal_id = s.signal_id "
+          "LEFT JOIN embeddings e "
           "ON e.embedding_id = s.embedding_id "
           "ORDER BY s.signal_id");
       const auto authoritative_signal_count

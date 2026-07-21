@@ -5510,23 +5510,29 @@ state, an expiry index, and a connection-local temporary effective-value
 view. The persistent migration inventory is exactly the three state
 tables plus the expiry index; it does not install durable views or
 triggers. Retrieval competition advances one global log-recovery clock
-per event, materializes only rows whose exact suppression has crossed
-the existing 10<sup>−9</sup> active threshold, and updates only newly
-suppressed losers. A full-recovery interval advances a generation; older
-rows are materialized in bounded batches and reset markers are pruned
-after their generation has no remaining active rows. Internal reads that
-depend on strength, suppression, or the suppression timestamp use the
-temporary effective view. Compatibility handling conservatively
-materializes and rebuilds the private representation around every
-caller-supplied SQL statement because aliases, wildcards, views,
-subqueries, and triggers cannot be classified safely from SQL text. A
-caller mutation also invalidates every database-derived processor cache
-before the statement executes.
+per event, materializes at most one knob-derived row batch whose exact
+suppression has crossed the existing 10<sup>−9</sup> active threshold,
+and updates only newly suppressed losers. A full-recovery interval
+advances a generation; older rows are materialized in the same
+knob-derived batches and reset markers are pruned after their generation
+has no remaining active rows. Internal reads that depend on strength,
+suppression, or the suppression timestamp use the temporary effective
+view. Compatibility handling conservatively materializes and rebuilds
+the private representation around every caller-supplied SQL statement
+because aliases, wildcards, views, subqueries, and triggers cannot be
+classified safely from SQL text. A caller mutation also invalidates
+every database-derived processor cache before the statement executes.
 
 The authoritative signal mutation still commits once to persistent
 SQLite. After that commit, a separate connection-local in-memory SQLite
-database publishes only the current recovery clock and active-generation
-inhibition rows. It never mirrors durable memory, signal, embedding,
+database publishes only the current recovery clock and the identities
+touched in the current engine epoch. Persistent SQLite may retain more
+active inhibition identities than this disposable epoch projection.
+Suppression, recovery-total, anchor, expiry, and effective-value fields
+remain solely in persistent SQLite; no production consumer reads a
+duplicated RIF value from the disposable identity ledger. Strength-only
+changes that cannot alter active membership therefore do not republish
+it. The ledger never mirrors durable memory, signal, embedding,
 association, or payload history. A failed persistent commit restores the
 pre-signal processor snapshot; a failed post-commit epoch publication
 discards and rebuilds the disposable database from persistent authority
@@ -5534,15 +5540,84 @@ without replaying the committed signal. Natural returns after
 publication. Durable follows the identical path and then executes only
 the named WAL checkpoint barrier.
 
-The active epoch records event, changed-row, and allocated-byte measures
-with harness safety ceilings of 512 events, 32,768 mutations, and 64
-MiB. Reaching a ceiling raises the existing `Required` consolidation
-hint before an honoring caller can enter another event. Ignoring the
-hint neither starts another epoch nor drops mutations. A successful
-explicit consolidation rebuilds the disposable epoch and resets its
-mutable measures; a failed consolidation leaves the old epoch intact.
+The active epoch records event, changed-row, allocated-byte, and maximum
+statement-row measures. Its harness safety ceilings are derived from the
+same clamped F/S/T route capacity and row batch
+
+*C*(*F*, *S*, *T*) = round (256 + 256*F* + 128*S* + 128*T*),   *B*(*F*, *S*, *T*) = round (64 + 64*F* + 32*S* + 32*T*).
+
+events are bounded by *C*, mutations by 64*C*, and allocated bytes by
+131, 072*C*. Persistent active-row loads, in-memory SQLite publication,
+recovery calibration, and retired-generation materialization use
+statements of at most *B* rows. Thus all-low, midpoint, and all-high
+resolve respectively to 256/16,384/32 MiB/64 rows, 512/32,768/64 MiB/128
+rows, and 768/49,152/96 MiB/192 rows. The midpoint values are defaults,
+not fixed production constants. Reaching an epoch ceiling raises the
+existing `Required` consolidation hint before an honoring caller can
+enter another event. Ignoring the hint neither starts another epoch nor
+drops mutations. A live *B* + 1 mutation set is completed by a second
+independently *B*-bounded statement; *B* is a statement bound, not a
+history cap. This is distinct from historical sparse-route backfill,
+whose logical *B* + 1 completion probe does not read or process the
+additional historical row. Any epoch overflow observation is named as
+the resolved limit plus one and is not an additional work-batch size. A
+successful explicit consolidation commits persistent SQLite and then
+starts a fresh in-memory SQLite epoch containing only the current clock.
+It does not copy the persistent active-identity population into the new
+epoch. The next ordinary event publishes only its changed identities. A
+failed consolidation leaves the old epoch intact, while a publication
+failure after persistent commit discards and recreates the same empty
+epoch without replaying the durable mutation. The retry intent is sticky
+until that empty epoch is published: even if both publication and
+immediate recovery fail, the next processor event executes the empty
+reset rather than a full persistent-history rebuild. Retrieval-surface
+reloads preserve the RIF epoch sidecar across their independent cache
+refresh, including the exception path after a failed reload, so
+consolidation cannot erase that retry intent after the durable commit.
 These are harness-scoped ceilings, not a claim that every production
-workload is globally bounded.
+workload is globally bounded. Non-finite F/S/T values fail before
+integer capacity derivation; finite out-of-range values retain the
+engine’s established clamping to \[0, 1\].
+
+The row-batch contract is exercised structurally over all 27 points in
+{0, 0.5, 1}<sup>3</sup> and through live *B* + 1 publication at nine
+production-shaped points: midpoint, both joint endpoints, and each
+one-axis endpoint. The latter varies text, audio, image, shared-source,
+and opaque-source labels while requiring the same resolved batch and the
+same two-statement completion. Thus 128 is only the neutral-knob result,
+and 129 is only its derived *B* + 1 boundary.
+
+The consolidation-reset regression uses the same nine knob points and
+seeds a knob-derived *B* + 1 persistent active population with mixed
+text, audio, image, shared-source, and opaque-source labels. At every
+point the durable population survives consolidation, the new disposable
+epoch contains zero copied identities, and the following event publishes
+exactly its one changed identity. An additional failure-chain regression
+seeds a neutral *B* + 1 = 129 mature durable population, injects
+failures into publication, immediate recovery, and the following
+retrieval-surface reload, and requires the next event to observe zero
+copied rows before publishing exactly one changed identity. The
+persistent 129-row population remains authoritative; it is never
+converted into a 129-row statement. The reload exception was first
+reproduced as a missing sidecar before the catch path was repaired. This
+removes store-sized work from the successful-consolidation publication
+edge. It does not yet bound initial processor startup: compatibility and
+restart recovery may still reconstruct current-generation identity and
+calibration state from persistent SQLite, so bounded whole-engine
+restart remains an explicit open gate.
+
+The same derivation owns the integrated SQLite HNSW maintenance and
+consolidation frontiers. Public route inspection and queue effort reset
+to 8*C* after consolidation, advance by *R* = max (2, ⌊*B*/16⌋) per
+retrieval-active query, and saturate at 9*C*; downstream activated
+identities are bounded by *A* = 2*C* + 2*B*; graph degree is
+*N* = max (8, ⌊*B*/2⌋); search expansion is *E* = max (8, ⌊*B*/4⌋); and
+ordinary route sealing occurs at *B* − *E*. Score consolidation reads at
+most *A* indexed low-strength identities and at most *N* association
+edges for each admitted identity. Natural and Durable execute these same
+operations and mutations; Durable adds only the existing post-commit
+flush/checkpoint barrier. None of these bounds branches on modality or
+source identifier.
 
 ### Bounded activation observation shadow
 
@@ -5581,6 +5656,362 @@ production-cutover blocker. The experiment therefore establishes
 implementation and measurement seams for fixed sparse activation; it
 does not replace exact retrieval, make the shadow authoritative, or
 claim bounded startup or live behavior.
+
+### Packed sparse-route hybrid candidate
+
+The follow-on benchmark candidate replaces the centroid shadow’s single
+lossy route with two independently constructed sparse graphs and a
+persistent 512-neighbor route for each sealed embedding. Query work is
+fixed independently of retained-history size: each graph receives at
+most 1,280 exact embedding comparisons, and the merged candidates are
+reranked by the same cosine distance and identity tie order as the exact
+control. During a 512-event active epoch, each new embedding may propose
+at most 64 reciprocal route updates. Building a sealed graph is likewise
+capped at 16,384 construction comparisons per graph. These capacities
+are functions of the engine knobs and embedding geometry; neither
+`source_id` nor modality participates in routing.
+
+The benchmark persistence layout keeps SQLite authoritative. A sealed
+snapshot stores normalized vectors, the two packed adjacency arrays, and
+packed routes as four SQLite blobs, with 1,024 deterministic anchor rows
+used to enter the graphs after restart. The current epoch remains a
+bounded connection-local SQLite database. Restart opens the four blobs
+and visits only metadata plus the anchor rows; it does not replay
+retained embeddings. Consolidation is the epoch boundary: it seals
+derived routes and then begins a fresh active epoch, producing the
+intended sawtooth without introducing a second Natural/Durable write
+algorithm. Durable would remain the shared write followed only by its
+checkpoint barrier.
+
+This layout is still a benchmark design, not the current production
+retrieval path. The first quality corpus contained all embedding rows,
+including signal-only rows that the public seed path does not rank as
+long-term memories; its control was therefore mislabeled as current
+public retrieval. A corrected export uses current long-term memory
+surfaces keyed by memory identity. The two-graph design reached exact
+top-1 and recall-at-16 of 1.0 over 3,172 such surfaces, but that static
+population still omitted runtime timestamp eligibility, supersession
+filtering, current-surface selection, and family collapse. A subsequent
+15,695-packet run captured 512 actual public retrieval controls across
+events 6–15,691. Three standalone attempts reconstructed the
+point-in-time route from the final database: all surface versions, one
+current node per memory, and base plus replaceable current
+reconstruction. Their apparent identity coverage remained near 0.984 and
+top-1 near 0.914. An exhaustive dual-surface oracle reproduced those
+misses exactly, showing that approximate graph search was not the cause.
+The final database cannot reproduce every intermediate current surface
+after reconsolidation mutates `memories.embedding_id`; therefore those
+quality labels are invalidated rather than treated as candidate
+failures. A valid follow-on captures the live surface mutation stream
+during replay. No variant is enabled in production. The prototype’s
+source graph construction and snapshot writer also have not yet passed
+the engine’s transaction-failure, consolidation-publication, end-to-end
+latency, or full-replay gates. The description records the algorithm
+precisely so those gates test one content-addressed design rather than
+an informal approximation.
+
+The replacement evaluation seam is an explicit private live-surface
+mutation trace. It is disabled by default and enabled only by the replay
+harness. After each successful process event it records ordered
+long-term surface upserts and removals as memory identity, embedding
+identity, and the 256-dimensional post-encoding vector;
+consolidation-phase mutations are recorded separately after the process
+phase. Normal execution neither stores nor copies these vectors. The
+trace carries no routing branch for `source_id` or modality, and its raw
+vectors remain private. A paired capture-off/capture-on replay must
+retain exact public behavior and logical SQLite content before the trace
+can be used as candidate evidence.
+
+The direct-control harness now observes the engine rather than
+reimplementing its eligibility rules. On explicitly enabled benchmark
+runs, `GraphAugmentedRetrieveCandidates` exposes its already-ranked
+direct seeds to a thread-local trace after timestamp exclusion,
+supersession filtering, current-surface selection, family collapse,
+exact scoring, and deterministic tie ordering. The Natural replay
+records those seed ranks together with the graph-expanded and hydrated
+public ranks only on retrieval-active events, then selects an inclusive
+even sample from that event stream. Normal execution does not construct
+the extra seed trace. A paired 200-event replay produced the same
+behavior digest and canonical logical-database digest with and without
+capture, so the observer is behavior- and storage-neutral at that scope.
+Query vectors remain only in the private proof artifact; the
+paper-facing audit retains their digests and aggregate coverage. The
+complete 15,695-event, 512-query control and live candidate comparison
+are reported in the optimization evaluation. This instrumentation
+remains a private proof seam rather than a production API.
+
+### Integrated HNSW candidate route
+
+The sparse route is wired into the existing
+`GraphAugmentedRetrieveCandidates` operation; it is not a second
+retrieval or ingestion API. SQLite-backed routing is the normal internal
+path, with a private rollback switch retained for experiments. Natural
+and Durable update the same current-memory surface and Durable adds only
+its post-commit SQLite checkpoint barrier. Routing consumes only the
+256-dimensional post-encoding vector and memory identity, so modality
+and the opaque `source_id` never select graph structure, capacity, or
+rank behavior.
+
+Every operational work limit is derived from the three public knobs.
+After clamping *F*, *S*, and *T* independently to \[0, 1\], the
+candidate capacity and legacy-store backfill batch are
+
+*C*(*F*, *S*, *T*) = round (256 + 256*F* + 128*S* + 128*T*),
+
+*B*(*F*, *S*, *T*) = round (64 + 64*F* + 32*S* + 32*T*).
+
+The downstream activation target is independently named:
+
+*A*(*F*, *S*, *T*) = 2*C*(*F*, *S*, *T*) + 2*B*(*F*, *S*, *T*).
+
+The graph neighbor limit is *m**a**x*(8, ⌊*B*/2⌋), the level-zero link
+limit is *m**a**x*(16, ⌊*C*/4⌋), and maximum hierarchy level is
+⌈log<sub>2</sub>*C*⌉. At each level a new node may update at most
+*m**a**x*(2, ⌊*B*/16⌋) reciprocal rows. HNSW construction effort is
+*m**a**x*(32, round (25*C*/64)) and query effort is
+*m**a**x*(*C*, round (5*C*/2)). The bootstrap, maximum public
+visited-node, maximum public queue, shadow-cache, construction-node, and
+construction-queue limits are respectively 2*C*, 9*C*, 9*C*, 24*C*,
+*C* + *B*, and 2*B*. The 9*C* quantity is a hard routing-inspection
+ceiling, not the activated working set; the cache’s node map and FIFO
+order are bounded together, and a successful seal clears both so
+invalidated rows cannot leave accumulating order entries. After exact
+reranking, no more than *A* identities may proceed into eligibility,
+family collapse, graph expansion, and final ranking. Exact cosine family
+checks have a separate 2*C* per-event ceiling. The breadth-first
+adjacency fetch batch is *m**a**x*(8, ⌊*B*/4⌋). The larger query and
+bounded cache coefficients were selected by copied-late quality probes:
+2*C*/*C* and 3*C*/2*C* search candidates missed the exact-identity gate;
+8*C*/4*C* with a 16*C* cache passed on the initial store but missed one
+exact top-1 after the bounded supersession surface changed the live
+graph. A later expanding 5*C* → 12*C* envelope restored exact sampled
+quality but made both query and construction work grow with query age.
+The retained candidate resets public route inspection to 8*C*, advances
+it by *R* only until the 9*C* ceiling, fixes downstream activation at
+*A* = 2*C* + 2*B*, and reserves the smaller *C* + *B*/2*B* envelope for
+graph construction. These are knob-derived finite limits, not midpoint
+constants.
+
+Consolidation changes activation locality without changing SQLite
+authority or introducing a second route. Restart opens at the 9*C*
+ceiling because in-process query age is not durable; every successful
+recenter resets the shared path to the 8*C* floor, and subsequent
+retrieval-active queries advance queue effort and actual-node ceiling
+together by *R* until 9*C*. A successful route seal normalizes the
+consolidation embedding, runs the canonical bounded search around that
+semantic center, and persists at most *A* resulting memory identities as
+the next activation snapshot. The canonical maximum-level entry
+continues to own global HNSW descent. Ordinary retrieval loads the
+packed snapshot through its independent *A* row budget and uses all
+valid snapshot identities as deterministic level-zero entry points.
+Neighbor rows discovered from those entry points remain charged to the
+current canonical 8*C*–9*C* budget, so consolidation can steer the walk
+without widening either envelope. The internal search used to construct
+a recenter snapshot does not advance the retrieval-age ramp. If snapshot
+persistence fails, both queue effort and the actual-node budget remain
+at their pre-attempt values; only a successful recenter resets them to
+8*C*. The floor, increment, and ceiling are derived from F/S/T rather
+than independently tunable fourth knobs. Every query records its ceiling
+and actual visited rows; canonical rows above the current ceiling or
+above 9*C* fail the audit. The persisted snapshot remains independently
+charged under its *A* ceiling and is joined with the canonical
+candidates for final exact reranking. The returned set makes the
+existing formula explicit: its best 2*C* canonical identities are
+protected, while consolidation may supply the remaining 2*B* identities
+in *A* = 2*C* + 2*B*. The final selected set is reranked by exact
+distance. Total fetched-row work is therefore bounded by 9*C* + *A*. A
+separate returned-identity counter still fails above *A*, so a changed
+semantic center cannot be mistaken for an unbounded working set. The
+normalized center, snapshot generation, and packed identity list live in
+the single SQLite route-metadata row and survive reopen; malformed,
+stale, duplicate, or over-capacity metadata invalidates the route. Graph
+and memory rows remain authoritative in SQLite.
+
+Decoded activation-snapshot rows reuse the route’s existing
+generation-qualified shadow-node cache rather than being selected and
+decoded again for every query. The first query after reopen loads only
+snapshot identities absent from that cache; later queries reuse those
+immutable decoded rows while continuing to compute query distance
+exactly. The shared cache remains bounded by 24*C*, and every successful
+seal clears both its node map and FIFO order before any row from the
+next authoritative SQLite state can be reused. A separate physical
+snapshot-cache-miss counter distinguishes the fixed *A* rows evaluated
+from the rows actually loaded from SQLite. This is a read-through
+optimization of the one persisted route, not an in-memory authority or a
+second write path, and it contains no modality or source-id predicate.
+
+Emotional propagation uses the same first-source-wins semantics while
+avoiding duplicate downstream work. Its breadth-first kernel carries up
+to 64 source ordinals in one bit mask. For each reached embedding, the
+kernel records only the lowest source ordinal and that source’s first
+(therefore shortest) positive depth; after all batches, it emits one
+winning pair per embedding in deterministic source/depth/identity order.
+Separate counters record all source–embedding reachability pairs and all
+physical adjacency visits, so winner collapse does not relabel unbounded
+traversal as bounded work. The optimization is independent of modality
+and source-id labels and does not change persistence or add a write
+path.
+
+The bounded-cascade experiment adds three independent F/S/T-derived
+limits around that exact winner rule. Its maintained source-priority
+snapshot holds at most the public routing budget 5*C*; one cascade
+inspects no more than that snapshot and executes at most *B* eligible
+sources. The shared traversal stops before physical adjacency visit
+5*C* + 1, and the existing enqueue stage emits at most *A* = 2*C* + 2*B*
+embedding updates. SQL fallback materializes at most the same 5*C*
+source prefix. Inspection, accepted-source, physical-edge, winning-pair,
+and update counts remain distinct, with their resolved limits recorded
+on each profiled event. The snapshot ordering depends only on timestamp
+and memory identity; no source-id or modality label participates. These
+limits remain private experiment hooks until the complete quality,
+plateau, restart, and knob-ablation contracts pass.
+
+The cycle auditor classifies retrieval independently from whole-engine
+process shape. It selects retrieval-active events from explicit route
+activity, queue, ceiling, visit, distance, snapshot, or activation
+evidence. In sawtooth mode it requires the exact F/S/T-derived 8*C*
+reset floor, *R* increment, and 9*C* ceiling, canonical visits no
+greater than the current ceiling, snapshot visits no greater than *A*,
+combined row visits no greater than 9*C* + *A*, nonzero unique distance
+work no greater than the fetched-row union, and activated identities no
+greater than *A*. Mature cycles must show the reset on consolidation and
+pass the preregistered peak/trough, resampled-shape, and late-template
+gates. A route-active event with missing or zero work therefore fails
+rather than disappearing from the sample. Missing recenter evidence, a
+changed post-consolidation canonical ceiling, or any work value above
+its declared derived envelope also fails closed. Activated-identity
+overlap is a separate centroid movement measurement; without it the
+classifier and work envelope may pass, but the full retrieval-cycle
+contract remains unproven. Process, throughput, and operation-slope
+gates remain separate, so bounded routing cannot conceal a rising write
+path.
+
+At neutral knobs these formulas retain the evaluated midpoint:
+*C* = 512, *B* = 128, *A* = 1, 280, 64 neighbors, 128 level-zero links,
+maximum level 9, 8 reciprocal updates per level, construction effort
+200, query effort 1,280, and 1,024 exact family comparisons. The
+canonical floor is 4,096 rows, the increment is 8, and the
+canonical-plus-snapshot row ceiling is 9*C* + *A* = 5, 888 at neutral
+knobs. The all-low and all-high endpoints are not aliases for this
+midpoint; the complete 3 × 3 × 3 structural grid is tested.
+
+When the current surface contains at most *C* rows, the exact scan is
+already inside the bound. Above it, one deterministic persisted HNSW
+hierarchy proposes a sparse frontier. The same SQLite route then
+completes the current query’s knob-bounded routing envelope with a
+deterministic indexed slice of active rows, wrapping once around the
+canonical entry identity, until the current 8*C*–9*C* actual-node
+ceiling is reached or the surface is exhausted. Every routed row—whether
+reached by an HNSW edge or by envelope completion—is exactly reranked.
+The independently persisted consolidation snapshot then contributes at
+most *A* additional rows to the same exact union, after which the
+operation returns at most *A* memory identities to the existing
+downstream path. Timestamp eligibility, current-surface membership,
+supersession, long-term kind, cosine-family collapse, graph expansion,
+final scoring, and deterministic ties remain authoritative. This sparse
+activation route fixes disconnected-node blindness without introducing a
+second retrieval or write path; HNSW controls locality while the derived
+envelope controls exact coverage and work.
+
+Within one activation query, the row-addressed route stores each
+persisted node’s exact query distance beside that query’s local node
+view. Higher-level descent, level-zero expansion, best-set maintenance,
+and the final exact activation rerank reuse that value instead of
+recomputing the same 256-element distance. The canonical cache is
+query-local and bounded by the same 9*C* maximum fetched-node ceiling;
+snapshot materialization is separately bounded by *A*, and both are
+discarded after the call. Pending updated embeddings use a separate
+distance evaluation from their older persisted row, so an identity
+cannot reuse a stale vector merely because its numeric ID is unchanged.
+The route records both visited nodes and exact distance evaluations, and
+requires the latter to be at most the unique union of canonical,
+snapshot, and knob-bounded pending-delta rows. This changes only
+repeated arithmetic: activated identities, order, downstream
+eligibility, SQLite authority, and Natural/Durable ownership are
+unchanged.
+
+SQLite remains canonical for both memory data and the row-addressed
+graph. Active graph metadata and node rows are separate from an
+unpublished build record. An existing store is backfilled in batches no
+larger than *B* and the build is invisible to retrieval until its active
+count matches the authoritative current surface. Exact retrieval remains
+the candidate and the control during this interval. A durable
+dirty-identity journal records every route upsert or removal in the
+caller’s authoritative transaction. When the complete active journal
+contains at most *C* identities, retrieval stages those authoritative
+current embeddings or removals as an exact bounded delta over the
+persisted hierarchy. More than *C* dirty identities fails closed to the
+exact path. The journal query reads at most *C* + 1 identities only to
+distinguish a complete *C*-row delta from overflow. At neutral knobs
+this live-journal limit is therefore 512 and its overflow sentinel is
+row 513. Historical ordered backfill remains independently bounded by
+*B*. After advancing at most *B* = 128 historical rows, the
+implementation tests whether the in-memory ordered iterator has another
+entry. Thus 129 is the derived logical *B* + 1 boundary, not a physical
+129th-row read and never a 129-row work batch. Opening the sparse route
+loads one metadata row, validates at most *A* packed activation
+identities from that row, resolves only that knob-bounded ordered slice,
+and lazily fetches graph nodes under the 9*C* canonical plus *A*
+snapshot public-query bounds; the route itself does not replay or mirror
+complete history. This is not a bounded whole-engine restart claim:
+`SignalProcessor` startup still materializes the complete current memory
+surface before retrieval begins, so startup remains *O*(history) until
+that separate hydration path is removed.
+
+Live writes do not grow an unbounded in-memory construction delta for
+either active or unpublished routes. Each construction edge drains at
+most *C* dirty identities from the SQLite journal and may independently
+advance at most *B* ordered historical backfill rows. The larger dirty
+bound is still knob-derived and lets an epoch that changes more than one
+backfill batch converge instead of permanently chasing its own journal.
+A successful seal deletes only the dirty identities included in that
+bounded root set; any remainder stays authoritative for the next edge,
+and an unpublished build cannot publish until both ordered backfill and
+the journal are complete. Thus a busy active route or legacy-store
+migration cannot turn the sparse index into a second unbounded write
+path.
+
+Normal writes and reconsolidations append only their memory identities
+to the durable journal. A successful seal writes changed nodes and
+knob-bounded reciprocal neighbors, advances graph metadata, and clears
+only its staged root identities in the same SQLite transaction. Neighbor
+proposal during this seal uses the *C* + *B* node and 2*B* queue
+construction envelope, not the public 9*C* activation envelope. Existing
+active nodes retain their persisted topology when their current
+embedding changes; the rejected bounded-relink experiment is reported in
+the optimization section. A failed authoritative transaction cannot
+leave a durable route mutation. An interrupted or failed seal leaves the
+identities journaled for restaging, while exact retrieval remains
+authoritative. This gives consolidation a real route-epoch boundary
+without a store-sized graph rewrite.
+
+Application hydration uses the same bounded-surface rule when a memory
+has no materialized memory or reconstruction blob. SQLite retains every
+authoritative signal, but the fallback reads only the most recent *B*
+signal rows for that memory through the `(memory_id, serial_position)`
+index and returns the selected rows in chronological order. Thus neutral
+knobs hydrate at most 128 fallback signal payloads per returned memory,
+all-low hydrates 64, and all-high hydrates 192. The bound does not
+inspect modality or `source_id`; text, audio, and image signals follow
+the same indexed query. The runtime records the derived limit and the
+number of fallback rows actually materialized on each public call.
+
+The same bounded activation surface now serves supersession selection
+after the current memory population exceeds *C*. `MemoryStorage` asks
+the persisted route for at most *A* identities, exactly reranks those
+current embeddings, and keeps its existing timestamp, kind, threshold,
+duplicate-band, edge-count, and tie rules. On this sparse path the
+latest current embedding is the memory’s active centroid: an older base
+embedding remains durable lineage but does not re-enter as a second
+competing candidate after consolidation has moved that memory. Until the
+route is published, when the dirty delta exceeds *C*, or when route
+validation fails, the operation retains the exact fallback. This is one
+shared, modality- and source-agnostic candidate route for Natural and
+Durable; it does not add a second write API or make the connection-local
+cache authoritative. The 4,000-event knob ablation and its remaining
+full-horizon limits are reported in the optimization section.
+`TRACE[state:integrated_hnsw_sparse_route_experiment]` and
+`TRACE[state:sqlite_hnsw_knob_ablation]`.
 
 Rollback snapshots move the private accumulator map, working-memory
 records, and their blob-reference vectors out of the generic context
@@ -5700,90 +6131,95 @@ nonnegative; both upper bounds are also sound, so none can exclude a
 pair meeting the cosine threshold. The complementary bases avoid broad
 exact pairwise work for both sparse coordinate-aligned vectors and dense
 Hadamard-aligned vectors; arbitrary adversarial surfaces may still reach
-the exact fallback. The normalized vector and both block-norm summaries
-are immutable functions of an embedding, so the private surface computes
-them on first family use and retains them with that entry. Replacing a
-current surface entry replaces its summaries as part of the same cache
-mutation. This removes repeated normalization and Walsh–Hadamard
-construction without changing family order, comparison arithmetic, or
-fallback behavior. If the private vector cache is unavailable, durable
-processing rebuilds it once from the complete persisted surface and
-immediately applies the same family and supersession filters before
-truncation. A failed rebuild installs a failure sentinel rather than
-repeating the two complete surface scans on every request. A unique
-cached vector retains every long-term memory metadata alternative that
-shares its base embedding, and query-time eligibility chooses a
-nonsuperseded sibling without duplicating vector storage. The cache
-separately indexes entries that have at least one long-term metadata
-alternative. Retrieval applies the existing timestamp, current-surface,
-and supersession predicates to that subset before evaluating vector
-distance, so signal-only historical embeddings do not enter the distance
-kernel. This is an execution-only index: it does not change the eligible
-set, distance expression, tie order, family collapse, or source and
-modality semantics. Alongside the shared association fanout cache, an
-internal execution sidecar maintains, for each supersession target, the
-earliest start timestamp of an eligible replacement. Retrieval tests
-that timestamp directly instead of rebuilding a target set by scanning
-every incoming edge. Memory storage publishes its already-committed
-supersession decisions into the fanout cache and rebuilds the sidecar
-index; missing target metadata invalidates the cache and returns to
-authoritative SQLite rehydration. Neither structure is part of the
-public processor layout. The strict replacement-before-query predicate
-and base embedding identity remain unchanged. The emotional-metadata
-portion of the sidecar is trusted only by the engine-owned operation
-root that maintains it. A caller-supplied root’s transaction view
-invalidates that sidecar before forwarding its first SQL statement, so a
-custom transaction that updates emotional columns directly cannot leave
-a valid-looking stale fixed point for a later operation in the same
-transaction. Cache-only custom roots retain their exact rollback
-snapshot. The fallback executes a demand-driven sequence of ordered SQL
-pages over the current and historical vector surfaces. Each page joins
-memory metadata and applies kind, timestamp, and supersession
-eligibility before distance ordering, excludes a historical row when
-that memory already has a current reconstruction, collapses
-byte-identical historical vectors, and uses a second application of the
-existing F/S/T-derived seed-search breadth as its row bound. One
-in-memory cosine-family index spans every page; paging stops when the
-ordinary semantic-family seed budget is full or the eligible surface is
-exhausted. Processor hydration tracks persisted-current-surface currency
-and processor-surface completeness independently. The private
-current-vector search cache is built and incrementally updated from the
-processor’s latest reconstruction surface, even when a test or storage
-policy intentionally omits the corresponding persisted-current write. A
-valid cache therefore performs distance ordering and cosine-family
-accounting on latest vectors. If that cache is unavailable while the
-processor surface is complete and original-base lineage remains
-available, durable retrieval rebuilds a current-only cache from the
-processor surface and ephemeral retrieval scans that surface directly
-without mutating the registry. Missing base lineage or an incomplete
-processor surface falls back to SQL; in that recovery case the query
-substitutes each latest reconstruction before cross-page family
-accounting. Base families that converge after reconstruction therefore
-consume one current-family slot and cannot stop selection early. Current
-per-memory reconstructions remain distinct rows and the corresponding
-base row for that same memory is excluded. The same registry keeps an
-exact index of supersession-eligible historical memory rows and the base
-lineage of each current row. Memory storage first ranks the current
-surface and records its exact cutoff. When current and historical
-populations are identical except for explicitly tracked changed
-memories, deterministic embedding-id and memory-id tie orders agree, and
-every changed historical row is outside that cutoff, the current result
-proves that the historical top-k contributes no unseen candidate. The
-historical scan is then skipped; any ambiguous lineage, reversed tie
-order, or failed cutoff proof falls back to the complete eligible
-historical scan. A historical embedding referenced by more than one
-eligible memory also disables both current-population shortcuts: the
-historical query ranks embeddings before expanding every memory sibling,
-whereas the current surface ranks per-memory rows. The complete
-embedding-level pass therefore preserves sibling fanout even when the
-per-memory candidate limit is saturated. This proof changes neither the
-candidate population nor the chosen supersession edges, but the current
-surface distance pass remains proportional to that surface. Rollback and
-flush recovery also rehydrate each current entry’s original base ID from
-`memories.embedding_id`; they never infer it from the reconstructed
-surface. When constructive recall is disabled, both restart hydration
-and cache-loss rebuild select the base embedding and ignore
-reconstruction/current surfaces. This recovery path preserves an
+the exact fallback. One event may execute at most 2*C* exact cosine
+checks across all family-collapse stages. Exhaustion conservatively
+admits the current candidate to the independently bounded rank/output
+stages rather than performing a store-sized comparison tail. The
+normalized vector and both block-norm summaries are immutable functions
+of an embedding, so the private surface computes them on first family
+use and retains them with that entry. Replacing a current surface entry
+replaces its summaries as part of the same cache mutation. This removes
+repeated normalization and Walsh–Hadamard construction without changing
+family order, comparison arithmetic, or fallback behavior. If the
+private vector cache is unavailable, durable processing rebuilds it once
+from the complete persisted surface and immediately applies the same
+family and supersession filters before truncation. A failed rebuild
+installs a failure sentinel rather than repeating the two complete
+surface scans on every request. A unique cached vector retains every
+long-term memory metadata alternative that shares its base embedding,
+and query-time eligibility chooses a nonsuperseded sibling without
+duplicating vector storage. The cache separately indexes entries that
+have at least one long-term metadata alternative. Retrieval applies the
+existing timestamp, current-surface, and supersession predicates to that
+subset before evaluating vector distance, so signal-only historical
+embeddings do not enter the distance kernel. This is an execution-only
+index: it does not change the eligible set, distance expression, tie
+order, family collapse, or source and modality semantics. Alongside the
+shared association fanout cache, an internal execution sidecar
+maintains, for each supersession target, the earliest start timestamp of
+an eligible replacement. Retrieval tests that timestamp directly instead
+of rebuilding a target set by scanning every incoming edge. Memory
+storage publishes its already-committed supersession decisions into the
+fanout cache and recomputes only the affected target’s eligibility. A
+current-surface change likewise recomputes only targets reached by that
+memory’s outgoing `supersedes` edges. Missing target metadata
+invalidates the cache and returns to authoritative SQLite rehydration.
+Neither structure is part of the public processor layout. The strict
+replacement-before-query predicate and base embedding identity remain
+unchanged. The emotional-metadata portion of the sidecar is trusted only
+by the engine-owned operation root that maintains it. A caller-supplied
+root’s transaction view invalidates that sidecar before forwarding its
+first SQL statement, so a custom transaction that updates emotional
+columns directly cannot leave a valid-looking stale fixed point for a
+later operation in the same transaction. Cache-only custom roots retain
+their exact rollback snapshot. The fallback executes a demand-driven
+sequence of ordered SQL pages over the current and historical vector
+surfaces. Each page joins memory metadata and applies kind, timestamp,
+and supersession eligibility before distance ordering, excludes a
+historical row when that memory already has a current reconstruction,
+collapses byte-identical historical vectors, and uses a second
+application of the existing F/S/T-derived seed-search breadth as its row
+bound. One in-memory cosine-family index spans every page; paging stops
+when the ordinary semantic-family seed budget is full or the eligible
+surface is exhausted. Processor hydration tracks
+persisted-current-surface currency and processor-surface completeness
+independently. The private current-vector search cache is built and
+incrementally updated from the processor’s latest reconstruction
+surface, even when a test or storage policy intentionally omits the
+corresponding persisted-current write. A valid cache therefore performs
+distance ordering and cosine-family accounting on latest vectors. If
+that cache is unavailable while the processor surface is complete and
+original-base lineage remains available, durable retrieval rebuilds a
+current-only cache from the processor surface and ephemeral retrieval
+scans that surface directly without mutating the registry. Missing base
+lineage or an incomplete processor surface falls back to SQL; in that
+recovery case the query substitutes each latest reconstruction before
+cross-page family accounting. Base families that converge after
+reconstruction therefore consume one current-family slot and cannot stop
+selection early. Current per-memory reconstructions remain distinct rows
+and the corresponding base row for that same memory is excluded. The
+same registry keeps an exact index of supersession-eligible historical
+memory rows and the base lineage of each current row. Memory storage
+first ranks the current surface and records its exact cutoff. When
+current and historical populations are identical except for explicitly
+tracked changed memories, deterministic embedding-id and memory-id tie
+orders agree, and every changed historical row is outside that cutoff,
+the current result proves that the historical top-k contributes no
+unseen candidate. The historical scan is then skipped; any ambiguous
+lineage, reversed tie order, or failed cutoff proof falls back to the
+complete eligible historical scan. A historical embedding referenced by
+more than one eligible memory also disables both current-population
+shortcuts: the historical query ranks embeddings before expanding every
+memory sibling, whereas the current surface ranks per-memory rows. The
+complete embedding-level pass therefore preserves sibling fanout even
+when the per-memory candidate limit is saturated. This proof changes
+neither the candidate population nor the chosen supersession edges, but
+the current surface distance pass remains proportional to that surface.
+Rollback and flush recovery also rehydrate each current entry’s original
+base ID from `memories.embedding_id`; they never infer it from the
+reconstructed surface. When constructive recall is disabled, both
+restart hydration and cache-loss rebuild select the base embedding and
+ignore reconstruction/current surfaces. This recovery path preserves an
 eligible target behind 900 closer ineligible rows and preserves an
 eligible sibling of a superseded shared embedding. A separate 600-member
 byte-distinct cosine-near family requires two bounded pages and cannot
@@ -5893,6 +6329,62 @@ those links as ranking features, and no bundled chat renderer is part of
 this claim.
 
 ## Computational Complexity
+
+### Bounded Active Signal-Vector Snapshot
+
+Migration 30 removes accepted signal vectors from the store-wide
+sqlite-vec search surface. The durable `signals` row and object-store
+payload remain the authoritative event record, and
+`signals.embedding_id` references the memory or working-memory centroid
+that represents that event in global retrieval. Exact vectors for only
+the active tail are retained in the internal
+`cortext_active_signal_embeddings` SQLite table. This is one
+SQLite-backed write path, not a second durability system: Natural
+ingestion appends through the common path, and Durable adds the existing
+flush/checkpoint boundary.
+
+The ring capacity reuses the knob-derived historical batch size
+
+*B*(*F*, *S*, *T*) = round (64 + 64*F* + 32*S* + 32*T*),
+
+after independently clamping each knob to \[0, 1\]. It therefore
+contains 64, 128, and 192 rows at the all-low, midpoint, and all-high
+corners. The logical rounding rule is C++ `std::lround`, so half-integer
+ties round away from zero. For example, *F* = 1/128, *S* = *T* = 0
+yields 65 rather than 64. The logical *B* + 1 probe remains an
+overflow/completion check; it is not a fetched or processed extra row.
+Slot selection is `(signal_id - 1) mod B`, so each ring upsert replaces
+at most one prior exact-vector row. One accepted pipeline event may
+persist multiple accumulated signal records and therefore perform
+multiple bounded upserts; the measured Natural maximum was 14 ring-table
+mutations in one event. If knobs change, the table rehashes only the
+newest rows that fit the newly resolved *B* and remains bounded by the
+old or new knob-derived capacity throughout the transition.
+
+Recent-context and working-memory restart hydration first read the exact
+vector from this bounded ring and fall back to the durable centroid
+reference for an older signal or a pre-migration database. The global
+vector index consequently contains memory centroids rather than a
+growing population of signal-only decoys. The schema and routing code
+contain no modality or `source_id` branch; text, audio, image, shared,
+and opaque sources enter after encoding through the same slot formula.
+Migration tests preserve the legacy fallback, and direct regressions
+cover mixed modality/source labels, knob changes, and the 64/128/192
+capacity corners without widening the public API. The hydration
+implementation reads the exact ring first and then the centroid
+fallback, but this checkpoint does not claim a standalone end-to-end
+restart regression or bounded whole-engine restart.
+
+Emotional propagation separately limits enqueued mutation statements to
+the existing activation target *A* = 2*C* + 2*B*. This is a hard bound
+on writes, not a claim that the current breadth-first emotional
+traversal is fixed work. The full traversal remains an explicitly
+unresolved optimization surface. A pass that reaches *A* is an
+incomplete priority prefix and is not recorded as an emotional fixed
+point; a persistent processor context therefore revisits its unresolved
+tail on the next event. Commit-table mutation profiling is installed
+whenever work-counter profiling is enabled and no longer depends on the
+separate consolidation-epoch profiler.
 
 The dominant per-signal cost is exact candidate discovery over the
 durable embedding and association surface. With `N` stored memories and
@@ -6104,19 +6596,27 @@ payloads</td>
 <td>durable payload identity is preserved</td>
 </tr>
 <tr>
-<td>exact durable-neighbor ranking</td>
-<td>maintain private current/base embedding surfaces in a process-wide
-lifecycle registry, including signal-only rows that affect the
-sqlite-vec population; rank into typed borrowed/owned candidates; reuse
-the query norm across exact cosine checks; track the exact historical
-supersession population and current/base mismatches so a current top-k
-cutoff can prove when no unseen historical row can enter the result</td>
-<td>the registry follows processor teardown across sequential thread
-migration and mirrors authoritative SQL write decisions; the same
-candidate population, K, filters, tie order, cosine results, thresholds,
-and supersession edges are retained; ambiguous lineage or tie order
-falls back to the complete eligible scan; SQL remains the final fallback
-and no public header or API layout changes</td>
+<td>supersession neighbor ranking</td>
+<td>below the sparse cutover, or whenever the route is unpublished,
+overflowing, or invalid, maintain private current/base embedding
+surfaces and retain the exact historical-coverage proof and SQL
+fallback; above the knob-derived cutover, reuse the SQLite HNSW
+activation surface, inspect an <span
+class="math inline">8<em>C</em></span> post-consolidation floor that
+advances by <span
+class="math inline"><em>R</em> = max (2, ⌊<em>B</em>/16⌋)</span> to a
+<span class="math inline">9<em>C</em></span> ceiling, rerank at most
+<span class="math inline"><em>A</em> = 2<em>C</em> + 2<em>B</em></span>
+activated current centroids, and count routed rows and activated
+identities independently</td>
+<td>the current centroid becomes the active post-consolidation identity
+while older base embeddings remain durable lineage; total query rows
+remain at most <span
+class="math inline">9<em>C</em> + <em>A</em></span>; timestamp, kind,
+duplicate band, similarity threshold, edge limit, deterministic tie
+order, rollback, source/modality independence, and public API shape
+remain unchanged; lower-rank candidates may differ within the separately
+approved bounded-retrieval accuracy contract</td>
 </tr>
 <tr>
 <td>graph retrieval</td>
@@ -6234,18 +6734,390 @@ candidate scan into an asymptotically flat store search.
 
 The later active-epoch cutover targets the remaining
 store-size-dependent retrieval-inhibition recovery directly. A complete
-15,695-packet Natural replay kept the active epoch within its harness
-ceilings: the observed high-water marks were 512 events, 1,859 distinct
-mutations, and 180,224 allocated bytes, with no over-limit event. The
+15,695-packet Natural replay made before the active-epoch ceilings
+became knob-derived kept the active epoch within its then-fixed midpoint
+harness ceilings: the observed high-water marks were 512 events, 1,859
+distinct mutations, and 180,224 allocated bytes, with no over-limit
+event. That evidence is retained as midpoint-only historical proof and
+is not accepted as proof of the current F/S/T-derived contract. The
 caller honored 127 consolidations. Across the audit’s first and last
 five eligible windows, `Competition.rif_recovery_active_sql` changed
 from 0.008629 to 0.009038 ms, a 1.047 ratio. The whole write path did
 not plateau: mean process time rose from 2.265 to 5.507 ms and
 throughput fell from 36.27 to 9.14 packets/s. This run therefore
-verifies the lazy-RIF hotspot and the scoped epoch ceilings, while
-leaving graph retrieval, memory storage, and emotional propagation as
-measured contributors. It is not a long-horizon or production-wide
-boundedness claim.
+verifies the lazy-RIF hotspot and the historical midpoint epoch
+ceilings, while leaving graph retrieval, memory storage, and emotional
+propagation as measured contributors. It is not a long-horizon or
+production-wide boundedness claim.
+
+The subsequent implementation change derives the active-epoch event
+ceiling from *C*(*F*, *S*, *T*), the mutation ceiling from 64*C*, the
+allocation ceiling from 131, 072*C* bytes, and every RIF
+persistent/shadow statement batch from the same *B*(*F*, *S*, *T*) used
+by sparse-route backfill. A compiled structural regression covers all 27
+points in the {0, 0.5, 1}<sup>3</sup> grid and separately evaluates the
+nine midpoint, all-low, all-high, and one-axis-low/high points used by
+the production-shaped route ablation. It proves the formulas resolve to
+256/16,384/32 MiB/64 rows, 512/32,768/64 MiB/128 rows, and 768/49,152/96
+MiB/192 rows at the all-low, midpoint, and all-high corners. A separate
+nine-point execution regression publishes *B* + 1 live active rows at
+every named point, observes a maximum statement size of exactly the
+resolved *B*, retains all *B* + 1 rows through a second statement, and
+varies text, audio, image, shared, and opaque source metadata without
+changing the schedule. The 129th midpoint live row is therefore
+processed in a second statement; it must not be confused with the
+historical backfill’s logical 129th completion probe, which is not read
+or processed. The benchmark now records resolved values instead of
+emitting fixed midpoint labels. Configured low, midpoint, and high
+Natural and Durable regressions each reached their own resolved event
+boundary, preserved `Required` at the logical limit-plus-one
+observation, and reset after a successful consolidation; the same runs
+varied opaque source and text, audio, and image labels without changing
+the formula. One-event current-binary profile probes independently
+emitted 256/16,384/32 MiB for all-low Natural and 768/49,152/96 MiB for
+all-high Durable, with the recorded event limit equal to the
+independently recorded route capacity. Non-finite knobs are rejected
+before any capacity is converted to an integer, and the profile auditor
+applies the same fail-closed rule. Long-horizon nine-point latency and
+reset evidence is now complete over the full 15,695-packet corpus at
+midpoint, both joint endpoints, and each one-axis endpoint. Every run
+emitted its independently expected F/S/T-derived event, mutation, and
+allocation limits; every run reached exactly its event limit without
+exceeding any ceiling; and every run observed a successful reset. None
+of the nine runs passed the whole-engine plateau or consolidation-cycle
+contract, however.
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 13%" />
+</colgroup>
+<thead>
+<tr>
+<th>F/S/T point</th>
+<th style="text-align: right;"><span
+class="math inline"><em>C</em></span></th>
+<th style="text-align: right;">Wall time (ms)</th>
+<th style="text-align: right;">Mean process (ms)</th>
+<th style="text-align: right;">Final/first process</th>
+<th>Plateau</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>midpoint</td>
+<td style="text-align: right;">512</td>
+<td style="text-align: right;">111,526</td>
+<td style="text-align: right;">2.430</td>
+<td style="text-align: right;">1.716</td>
+<td>fail</td>
+</tr>
+<tr>
+<td>all-low</td>
+<td style="text-align: right;">256</td>
+<td style="text-align: right;">119,572</td>
+<td style="text-align: right;">4.020</td>
+<td style="text-align: right;">1.963</td>
+<td>fail</td>
+</tr>
+<tr>
+<td>all-high</td>
+<td style="text-align: right;">768</td>
+<td style="text-align: right;">809,691</td>
+<td style="text-align: right;">45.566</td>
+<td style="text-align: right;">5.517</td>
+<td>fail</td>
+</tr>
+<tr>
+<td>focus-low</td>
+<td style="text-align: right;">384</td>
+<td style="text-align: right;">89,197</td>
+<td style="text-align: right;">2.335</td>
+<td style="text-align: right;">1.448</td>
+<td>fail</td>
+</tr>
+<tr>
+<td>focus-high</td>
+<td style="text-align: right;">640</td>
+<td style="text-align: right;">246,936</td>
+<td style="text-align: right;">4.802</td>
+<td style="text-align: right;">1.838</td>
+<td>fail</td>
+</tr>
+<tr>
+<td>sensitivity-low</td>
+<td style="text-align: right;">448</td>
+<td style="text-align: right;">74,894</td>
+<td style="text-align: right;">1.565</td>
+<td style="text-align: right;">1.554</td>
+<td>fail</td>
+</tr>
+<tr>
+<td>sensitivity-high</td>
+<td style="text-align: right;">576</td>
+<td style="text-align: right;">1,866,911</td>
+<td style="text-align: right;">110.989</td>
+<td style="text-align: right;">6.841</td>
+<td>fail</td>
+</tr>
+<tr>
+<td>stability-low</td>
+<td style="text-align: right;">448</td>
+<td style="text-align: right;">149,161</td>
+<td style="text-align: right;">4.136</td>
+<td style="text-align: right;">1.762</td>
+<td>fail</td>
+</tr>
+<tr>
+<td>stability-high</td>
+<td style="text-align: right;">576</td>
+<td style="text-align: right;">105,381</td>
+<td style="text-align: right;">1.887</td>
+<td style="text-align: right;">1.760</td>
+<td>fail</td>
+</tr>
+</tbody>
+</table>
+
+Sensitivity was the dominant adverse axis: the high-sensitivity wall
+time was 24.93 times the low-sensitivity wall time, and
+`PropagateEmotionalCascade` accounted for 98.78 percent of its
+early-to-late process growth. The all-high run attributed 95.10 percent
+of growth to the same operation. At midpoint and lower sensitivity,
+graph retrieval and memory storage remained the dominant contributors.
+The content-addressed aggregate is
+`active-epoch-knob-long-horizon-ablation-v1.json`. These text-ingress
+runs prove the knob formulas, hard epoch ceilings, and reset mechanics
+across the selected grid, but reject latency boundedness within every
+envelope; modality and source agnosticism remain separately covered by
+the fixed-embedding active-route regression rather than inferred from
+this corpus.
+
+The next retained active-epoch candidate removed redundant values from
+the connection-local database rather than changing the persistent
+recurrence. Profiling a copied mature 1,000-event slice first attributed
+0.351847 ms of a 0.385052 ms publication to loading complete persistent
+RIF rows. The retained identity ledger loads and publishes only active
+`memory_id` values in the same knob-derived *B*-row statements; the
+recovery clock, anchored suppression, recovery total, log factors,
+expiry, and effective view remain authoritative only in persistent
+SQLite. Strength-only refreshes do not publish when membership cannot
+change. Natural and Durable still share the same write and publication
+path, with Durable adding only its checkpoint.
+
+Against the same copied database and eight fixed consolidations,
+publication fell from 0.384426 to 0.103604 ms, a 73.05 percent reduction
+that passes the preregistered 20 percent local gate. Mean process time
+changed from 3.282725 to 3.243371 ms, total latency from 14.891846 to
+15.254791 ms (+2.44 percent), and wall time from 16,096 to 16,368 ms
+(+1.69 percent). All 1,000 public behavior rows, the canonical logical
+database, and the raw SQLite database were exact; the observed midpoint
+statement high-water was 128. A separate fresh 1,000-event screen
+recorded 0.009047 ms publication and 0.684362 ms process, but used four
+live-hint consolidations and is therefore only a non-regression screen,
+not fixed-index equivalence. Removing the membership preflight and using
+`RETURNING` was rejected after publication regressed to 0.335491 ms.
+These copied-slice source-health results did not decide the full
+15,695-event Natural plateau, Durable horizon and checkpoint proof, or
+bounded restart. `TRACE[state:rif_active_identity_ledger]`.
+
+The subsequent default-knob Natural replay resolved *B* = 125, processed
+all 15,695 packets with an observed statement high-water of exactly 125,
+and ran 31 consolidations in 82,994 ms. Mean process time was 1.944934
+ms, mean total latency was 5.107905 ms, and active-epoch publication
+averaged 0.019719 ms. This closes the full-Natural batch-bound check but
+not the engine plateau: over the final six eligible windows process and
+throughput ratios were 1.0072 and 0.9555, while transaction commit was
+1.1129 and the exact graph-comparison work counter was 1.1304. The
+identity ledger is therefore retained as a local repair and the next
+hotspot is reranked; Durable and bounded-restart proof stay open.
+
+The real 2,016-message Durable replay exercised that identical
+default-knob path with four consolidations, the same derived *B* = 125
+and the same observed 125-row high-water. Mean process and total latency
+were 5.883704 and 11.471774 ms, wall time was 23,845 ms, and the added
+checkpoint barrier averaged only 0.000158 ms. This supports the
+one-path-plus-flush architecture, but the corpus contains only three
+post-warmup 500-event windows against the required ten; it cannot
+establish a Durable plateau, and same-index copied-store equivalence
+remains separate proof.
+
+That result nominates a bounded emotional-propagation experiment rather
+than a larger retrieval envelope. The proposed `bounded-priority-prefix`
+reuses the current-event retrieval capacity *C*, backfill batch *B*, and
+activation target *A* = 2*C* + 2*B*. The candidate keeps a 5*C*-capacity
+index of rows already satisfying the flashbulb, intensity, arousal, and
+recency predicates, ordered by descending creation time and memory
+identifier. It inspects that eligible prefix and uses at most 5*C**B*
+comparisons or moves to select *B* sources in descending intensity and
+ascending memory-identifier order. It may emit at most *B* source
+memories and embeddings, visit 5*C* physical association edges, retain
+5*C* + *B* frontier/visited and topology-footprint entries, consider *A*
+activated identities, and enqueue *A* update statements. Source-index
+maintenance is bounded independently by
+(5*C*)<sup>2</sup> = 25*C*<sup>2</sup> comparisons or moves per event.
+
+A statement count alone is not a fixed-work guarantee because an
+embedding can be shared by arbitrarily many memory rows. The candidate
+therefore admits only embedding identities with at most *B* members and
+gives current-value member reads, SQL-affected rows, and cache-row
+mutations separate 5*C* total budgets. An identity whose complete member
+set does not fit every remaining budget is skipped. Member-vector size
+detects the logical *B* + 1 overflow boundary in constant time; no
+plus-one row is fetched or mutated. At *F* = *S* = *T* = 0.5, *C* = 512,
+*B* = 128, and *A* = 1, 280: every 5*C* surface is 2,560, every *B*
+source surface is 128, every *A* surface is 1,280, every 5*C* + *B*
+surface is 2,688, source-index maintenance is 6,553,600, priority
+selection is 327,680, and the logical overflow boundary is 129. All-low
+resolves these families to 1,280/64/640/1,344/1,638,400/81,920/65;
+all-high resolves them to 3,840/192/1,920/4,032/14,745,600/737,280/193.
+Thus 128 and 129 are consequences of neutral F/S/T, not hidden
+constants. The proposal has no durable backlog or second write path:
+SQLite remains authoritative and the in-memory metadata/fanout view
+remains rebuildable and rollback-equivalent. Neither modality nor source
+identifier is a predicate or budget input.
+
+This is a preregistered candidate, not a result or cutover. A
+deterministic dense-graph regression must first fail on the current
+unbounded traversal. The candidate must then prove all formulas over the
+27-point structural knob grid, including source-index, selection,
+emission, member-row, and cache work. Exact parity is required when the
+unbounded event stays within every resolved source, edge, frontier,
+identity, member, affected-row, and mutation limit. Above the envelope,
+candidate and control run once on separate byte-identical pre-event
+stores at identical consolidation indices. If *U*<sub>*c*</sub> and
+*U*<sub>*b*</sub> are the control and bounded sets whose final minimum
+intensity or bonus increased, the candidate requires
+|*U*<sub>*b*</sub> \\ *U*<sub>*c*</sub>| = 0 and recall
+|*U*<sub>*b*</sub> ∩ *U*<sub>*c*</sub>|/|*U*<sub>*c*</sub>| ≥ 0.95;
+empty control and bounded sets pass, while an empty control with a
+nonempty bounded set fails. For each metric, retained delta is the ratio
+of the sum of positive bounded changes to the sum of positive control
+changes over *U*<sub>*c*</sub> ∪ *U*<sub>*b*</sub>, must be at least
+0.99, and passes a zero control denominator only when the bounded
+numerator is also zero. Non-finite values and bounded per-identity
+deltas exceeding control by more than 10<sup>−12</sup> fail. Downstream
+gates allow at most one exact top-1 miss per 512-query run, require
+identity recall at 16 of at least 0.998 and semantic coverage of at
+least 0.95, and reject clustered top-1 misses.
+
+Per-event cascade timing includes zero-work events. Early and late means
+use the first and last 3,000 events; positive-over-zero and non-finite
+ratios fail. The p99 is nearest-rank ⌈0.99*n*⌉ over all events and must
+be at most one quarter of the same-knob, same-retention control, with
+zero control passing only zero candidate. Sensitivity-high and all-high
+must also hold late/early mean to 1.10. The preregistered nine tuples
+are midpoint, both joint endpoints, and the low/high endpoint of each
+one-axis change while the other knobs remain 0.5. Every tuple runs fresh
+matched candidate/control pairs for both the exact 15,695-packet Natural
+corpus and 2,016-message Durable corpus, with one selected algorithm per
+event, control-derived fixed consolidation indices, and exact
+source-tree, build, binary, corpus, database, profile, audit, raw, and
+sanitized digests. During that experiment the private selector accepted
+only `control` or `bounded`, defaulted to `control`, and rejected any
+other value before mutation. The candidate could have cut over only by
+removing that selector and the unbounded implementation, leaving one
+Natural/Durable path with Durable adding only its checkpoint. The
+midpoint rejection instead removed the candidate; the measured envelope
+and disposition are retained here.
+
+The rejected implementation packet exercised that preregistered shape
+behind a private selector without claiming cutover. The red dense-graph
+regression visited 2,561 edges against the neutral 5*C* = 2, 560 ceiling
+on the prior path. The experimental implementation kept the eligible
+recency prefix at 5*C*, performed deterministic bounded top-*B*
+selection, traverses sources sequentially with first-source-wins
+identity ownership, skips shared embeddings at the logical *B* + 1
+boundary, and updates accepted member rows with one row-addressed
+`UPDATE ... RETURNING` statement. `RETURNING` is required for exact
+accounting through caller-supplied transaction wrappers: a later
+compatibility statement would otherwise overwrite SQLite’s
+connection-local `changes()` value. The same statement was enclosed by a
+narrow managed-mutation scope so the caller-SQL compatibility layer
+could distinguish the cascade’s cache-maintained write from arbitrary
+caller SQL. Arbitrary same-event caller SQL invalidated every
+database-derived surface and the bounded cascade failed closed; the next
+event rebuilt from committed SQLite before traversal.
+
+One hooks-on Release binary then passed 807 assertions in 13 fixed-work
+tests and 907 assertions in 32 complete emotional-cascade tests. The
+fixed-work set includes every one of the 27 structural F/S/T points,
+exact *B* mutation, logical *B* + 1 overflow, source prefix and priority
+work, dense edge saturation, below-envelope candidate/control parity,
+invalid and mid-event selector behavior, caller-SQL invalidation and
+rebuild, engine-owned rollback, process restart, and an explicit
+consolidation event. A separate `FullRoot` regression passed 5,552
+assertions while varying two then four opaque source identifiers,
+text/audio/image labels, and both Natural and Durable retention; every
+cascade counter remained within the same F/S/T-derived ceiling, and
+Durable alone reported the existing post-commit checkpoint. Those
+focused results established the structural and lifecycle seams only. The
+full-corpus midpoint below then failed the preregistered timing and
+identity-quality gates, so the selector, managed-mutation seam, and
+candidate-specific counters were removed. The structural results remain
+historical experiment evidence, not production source health.
+`TRACE[state:emotional_cascade_fixed_work_candidate]`
+`TRACE[rejected:EmotionalCascade.knob-derived-bounded-priority-prefix]`
+
+The fixed-time midpoint screen rejected this candidate before the
+nine-point matrix. A same-binary Natural control/candidate pair used
+timestamps 1, 700, 000, 000, 000 + 1000*i* and the control’s 118
+successful consolidation indices for both fresh stores. Every candidate
+hard-work counter remained within its neutral-knob limit: source
+candidates and executions reached 37, physical edges reached
+5*C* = 2, 560, frontier and topology entries reached 1,888 and 476,
+activated identities reached *A* = 1, 280, and member reads,
+SQL-affected rows, and cache mutations each reached 133. Nevertheless,
+candidate p99 was 0.397625 ms versus 0.693875 ms for control, a 0.573
+ratio against the preregistered 0.25 maximum. Its late/early mean ratio
+was 2.324. The control and candidate profiles are content-addressed by
+`8ef80929db664afd8ac87c256033d7ae3c9ac88036edaddf5f270940c79e52ba` and
+`dd0cdd0801b7656dd8835528977b8d3e925b15d2b8dca398c14bb7d819eacd55`; the
+fixed schedule digest is
+`901fac42a38125e525d6ca44b63312248b36b30b35d8eb3156ff5d4dc7fbcd8f`.
+
+Three implementation-only iterations retained every formula and semantic
+boundary. First, traversal scratch was reserved from 5*C* + *B* and
+reused across sources, while a fixed indexed `embedding_id` update
+replaced variable-length SQL construction and required the exact
+returned memory identifiers to match the cache before mutation. This
+produced p99 0.395666 ms. Second, the candidate persisted the
+already-budgeted 5*C* + *B* expandable topology footprint and reused a
+fixed point only when a new edge was provably outside that footprint;
+active traversals fell from 6,710 to 1,369 and mean cascade time fell
+from 0.0644 to 0.0260 ms, but p99 rose to 0.475541 ms because the
+nearest-rank percentile now landed inside the remaining full traversals.
+Third, a generation-stamped visited map allocated each event’s unique
+memory identities once instead of reallocating hash nodes per source.
+Mean cascade time fell again to 0.023903 ms and p99 to 0.432000 ms,
+while traversal alone remained 0.223292 ms at p99. These tuning profiles
+have digests
+`d06e1042784afbe760ff2e2917541bf07628adc7d9055561372fa513aa6274b8`,
+`ca4039abeaf873acb500b9279dfb1dacd4fb99f57c24c25751c5d7f1edd36bef`, and
+`5ee53d12f0fc98c8e746553500be2f12802a62a5d38de681d84672580d55d916`. They
+are tuning diagnostics rather than admissible performance pairs because
+their comparison control predates the corresponding binary changes.
+
+The final tuning profile independently failed the downstream
+public-retrieval gate, so an additional exact-binary timing pair could
+not rescue the candidate. Over 512 deterministic controls and four
+opaque source identifiers, exact top-1 was 0.998047, identity recall at
+16 was 0.980760, semantic coverage was 0.975084, and tie order remained
+deterministic. The content-addressed audit digest is
+`da402733380f8cf7f2eda5289a4f95f1a35b55fcd27ede4695499d8acd6b4973`.
+Exact top-1 1.0 and recall 0.998 were mandatory, so
+`bounded-priority-prefix` is terminally rejected without running the
+remaining knob/corpus matrix or claiming direct bounded/control delta
+fidelity. The structural formulas remain useful design evidence: neutral
+128 and logical 129 were always derived from *B*(*F*, *S*, *T*), no
+plus-one row was read or mutated, and the latest focused tests passed
+824 assertions in 15 fixed-work cases, 924 in 34 emotional-cascade
+cases, and 5,552 in the mixed source/modality FullRoot case. Those
+source-health results do not override the measured rejection.
 
 The observation-only bounded activation graph was then implemented
 behind a default-off private flag and evaluated directly in compiled C++
@@ -6313,34 +7185,2404 @@ the final-five versus prior-five template error must be at most 0.10.
 Natural cutover cannot use flat-envelope mode to bypass these cycle
 gates; the already-flat Durable control remains eligible for its
 separate flat-envelope contract. The separate 512-query, top-16 corpus
-gate preserves exact identifier recall and exact top-1 at 1.0 and
-requires the complete ordered top-16 identity list to match, including
-seven fixed identity-and-rank probes. The summary is recomputed from all
-512 per-query records rather than trusted as a label. The candidate must
-match a separate control artifact whose exact content digest was
-approved before the audit; deterministic query indices, embedding
-identities, ranked controls, and the seven fixed probe positions are
-bound across those artifacts. The approved control must identify the
-current public retrieval path, and the candidate must also preserve the
-independently recorded digest of the pre-existing seven public
-identity-and-rank probes; the pre- and post-restart probe digests at
-every retained-history fraction must equal the candidate/control
-fixed-probe digest, so a restart cannot preserve a consistent but
-incorrect ranking; the benchmark’s exhaustive embedding-neighbor mode
-can propose a control artifact but cannot label itself approved. Hashed
-source provenance, modality, and history position come from the queried
-embedding’s authoritative SQLite signal rows; together they must cover
-early, middle, and late history, text, audio, image, and at least four
-opaque sources. Restart acceptance likewise derives the fixed row-visit
-ceiling from F/S/T and checks measured retained-row and visited-row
-series from a production-shaped persistent restart rather than trusting
-pass/fail labels. The three retained counts are fixed at 25%, 50%, and
-100% of the bound corpus, visited-row counts must be nonzero and within
-the F/S/T capacity, and a ranked probe digest before restart must match
-the restored probe with at least top-16 candidate state. The current
-synthetic full-history fallback measurement is explicitly ineligible.
-These are candidate-selection thresholds, not evidence that the current
+gate requires mean exact-identifier recall of at least 0.998, at most
+one exact top-1 miss, and mean exact-neighbor semantic coverage of at
+least 0.95. Across the prescribed nine-run matrix, aggregate top-1 must
+remain at least 0.999 and two misses may not share a modality, opaque
+source, memory-age quartile, or exact knob point. The candidate’s
+complete ordered top-16 lists must repeat byte-for-byte under the same
+seeds, while all seven fixed identity-and-rank probes must still match
+the exact control. This permits only the explicitly approved bounded
+approximation; it does not permit clustered top-1 drift,
+nondeterministic ties, or semantic substitution below the exact-recall
+floor. The summary is recomputed from all 512 per-query records rather
+than trusted as a label. The candidate must bind to a separate control
+artifact whose exact content digest was approved before the audit;
+deterministic query indices, embedding identities, exact ranked
+controls, provenance, and the seven fixed probe positions are bound
+across those artifacts. Candidate ranks are separately content-addressed
+across two complete runs rather than being required to equal the exact
+control outside the approved lower-rank allowance. The approved control
+must identify the current public retrieval path, and the candidate must
+also preserve the independently recorded digest of the pre-existing
+seven public identity-and-rank probes; the pre- and post-restart probe
+digests at every retained-history fraction must equal each other, and
+the full-history fraction must additionally equal the candidate/control
+fixed-probe digest. Each smaller fraction uses probes drawn only from
+its retained prefix, so the gate tests restart equality without
+referring to absent history; the benchmark’s exhaustive
+embedding-neighbor mode can propose a control artifact but cannot label
+itself approved. Hashed source provenance, modality, and history
+position come from the queried embedding’s authoritative SQLite signal
+rows; together they must cover early, middle, and late history, text,
+audio, image, and at least four opaque sources. Restart acceptance
+likewise derives the fixed row-visit ceiling from F/S/T and checks
+measured retained-row and visited-row series from a production-shaped
+persistent restart rather than trusting pass/fail labels. The three
+retained counts are fixed at 25%, 50%, and 100% of the bound corpus,
+visited-row counts must be nonzero and within the F/S/T capacity, and a
+ranked probe digest before restart must match the restored probe with at
+least top-16 candidate state. The current synthetic full-history
+fallback measurement is explicitly ineligible. These are
+candidate-selection thresholds, not evidence that the current
 observation-only graph passes them.
+
+The preliminary embedding-router feasibility selected a two-graph
+packed-route hybrid evaluated over 34,456 normalized, 256-dimensional
+embeddings. Each sealed embedding retained 512 route entries; each new
+active-epoch embedding proposed at most 64 reciprocal updates; each
+graph used a 16,384-comparison construction ceiling and a
+1,280-comparison query ceiling. Across 512 deterministic top-16 queries,
+exact top-1 was 1.0, mean exact-identifier recall was 0.998413, and mean
+exact-neighbor semantic coverage was 0.999961. Thirteen of 8,192
+exact-neighbor slots were absent, spread across ten queries, while all
+seven fixed identity-and-rank probes remained exact. The complete
+candidate rank stream repeated with the same content digest in two runs.
+Mixed-input evidence included four opaque sources and text, audio, and
+image labels after encoding; the router consumed only embedding values
+and embedding identity.
+
+The selected benchmark snapshot restarted from 1,024 anchor rows and
+four packed SQLite blobs. At 25%, 50%, and 100% retained history, all
+fixed prefix-local probe results were identical before and after
+restart; the maximum restart visit count was 1,029 rows while the full
+snapshot retained 34,456 embeddings. Active-epoch SQLite allocation
+peaked at 708,608 bytes and reciprocal mutations peaked at 11,967, below
+the historical midpoint 32,768 ceiling. Ten modeled material cycles had
+zero normalized cycle-template error and zero late-template error, with
+post-consolidation retrieval work 0.888889 of the preceding level. This
+establishes a bounded and repeatable embedding-router direction, not the
+production-shaped quality gate, live cycle, or latency proof: the cycle
+result is derived from the fixed-work benchmark model and must still be
+reproduced at public consolidation boundaries in the shared engine path.
+
+Several variants were rejected before selecting that point. A
+reciprocal-route only design reached 0.979858 mean exact recall; adding
+a third graph did not improve recall at equal per-graph work; reducing
+construction to 4,096 comparisons per graph reached 0.995972; and an
+8,192-comparison construction with 64 reciprocal proposals reached
+0.997803. All retained exact top-1, but all fell below the approved
+0.998 lower-rank recall floor. The chosen point therefore spends
+additional bounded construction work to remove all but 13 lower-rank
+misses on that feasibility population, rather than weakening the
+top-result or semantic gates.
+
+An even simpler anchor-only route was also rejected on the corrected
+3,172 current-memory surface. With four selected routes per query, 512
+anchors reached mean exact recall 0.98425 and exact top-1 0.97656; 1,024
+anchors reached 0.99194 and 0.98633 respectively. Adding exact
+reciprocal node-route hops reached only approximately 0.982 recall.
+These were private one-off randomized held-out feasibility probes and
+their raw output was not retained, so they are recorded as negative
+design evidence rather than reproducible acceptance proof. The result
+rules out using anchors as the retrieval candidate set by themselves;
+anchors remain useful only as bounded route entry points into the
+independently constructed sparse graphs.
+`TRACE[state:anchor_only_route_feasibility]`.
+
+A control audit then found that the 34,456 identities came from the
+complete `embeddings` table. The public seed path ranks eligible
+long-term/current memory surfaces, not signal-only embedding ids, and
+additionally applies timestamp, supersession, current-surface, and
+family filters. Labeling the exhaustive embedding-neighbor artifact
+`current-public-retrieval` was therefore invalid. The corresponding
+production-shaped pass is revoked; the result remains only
+router-feasibility evidence.
+
+The corrected current long-term surface contains 3,172 memory
+identities, a 10.86-fold smaller and semantically different population.
+Over the same 512 deterministic top-16 queries, the two-graph route
+reached exact top-1 1.0, exact recall-at-16 1.0, and semantic coverage
+1.0 with no missing query. Maximum construction work was 6,344
+comparisons. Ten 128-memory-node incremental feasibility epochs used at
+most 184,320 active SQLite bytes; mean graph insert, route construction,
+and reciprocal-update times were 0.073002, 0.044416, and 0.013539
+seconds per epoch. At 25%, 50%, and 100% retained surfaces, restart
+visited 798, 1,029, and 1,029 rows and preserved all prefix-local
+probes. These results retain the sparse-route design but do not close
+the public control: the next quality artifact must compare against the
+runtime’s exact eligibility, supersession, current-surface, and family
+behavior. The active sawtooth remains signal-event based, so the
+128-memory-node epochs also cannot substitute for ten live 512-signal
+consolidation cycles. This correction is
+`TRACE[state:retrieval_quality_control_correction]`.
+
+To close that gap without another approximate population model, the
+benchmark now captures the actual public retrieval ranks during Natural
+ingestion. Queries are sampled evenly from retrieval-active events, not
+from every event: the latter includes legitimate no-retrieval decisions
+and would make a routing quality denominator vacuous. A 100-event smoke
+contained 27 retrieval-active events; an eight-query sample covered
+events 6 through 96 and retained nonempty direct, graph-expanded, and
+hydrated rank lists for every query. In a separate paired 200-event run,
+enabling the capture preserved behavior SHA-256
+`40833b57d441b8d7e704787768e8157bacdd8a2525616af8893bbf2d164a87bb` and
+logical-database SHA-256
+`e83dabd67109258d9609d82c26ed01c227045c6ae1f7786ef4b15bb296824ff8`
+exactly. The complete 15,695-packet run then sampled 512 controls from
+5,390 retrieval-active events, spanning events 6 through 15,691. Direct
+controls contained 1–16 identities and the hydrated public result
+contained 1–12; the fail-closed audit accepted the control population.
+The corpus itself is one opaque source and text-only, so it cannot
+satisfy the independent four-source text/audio/image implementation
+gate. `TRACE[state:public_retrieval_control_capture_experiment]` is
+exact public-control evidence, not candidate acceptance.
+
+Three standalone HNSW variants then attempted to reconstruct
+point-in-time candidate routes from the final database. All used two
+graphs with *M* = 64, construction effort 200, query effort 1,280, and a
+route cap of 512. Indexing every retained surface version produced
+apparent identity coverage 0.983770, top-1 coverage 0.914063, and
+73.8887 current candidates on average. Replacing each memory with one
+current node raised occupancy to 406.641 but produced 0.983155 and
+0.912109. Keeping the original surface plus one replaceable current
+reconstruction produced 231.445 candidates and 0.983893/0.914063. An
+exhaustive dual-surface top-512 oracle produced exactly the third
+variant’s apparent misses, while every one of the 8,133 ranked control
+slots was present in retained history at its sampled query (memory
+identities repeat across queries). The mismatch is therefore not HNSW
+approximation or eviction.
+
+The quality labels are invalidated because the final database is not an
+exact time-travel log of the retrieval surface: reconsolidation updates
+`memories.embedding_id`, and the retained reconstruction/current tables
+do not encode every intermediate live processor surface at every earlier
+query. Even substituting `original_centroid` cannot reconstruct that
+mutation order. These runs remain useful negative evidence about the
+post-run evaluation method, not evidence for accepting or rejecting the
+sparse algorithm. The next valid experiment must capture surface
+upserts/removals live and replay that stream against the unchanged
+public controls. Four-source text/audio/image evidence, live cycles, and
+production cutover remain pending.
+`TRACE[state:public_hnsw_route_prototype_experiment]`.
+
+The live mutation capture first passed a 100-event source-health run: 48
+ordered upserts were recorded, every vector had 256 dimensions, 27
+events activated retrieval, and eight sampled public controls remained
+valid. A paired 200-event run then produced identical behavior SHA-256
+`25ed7beeb14a7fc1e4201c632c324c1d45a4d6d1f31e2d9e10799738cdb42c5e` and
+identical logical-database SHA-256
+`1625c3b6a85b585c4e55a8cc83c2871c2b7a6ab8730f788a21b2d9f41f268113` with
+capture off and on. This proves observer neutrality only; the full live
+mutation population was therefore still required. Using the live stream
+as a conservative current-vector route, without attempting to replay
+final-table supersession state backward in time, the two-graph candidate
+covered every public seed identity and every top-1 identity in both the
+eight-query/100-event and sixteen-query/200-event smokes. Candidate
+occupancy grew from a mean 9.75 (maximum 20) to 21.9375 (maximum 41).
+Exact timestamp, supersession, family, and final-rank decisions remain
+downstream engine work; the preliminary exact coverage does not yet
+establish full-run quality, bounded cycles, restart, or latency.
+`TRACE[state:live_surface_mutation_capture_experiment]`.
+
+The complete live run recorded 9,175 ordered 256-dimensional upserts
+across 15,695 packets; this corpus produced no surface removal. It
+retained the same 5,390 retrieval-active events and 512 sampled queries
+as the prior control. Capture and control had identical full-run
+behavior digest
+`ed1146a0ed9b2a85eb2ff7c4b511f39357e6db9c363827d941d96163dc7a1463` and
+logical-database digest
+`522f0dfa9e33e2053903ae938a7bb934319ff836ba608250bd8cd42677b950ca`. The
+live two-graph route covered all 8,133 ranked public seed slots and all
+512 top-1 identities: exact identity coverage 1.0 and top-1 coverage
+1.0. It returned 470.977 candidates on average and at most 512, with a
+10.5183-second offline evaluation time. A complete repeat produced the
+same per-query candidate-order digest
+`2b3e30b0f413692cd8c5a77a15c464ebcc953685901be3904c1b19c96eaf22af` and
+the same normalized result digest
+`f8dafb51cdac5fafda8f93e1b2b07e9a5135a4f43066625cec92f7a19acebcb0`.
+Exact downstream filters remain authoritative, so this is a
+candidate-set quality pass, not a final-rank rewrite or a production
+cutover. The corpus is still one opaque source and text-only;
+four-source text/audio/image evidence, restart bounds, ten live cycles,
+and integrated latency remain open.
+
+The next experiment moved that exact candidate route into the real
+retrieval operation and used a deterministic 2,500-packet Natural prefix
+with four opaque source identities cycling across text, audio, and image
+labels after the common encoder. It sampled 128 actual public controls
+at *k* = 16. The exact control visited 1,078 current rows at the final
+event and spent 1.83742 ms in cached seed discovery. The retained route
+visited exactly 512 rows and spent 1.54363 ms, while all 128 ranked
+identity lists, the complete behavior digest
+`d5bf0c833a2b1677b2df21882145587b21ab03a44cd6b88935f0199d266c7dc2`, and
+the logical-database digest
+`05e7bf911fe848e1a7d7a8db77be7b7edcf289aab0055e965e901c80366dc06e`
+remained exact. Total wall time moved from 48,176 to 49,828 ms
+(1.03429x), and mean process time moved from 2.79103 to 2.85218 ms
+(1.02191x). This is focused integrated evidence, not full-horizon
+flatness, restart, or production cutover.
+
+Two direct integrations were rejected before that result. Updating both
+HNSW graphs on every surface mutation retained the 512-row route and
+exact sampled ranks but raised wall time to 90,022 ms and mean process
+time to 19.7725 ms. A sealed graph plus exact delta that rebuilt after
+every one of the run’s 356 consolidations raised wall time to 93,969 ms.
+The retained algorithm keeps the sealed graphs across consolidation,
+journals changed row addresses in the exact delta, and reseals only when
+512 distinct changes accumulate. This is the measured reason
+consolidation is an epoch boundary rather than a command to rewrite the
+entire index every time it is requested.
+`TRACE[state:integrated_hnsw_sparse_route_experiment]`.
+
+The same-event exact-control seam subsequently corrected the integrated
+quality measurement. A complete 15,695-packet, four-source replay
+cycling text, audio, and image labels sampled 512 retrieval-active
+events while running the route and exact current-surface scan on the
+same query. Exact top-1 was 1.0, exact identity recall at 16 was
+0.999877451, and conservative semantic coverage was 0.999809451;
+deterministic tie order and all control-population checks passed. The
+exact scan is proof instrumentation only and its 1,160,884 ms wall time
+is not a performance result. This satisfies the owner-authorized quality
+tradeoff at this scope, but it does not establish bounded restart, cycle
+symmetry, or default-on readiness.
+
+A follow-up candidate changed consolidation from threshold-triggered
+full resealing to deterministic incremental sealing of every successful
+epoch’s distinct additions, updates, and tombstones into the retained
+graphs. Focused delete, seal, reinsert, delta-reset, and same-route
+tests passed. Two 2,500-packet runs completed all 356 public
+consolidations in 59,526 and 60,427 ms wall time, compared with 48,176
+ms for exact routing and 49,828 ms for the prior sealed-snapshot
+candidate. In the first run, mean ordinary process time was 2.77838 ms
+versus 2.79103 ms for control, mean reported total latency was 10.2603
+versus 9.65932 ms (1.06221x), and measured consolidation time was
+14,341.6 versus 13,907.5 ms (1.03121x). Because the first two wall
+regressions of 1.23559x–1.25430x exceeded those fields, a third run
+persisted the consolidation-context route timings instead of assigning
+the difference to HNSW by inference. It completed in 54,165 ms (1.12432x
+control), with mean ordinary process time 2.66766 ms (0.95580x), mean
+reported total latency 9.88112 ms (1.02296x), and consolidation time
+14,058.0 ms (1.01083x). Across 204 route-active consolidations,
+incremental sealing consumed 381.006 ms total (1.86768 ms per active
+seal) for 1,163 distinct delta identities. Reloading the authoritative
+retrieval surface consumed 9,220.74 ms across all 356 consolidations,
+showing that the existing full-surface reload—not the incremental HNSW
+mutation—is the dominant named route-epoch cost. The incremental seal is
+therefore retained as a default-off candidate within the current latency
+tradeoff, while row-addressed SQLite route startup and removal of the
+full-surface reload remain required before cutover.
+`TRACE[state:integrated_hnsw_consolidation_seal_experiment]`.
+
+### Historical pre-cutover knob-derived SQLite HNSW ablation
+
+The first row-addressed route was moved from a fixed midpoint to the
+complete F/S/T-derived surface defined in the implementation section. A
+structural 3 × 3 × 3 test grid covered all 27 low, midpoint, and high
+combinations with 603 assertions over capacity, backfill, expansion
+breadth, bootstrap, visited nodes, cache size, maximum level, topology,
+reciprocal updates, and construction/query effort. The neutral setting
+intentionally remains the measured 512-candidate, 128-row-backfill
+configuration; low and high settings now change the topology and every
+work ceiling with it.
+
+These nine runs describe the earlier 4*C* visited-node, 2*C*
+search-effort, 8*C* cache candidate and its
+exact-fallback-on-any-dirty-row policy. They remain retained as
+evaluated history, but they are stale for the current source after the
+quality-selected 8*C*/4*C*/16*C* route and bounded *B*-row dirty delta
+were integrated. They cannot satisfy the final cutover matrix; the
+current-source nine-point 2,000-event rerun is reported immediately
+below, and the later 15,695-packet nine-point latency/reset ablation is
+reported above.
+
+Nine production-shaped 2,000-event Natural replays then used the
+authorized private Claude-session sentence corpus. Each run generated
+its own 512-query same-event exact `GraphRetrieve` control at *k* = 16,
+used four opaque source identities, and cycled text, audio, and image
+labels after the shared encoder. All 4,608 system-path queries passed:
+exact top-1 and mean identity recall at 16 were 1.0 in every run,
+deterministic tie order held, and the minimum conservative semantic
+coverage was 0.999532. Four configurations actually queried the SQLite
+sparse route and passed those gates. Sensitivity-low remained below its
+activation threshold. Focus-low had a published hierarchy but a nonempty
+durable journal at every sampled route opportunity, while
+sensitivity-high, stability-high, and all-high remained unpublished; all
+five therefore exercised exact fallback. Those runs establish system
+fallback quality, not sparse-route quality. Every raw profile records
+the resolved knob configuration rather than relying on the evaluator to
+reconstruct it.
+
+<table>
+<colgroup>
+<col style="width: 11%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 15%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>Configuration <span
+class="math inline">(<em>F</em>, <em>S</em>, <em>T</em>)</span></th>
+<th style="text-align: right;"><span
+class="math inline"><em>C</em></span> / <span
+class="math inline"><em>B</em></span> / max level</th>
+<th style="text-align: right;">neighbors / L0 / reciprocal</th>
+<th style="text-align: right;">construction / query</th>
+<th style="text-align: right;">max visited / restart</th>
+<th style="text-align: right;">process / total ms</th>
+<th>route state</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>all-low (0,0,0)</td>
+<td style="text-align: right;">256 / 64 / 8</td>
+<td style="text-align: right;">32 / 64 / 4</td>
+<td style="text-align: right;">100 / 640</td>
+<td style="text-align: right;">776 / 1</td>
+<td style="text-align: right;">25.532 / 33.749</td>
+<td>active; 5 SQLite-route events; observed level 5</td>
+</tr>
+<tr>
+<td>Focus-low (0,.5,.5)</td>
+<td style="text-align: right;">384 / 96 / 9</td>
+<td style="text-align: right;">48 / 96 / 6</td>
+<td style="text-align: right;">150 / 960</td>
+<td style="text-align: right;">0 / 0</td>
+<td style="text-align: right;">19.010 / 25.449</td>
+<td>dirty journal; exact fallback; hierarchy reached level 5</td>
+</tr>
+<tr>
+<td>Sensitivity-low (.5,0,.5)</td>
+<td style="text-align: right;">448 / 112 / 9</td>
+<td style="text-align: right;">56 / 112 / 7</td>
+<td style="text-align: right;">175 / 1,120</td>
+<td style="text-align: right;">0 / 0</td>
+<td style="text-align: right;">0.544 / 0.952</td>
+<td>surface stayed below <span
+class="math inline"><em>C</em></span></td>
+</tr>
+<tr>
+<td>Stability-low (.5,.5,0)</td>
+<td style="text-align: right;">448 / 112 / 9</td>
+<td style="text-align: right;">56 / 112 / 7</td>
+<td style="text-align: right;">175 / 1,120</td>
+<td style="text-align: right;">906 / 1</td>
+<td style="text-align: right;">19.443 / 23.669</td>
+<td>active; 31 SQLite-route events; observed level 5</td>
+</tr>
+<tr>
+<td>neutral (.5,.5,.5)</td>
+<td style="text-align: right;">512 / 128 / 9</td>
+<td style="text-align: right;">64 / 128 / 8</td>
+<td style="text-align: right;">200 / 1,280</td>
+<td style="text-align: right;">974 / 1</td>
+<td style="text-align: right;">14.314 / 18.392</td>
+<td>active; 30 SQLite-route events; observed level 5</td>
+</tr>
+<tr>
+<td>Sensitivity-high (.5,1,.5)</td>
+<td style="text-align: right;">576 / 144 / 10</td>
+<td style="text-align: right;">72 / 144 / 9</td>
+<td style="text-align: right;">225 / 1,440</td>
+<td style="text-align: right;">0 / 0</td>
+<td style="text-align: right;">59.718 / 62.364</td>
+<td>build unpublished; exact fallback; observed level 4</td>
+</tr>
+<tr>
+<td>Stability-high (.5,.5,1)</td>
+<td style="text-align: right;">576 / 144 / 10</td>
+<td style="text-align: right;">72 / 144 / 9</td>
+<td style="text-align: right;">225 / 1,440</td>
+<td style="text-align: right;">0 / 0</td>
+<td style="text-align: right;">13.855 / 18.073</td>
+<td>build unpublished; exact fallback; observed level 4</td>
+</tr>
+<tr>
+<td>Focus-high (1,.5,.5)</td>
+<td style="text-align: right;">640 / 160 / 10</td>
+<td style="text-align: right;">80 / 160 / 10</td>
+<td style="text-align: right;">250 / 1,600</td>
+<td style="text-align: right;">968 / 1</td>
+<td style="text-align: right;">12.800 / 14.656</td>
+<td>active; 17 SQLite-route events; observed level 4</td>
+</tr>
+<tr>
+<td>all-high (1,1,1)</td>
+<td style="text-align: right;">768 / 192 / 10</td>
+<td style="text-align: right;">96 / 192 / 12</td>
+<td style="text-align: right;">300 / 1,920</td>
+<td style="text-align: right;">0 / 0</td>
+<td style="text-align: right;">51.722 / 52.864</td>
+<td>build unpublished; exact fallback; observed level 4</td>
+</tr>
+</tbody>
+</table>
+
+The maximum observed backfill batches at the all-low, neutral, and
+all-high points were exactly 64, 128, and 192 rows. Active routes never
+exceeded their 4*C* visited-node limit and opened the route from one
+metadata row. Zero visited rows do not claim zero retrieval work: those
+configurations either remained below their activation threshold or had
+not accumulated enough consolidation boundaries to publish the bounded
+build, so the exact scan was both production candidate and control.
+
+Four defects were rejected during this ablation rather than folded into
+the reported pass. The first all-low run visited 1,042 rows against its
+1,024-row ceiling because hot-cache hits bypassed the database-miss
+budget; the fetcher now applies one ceiling to cached and uncached
+nodes, and a warmed-cache regression reproduces the low-knob case.
+Earlier generation-reset variants also discarded resumable progress, and
+a later build marker could resume nodes but lost committed live
+mutations. The retained design instead keeps an authoritative
+dirty-identity journal across both active and unpublished generations.
+The unpublished build was also copying every live write into an
+unbounded in-memory delta even though exact fallback remained
+authoritative. At sensitivity-high this exceeded the construction search
+ceiling on the second batch. The retained path keeps those live
+identities in SQLite, drains at most *B* dirty identities plus *B*
+backfill rows per construction edge, and clears only the identities
+actually sealed. A focused 400-dirty-identity regression covers both
+active and unpublished drainage. Finally, the first persisted
+implementation assigned every node to level zero; the retained route
+deterministically assigns hierarchy levels capped by
+⌈log<sub>2</sub>*C*⌉, bounds upper-level links by the knob-derived
+neighbor limit, and requires observed upper-level rows before a corpus
+slice may be called route-lifecycle exercised. The retained databases
+additionally decode to nonempty upper-level adjacency on every exercised
+route (236, 160, 125, and 90 upper-level nodes respectively), rather
+than merely containing positive level labels. The nine reruns now record
+zero backfill and search failures. They were rerun with benchmark
+executable SHA-256
+`a398ac2d0ce5188bb1708f811a30689d59412efcffc2c4c08587bb33c6f7c780`; the
+four direct regression reports bind test executable SHA-256
+`4ee4dd4c5d28583ffea8dc2ab6f43bc40572f2496d589923736b9fb242ad4513`. All
+nine SQLite databases are retained in the private artifact root and
+content-addressed beside their profiles and audits. The aggregate
+artifact is content-bound by SHA-256
+`8ef2012604c5efe6f547837bc8e8c0e625a691de52c051187858e43b344fe1a3`.
+
+This matrix proves knob derivation, local work ceilings, bounded
+live-dirty drainage, source/modality agnosticism, runtime hierarchy
+construction, route lifecycle exercise on four configurations, exact
+whole-system quality on all nine, and one-row sparse-route metadata open
+at 2,000 events. It does not separately materialize route-active query
+quality and does not prove bounded whole-engine restart; processor
+startup still loads the complete current surface. It also does not prove
+the full 15,695-event plateau, repeated sawtooth symmetry, or
+production-wide boundedness. Whole-engine timing is also not an
+HNSW-only ablation: changing F, S, or T changes retrieval admission,
+consolidation frequency, and surface evolution.
+`TRACE[state:sqlite_hnsw_knob_ablation]`.
+
+### Consolidation-centroid and activation-effort follow-up
+
+The first bounded-supersession full replay retained the static 6*C*
+query effort. It completed 15,695 events and kept write-time
+supersession candidates bounded, but 2,833 consolidations did not
+flatten retrieval: mean SQLite sparse route visits rose with the
+persisted graph. This rejected the claim that candidate capacity alone
+made consolidation restorative.
+
+A connection-local centroid recenter was then added. The first
+5,000-event probe still consolidated 801 times because the detector
+cooldown incorrectly used a backlog counter that can remain high when a
+consolidation has no association mutations. Replacing that condition
+with a post-acknowledgement observation count derived from *B* reduced
+the same 5,000-event cadence to 35 consolidations, normally 128
+observations apart at neutral knobs. That probe still did not lower
+route work: 6*C* exceeded the reachable graph in those epochs, so
+changing only the entry centroid could not change traversal breadth.
+Both variants were therefore retained as rejected diagnostic steps
+rather than reported as a performance fix.
+
+The selected follow-up couples the centroid to the 2*C* → 6*C*
+activation effort cycle described in the implementation section. A
+1,000-event copied-late control at *F* = *S* = *T* = 0.5 exercised seven
+successful resets to 2*C* = 1, 024. Its 512 independently captured
+public controls across four opaque source identifiers and text, audio,
+and image inputs retained exact top-1 1.0, recall at 16 of 1.0, semantic
+coverage 1.0, and deterministic tie order. A separate 2,000-event
+copied-late performance replay produced 15 complete large-store cycles.
+The phase-edge sample is itself knob-derived as *m**a**x*(2, ⌊*B*/32⌋),
+or four retrieval-active queries at neutral knobs. Eleven cycles had at
+least a 1.10 pre-consolidation visited-row ramp and all 11 reset by at
+least 10%; the median immediate reset ratio was 0.859. The first and
+second halves of material-cycle peak work differed by 1.041, while
+trough work differed by 0.992, both inside the 1.10 late-drift limit. A
+fresh 5,000-event replay produced the intended 35-consolidation cadence
+but remained below the 2*C* traversal envelope; it is warm-up evidence,
+not a late-store sawtooth claim.
+
+The subsequent 15,695-event full replay rejected queue effort as the
+only work-control mechanism. It completed 117 consolidations in 927,365
+ms. The recorded 2*C* → 6*C* waveform itself was repeatable (p95
+normalized shape error 0.0118 and late-template error 0.00496), but
+actual node visits continued to rise: only 13 of 23 material cycles
+reset, and late/early peak and trough ratios were 1.167 and 1.159.
+End-anchored process windows rose from about 2.21 to 3.24 ms, throughput
+fell from 29.07 to 10.38 events/s, and the final 500-event tail reached
+9.44 events/s. Normalized consolidation cost rose 2.50-fold per sealed
+event and 2.16-fold per sealed mutation. HNSW queue effort limits the
+candidate queue, not the number of row-addressed graph nodes fetched, so
+a symmetric control waveform did not make actual work restorative.
+
+The first actual-node candidate used the knob-derived ⌈11*C*/2⌉ → 12*C*
+cycle, or 2,816 to 6,144 nodes in increments of 26 at neutral knobs. Its
+copied-late quality probe passed exact top-1 at 1.0, recall at 16 at
+0.999878, semantic coverage at 0.999947, and deterministic order. The
+full 15,695-event replay cut wall time from 927,365 to 190,736 ms and
+mean public latency from 57.542 to 11.068 ms, with no absolute or
+dynamic node-budget violations. It nevertheless failed the
+restorative-cycle gate: only 10 of 16 material cycles reset, late/early
+peaks were 1.107, and troughs were 1.097. This floor was therefore
+rejected as too shallow for the required symmetric sawtooth despite its
+large runtime gain.
+
+The selected lower-floor candidate uses 5*C* → 12*C* with step
+⌈(12*C* − 5*C*)/*B*⌉. At neutral knobs this is 2,560 to 6,144 nodes in
+increments of 28. A corrected 1,000-event copied-mature quality probe
+enabled the exact HNSW control capture explicitly and exercised eight
+simultaneous queue/node resets to 1,024/2,560. Across 512 controls it
+kept exact top-1 at 1.0, recall at 16 at 0.999146, semantic coverage at
+0.998680, and deterministic order over four opaque sources and text,
+audio, and image. Actual visits ranged from 2,560 to 3,740, recorded
+ceilings ranged from 2,560 to 6,144, and no query exceeded its current
+ceiling. An earlier run without the exact-control capture flag was
+classified candidate-pending rather than accepted.
+
+Four follow-up variations were rejected rather than silently folded into
+the selected result. Lowering the reset floor by one backfill batch to
+5*C* − *B* = 4.75*C* reduced exact top-1 to 0.998047. Holding the 5*C*
+floor while reducing its derived ramp increment from 28 to 27 also lost
+exact top-1 on the copied mature store. Raising the queue floor
+independently to 3*C*, 4*C*, or 5*C*, and holding it at 6*C*, reproduced
+that same miss. Queue effort and the last quarter-batch of node budget
+were therefore not the root cause. Inspection found a live target with
+no incoming persisted links, and also found that the route’s
+fetched-node cache was larger than the HNSW best queue but only the best
+queue was exactly reranked. A connected traversal could never activate
+that target regardless of queue tuning.
+
+The retained repair keeps the HNSW traversal in the existing SQLite
+route, then fills the unused portion of the current knob-derived
+actual-node envelope from a deterministic indexed active-row slice that
+starts at the current entry and wraps once. It exactly reranks every
+fetched row, not only the HNSW best queue, before returning the existing
+*C*-identity candidate set. The completion is bounded by the same
+5*C* → 12*C* ceiling and does not branch on source or modality. In a
+512-query copied-mature probe this exact bounded activation kept top-1
+and recall at 16 at 1.0, semantic coverage at 0.999736, deterministic
+ties, and zero work-bound violations.
+
+A final source review found that seal-time node invalidation erased
+cache-map rows without erasing their FIFO order entries. Repeated
+seal/search cycles could therefore grow bookkeeping even while the node
+map stayed at 24*C*. The retained correction clears the map and order
+together after a successful seal. The focused SQLite-route suite
+directly checks both structures against the knob-derived 24*C* capacity;
+this is bounded-cache source proof, not a new full-corpus latency claim.
+
+That expanding-envelope replay completed 117 consolidations in 175,166
+ms, with mean process latency 3.493 ms and mean public latency 9.942 ms.
+All 15 material retrieval cycles reset, late/early peak and trough
+ratios were 1.074 and 1.002, the late template error was 0.00450, and
+the maximum observed node work was 3,357 under the 6,144 hard ceiling.
+The retrieval-specific restorative sawtooth passed under that binary.
+The whole-engine plateau did not: final-suffix process latency was 1.165
+times its leading suffix and throughput retained only 0.877 of its
+leading rate. Consolidation process peak and trough ratios were 1.201
+and 1.273. After live dirty reconciliation was corrected from a *B*
+drain to a *C* drain, however, the expanding public envelope also became
+an expensive construction envelope. The current-binary replay took
+394,645 ms, including 65,562 ms in 118 consolidations and 58,825 ms in
+SQLite route sealing. Public retrieval activated as many as
+12*C* = 6, 144 rows, and each dirty root could repeat that work while
+selecting graph neighbors. Exact top-1 remained 1.0, mean identity
+recall at 16 was 0.998407, and semantic coverage was 0.997572. The
+expanding envelope is retained as a rejected experiment, not as the
+current algorithm or an engine-wide boundedness claim.
+
+### Fixed activation and separate construction envelopes
+
+The first fixed-envelope candidate separated retrieval work from graph
+maintenance. Public retrieval always uses a 5*C* actual-node envelope
+and 2*C* queue. Consolidation recenters the connection-local entry but
+does not increase or reset work size; the zero ramp is an invariant
+selecting the fixed F/S/T-derived envelope. Incremental sealing uses the
+independently derived *C* + *B* node and 2*B* queue construction
+envelope. Historical backfill remains *B* rows; *B* + 1 names the
+logical boundary tested by checking the post-*B* in-memory iterator, not
+an extra row read. Live dirty reconciliation remains *C* rows, with
+*C* + 1 used only as its overflow probe.
+
+The first neutral 2,500-packet current-binary probe used *C* = 512 and
+*B* = 128: public work was fixed at 2,560 nodes and queue effort 1,024,
+construction work was bounded at 640 nodes and queue effort 256, and 129
+remained solely the logical historical-overflow boundary. Across 512
+exact public controls, top-1 was 1.0, mean identity recall at 16 was
+0.999876, semantic coverage was 0.999947, and all four opaque sources
+plus text, audio, and image post-encoding inputs used the same route.
+Eighteen consolidations spent 301.174 ms in SQLite route seals in total;
+the maximum individual seal was 80.482 ms, down from the roughly
+one-second late seals in the rejected current-binary expanding-envelope
+run. This was only a quality and local-work probe. A full 15,695-packet
+replay and new nine-point knob ablation were therefore required before
+retention or plateau claims; those later runs are reported separately
+and reject the whole-engine plateau.
+
+The corresponding full replay rejected that first fixed-envelope
+candidate. All mature route queries stayed at exactly the 2,560-row
+ceiling and maximum seal time stayed below 114 ms, but exact top-1 fell
+to 0.992188, mean identity recall at 16 to 0.975490, and semantic
+coverage to 0.967325. Recall by query quarter was 1.0, 1.0, 0.980469,
+and 0.921875, so the failure was age-related rather than an immediate 5C
+coverage defect. Inspection found that an existing memory whose
+consolidation centroid moved updated its embedding but retained its old
+outbound neighbor list. The graph became semantically stale even though
+its row count and every query remained bounded.
+
+The relinking candidate recomputed outbound neighbors for both new and
+changed active centroids under the same *C* + *B* node and 2*B* queue
+construction envelope, preserves deterministic level, and applies at
+most the derived max (2, ⌊*B*/16⌋) reciprocal updates per level. Its
+focused restart regression proved a moved centroid changes persisted
+links and remains the nearest result after reopen. The full replay
+rejected it: exact top-1 fell to 0.980469, mean identity recall at 16 to
+0.972794, semantic coverage to 0.964210, and maximum seal time rose to
+140.669 ms. The source change and its regression were removed; the
+result remains as negative evidence.
+
+The dual-seed candidate tested activation entry ownership instead. The
+prior recenter operation replaced the canonical maximum-level HNSW entry
+with the nearest consolidation centroid, which was often a level-zero
+node. Later queries therefore skipped global hierarchy descent and
+crawled only the local graph. The dual-seed candidate always descends
+from the persisted canonical entry, then adds the consolidation centroid
+as a second level-zero frontier seed and as the deterministic envelope
+pivot. Both seeds share the same fixed 2*C*/5*C* envelope, so this did
+not double work. Its full replay still failed: exact top-1 was 0.984375,
+mean identity recall at 16 was 0.974142, and semantic coverage was
+0.968592. The source change was removed. A copied-late
+duplicate-ingestion diagnostic is excluded from acceptance because
+replaying already-present packets changed the authoritative population
+and timestamps.
+
+The 12*C*/6*C* candidate passed quality but saturated too late to
+provide six complete mature 500-event windows, so it remains a
+superseded experiment rather than plateau evidence. Reducing the fixed
+public envelope to 10*C* nodes and a 5*C* queue moved saturation earlier
+while construction remained independently bounded at *C* + *B* nodes and
+2*B* queue effort. At neutral knobs these values are 5,120/2,560 for
+public retrieval and 640/256 for construction. All are F/S/T-derived,
+and the query-age increments remain zero.
+
+The first 10*C*/5*C* full replay isolated five late operation slopes to
+one cause: each supersession write or current-surface change invalidated
+the whole target-eligibility sidecar, so later storage, reconsolidation,
+and emotional cascade cache ensures rebuilt every target. The retained
+repair recomputes only the supersession targets affected by the
+committed edge or changed source. The next exact-binary replay removed
+every late operation failure. A separate family-comparison counter still
+had a noisy half ratio even though its event maximum was only 130. A
+first *B* = 128 hard cap and a second *C* = 512 cap were both rejected
+because the 430- and 600-near-duplicate pagination regressions could
+consume the budget before the semantic target. The retained 2*C* cap
+passes those regressions and provides a stronger per-event absolute
+bound; half ratios remain reported, but bounded work below 2*C* is not
+misclassified as store growth.
+
+The final 15,695-packet Natural replay passed both quality and
+whole-engine plateau gates. Exact top-1 was 1.0, mean identity recall at
+16 was 0.999020, and semantic coverage was 0.998311 across 512 exact
+public controls. The run took 333,475 ms overall, with mean process and
+public total latencies of 8.885 and 16.617 ms. The accepted plateau
+begins at event 11,695 and contains eight complete 500-event windows
+while the authoritative store continues growing. Mean plateau process
+time is 9.933 ms; late/early process and consolidation-inclusive
+throughput ratios are 0.96177 and 0.97979, and the relative Theil–Sen
+slope is -0.00768 per window. All operation and work-counter failures
+are empty. Twenty-nine complete consolidation epochs form the intended
+zero-amplitude fixed envelope, and the maximum 130 exact family checks
+remain below the midpoint 2*C* = 1, 024 ceiling. Route sealing consumed
+8,375 ms in total and no seal exceeded 97.562 ms.
+
+### Historical C-identity fixed-envelope knob ablation
+
+The prior 10*C*/5*C* candidate, which returned at most *C* identities
+from the routing envelope, was rebuilt once and evaluated at all nine
+prescribed F/S/T points. Each fresh SQLite store processed 2,000 corpus
+packets and used its own 512-query exact public control at the same knob
+values. The 4,608 controls covered four opaque source identifiers and
+text, audio, and image post-encoding inputs. Exact top-1 and identity
+recall at 16 were 1.0 in all nine runs; minimum semantic coverage was
+0.999898. Midpoint and focus-low published and exercised the sparse
+hierarchy. The other seven runs remained below threshold or ended with
+bounded unpublished or dirty state and are therefore system-quality
+exact fallbacks, not sparse-route quality claims.
+
+<table>
+<colgroup>
+<col style="width: 8%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+<col style="width: 8%" />
+<col style="width: 11%" />
+<col style="width: 11%" />
+</colgroup>
+<thead>
+<tr>
+<th>Point (F/S/T)</th>
+<th style="text-align: right;">C/B</th>
+<th style="text-align: right;">public nodes/queue</th>
+<th style="text-align: right;">dirty limit/sentinel</th>
+<th style="text-align: right;">backfill limit/sentinel</th>
+<th style="text-align: right;">route events/resets</th>
+<th>quality class</th>
+<th style="text-align: right;">top-1 / recall@16 / semantic</th>
+<th style="text-align: right;">process / total ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>midpoint (.5/.5/.5)</td>
+<td style="text-align: right;">512/128</td>
+<td style="text-align: right;">5120/2560</td>
+<td style="text-align: right;">512/513</td>
+<td style="text-align: right;">128/129</td>
+<td style="text-align: right;">15/1</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">13.749/17.930</td>
+</tr>
+<tr>
+<td>all-low (0/0/0)</td>
+<td style="text-align: right;">256/64</td>
+<td style="text-align: right;">2560/1280</td>
+<td style="text-align: right;">256/257</td>
+<td style="text-align: right;">64/65</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">22.853/27.654</td>
+</tr>
+<tr>
+<td>all-high (1/1/1)</td>
+<td style="text-align: right;">768/192</td>
+<td style="text-align: right;">7680/3840</td>
+<td style="text-align: right;">768/769</td>
+<td style="text-align: right;">192/193</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">48.580/49.771</td>
+</tr>
+<tr>
+<td>focus-low (0/.5/.5)</td>
+<td style="text-align: right;">384/96</td>
+<td style="text-align: right;">3840/1920</td>
+<td style="text-align: right;">384/385</td>
+<td style="text-align: right;">96/97</td>
+<td style="text-align: right;">232/5</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">1/1/0.999898</td>
+<td style="text-align: right;">10.794/15.802</td>
+</tr>
+<tr>
+<td>focus-high (1/.5/.5)</td>
+<td style="text-align: right;">640/160</td>
+<td style="text-align: right;">6400/3200</td>
+<td style="text-align: right;">640/641</td>
+<td style="text-align: right;">160/161</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">12.363/14.390</td>
+</tr>
+<tr>
+<td>sensitivity-low (.5/0/.5)</td>
+<td style="text-align: right;">448/112</td>
+<td style="text-align: right;">4480/2240</td>
+<td style="text-align: right;">448/449</td>
+<td style="text-align: right;">112/113</td>
+<td style="text-align: right;">0/0</td>
+<td>exact below threshold</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">0.429/0.823</td>
+</tr>
+<tr>
+<td>sensitivity-high (.5/1/.5)</td>
+<td style="text-align: right;">576/144</td>
+<td style="text-align: right;">5760/2880</td>
+<td style="text-align: right;">576/577</td>
+<td style="text-align: right;">144/145</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">57.418/60.169</td>
+</tr>
+<tr>
+<td>stability-low (.5/.5/0)</td>
+<td style="text-align: right;">448/112</td>
+<td style="text-align: right;">4480/2240</td>
+<td style="text-align: right;">448/449</td>
+<td style="text-align: right;">112/113</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">17.766/21.884</td>
+</tr>
+<tr>
+<td>stability-high (.5/.5/1)</td>
+<td style="text-align: right;">576/144</td>
+<td style="text-align: right;">5760/2880</td>
+<td style="text-align: right;">576/577</td>
+<td style="text-align: right;">144/145</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">13.264/17.515</td>
+</tr>
+</tbody>
+</table>
+
+The complete 3 × 3 × 3 structural grid passed 780 assertions, while the
+bounded backfill/journal, route-metadata-open, and core-knob suites
+passed 1,220, 566, and 393 assertions. At neutral knobs the historical
+batch is *B* = 128; 129 is exclusively the derived logical *B* + 1
+boundary. The implementation checks the post-*B* iterator without
+reading or processing a 129th work row. The corresponding endpoint pairs
+are 64/65 and 192/193. Public activation likewise scales from
+2,560/1,280 nodes/queue through 5,120/2,560 to 7,680/3,840. Exact family
+comparisons independently scale as 2*C*, or 512, 1,024, and 1,536 at
+those same endpoints. The content-addressed aggregate digest is
+`efdbd964cb255c44d4490814fde954380b683cd2e891ceae13723ba77b691313`. This
+closed the earlier C-identity candidate’s knob-derivation and
+sampled-quality gate. The later fixed-activation experiments below
+supersede it: the *C*-identity route was fast enough for a plateau on
+that binary, but did not retain exact long-history quality once the
+activated working set was separated from the wider routing envelope.
+
+### Fixed activated-identity follow-up
+
+The retained route distinguishes two finite sets. SQLite routing may
+inspect at most 5*C* graph identities so that a sparse hierarchy can
+recover distant neighborhoods. Exact reranking then retains at most
+
+*A* = 2*C* + 2*B*
+
+identities for current-surface eligibility, family collapse, graph
+expansion, and final ranking. At neutral knobs *C* = 512, *B* = 128, and
+*A* = 1, 280; at the all-low and all-high endpoints *A* is 640 and
+1,920. Construction remains a separate *C* + *B* node and 2*B* queue
+operation. The canonical maximum-level HNSW entry performs global
+descent, while the nearest consolidation centroid is an additional
+level-zero seed and deterministic fill pivot. Neither identity set,
+seed, nor limit depends on modality or `source_id`.
+
+The activated target was selected through a sequence of full-corpus and
+focused negative experiments. The table reports exact top-1, mean
+identity recall at 16, and semantic coverage. “Limited route” means the
+routing-node ceiling was also set to the activated target rather than
+retaining the wider 10*C* route.
+
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>Candidate</th>
+<th style="text-align: right;">Corpus / wall ms</th>
+<th style="text-align: right;">top-1 / recall@16 / semantic</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="math inline"><em>A</em> = 2<em>C</em></span></td>
+<td style="text-align: right;">Durable / 27,006</td>
+<td style="text-align: right;">0.994141 / 0.985797 / 0.978325</td>
+<td>rejected: three sampled top-1 misses</td>
+</tr>
+<tr>
+<td><span class="math inline"><em>A</em> = 3<em>C</em></span></td>
+<td style="text-align: right;">Durable / 28,242</td>
+<td style="text-align: right;">1 / 0.999753 / 0.999285</td>
+<td>superseded: the 1,497 midpoint-near target saturated too late for
+six mature windows</td>
+</tr>
+<tr>
+<td><span
+class="math inline"><em>A</em> = 2<em>C</em> + 2<em>B</em></span>,
+limited route</td>
+<td style="text-align: right;">Durable / 27,963</td>
+<td style="text-align: right;">1 / 0.998518 / 0.995665</td>
+<td>rejected for the shared path after Natural failed</td>
+</tr>
+<tr>
+<td><span
+class="math inline"><em>A</em> = 2<em>C</em> + 2<em>B</em></span>,
+limited route</td>
+<td style="text-align: right;">Natural / 115,461</td>
+<td style="text-align: right;">0.964844 / 0.939345 / 0.926401</td>
+<td>rejected: long-history neighborhoods were unreachable</td>
+</tr>
+<tr>
+<td>canonical hierarchy plus consolidation seed, limited route</td>
+<td style="text-align: right;">Natural / 114,909</td>
+<td style="text-align: right;">0.980469 / 0.963583 / 0.950696</td>
+<td>improved but rejected</td>
+</tr>
+<tr>
+<td>fill the full target during traversal, limited route</td>
+<td style="text-align: right;">Natural / 96,859</td>
+<td style="text-align: right;">0.978516 / 0.965016 / 0.952839</td>
+<td>rejected</td>
+</tr>
+<tr>
+<td>several arbitrary highest-level seeds</td>
+<td style="text-align: right;">Natural / 111,770</td>
+<td style="text-align: right;">0.960938 / 0.938407 / 0.926448</td>
+<td>rejected and removed</td>
+</tr>
+<tr>
+<td>query-adaptive coarse highest-level seeds</td>
+<td style="text-align: right;">Natural / 116,619</td>
+<td style="text-align: right;">0.980469 / 0.952914 / 0.939977</td>
+<td>rejected and removed</td>
+</tr>
+</tbody>
+</table>
+
+A direct node-envelope ablation then varied the routing ceiling without
+changing *C*, *B*, *A*, construction, downstream eligibility, or exact
+reranking. The 5,000-packet screen rejected *C* and *C* + *B*.
+Full-horizon runs rejected 2*C* and *A* despite their lower wall times
+because both violated the mandatory exact-top-1 and recall contracts.
+5*C* was the smallest tested envelope to retain exact top-1 and the
+accepted recall gate; 10*C* was exact but wider and slower. These are
+route-envelope results, not whole-engine plateau passes.
+
+<table>
+<colgroup>
+<col style="width: 21%" />
+<col style="width: 28%" />
+<col style="width: 28%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>Routing ceiling</th>
+<th style="text-align: right;">Events / wall ms</th>
+<th style="text-align: right;">top-1 / recall@16 / semantic</th>
+<th>Disposition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><span class="math inline"><em>C</em></span></td>
+<td style="text-align: right;">5,000 / 28,807</td>
+<td style="text-align: right;">0.890625 / 0.875265 / 0.864615</td>
+<td>rejected</td>
+</tr>
+<tr>
+<td><span class="math inline"><em>C</em> + <em>B</em></span></td>
+<td style="text-align: right;">5,000 / 29,765</td>
+<td style="text-align: right;">0.974609 / 0.970724 / 0.966273</td>
+<td>rejected</td>
+</tr>
+<tr>
+<td><span class="math inline">2<em>C</em></span></td>
+<td style="text-align: right;">15,695 / 91,591</td>
+<td style="text-align: right;">0.935547 / 0.907982 / 0.884337</td>
+<td>rejected</td>
+</tr>
+<tr>
+<td><span
+class="math inline"><em>A</em> = 2<em>C</em> + 2<em>B</em></span></td>
+<td style="text-align: right;">15,695 / 112,713</td>
+<td style="text-align: right;">0.984375 / 0.971970 / 0.959175</td>
+<td>rejected</td>
+</tr>
+<tr>
+<td><span class="math inline">5<em>C</em></span></td>
+<td style="text-align: right;">15,695 / 101,598</td>
+<td style="text-align: right;">1 / 0.999507 / 0.999143</td>
+<td>retained: smallest passing envelope</td>
+</tr>
+<tr>
+<td><span class="math inline">10<em>C</em></span></td>
+<td style="text-align: right;">15,695 / 103,534</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+<td>superseded: wider than necessary</td>
+</tr>
+</tbody>
+</table>
+
+A denser graph candidate increased each node to *B* outgoing neighbors
+and *B*/4 reciprocal updates. Its focused 600-node HNSW regression did
+not finish within three minutes, so it was interrupted before any corpus
+result and the retained *B*/2 neighbor and *B*/16 reciprocal formulas
+were restored. Earlier integration attempts are also retained as
+negative evidence: one full Durable run stayed on exact fallback because
+backfill advanced only at consolidation; a lifecycle repair activated
+the route but truncated candidates before operation-specific eligibility
+and lost quality; a later exact-quality run let visited-node work grow
+with the sub-ceiling store and failed the plateau audit. An apparent
+15,695-event “Durable” replay that forced each Natural sentence to
+Durable was invalidated because it changed the corpus unit and is not
+used as performance evidence.
+
+The selected implementation keeps the 5*C* routing ceiling and exact
+rerank, then retains *A* = 2*C* + 2*B*. The final 15,695-packet Natural
+replay at *F* = 0.45, *S* = *T* = 0.5 resolved *C* = 499, *B* = 125,
+*A* = 1, 248, and a 2,495-row routing and queue ceiling. With no
+experiment override, it completed in 100,805 ms with mean process and
+public total latencies of 2.777 and 6.207 ms. Across 512 controls, exact
+top-1 was 1.0, recall at 16 was 0.999507, semantic coverage was
+0.999285, and ties were deterministic. The activated set never exceeded
+*A*. This proves a fixed semantic activation set and a finite route
+envelope, not a whole-engine plateau; the end-anchored plateau audit
+still had no accepted suffix.
+
+The corresponding 2,016-message Durable replay used the identical
+algorithm and knobs, with Durable adding only its post-commit
+checkpoint. With no experiment override, it completed in 29,767 ms with
+mean process and public total latencies of 8.178 and 14.350 ms. All
+three retrieval quality measures were 1.0. Only three post-warmup
+500-event windows existed, below the required ten, so this is
+insufficient horizon rather than a Durable plateau pass.
+
+The new nine-point ablation rebuilt one binary and ran fresh
+2,000-packet stores at midpoint, both joint endpoints, and each one-axis
+endpoint. Every run used its own 512-query same-knob text control over
+four opaque sources. A separate active-SQLite-route regression held
+embeddings fixed and produced identical candidates and bounds while
+varying memory and query labels across text, audio, image, shared
+sources, and opaque sources. This split avoids fabricated media in the
+corpus audit while proving that the post-encoding optimization has no
+source or modality branch. All 4,608 whole-system controls achieved
+exact top-1, recall at 16, and semantic coverage of 1.0. Five
+configurations both traversed and successfully recentered the hierarchy.
+Two traversed but are explicitly recenter-unproven; two remained exact
+fallback. The retained audit does not separately materialize the
+route-active query subset, so these are route-lifecycle classifications
+paired with whole-system quality, not sparse-route-only quality claims.
+
+<table>
+<colgroup>
+<col style="width: 13%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 18%" />
+<col style="width: 13%" />
+<col style="width: 18%" />
+</colgroup>
+<thead>
+<tr>
+<th>Point (F/S/T)</th>
+<th style="text-align: right;">C/B/A</th>
+<th style="text-align: right;">route events / recenters</th>
+<th style="text-align: right;">max routed / activated</th>
+<th>quality class</th>
+<th style="text-align: right;">process / total ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>midpoint (.5/.5/.5)</td>
+<td style="text-align: right;">512/128/1280</td>
+<td style="text-align: right;">93/0</td>
+<td style="text-align: right;">573/578</td>
+<td>traversed, recenter-unproven</td>
+<td style="text-align: right;">1.522/7.519</td>
+</tr>
+<tr>
+<td>all-low (0/0/0)</td>
+<td style="text-align: right;">256/64/640</td>
+<td style="text-align: right;">335/5</td>
+<td style="text-align: right;">525/534</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">1.723/6.366</td>
+</tr>
+<tr>
+<td>all-high (1/1/1)</td>
+<td style="text-align: right;">768/192/1920</td>
+<td style="text-align: right;">35/0</td>
+<td style="text-align: right;">769/785</td>
+<td>traversed, recenter-unproven</td>
+<td style="text-align: right;">5.339/9.030</td>
+</tr>
+<tr>
+<td>focus-low (0/.5/.5)</td>
+<td style="text-align: right;">384/96/960</td>
+<td style="text-align: right;">274/2</td>
+<td style="text-align: right;">626/657</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">1.848/7.304</td>
+</tr>
+<tr>
+<td>focus-high (1/.5/.5)</td>
+<td style="text-align: right;">640/160/1600</td>
+<td style="text-align: right;">48/1</td>
+<td style="text-align: right;">643/671</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">1.601/7.757</td>
+</tr>
+<tr>
+<td>sensitivity-low (.5/0/.5)</td>
+<td style="text-align: right;">448/112/1120</td>
+<td style="text-align: right;">0/0</td>
+<td style="text-align: right;">0/0</td>
+<td>exact below threshold</td>
+<td style="text-align: right;">0.921/6.440</td>
+</tr>
+<tr>
+<td>sensitivity-high (.5/1/.5)</td>
+<td style="text-align: right;">576/144/1440</td>
+<td style="text-align: right;">379/2</td>
+<td style="text-align: right;">879/955</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">12.575/21.436</td>
+</tr>
+<tr>
+<td>stability-low (.5/.5/0)</td>
+<td style="text-align: right;">448/112/1120</td>
+<td style="text-align: right;">470/4</td>
+<td style="text-align: right;">892/920</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">3.054/9.256</td>
+</tr>
+<tr>
+<td>stability-high (.5/.5/1)</td>
+<td style="text-align: right;">576/144/1440</td>
+<td style="text-align: right;">0/0</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1.309/7.771</td>
+</tr>
+</tbody>
+</table>
+
+The structural, backfill/journal, route-metadata-open, core-knob, and
+active-route label-invariance suites passed 853, 1,234, 566, 393, and 23
+assertions. All route and activation ceilings were respected; no search
+or backfill failure occurred; route open read one metadata row.
+Whole-engine startup remains *O*(history) because the processor still
+hydrates every current memory. The neutral historical work batch remains
+*B* = 128, while 129 is only the derived logical boundary checked
+through post-*B* iterator state, not a fetched row. The
+content-addressed aggregate digest for this pre-commit evidence snapshot
+is `a6c8e94af01c1f84d1a1a25e83abc1a3f2cafe9d3880cd553d84dc4704ed66ec`.
+Sensitivity-high remains the dominant whole-engine configuration at
+43,418 ms wall and 12.575 ms mean process time; this reranks the
+independent emotional cascade bound rather than weakening the fixed
+retrieval envelope. Because the current Natural whole-engine plateau and
+Durable horizon gates are open, these results establish the HNSW
+cutover, knob derivation, exact sampled quality, and bounded activated
+identity set without claiming the broader goal complete.
+
+### Consolidation-persisted activation snapshot
+
+The first attempt to make consolidation move the activated graph changed
+only the route pivot. In a 13,000-packet neutral replay it reached exact
+top-1 0.998047, recall at 16 of 0.993042, and semantic coverage of
+0.998430. More importantly, none of 50 valid pre/post-recenter pairs
+changed the activated identity set for the same consolidation query.
+This rejected the hypothesis that replacing or supplementing an entry
+pivot was sufficient: the canonical 5*C* completion dominated the pivot
+while lower-rank quality fell below its 0.998 gate.
+
+The retained design leaves that canonical HNSW route intact and gives
+consolidation one separate, SQLite-persisted activation snapshot. On
+each successful seal, the normalized consolidation embedding defines the
+semantic center and the route records at most *A* = 2*C* + 2*B* nearest
+activated identities. Ordinary queries still perform canonical
+maximum-level descent; the snapshot’s identities are loaded through the
+separate *A* row budget and become deterministic level-zero entry
+points. Neighbor rows discovered from those entry points are still
+charged to the canonical 5*C* traversal ceiling. Queries exactly rerank
+the union while protecting the best 2*C* canonical identities; the
+snapshot may change the remaining 2*B* identities in *A* = 2*C* + 2*B*.
+Canonical rows, snapshot rows, and their sum are recorded independently
+and fail above 5*C*, *A*, and 5*C* + *A*. The center, generation, first
+identity, and packed identity list survive reopen in the single
+route-metadata row. This is an internal SQLite migration and does not
+add a public API or another Natural/Durable write path.
+
+The neutral 13,000-packet screening replay used *C* = 512, *B* = 128,
+and *A* = 1, 280. Canonical rows reached exactly 5*C* = 2, 560, snapshot
+rows reached exactly *A*, and their sum reached but never exceeded
+3,840. Across 512 public controls, exact top-1 was 1.0, recall at 16 was
+0.999754, semantic coverage was 0.999789, and ties were deterministic.
+Forty-six successful recenters were profiled; 35 snapshots reached their
+full *A* capacity, 11 same-query pre/post pairs changed identity
+membership, and no pair was invalid. This is the first retained result
+in which consolidation demonstrably changes the fixed activated set
+while preserving the canonical route. It was a screening predecessor,
+not the final multi-entry implementation.
+
+Three complete 15,695-event variants then isolated the remaining quality
+loss. The canonical-only walk plus post-search snapshot returned top-1
+0.998047, recall at 16 of 0.995213, and semantic coverage 0.994474.
+Restoring one snapshot entry as a level-zero seed improved recall to
+0.997054 but remained below the 0.998 floor. Protecting the best 2*C*
+canonical identities produced perfect sampled top-1 but recall fell to
+0.996072, showing that output-tail allocation could not recover
+neighbors the walk never reached. The retained variant therefore makes
+the complete persisted snapshot a bounded multi-entry surface before
+traversal rather than only an after-the-fact rerank layer.
+
+That retained variant processed all 15,695 events in 470,440 ms with 63
+consolidations. Its 512 controls achieved exact top-1 1.0, recall at 16
+of 0.999877, semantic coverage 0.999809, and deterministic ties. All 57
+profiled recenter pairs were valid; 43 changed membership. In the final
+3,000-event suffix, all 10 successful recenter edges changed the fixed
+*A* = 1, 248 set and retained only 33.0–36.1 percent overlap. The same
+suffix kept the canonical ceiling at 5*C* = 2, 495, the snapshot ceiling
+at *A*, and the combined ceiling at 5*C* + *A* = 3, 743. This proves
+consolidation changes activation locality while work remains fixed; it
+does not prove the independent whole-process plateau.
+
+The required nine production-shaped 4,000-event ablations then rebuilt
+fresh stores at midpoint, both joint endpoints, and every one-axis
+endpoint. Each run captured 512 same-event public controls over four
+opaque sources. All nine traversed the SQLite hierarchy and subsequently
+completed between three and 17 successful recenters; none passed through
+an exact-fallback-only lifecycle. All 4,608 controls achieved exact
+top-1 and recall at 16 of 1.0; minimum semantic coverage was 0.999695,
+with zero miss fingerprints. The acceptance policy permits at most one
+top-1 miss in each 512-query run (0.998047), requires at least 0.999
+across all nine runs, and rejects two or more misses sharing a modality,
+opaque source, memory-age quartile, or exact knob point. Thus the
+contract allows a bounded approximation without describing it as exact,
+while this measured matrix did not consume that allowance.
+
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>Point <span
+class="math inline">(<em>F</em>, <em>S</em>, <em>T</em>)</span></th>
+<th style="text-align: right;"><span
+class="math inline"><em>C</em>/<em>B</em>/<em>A</em></span></th>
+<th style="text-align: right;">max canonical / snapshot / total
+rows</th>
+<th style="text-align: right;">recenters: valid / changed</th>
+<th style="text-align: right;">process / total ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>midpoint (.5/.5/.5)</td>
+<td style="text-align: right;">512/128/1280</td>
+<td style="text-align: right;">517 / 1096 / 1096</td>
+<td style="text-align: right;">12 / 0</td>
+<td style="text-align: right;">2.932 / 27.993</td>
+</tr>
+<tr>
+<td>all-low (0/0/0)</td>
+<td style="text-align: right;">256/64/640</td>
+<td style="text-align: right;">405 / 640 / 1045</td>
+<td style="text-align: right;">13 / 7</td>
+<td style="text-align: right;">3.558 / 27.279</td>
+</tr>
+<tr>
+<td>all-high (1/1/1)</td>
+<td style="text-align: right;">768/192/1920</td>
+<td style="text-align: right;">865 / 1415 / 1415</td>
+<td style="text-align: right;">3 / 0</td>
+<td style="text-align: right;">11.153 / 32.204</td>
+</tr>
+<tr>
+<td>focus-low (0/.5/.5)</td>
+<td style="text-align: right;">384/96/960</td>
+<td style="text-align: right;">400 / 960 / 1304</td>
+<td style="text-align: right;">12 / 6</td>
+<td style="text-align: right;">3.666 / 26.646</td>
+</tr>
+<tr>
+<td>focus-high (1/.5/.5)</td>
+<td style="text-align: right;">640/160/1600</td>
+<td style="text-align: right;">603 / 1267 / 1267</td>
+<td style="text-align: right;">9 / 0</td>
+<td style="text-align: right;">3.210 / 28.522</td>
+</tr>
+<tr>
+<td>sensitivity-low (.5/0/.5)</td>
+<td style="text-align: right;">448/112/1120</td>
+<td style="text-align: right;">423 / 542 / 542</td>
+<td style="text-align: right;">4 / 0</td>
+<td style="text-align: right;">1.241 / 25.032</td>
+</tr>
+<tr>
+<td>sensitivity-high (.5/1/.5)</td>
+<td style="text-align: right;">576/144/1440</td>
+<td style="text-align: right;">592 / 1440 / 1622</td>
+<td style="text-align: right;">17 / 4</td>
+<td style="text-align: right;">23.536 / 49.794</td>
+</tr>
+<tr>
+<td>stability-low (.5/.5/0)</td>
+<td style="text-align: right;">448/112/1120</td>
+<td style="text-align: right;">698 / 1120 / 1818</td>
+<td style="text-align: right;">13 / 7</td>
+<td style="text-align: right;">5.886 / 29.842</td>
+</tr>
+<tr>
+<td>stability-high (.5/.5/1)</td>
+<td style="text-align: right;">576/144/1440</td>
+<td style="text-align: right;">543 / 931 / 931</td>
+<td style="text-align: right;">4 / 0</td>
+<td style="text-align: right;">2.276 / 27.394</td>
+</tr>
+</tbody>
+</table>
+
+All 87 successful recenter pairs had explicit, valid overlap evidence
+and zero failure codes; 24 pairs changed membership across four knob
+runs. A zero in the changed column is not treated as a fabricated reset:
+in those short runs the reachable published surface fit inside *A*, so
+the fixed snapshot already covered it and overlap correctly remained
+1.0. The full-horizon production-knob run above supplies the
+mature-store movement proof.
+
+The complete 27-point structural grid passed 985 assertions. The bounded
+backfill/journal, restart plus centroid persistence, core-knob, and
+active-route source/modality-invariance reports passed 1,234, 64, 393,
+and 25 assertions with no failures. At neutral knobs the historical
+batch remains *B* = 128 and 129 remains only the logical post-*B*
+iterator boundary; no 129th historical row is fetched or processed.
+Sensitivity-high remains an adverse whole-engine result rather than
+being hidden by the aggregate. These runs prove formula derivation,
+local work ceilings, persisted recenter behavior, label-agnostic
+routing, and sampled quality. The full Natural plateau, the short
+Durable horizon, whole-engine restart, and production-wide boundedness
+remain separate gates. The content-addressed aggregate digest is
+`f674c55915331279f99f7d4c9eb22e0ed9440b58acd6b3e2a529455219db93d1`.
+`TRACE[state:sqlite_hnsw_knob_ablation]`.
+
+### Activation-snapshot read-through reuse
+
+The retained multi-entry route initially selected and decoded the same
+persisted activation snapshot on every query. A read-through repair
+places those generation-qualified node rows in the route’s existing
+24*C* shadow cache. SQLite remains authoritative: reopen begins cold,
+and every successful seal clears the cache before rows from the next
+state may be reused. Query distances are still evaluated exactly, so
+this changes row loading rather than the 5*C* + *A* semantic envelope. A
+regression proves that the first query after reopen loads at most *A*
+snapshot rows and an identical second query loads zero while returning
+the same identities.
+
+The matched 15,695-packet Natural replay completed in 194,736 ms, down
+from 470,440 ms for the uncached activation-snapshot run. Mean process
+time fell from 6.384 to 4.729 ms and mean end-to-end time from 29.563 to
+12.115 ms. Only 13 events physically loaded snapshot rows; the maximum
+load was the derived *A* = 1, 248, and all other routed events reused
+the bounded cache. The 512-query public control retained exact top-1
+1.0, recall at 16 of 0.999754, semantic coverage 0.999809, deterministic
+ties, and four opaque sources. The late eight-window process ratio was
+0.999920 and throughput ratio 1.021200, but the whole plateau remained
+rejected by emotional-cascade growth, operation counters, and the
+requirement for ten mature recenter edges. The different
+wall-time-driven consolidation cadence is retained as production-like
+temporal feedback, not described as behavior equivalence.
+
+A fixed 2*C* + *A* actual-node ablation was then tested against the same
+complete replay and public control. It is rejected: eight of 512 top
+identities missed (top-1 0.984375), recall at 16 fell to 0.969452, and
+semantic coverage was 0.959699. Its 203,096 ms wall time and 4.502 ms
+mean process time cannot waive that loss. This result is why the
+accepted 0.998 quality floor is useful rather than ceremonial; the lower
+envelope is not retained.
+
+### Exact emotional winner collapse
+
+The next measured late-suffix contributor was the emotional cascade. Its
+shared bit-mask breadth-first walk already visits graph adjacency once
+per 64-source batch, but it materialized a source–embedding pair for
+every source that reached an embedding. The later update loop then
+discarded all but the first pair under the established first-source-wins
+rule. The exact repair performs that winner selection inside the shared
+traversal: for each reached embedding it retains the lowest source
+ordinal and that source’s shortest positive depth, then materializes one
+winning pair. Reachable-pair and physical edge-visit counters remain
+separate from the smaller winning-pair counter so the optimization
+cannot hide an expanding graph walk. A 70-source regression now proves
+70 reachable pairs and 70 physical edge visits collapse to one executed
+winner with the same final intensity. Full-horizon performance,
+work-bound, and retrieval results remain required before retention.
+
+The complete exact-winner replay kept top-1 at 1.0, recall at 16 at
+0.999386, and semantic coverage at 0.999381, but it did not improve the
+full run: wall time was 205,445 ms versus 194,736 ms for snapshot reuse
+alone, and mean process time was 4.865 ms versus 4.729 ms. The new
+physical counter also showed why: the walk still reached 6,786 adjacency
+visits in one event. Exact winner collapse is therefore not promoted by
+itself.
+
+An experiment then combined winner collapse with a deterministic
+physical-edge ceiling equal to the existing public node formula 5*C*. At
+the production knobs the maximum was exactly 2,495 visits; 1,190 of
+1,912 active cascade events reached the ceiling, and no 2,496th edge was
+visited. Mean cascade time fell from 0.107 to 0.072 ms/event and the
+replay completed in 198,222 ms. Its public control consumed the allowed
+single miss: top-1 was 511/512 (0.998047), recall at 16 was 0.999141,
+semantic coverage was 0.999285, and ties remained deterministic over
+four opaque sources. The ten-window suffix beginning at event 10,695
+passed whole-process ratio (1.018755), throughput ratio (1.012508),
+relative slope (0.005399), and bootstrap upper slope (0.012176). It is
+still an experiment rather than a cutover: the current source-selection
+scan is not yet bounded by an F/S/T-derived prefix, operation incidence
+remains visible, and one material consolidation edge failed the strict
+raw post/trailing reset.
+
+The follow-up bounded the source side as well. The maintained source
+snapshot now admits at most 5*C* timestamp/identity-ordered candidates
+and each cascade executes at most *B* sources, while physical adjacency
+remains capped at 5*C* and updates at *A*. A dense all-low regression
+proves the exact 1,280-source inspection boundary and the separate
+64-source execution boundary; the 1,281st candidate is not materialized.
+The audit also stopped double-counting the route’s detailed node and
+snapshot counters on top of the already-total
+`GraphRetrieve.rows_visited` value.
+
+The corrected 15,695-packet release replay completed in 191,354 ms with
+33 consolidations, mean process time 4.552 ms, and mean end-to-end time
+11.903 ms. Its 512-query public control passed with top-1 1.0, identity
+recall at 16 of 0.999386, semantic coverage 0.999667, deterministic
+order, and four opaque sources. Observed maxima were 64 source
+inspections and executions, 2,495 physical adjacency visits, 1,337
+winning neighbors, and 73 updates, all below their production-derived
+5*C* = 2, 495, *B* = 125, 5*C*, 5*C*, and *A* = 1, 248 ceilings. The
+ten-window suffix beginning at event 10,695 passed whole-process ratio
+(0.992191), throughput ratio (0.994754), relative slope (-0.002547),
+bootstrap upper slope (0.001772), and every active-work counter. All ten
+mature recenter observations were pair-valid, changed the activation
+set, preserved the fixed envelope, and had overlap from 0.348558 to
+0.690705.
+
+This is still not a whole-goal cutover. Seven material consolidation
+epochs were available, but the strict raw reset and normalized
+consolidation-cost trend contracts failed, and several individually
+timed bounded kernels varied by more than the current 1.05 component
+ratio. The result therefore proves the quality and sparse-work envelope
+of this experiment, not a completed Natural plateau, Durable
+equivalence, or production-wide bound.
+
+### Post-cutover shared activation distance reuse
+
+The first complete Natural profile after the retained row-addressed HNSW
+cutover still increased by 1.69146 ms between its first and final five
+post-warmup windows. Graph retrieval contributed 0.97932 ms (57.90%) and
+memory storage 0.52965 ms (31.31%), or 89.21% together. Both operations
+call the same SQLite `SearchActivated` routine. The graph seed-cache
+subsection alone increased by 0.66697 ms, while mean route-node work
+increased 3.390x for graph retrieval and 3.460x for memory supersession.
+These observations select query-distance materialization inside the
+shared activation routine; they do not imply that HNSW routing itself or
+the knob-derived activation target is unbounded.
+
+A deterministic 1,300-node regression exposed duplicate arithmetic
+directly: one activation made 2,761 exact query-to-node distance
+evaluations. The retained query-local distance slot reduces that count
+to no more than one per visited persisted node plus one per pending
+updated embedding, without changing the 5*C* visit ceiling or
+*A* = 2*C* + 2*B* outward activation target.
+
+Two Release binaries built from the same source head then replayed the
+same 500 events against byte-copies of the same mature Natural database.
+The control removed only the query-local cached-distance early return;
+the source delta, binaries, compiler, corpus, initial database, command
+contract, profiles, and audits are content-addressed in the retained
+evidence packet. Exact behavior, canonical logical-database, and
+physical output-database digests matched. Mean process time fell from
+4.10098 to 3.76532 ms (-8.18%), Graph retrieval from 2.02630 to 1.83392
+ms (-9.49%), its seed-cache section from 1.77608 to 1.59049 ms
+(-10.45%), and Memory storage from 0.87427 to 0.77841 ms (-10.96%).
+End-to-end mean fell 5.28% and wall time fell 5.49%. A separate earlier
+matched fresh 2,500-event pair reduced mean process 1.05%, Graph
+retrieval 2.47%, seed-cache work 4.68%, and Memory storage 1.84%; its
+wall-time difference was +1.01%, so it is reported as noise rather than
+a fresh-store wall-time win. This is a measured local repair, not proof
+of the required full-horizon Natural/Durable plateau or
+consolidation-cycle shape.
+
+The failed full replay also isolated a separate application-hydration
+leak. The final six active working-memory slots contained 14,290 signal
+rows, and because they lacked memory-level summary blobs, public
+hydration replayed all 14,290 payloads on every packet. Mean hydration
+increased from 3.07 ms in the early window to 96.16 ms in the final
+window, dominating total latency. The retained fallback now selects only
+each memory’s newest *B* indexed signal rows while SQLite keeps the
+complete history. On a copied mature database, a 500-event tail probe at
+neutral knobs recorded the 128-row limit on every event and materialized
+642–655 fallback rows total across working and retrieved memories. Mean
+hydration was 5.395 ms, mean process time 2.900 ms, mean public latency
+12.327 ms, end-to-end time 14.166 ms, and wall time 7,160 ms. Relative
+to the rejected full replay’s final 500 events, hydration fell 94.4%
+(96.162 to 5.395 ms) while six working slots remained active. The
+focused regression test proves the newest 128 rows and chronological
+output independently for opaque text, audio, and image sources. This
+copied-tail probe is direct mature-store performance evidence, not yet a
+full-horizon plateau or application-quality claim for omitted older
+fallback payloads.
+
+### Consolidation-cost and seal-cadence ablation
+
+A later full-horizon attribution pass corrected three observer and
+routing details before changing the algorithm. Commit timing had
+included a profiling-only vector identity lookup; identity resolution
+now occurs when the committed mutation audit is consumed, while the
+independent logical and physical audit streams remain intact. Mature
+deterministic route completion now draws from the indexed generation
+slice and applies active eligibility at ranking, so an inactive row
+cannot make the fixed envelope appear one row short. The RIF changed-row
+counter now records work performed by the current event rather than the
+historical active population. Each correction has a red-then-green
+regression and changes measurement, not public retrieval semantics.
+
+The remaining consolidation scan was bounded by the same knobs. Let
+*A* = 2*C* + 2*B* and *N* = max (8, ⌊*B*/2⌋). Score consolidation now
+admits at most *A* low-strength long-term identities from the indexed
+strength/time frontier and counts at most *N* association edges per
+admitted identity. A sentinel row publishes the exact input cardinality
+even when no candidate is selected. The formula, counter, and
+source/modality invariants pass all 27
+*F*, *S*, *T* ∈ {0, 0.5, 1}<sup>3</sup> configurations across text,
+audio, image, and four opaque source labels. At midpoint *C* = 512,
+*B* = 128, *A* = 1280, and *N* = 64; 129 occurs only as the logical
+*B* + 1 completion probe.
+
+Four ordinary SQLite-route seal cadences were evaluated. Sealing every
+write raised full-replay wall time to 107,294 ms and did not remove
+consolidation growth. Sealing at the search-expansion batch
+*E* = max (8, ⌊*B*/4⌋) moved the sawtooth into ordinary writes. Sealing
+at *N* = *B*/2 left late seed-rank and seal slopes. The retained
+candidate seals at *B* − *E* (96 rows at neutral knobs and 94 at the
+production replay’s *F* = 0.45, *S* = *T* = 0.5), which is derived at
+every knob point rather than stored as a second threshold. Its
+15,695-packet Natural replay completed 31 live consolidations and found
+an accepted seven-window suffix beginning at event 12,195: no operation
+or work-counter gate failed, six complete consolidation cycles were
+present, fixed route work was 5*C* = 2495, and normalized consolidation
+cost ratios were 0.984 per sealed event and 0.937 per sealed mutation.
+This is the measured write-throughput-for-symmetry tradeoff selected for
+further quality proof.
+
+The stricter fixed-time, fixed-consolidation, four-opaque-source public
+control then exposed a quality boundary not visible in the earlier
+control. With the retained 5*C* node and 5*C* queue envelope, exact
+top-1 was 0.990234 and identity recall@16 was 0.979902. Restoring the
+older *B* seal cadence was slightly worse (0.984375 top-1), so *B* − *E*
+did not cause the loss. Bounded node ablations kept the queue at 5*C*:
+10*C* reached 0.998047 top-1 and 0.998897 recall; 12*C* reached 0.998047
+and 0.999755; 16*C* reached 1.0 for top-1, recall, and semantic coverage
+over all 512 queries. The 16*C* point is not retained: its 7,984-node
+production budget exceeds the replay’s roughly 3,200 active memories, so
+actual work has not saturated, continues growing with the store, and
+fails the six-window plateau and fixed-envelope gates. Production
+therefore remains at the only mature plateau candidate, 5*C*, while
+exact top-1 remains an explicit unresolved cutover gate. These results
+do not claim the overall goal complete.
+
+Five fixed-5*C* moved-centroid topology repairs were then evaluated and
+rejected on the same 15,695-packet, 512-query control. The first
+attached the most recent *B* − *E* changed centroids to the canonical
+hierarchy entry; it improved top-1/recall/semantic coverage from
+0.990234/0.979902/0.975038 to 0.994141/0.983333/0.976229 but still
+missed three top results. Retaining a full *B* identities on that entry
+also missed three (0.994141/0.983088/0.975419). Distributing *B*
+identities across *R* = max (2, ⌊*B*/16⌋) hierarchy hubs displaced too
+much useful locality and fell to 0.986328/0.972426/0.964653; the
+narrower two-hub 2*B* target reached only 0.990234/0.977083/0.968464.
+Finally, preserving each moved centroid’s old level-zero neighborhood
+while splicing only *R* newly proposed links and reciprocals reached
+0.992188/0.978554/0.969131. Production knobs for these runs were
+*C* = 499, *B* = 125, *E* = 31, and *R* = 7; neutral knobs would have
+resolved to *C* = 512, *B* = 128, *E* = 32, and *R* = 8. No experiment
+used 129 as a row count: it remains solely the neutral logical *B* + 1
+completion boundary. The candidate source and its isolated
+moved-centroid regression were removed after rejection. The profile
+identities, in the order above, are
+`41f4708064c9f0e9034a551c4fd356adfe8b73b4537a734a94920ee6d7e96858`,
+`01464b04783eae0443707dc88187d05492c6f02e526d4e450a64c859ce58f5c0`,
+`5b0eb95ee32d15f7a2a5ab2511cc5e2d1e72629f0b8d3fbbf968ceae77c2539e`,
+`3f3a13a245331e1f9691bd0a7eaf0d6a0900f060bd3e9ed6626ba14117d4b8e8`, and
+`1f3216ae0c41c7b105cbd27e299f11b30d0403f63401d2871c13ed98c0428ad5`.
+Together these ablations reject bounded link sprinkling as the quality
+repair; they do not reject a separately represented sparse activation
+layer whose centroids are rebuilt at consolidation under a fixed
+knob-derived capacity.
+
+### Historical expanding-envelope knob ablation
+
+The pre-fixed-envelope matrix regenerated all nine prescribed points
+from empty SQLite stores on one rebuilt binary. Each run processed 2,000
+corpus packets and compared 512 public retrievals at *k* = 16 with an
+exact control generated under the same F/S/T values. Across 4,608
+controls, exact top-1 and recall at 16 were 1.0; minimum semantic
+coverage was 0.999898. The midpoint and focus-low runs published and
+exercised the SQLite sparse route, including one and five successful
+consolidation recenter resets respectively. The other seven are reported
+as system-quality exact fallbacks, not misrepresented as sparse-route
+quality: sensitivity-low remained below threshold, while the remaining
+six ended with bounded unpublished or dirty hierarchy state.
+
+<table style="width:100%;">
+<colgroup>
+<col style="width: 10%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+<col style="width: 10%" />
+<col style="width: 13%" />
+<col style="width: 13%" />
+</colgroup>
+<thead>
+<tr>
+<th>Point (F/S/T)</th>
+<th style="text-align: right;">C/B</th>
+<th style="text-align: right;">dirty limit/sentinel</th>
+<th style="text-align: right;">backfill limit/sentinel</th>
+<th style="text-align: right;">route events/resets</th>
+<th>quality class</th>
+<th style="text-align: right;">top-1 / recall@16 / semantic</th>
+<th style="text-align: right;">process / total ms</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>midpoint (.5/.5/.5)</td>
+<td style="text-align: right;">512/128</td>
+<td style="text-align: right;">512/513</td>
+<td style="text-align: right;">128/129</td>
+<td style="text-align: right;">15/1</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">13.994/18.326</td>
+</tr>
+<tr>
+<td>all-low (0/0/0)</td>
+<td style="text-align: right;">256/64</td>
+<td style="text-align: right;">256/257</td>
+<td style="text-align: right;">64/65</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">23.539/28.490</td>
+</tr>
+<tr>
+<td>all-high (1/1/1)</td>
+<td style="text-align: right;">768/192</td>
+<td style="text-align: right;">768/769</td>
+<td style="text-align: right;">192/193</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">49.888/51.132</td>
+</tr>
+<tr>
+<td>focus-low (0/.5/.5)</td>
+<td style="text-align: right;">384/96</td>
+<td style="text-align: right;">384/385</td>
+<td style="text-align: right;">96/97</td>
+<td style="text-align: right;">232/5</td>
+<td>route lifecycle exercised</td>
+<td style="text-align: right;">1/1/0.999898</td>
+<td style="text-align: right;">10.964/16.135</td>
+</tr>
+<tr>
+<td>focus-high (1/.5/.5)</td>
+<td style="text-align: right;">640/160</td>
+<td style="text-align: right;">640/641</td>
+<td style="text-align: right;">160/161</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">12.467/14.549</td>
+</tr>
+<tr>
+<td>sensitivity-low (.5/0/.5)</td>
+<td style="text-align: right;">448/112</td>
+<td style="text-align: right;">448/449</td>
+<td style="text-align: right;">112/113</td>
+<td style="text-align: right;">0/0</td>
+<td>exact below threshold</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">0.461/0.878</td>
+</tr>
+<tr>
+<td>sensitivity-high (.5/1/.5)</td>
+<td style="text-align: right;">576/144</td>
+<td style="text-align: right;">576/577</td>
+<td style="text-align: right;">144/145</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">59.519/62.366</td>
+</tr>
+<tr>
+<td>stability-low (.5/.5/0)</td>
+<td style="text-align: right;">448/112</td>
+<td style="text-align: right;">448/449</td>
+<td style="text-align: right;">112/113</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">18.284/22.522</td>
+</tr>
+<tr>
+<td>stability-high (.5/.5/1)</td>
+<td style="text-align: right;">576/144</td>
+<td style="text-align: right;">576/577</td>
+<td style="text-align: right;">144/145</td>
+<td style="text-align: right;">0/0</td>
+<td>exact unpublished</td>
+<td style="text-align: right;">1/1/1</td>
+<td style="text-align: right;">13.813/18.273</td>
+</tr>
+</tbody>
+</table>
+
+The matrix distinguishes the two ingestion surfaces that the earlier
+pre-cutover experiment conflated. Historical backfill advances at most
+*B* ordered rows; *B* + 1 is its logical overflow boundary, detected
+from the post-*B* in-memory iterator rather than an extra row read. Live
+dirty reconciliation drains at most *C* identities; *C* + 1 is only its
+overflow probe. Thus neutral 129 is not a fetched row or work batch, and
+neither 128 nor 129 is a hidden fixed value. The same formulas produce
+64/65 and 192/193 at the endpoints, while live dirty limits become
+256/257 and 768/769. The 27-point structural grid passed 752 assertions;
+bounded backfill/journal, route-metadata-open, and core-knob suites
+passed 1,220, 566, and 393 assertions, all without failures. The
+aggregate digest is
+`7313859052b25c87f6ddc103d6677c9a48572dbdf2b39333a19484a4ad75b892`.
+
+The audit treated queue effort and the actual-node ceiling as separate
+derived shape proofs, actual SQLite node rows as effect and bound proof,
+and fallback hydration rows as a selected-context bound. This prevents
+query-content variation from being mislabeled as engine drift while
+still rejecting a perfectly shaped control that fails to reduce real
+work. The matrix closed the expanding-envelope knob-derivation and
+sampled-quality gate; it does not validate the replacement fixed
+envelope, and it did not convert the still-failing whole-engine plateau
+into a boundedness claim. The epoch audit also corrected one ownership
+assumption: ongoing source-stream accumulator contents are observed
+active state but are not owned or cleared by consolidation.
+Working-memory pending signals and the three typed dirty-identity sets
+remain the required post-commit reset counters.
+`TRACE[state:sqlite_hnsw_activation_effort_cycle]`.
+
+### Experiment and algorithm traceability inventory
+
+The following inventory binds the task’s durable experiment state and
+every task-owned algorithm group to this paper. The detailed corpus
+sizes, parameters, measurements, and failure boundaries remain in the
+adjacent prose and tables; these stable identities make omissions
+detectable when the state, source diff, or generated manuscript changes.
+A retained source-health result is not a production-wide boundedness
+claim, and a benchmark, modeled, synthetic, or observation-only result
+is never promoted to production-path proof.
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Trace identity</th>
+<th>Recorded disposition and proof boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TRACE[state:baseline_results]</code></td>
+<td>Immutable Natural and Durable controls; source-health baseline
+only.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:post_hnsw_cost_attribution]</code></td>
+<td>The first complete retained-route Natural profile attributes 89.21%
+of remaining process growth to the two operations sharing SQLite
+activation and selects query-distance materialization without claiming
+whole-engine boundedness.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:post_hnsw_query_distance_reuse]</code></td>
+<td>Retained query-local persisted-distance reuse; a source- and
+binary-bound mature pair is behavior/database exact and improves the
+local gate, while full-horizon Natural/Durable plateau proof remains
+open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:repair_results]</code></td>
+<td>Ranked measured repairs and their exact behavior/database
+equivalence evidence.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:plateau_profiler_smoke_proof]</code></td>
+<td>Accepted instrumentation smoke proof; not plateau evidence.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:work_counter_activity_repair]</code></td>
+<td>Retained explicit activity-marker repair over 100/200 Natural and
+Durable events.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:graph_partial_distance_evaluation]</code></td>
+<td>Retained local improvement; full-Natural flatness still failed.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:graph_eligibility_repair]</code></td>
+<td>Retained exact eligibility repair; full-Natural flatness still
+failed.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:graph_eligibility_db_proof]</code></td>
+<td>Canonical database and fixed-probe equivalence proof for eligibility
+routing.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:graph_supersession_eligibility_repair]</code></td>
+<td>Retained focused repair; the next independent graph-family
+comparison remained required.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:graph_family_vector_bound_candidate]</code></td>
+<td>Rejected for fresh-process and graph regression.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:graph_family_projection_bound_candidate]</code></td>
+<td>Rejected for copied-late process, graph, and comparison
+regression.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:graph_family_precomputed_features_candidate]</code></td>
+<td>Rejected for fresh/copied-late process and wall regression.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:supersession_metric_index_candidate]</code></td>
+<td>Rejected by the fresh process and wall hard gate.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:competition_rif_returning_candidate]</code></td>
+<td>Rejected by fresh process and RIF regression.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:competition_suppression_state_cache_candidate]</code></td>
+<td>Rejected by fresh process, wall, and RIF hard gates.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:emotional_metadata_cache_repair]</code></td>
+<td>Retained full-run improvement; the flatness audit reranked the next
+contributor.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:emotional_cascade_fixed_point_repair]</code></td>
+<td>Retained focused fixed-point repair pending full-run
+verification.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:emotional_cascade_fixed_point_full_natural]</code></td>
+<td>Retained hotspot improvement; the full Natural plateau still
+failed.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:accepted_tree_natural_plateau_rerank]</code></td>
+<td>End-anchored plateau failure reranked the next independent exact
+candidate.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:emotional_cascade_fixed_work_candidate]</code></td>
+<td>Terminally rejected bounded-priority experiment. The 27-point
+structural grid and exact derived <span
+class="math inline"><em>B</em>/<em>B</em> + 1</span> seams passed, but
+the fixed-time Natural midpoint missed both the p99-ratio gate (0.573
+versus at most 0.25) and public identity quality (top-1 0.998047;
+recall@16 0.980760). Its selector was removed, and the nine-point matrix
+was correctly skipped by fail-fast.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:shadow_sqlite_seam_proof]</code></td>
+<td>Private seam/ownership evidence only.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:shadow_sqlite_scoped_evaluation]</code></td>
+<td>Whole-operation shadow was rejected by numeric acceptance
+gates.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:post_shadow_rerank]</code></td>
+<td>Rejected shadow evidence reranked the measured exact
+contributors.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:bounded_sparse_routing_observation]</code></td>
+<td>Promising default-off observation; low exact recall and linear
+restart forbid cutover.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:active_epoch_sqlite_evaluation]</code></td>
+<td>Private active-epoch feasibility and lazy-RIF evidence; production
+cutover remains false.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:rif_active_identity_ledger]</code></td>
+<td>Retained identity-only, knob-batched active-epoch publication. A
+matched copied-mature 1,000-event slice reduced the named hotspot 73.05
+percent with exact public behavior and SQLite state; a full default-knob
+Natural replay respected <span
+class="math inline"><em>B</em> = 125</span> but rejected the
+whole-engine plateau on commit and graph-work gates. Durable
+checkpoint/horizon and bounded restart remain open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:rif_epoch_consolidation_reset_candidate]</code></td>
+<td>Retained empty post-consolidation in-memory RIF epoch reset. The
+nine production-shaped knob points and full 27-point structural grid
+preserve <span
+class="math inline"><em>B</em> = round (64 + 64<em>F</em> + 32<em>S</em> + 32<em>T</em>)</span>;
+at neutral knobs <span class="math inline"><em>B</em> = 128</span>,
+while 129 is only the logical <span
+class="math inline"><em>B</em> + 1</span> boundary. The named
+publication hotspot stayed flat over 15,695 Natural packets, but
+whole-engine plateau and retrieval-quality gates failed, so Durable
+verification and production cutover remain open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:post_emotional_priority_rejection_rerank]</code></td>
+<td>The valid control reranked active-epoch publication after the
+emotional candidate failed; its final six 500-event means rose from
+0.347663 to 0.406671 ms while final-suffix whole-process and throughput
+gates passed.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:bounded_route_hybrid_observation]</code></td>
+<td>Embedding-router feasibility retained; its production-shaped quality
+label was invalidated by the public-control population mismatch.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:retrieval_quality_control_correction]</code></td>
+<td>Corrected 3,172-memory-surface feasibility passed exactly; runtime
+public eligibility/family control remains pending.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:anchor_only_route_feasibility]</code></td>
+<td>Rejected anchor-only candidate routing at both 512 and 1,024
+anchors; raw one-off output was not retained and is not acceptance
+proof.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:public_retrieval_control_capture_experiment]</code></td>
+<td>Real GraphRetrieve control capture is observer-exact on the paired
+smoke and validates 512 full-run public controls; the corpus is
+one-source/text-only.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:public_hnsw_route_prototype_experiment]</code></td>
+<td>Three standalone HNSW quality labels were invalidated because the
+final database cannot reconstruct every point-in-time live surface; live
+mutation capture is required.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:live_surface_mutation_capture_experiment]</code></td>
+<td>Full live capture is behavior/database exact and the repeated
+512-query route has exact identity/top-1 coverage;
+cross-source/modality, restart, live-cycle, and latency gates
+remain.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:integrated_hnsw_sparse_route_experiment]</code></td>
+<td>Historical default-off sealed-HNSW plus exact-delta integration
+established same-event quality before the row-addressed SQLite route was
+retained; full-horizon plateau and cycle proof remain open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:integrated_hnsw_consolidation_seal_experiment]</code></td>
+<td>Historical incremental epoch sealing isolated 381 ms of seal work
+versus 9,221 ms of pre-existing full-surface reload; the retained SQLite
+route replaces full resealing, while full-horizon cycle proof remains
+open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:sqlite_hnsw_knob_ablation]</code></td>
+<td>Production-default <span
+class="math inline">8<em>C</em></span>-to-<span
+class="math inline">9<em>C</em></span> plus consolidation-snapshot-<span
+class="math inline"><em>A</em></span> matrix: the 27-point structural
+grid and all nine sequential 4,000-event corpus runs passed. All 4,608
+controls measured top-1, recall@16, and semantic coverage of 1.0 with
+deterministic ties and zero miss clusters. Every short route was
+traversed, but none reached the <span
+class="math inline">8<em>C</em></span> maturity floor needed for a valid
+pre/post activation pair, so all nine are explicitly
+recenter-unevaluated. Separate backfill/journal, restart, core-knob, and
+text/audio/image plus source-label invariance regressions pass. <span
+class="math inline"><em>B</em>/<em>B</em> + 1</span>, <span
+class="math inline"><em>C</em>/<em>C</em> + 1</span>, the <span
+class="math inline">8<em>C</em></span> floor, <span
+class="math inline"><em>R</em></span> step, <span
+class="math inline">9<em>C</em></span> ceiling, snapshot <span
+class="math inline"><em>A</em></span>, combined <span
+class="math inline">9<em>C</em> + <em>A</em></span>, and
+family-comparison <span class="math inline">2<em>C</em></span> bounds
+are distinct and knob-derived.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:sqlite_hnsw_sparse_route_integration]</code></td>
+<td>Retained row-addressed SQLite HNSW query and incremental seal in the
+existing <code>GraphRetrieve</code> and <code>MemoryStorage</code>
+paths; Natural and Durable share the same algorithm, and Durable adds
+only its checkpoint. Current full-corpus retrieval quality and
+activation bounds pass, while the Natural whole-engine plateau and
+Durable horizon gates remain open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:sqlite_hnsw_activation_effort_cycle]</code></td>
+<td>Queue-effort-only, fixed-<span
+class="math inline">5<em>C</em></span>, and dynamic <span
+class="math inline">4<em>C</em></span> through <span
+class="math inline">8<em>C</em></span> floor variants were rejected or
+superseded. The retained candidate resets routing work to <span
+class="math inline">8<em>C</em></span>, advances by <span
+class="math inline"><em>R</em> = max (2, ⌊<em>B</em>/16⌋)</span> to
+<span class="math inline">9<em>C</em></span>, keeps <span
+class="math inline"><em>A</em> = 2<em>C</em> + 2<em>B</em></span>
+downstream activation and <span
+class="math inline">2<em>B</em>/(<em>C</em> + <em>B</em>)</span>
+construction, passes the 30,380-packet mature-cycle gates at 511/512
+top-1 and recall@16 0.999265, and passes canonical and nine-point
+quality without an engine-wide plateau claim.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:sqlite_hnsw_production_cutover]</code></td>
+<td>Retained the existing SQLite HNSW route as the production default at
+an <span class="math inline">8<em>C</em></span> post-consolidation
+floor, <span
+class="math inline"><em>R</em> = max (2, ⌊<em>B</em>/16⌋)</span> step,
+<span class="math inline">9<em>C</em></span> ceiling, separate <span
+class="math inline"><em>A</em> = 2<em>C</em> + 2<em>B</em></span>
+snapshot, and <span class="math inline">9<em>C</em> + <em>A</em></span>
+total row ceiling. The nine-point matrix passed 4,608/4,608 top-1
+controls, minimum recall@16 and semantic coverage 1.0, deterministic
+ties, and source/modality-label invariance. Natural and Durable share
+the operation path, with Durable adding only its checkpoint;
+whole-engine reset, bounded restart, Durable plateau, release, and
+deployment remain unclaimed.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:hnsw_fixed_6c_experiment]</code></td>
+<td>Rejected knob-derived fixed-<span
+class="math inline">6<em>C</em></span> routing envelope. All 27
+structural F/S/T points and 931 assertions passed; neutral <span
+class="math inline"><em>C</em> = 512</span> produced a 3,072-node
+envelope while <span class="math inline"><em>B</em> = 128</span> and the
+129 boundary remained distinct. An extra production-default
+F=.45/S=.5/T=.5 pre-screen missed exact top-1, recall@16, plateau, and
+wall-time gates, so fail-fast rejected the candidate before the exact
+nine-point corpus matrix started and left production on fixed <span
+class="math inline">5<em>C</em></span>.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:post_rif_empty_fixed_envelope_attribution]</code></td>
+<td>Repaired proof classification for the retained zero-increment
+fixed-<span class="math inline">5<em>C</em>/5<em>C</em></span> route.
+Retrieval mode is independent of whole-engine process shape;
+route-active rows fail closed on missing work, and queue, node ceiling,
+actual visits, distance work, and activation are checked separately
+across at least ten mature unchanged-envelope recenters. The production
+suffix beginning at event 10,195 passes the classifier and work envelope
+across 12 complete recenters, while activated-identity overlap,
+process-cycle reset, exact full-horizon retrieval, Durable horizon, and
+bounded restart remain open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:write_gate_incidence_attribution_v2]</code></td>
+<td>Deterministic range-bound observation-only 15,695-packet
+production-knob attribution rejected boundary-to-write incidence as the
+growth source: exact event ranges 0–2,499 and 13,195–15,694 contained
+510 and 528 writes, while MemoryStorage time per write rose from 0.4833
+to 2.8343 ms as the existing shared SQLite HNSW route warmed toward the
+fixed <span class="math inline">5<em>C</em> = 2, 495</span> envelope.
+Production <span
+class="math inline"><em>C</em>/<em>B</em>/<em>A</em> = 499/125/1, 248</span>
+and construction <span
+class="math inline"><em>C</em> + <em>B</em>/2<em>B</em> = 624/250</span>
+remain derived; neutral <span
+class="math inline"><em>C</em>/<em>B</em>/<em>A</em> = 512/128/1, 280</span>
+and 129 is only logical <span class="math inline"><em>B</em> + 1</span>.
+Raw reset remains failed and unwaived; 27 structural and nine
+production-shaped F/S/T ablations remain required.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:recenter_activation_overlap_natural_13000_v2]</code></td>
+<td>Fail-closed same-query pre/post activation measurement rejected the
+current connection-local HNSW recenter as a consolidation-driven
+centroid reset. A deterministic builder accepts only explicitly
+pair-valid, zero-failure observations; across 22 such successful
+recenters in 13,000 Natural events, including 14 at the full <span
+class="math inline"><em>A</em> = 1, 248</span> activation target and
+later queries saturating the <span
+class="math inline">5<em>C</em> = 2, 495</span> node envelope, all 22
+retained exactly the same activated identities (minimum overlap 1.0).
+This proves the route is integrated but its current recenter does not
+move the activated set; raw reset, 27 structural and nine
+production-shaped F/S/T ablations, modality/source-id invariance, and
+whole-goal proof remain open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:current_verification]</code></td>
+<td>The no-selector production default passes canonical Natural quality
+at 512/512 top-1 and nine-point quality at 4,608/4,608, with recall@16
+and semantic coverage 1.0 throughout. The 2,016-message Durable replay
+also passes 512/512 with identical route parameters and only its
+checkpoint barrier, but its horizon remains insufficient for plateau
+proof. Structural, backfill/journal, route-metadata-open, core-knob,
+source/modality invariance, Python, and C++ focused gates pass.
+Whole-engine raw process reset and bounded restart remain open and are
+not part of the scoped retrieval-envelope claim.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:fixed5c_moved_centroid_reachability]</code></td>
+<td>Five fixed-<span class="math inline">5<em>C</em></span> bounded
+single-hierarchy moved-centroid link repairs were measured and rejected;
+the result does not reject a separately represented
+consolidation-rebuilt activation layer.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:bounded_fallback_hydration]</code></td>
+<td>Retained newest-<span class="math inline"><em>B</em></span> indexed
+signal fallback reduced copied mature-tail hydration from 96.162 to
+5.395 ms and passed opaque text/audio/image recency tests; full-horizon
+and application-quality proof remain open.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:packed_route_sqlite_representation_experiment]</code></td>
+<td>Packed SQLite queries retained the exact route result, but
+complete-snapshot rewrite was rejected for incremental
+consolidation.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:row_addressed_route_sqlite_experiment]</code></td>
+<td>Row-addressed SQLite made a 200-event seal incremental at fresh and
+copied-late history; the representation is now integrated, with
+full-horizon copied-late and cycle proof still pending.</td>
+</tr>
+<tr>
+<td><code>TRACE[rejected:shared-shadow-sqlite-operation-view]</code></td>
+<td>Rejected whole-history shadow projection.</td>
+</tr>
+<tr>
+<td><code>TRACE[rejected:GraphRetrieve.seed_cache_family_compare.coordinate-block]</code></td>
+<td>Rejected exact coordinate-block graph candidate.</td>
+</tr>
+<tr>
+<td><code>TRACE[rejected:GraphRetrieve.seed_cache_family_compare.projection-bound]</code></td>
+<td>Rejected projection-bound graph candidate.</td>
+</tr>
+<tr>
+<td><code>TRACE[rejected:GraphRetrieve.seed_cache_family_compare.precomputed-features]</code></td>
+<td>Rejected immutable precomputed-feature graph candidate.</td>
+</tr>
+<tr>
+<td><code>TRACE[rejected:MemoryStorage.supersession_metric_index]</code></td>
+<td>Rejected supersession metric-index candidate.</td>
+</tr>
+<tr>
+<td><code>TRACE[rejected:Competition.rif_recovery_active_sql.update-returning]</code></td>
+<td>Rejected update-returning RIF candidate.</td>
+</tr>
+<tr>
+<td><code>TRACE[rejected:Competition.rif_recovery_active_sql.suppression-cache]</code></td>
+<td>Rejected suppression-cache RIF candidate.</td>
+</tr>
+<tr>
+<td><code>TRACE[rejected:RifActiveEpoch.row-batch-only-performance-cure]</code></td>
+<td>The knob-derived batching contract was retained, but batching
+complete RIF values reduced copied-mature publication only 3.99 percent
+versus the required 20 percent and was rejected as the performance
+cure.</td>
+</tr>
+</tbody>
+</table>
+
+The bounded-route search itself had five separately evaluated points
+over the same 34,456-vector, 512-query top-16 benchmark:
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Trace identity</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TRACE[bounded-route-variant:reciprocal-route-only]</code></td>
+<td>Rejected: exact recall at 16 was 0.979858.</td>
+</tr>
+<tr>
+<td><code>TRACE[bounded-route-variant:three-sparse-graphs]</code></td>
+<td>Rejected: no recall gain at equal per-graph work.</td>
+</tr>
+<tr>
+<td><code>TRACE[bounded-route-variant:construction-budget-4096]</code></td>
+<td>Rejected: exact recall at 16 was 0.995972.</td>
+</tr>
+<tr>
+<td><code>TRACE[bounded-route-variant:construction-budget-8192-reciprocal-64]</code></td>
+<td>Rejected: exact recall at 16 was 0.997803.</td>
+</tr>
+<tr>
+<td><code>TRACE[bounded-route-variant:two-graphs-construction-16384-retrieval-1280-reciprocal-64]</code></td>
+<td>Selected benchmark design: exact top-1 1.0 and recall at 16
+0.998413; production proof pending.</td>
+</tr>
+</tbody>
+</table>
+
+The source diff is partitioned into the following algorithm and
+experiment implementation groups. The traceability audit requires every
+changed C/C++ path under `src/` or `include/`, every changed benchmark
+C/C++ path, and every changed non-test experiment/audit tool to belong
+to exactly one group, so an unrecorded algorithm or experiment
+implementation fails closed.
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Trace identity</th>
+<th>Algorithm surface</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TRACE[algorithm:consolidation-envelope-and-detector]</code></td>
+<td>Drift rearm, accumulator reset, shallow consolidation, and
+consolidation-throughput state.</td>
+</tr>
+<tr>
+<td><code>TRACE[algorithm:shared-retention-and-rollback]</code></td>
+<td>Shared Natural/Durable accumulation, signal-record rollback journal,
+working memory, and processor transaction ownership.</td>
+</tr>
+<tr>
+<td><code>TRACE[algorithm:lazy-rif-active-epoch]</code></td>
+<td>Lazy RIF clock/generation state, active-epoch SQLite,
+memory-strength integration, store compatibility, and migration.</td>
+</tr>
+<tr>
+<td><code>TRACE[algorithm:bounded-graph-retrieval]</code></td>
+<td>Bounded activation observation, graph retrieval, historical search
+cache, evaluated embedding-family features, and explicitly enabled
+public-seed tracing.</td>
+</tr>
+<tr>
+<td><code>TRACE[algorithm:emotional-propagation-cache]</code></td>
+<td>Emotional state, fixed-point propagation, and rebuildable metadata
+cache.</td>
+</tr>
+<tr>
+<td><code>TRACE[algorithm:memory-storage-and-graph-maintenance]</code></td>
+<td>Supersession storage, association fanout, eviction,
+predictive/stability updates, and usage detection.</td>
+</tr>
+<tr>
+<td><code>TRACE[algorithm:runtime-composition]</code></td>
+<td>Engine pipeline composition and hydration/routing integration.</td>
+</tr>
+<tr>
+<td><code>TRACE[algorithm:bounded-work-instrumentation]</code></td>
+<td>Consolidation-epoch and mutation-ownership counters used by the
+acceptance audit.</td>
+</tr>
+<tr>
+<td><code>TRACE[algorithm:experiment-harness-and-audit]</code></td>
+<td>Owner-authorized session extraction, Natural/Durable replay,
+public-surface export and control capture, row-addressed SQLite
+experiment, and fail-closed performance/quality audit
+implementation.</td>
+</tr>
+</tbody>
+</table>
+
+Natural and Durable use one ingestion algorithm; Durable adds only the
+post-commit flush/checkpoint barrier. The algorithm does not branch on
+modality or source cardinality: `source_id` remains opaque provenance,
+while text, audio, and image inputs converge after encoding. The final
+traceability pass is rerun after production changes and the last
+experiment, so this inventory cannot become a stale intermediate
+snapshot.
+
+A follow-up SQLite representation run separated fixed query work from
+snapshot write amplification. The four-blob, 1,024-anchor snapshot
+occupied 207,847,424 bytes for 34,456 embeddings. Restart touched 1,029
+rows. The 512 top-16 route queries took 0.116659 seconds in total
+(0.22785 ms/query), performed a mean 512.004 and maximum 513 exact
+comparisons, and retained exact top-1 and recall-at-16 of 1.0. A
+1,024-embedding fresh prefix built, exported, restarted, and checked in
+0.44 seconds wall time. However, exporting the complete snapshot took
+65.5011 seconds.
+`TRACE[state:packed_route_sqlite_representation_experiment]` therefore
+retains the row-addressed SQLite query seam but rejects rewriting the
+store-sized packed blobs at consolidation. The production-shaped
+candidate must append only the sealed epoch’s nodes, edges, and routes,
+with bounded reciprocal updates; copied-late append, public-cycle, and
+failure/ownership proof remain pending.
+
+The row-addressed follow-up retained separate indexed node, graph-edge,
+and route rows and changed only the sealed epoch. In a 200-event fresh
+database, derived apply plus commit took 0.002320 seconds (0.01160
+ms/event). At a 34,256-row copied-late prefix, inserting the same 200
+nodes and two edge rows per node plus updating 3,544 unique reciprocal
+route rows took 0.010586 seconds (0.05293 ms/event). The 4.56 late/fresh
+ratio reflects the deliberately absent reciprocal population in the
+empty control, but its absolute cost remained small and no store-sized
+value was rewritten. An injected pre-commit failure restored exact table
+counts; close and reopen retained exact committed counts; restart read
+the dimension plus 1,024 anchors, or 1,025 rows total. The 512
+fixed-route queries each compared exactly 512 embeddings and took
+0.621792 seconds total (1.21444 ms/query). This is
+`TRACE[state:row_addressed_route_sqlite_experiment]`: measured
+representation evidence, not graph-construction, public-path latency,
+post-authoritative-commit publication, Durable-barrier, or live-sawtooth
+proof.
+
+The profiler’s zero-counter guard was also corrected during this
+evaluation. The initial 100-event Natural and Durable smoke audits
+incorrectly treated a positive recovery-operation duration as evidence
+that at least one suppressed row must exist. Recovery may legitimately
+run while the active suppression population is empty. The audit now
+pairs every required work count with the engine’s explicit boolean
+activity marker (`candidate_activity`, `rows_visited_activity`, and the
+corresponding graph, rollback, emotional, predictive, and supersession
+markers) rather than with an inclusive operation timer. A zero count
+beside a zero activity marker is valid; a zero count beside a positive
+marker still fails as a vacuous placeholder. A regression preserves that
+distinction. Rebuilt 100- and 200-event Natural and Durable profiles
+then passed row schema, producer/count equality, activity,
+consolidation-epoch, active-epoch-limit, and Durable-barrier validation.
+These short runs validate instrumentation only; they are not plateau or
+long-horizon performance proof.
 
 On 2026-06-30, a full Meta MSC replay rerun verified the retrieval-cache
 optimization on the same 9,130-turn slice used for the hosted
@@ -6602,6 +9844,625 @@ therefore proves semantic equivalence for this replay and preserves the
 measured exact constant-factor improvements, but it does not prove
 bounded Natural writes or authorize a production-wide flat-storage
 claim.
+
+## Signal-centroid ring cutover and knob ablation
+
+Commit profiling isolated a write-amplification defect that earlier
+aggregate timings obscured. Every accepted signal inserted a new row
+into the global sqlite-vec surface even though memory KNN later joined
+through memories and discarded those signal-only rows. In a 2,000-event
+control, accepted commits averaged 0.2240 ms and mutated 21.78
+`embeddings_chunks` rows per accepted write. The retained centroid-ring
+candidate reduced those figures to 0.1594 ms and 4.00 rows,
+respectively; mean process time fell from 0.8614 to 0.7048 ms.
+
+Two intermediate designs were rejected. Storing an exact vector inline
+on the ever-growing `signals` table while repointing historical
+working-memory rows to the newest centroid touched approximately 600
+signal rows per accepted write in the diagnostic profile. Removing the
+repoint avoided that direct *O*(*N*) mutation but still left an
+unbounded inline-vector table. The retained design instead stores one
+global centroid per memory and a persistent bounded exact-vector ring of
+size *B*(*F*, *S*, *T*). Signal rows reference the centroid, so the ring
+changes neither durable payload identity nor the public retrieval
+surface.
+
+The content-addressed benchmark binary then replayed all 15,695 Natural
+packets at *F* = 0.45, *S* = *T* = 0.5, resolving *B* = 125 and
+*A* = 1, 248. It processed 32 consolidations in 183,001 ms with mean
+process and total times of 4.2730 and 11.4210 ms. The maximum ring-table
+mutation count was 12 in any event. Emotional updates reached 133
+against the hard *A* = 1, 248 enqueue limit, and the limit was never
+saturated.
+
+That run is not reported as a whole-engine plateau pass. No suffix
+satisfied every combined consolidation-cycle, timing, and active-counter
+gate. Its 512-query full-horizon control also measured exact top-1
+0.994141, identity recall@16 0.993623, and semantic coverage 0.990139;
+top-1 and recall therefore miss the current mandatory whole-goal
+thresholds. The exact 2,016-message Durable replay completed four
+consolidations in 30,128 ms with mean process and total times of 9.1500
+and 14.5741 ms. Its retrieval controls remained 1.0, but neither
+attribution nor the required plateau passed. These failures remain part
+of the result rather than being replaced by the local ring improvement.
+
+The current-binary nine-point Natural ablation used 2,000 events, 512
+exact public GraphRetrieve controls, and four opaque source identifiers
+per point. Every point passed exact top-1, exact identity recall at 16,
+semantic coverage, and deterministic tie order at 1.0. A separate
+active-route regression covers text, audio, and image labels plus shared
+and opaque source identifiers, so the text-ingress corpus table is not
+misrepresented as fabricated multimodal traffic.
+
+<table>
+<colgroup>
+<col style="width: 15%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+<col style="width: 21%" />
+</colgroup>
+<thead>
+<tr>
+<th>F/S/T point</th>
+<th style="text-align: right;">ring <span
+class="math inline"><em>B</em></span></th>
+<th style="text-align: right;">max ring row mutations/event</th>
+<th style="text-align: right;">wall (ms)</th>
+<th style="text-align: right;">top-1 / recall@16 / semantic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>midpoint</td>
+<td style="text-align: right;">128</td>
+<td style="text-align: right;">12</td>
+<td style="text-align: right;">14,072</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+<tr>
+<td>all-low</td>
+<td style="text-align: right;">64</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: right;">12,039</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+<tr>
+<td>all-high</td>
+<td style="text-align: right;">192</td>
+<td style="text-align: right;">4</td>
+<td style="text-align: right;">15,619</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+<tr>
+<td>focus-low</td>
+<td style="text-align: right;">96</td>
+<td style="text-align: right;">14</td>
+<td style="text-align: right;">14,222</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+<tr>
+<td>focus-high</td>
+<td style="text-align: right;">160</td>
+<td style="text-align: right;">7</td>
+<td style="text-align: right;">14,997</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+<tr>
+<td>sensitivity-low</td>
+<td style="text-align: right;">112</td>
+<td style="text-align: right;">12</td>
+<td style="text-align: right;">12,464</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+<tr>
+<td>sensitivity-high</td>
+<td style="text-align: right;">144</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">39,900</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+<tr>
+<td>stability-low</td>
+<td style="text-align: right;">112</td>
+<td style="text-align: right;">10</td>
+<td style="text-align: right;">17,623</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+<tr>
+<td>stability-high</td>
+<td style="text-align: right;">144</td>
+<td style="text-align: right;">14</td>
+<td style="text-align: right;">14,558</td>
+<td style="text-align: right;">1 / 1 / 1</td>
+</tr>
+</tbody>
+</table>
+
+The sensitivity-high latency outlier is retained as measured. The
+aggregate `signal-centroid-ring-knob-ablation-v4.json` binds all
+profiles and sanitized audits to benchmark binary SHA-256
+`4ac8b7239545cdc1fcc7a0b51a0c131c6ef4ce3656ddbcbe6706c8f3baa76e83` and
+has SHA-256
+`d75f8244b84686b93578b644a7b4c2a9ecf0963bd98017f57dc75245204a7044`. Its
+29-file source-code manifest has SHA-256
+`41ea4060829c156230e5f40cd8f06d4197b00650b8a10a3e9aca06e6b7df2897`; the
+scope is explicit so unrelated concurrent branch work cannot silently
+change the evidence identity. The v4 builder fails closed unless every
+point contains exactly 2,000 rows with unique event indices covering 0
+through 1,999, 512 controls, four opaque source digests, all three
+quality values at 1.0, deterministic ties, an observed ring-mutation
+counter, and an audit digest bound to the private profile. Its capacity
+check uses the production `std::lround` rule and includes a half-integer
+regression. The plateau audit likewise treats
+`MemoryStorage.insert_signal_rows` as elapsed time rather than inferring
+diagnostics from a `_rows` suffix; a negative fixture grows only that
+duration and must fail. This closes knob derivation, the named
+nine-point ablation, public retrieval quality for those slices, and
+source/modality-independent routing structure. It does not claim a
+whole-engine plateau, a bounded emotional traversal, merge, release, or
+deployment. `TRACE[state:signal_centroid_ring_cutover]`.
+
+Post-signal-ring attribution exposed a distinct consolidation-edge
+defect in the retained identity ledger. Across the first and final five
+successful consolidations of the 15,695-packet Natural replay, mean
+consolidation duration rose from 21.306208 to 53.983433 ms. The
+disposable-ledger publication rose from 0.425858 to 6.475533 ms while
+the mean persistent current-generation identity population rose from
+226.0 to 3,113.2. Each SQL statement still obeyed the derived *B* = 125
+limit, but the number of statements copied the complete population.
+Batching therefore bounded statement size without bounding total
+consolidation work.
+
+The measured repair keeps persistent SQLite authoritative and changes
+only successful epoch reset: the new connection-local SQLite epoch
+begins with its clock and no copied identities, and later events publish
+only their changed identities. The deterministic regression covers all
+nine production-shaped F/S/T points, using persistent *B* + 1
+populations and mixed modality and opaque source labels. It initially
+failed at neutral knobs because 129 identities were copied, then passed
+171 assertions after the repair; after the double-failure regression was
+added, the complete active-epoch focused set passed 482 assertions in 15
+cases. Neutral 128 remains the derived batch, and 129 remains the
+logical *B* + 1 test population rather than a work batch.
+
+Fresh blind review found that the first implementation did not carry the
+empty-reset intent across consecutive failures. When both post-commit
+publication and its immediate recovery failed, the next event could
+rebuild the disposable RIF projection from all persistent active
+identities. The first repair made the empty-reset requirement sticky and
+preserved that sidecar across successful retrieval-surface reloads.
+Round-two review then found that the reload exception handler still
+erased it. That exact sequence was reproduced as a missing sidecar
+before repair. The catch path now detaches and restores the RIF epoch
+independently of the other disposable retrieval caches. A regression
+with a neutral *B* + 1 = 129 mature persistent population injects
+publication, recovery, and reload failures, then proves that the retry
+observes an empty disposable epoch and publishes only one changed
+identity; the durable 129 identities remain in persistent SQLite. This
+is failure-path source-health evidence. The earlier 15,695-packet timing
+run predates both review repairs and continues to support only the
+successful-path local publication result.
+
+The exact repaired binary then completed the full 15,695-packet Natural
+replay with 38 live-hint consolidations in 219,074 ms. The selected
+publication edge was flat: its first-five and final-five consolidation
+means were 0.198092 and 0.196425 ms, and all 38 publications consumed
+9.043001 ms. The local repair is therefore retained. It did not complete
+the engine goal. No suffix passed the consolidation-cycle contract, and
+the 512-query public control reached exact top-1 0.998047, exact
+identity recall at 16 of 0.996094, and semantic coverage 0.993760, below
+the mandatory 1.0 and 0.998 identity gates. Durable verification was not
+run after the first Natural acceptance gate failed. Bounded restart,
+recursive review, overall plateau, and production boundedness remain
+open.
+
+A smallest-next-envelope feasibility probe then raised only the private
+HNSW node inspection bound from 5*C* to 6*C*; activation remained
+*A* = 2*C* + 2*B* and every value remained F/S/T-derived. The complete
+27-point structural grid passed 931 assertions, with neutral *C* = 512,
+node budget 3,072, and *B* = 128; 129 remained only the logical *B* + 1
+boundary. An additional production-default F=.45/S=.5/T=.5 Natural
+pre-screen resolved *C* = 499 and 6C=2,994, processed all 15,695 packets
+in 231,275 ms, and regressed wall time 5.57 percent relative to the
+repaired 5C run. Exact top-1 remained 0.998047 with the same one miss;
+identity recall at 16 improved from 0.996094 to 0.997070 but remained
+below 0.998. No suffix passed the plateau or consolidation-cycle
+contracts. The 6C candidate is therefore rejected before the exact
+nine-point corpus matrix started. This is a complete 27-point formula
+ablation, one additional default-knob pre-screen rejection, and 0/9
+exact corpus-matrix points, not a nine-point performance pass. The
+historical benchmark executable is bound by SHA-256
+`86bafe48d4a75e8ebaf6d942fb92aca59e3078af189d4a8148a31846ee3e5a13`; its
+unchanged experiment-owned selector, formula, harness, regression, and
+audit source manifest is bound by SHA-256
+`35c0de6f3f05dd3e0720db01c372fa32b58f572fe269610ed56a7a3ee26a5198`.
+
+Re-attribution also exposed a proof-classification defect rather than
+another HNSW algorithm change. The retained route declares zero
+activation increments, but the audit previously chose a ramping
+retrieval-cycle test whenever process time formed a sawtooth. The same
+fixed 5*C* work therefore failed for having no material retrieval ramp.
+A deterministic regression reproduced the mismatch, and the repaired
+audit now selects fixed-envelope retrieval from the declared F/S/T
+parameter vector independently of process mode. Over the production
+replay suffix beginning at event 10,195, 12 complete successful
+recenters kept both queue and node envelopes at 5*C* = 2, 495 with no
+classifier or work-envelope failure. The historical profile did not
+record activated-identity overlap, so it cannot prove the full
+centroid-movement retrieval-cycle contract. The whole goal remains open:
+overlap, process-cycle reset, operation/counter suffix gates, exact
+top-1/recall, Durable horizon, and bounded restart are unchanged. This
+repair adds no runtime value, route, modality branch, or source-id
+branch; the existing 27 structural and nine production-shaped knob
+contracts remain the required ablations.
+
+The next process-reset attribution separated event incidence from
+per-active-unit cost. Ten suffix epochs met the material-ramp
+definition, and eight met the strict requirement that the following
+50-event process mean be at most 0.9 of the trailing mean. The two
+misses, epochs 28 and 35, still removed 90.65% and 66.40% of their
+preceding process ramps. Their post windows contained two and six times
+as many supersession candidates, respectively. Memory-storage time per
+candidate improved by 28.46% in epoch 28 and changed by only 1.25% in
+epoch 35. Epoch 28 also contained 3.69 times as many emotional neighbors
+while time per neighbor improved by 7.57%; epoch 35 moved from no
+trailing-neighbor activity to 472.48 neighbors per event after
+consolidation. Thus these two absolute-latency misses do not identify a
+store-size-dependent engine hotspot; they expose content-incidence
+sensitivity in the strict reset audit. An activity-normalized diagnostic
+now compares post to trailing windows separately for memory-storage
+candidates and emotional-cascade neighbors. It uses ratios of window
+sums, treats zero/zero activity as unevaluated, treats a one-sided zero
+as incomparable, and deterministically ranks per-unit regressions before
+activity-incidence explanations. It is diagnostic only: raw reset, peak,
+trough, slope, height, throughput, work, and continued-store-growth
+failures remain unchanged and cannot be waived.
+
+On the same production suffix, all evaluable rows were
+activity-incidence rather than per-unit regressions. Epoch 35 memory
+storage was selected deterministically because its post window added
+24.215 ms while candidate incidence rose sixfold; its unit-cost ratio
+was 1.0125, below the existing 1.05 operation threshold. The result
+continues to attribution of the memory-storage activity-generation path
+while the strict process-reset failure remains. Nineteen focused
+diagnostic tests and all 111 storage-audit tests pass, including
+contiguous adjacent and cross-operation-identical window checks, finite
+aggregate checks, and label-invariant arithmetic for text, audio, image,
+shared, and opaque labels. The candidate introduces no runtime work
+value. A content-addressed inventory evaluates 33 existing F/S/T-derived
+formulas over all 27 structural points and retains the exact nine
+production-shaped points; neutral *B* = 128, while 129 remains only the
+logical *B* + 1 exclusion boundary and never a fetched or processed row.
+No runtime algorithm, knob formula, public API, schema, modality
+behavior, or source-id behavior changed in this audit-only
+implementation.
+
+Direct attribution of the selected memory-storage activity path
+localized the remaining incidence jump one level earlier. In epoch 28
+the trailing and post windows stored 6 and 12 memories; in epoch 35 they
+stored 2 and 12. Each stored memory in both windows returned exactly 394
+supersession candidates and visited the same F/S/T-derived 1,248-row
+activation target. Thus the twofold and sixfold candidate totals are
+exactly the twofold and sixfold counts of natural writes, not growth in
+candidates per write. At epoch 35, sparse-route node rows per stored
+memory changed by a factor of 1.0305, candidate-load time per stored
+memory by 1.0144, and total memory-storage time per stored memory by
+1.0125; epoch 28 improved on the corresponding time measures. The next
+measured surface is therefore boundary-to-write incidence in
+`ComputeWriteGate`, not another MemoryStorage candidate-search repair.
+This is attribution, not authorization to alter memory semantics: the
+raw reset miss remains failed and unwaived.
+
+The replay used production knobs *F* = .45, *S* = .5, and *T* = .5,
+deriving *C* = 499, *B* = 125, *A* = 1, 248, 5*C* = 2, 495, 2*C* = 998,
+*C* + *B* = 624, and 2*B* = 250. Neutral `.5/.5/.5` remains a distinct
+ablation point with 512/128/1, 280/2, 560/1, 024/640/256; 129 is only
+its logical, unprocessed *B* + 1 boundary. The attribution adds no fixed
+work value and uses neither modality nor source-id labels as a budget
+input. The production corpus is text-only evidence; separate mixed-label
+regressions retain responsibility for modality/source-id invariance.
+
+### Write-gate incidence and existing-path HNSW attribution
+
+An observation-only `ComputeWriteGate` profile then recorded every
+decision input and exit class without changing write semantics. A
+deterministic builder binds the first comparison to event indices
+0–2,499 and the end-anchored final comparison to 13,195–15,694. The
+first range contains 575 boundary events and 510 writes: 330 were
+forced, 180 passed the score test, and 65 failed it. The final range
+contains 573 boundary events and 528 writes: 332 were forced, 196
+passed, and 45 failed. Mean scored margin changed from 0.0843 to 0.0895.
+The gate therefore did not produce the measured storage-cost ramp:
+boundaries changed by a factor of 0.997 and writes by 1.035.
+
+The same run demonstrates where HNSW is already incorporated. Natural
+and Durable share the existing SQLite-authoritative operation graph, and
+`MemoryStorage` supersession uses the same persisted sparse route as
+ordinary retrieval rather than a second durable write algorithm. During
+finite route warm-up, sparse node rows per stored memory rose from 9.82
+in the first range to 2,447.48 in the final range; exact current-row
+comparisons reached the fixed *A* = 1, 248 target and mature routing
+distance work reached the fixed 5*C* = 2, 495 envelope. Memory-storage
+time per write consequently rose from 0.4833 ms to 2.8343 ms even though
+write incidence stayed flat. The final seven end-anchored windows passed
+process-half, throughput-half, relative-slope, height, operation,
+work-counter, and continued-store-growth checks. Whole plateau
+acceptance still failed because the strict absolute consolidation reset
+classifier remained invalid; that raw failure is retained and unwaived.
+
+No new work constant was introduced. At the executed production knobs,
+*C*/*B*/*A* = 499/125/1, 248, public routing is 5*C* = 2, 495,
+construction remains *C* + *B* = 624 nodes and 2*B* = 250 queue effort,
+and 126 is only the production logical *B* + 1 boundary. At neutral
+`.5/.5/.5`, *B* = 128 and 129 remains only the logical, unprocessed
+*B* + 1 probe. The existing 27-point structural grid and nine
+production-shaped F/S/T corpus ablations remain the cutover requirement;
+this single production-knob attribution neither replaces them nor claims
+activated-identity overlap, bounded restart, Durable plateau, or overall
+completion.
+
+### Same-query recenter overlap
+
+An experiment-only measurement now runs the same consolidation embedding
+through the retained SQLite HNSW route immediately before and after each
+successful recenter. A pair is valid only when both route queries
+complete; the profile records a distinct pair-valid field and failure
+code, and the deterministic builder rejects every invalid pair. Direct
+consolidation-path regression covers both a valid equal-set result and
+an invalid pre-query. Both searches retain the production-derived 5*C*
+node ceiling and *A* = 2*C* + 2*B* activation target. Recenter timing
+excludes both observer queries, the measurement is not part of the
+accepted performance clock, and it does not change the production API or
+schema.
+
+In a regenerated 13,000-event Natural replay at *F*/*S*/*T* = .45/.5/.5,
+22 recenters had explicitly valid, zero-failure paired measurements and
+zero profiled pairs were invalid. Fourteen occurred after activation
+reached the full *A* = 1, 248 target, and late pairs visited the
+complete 5*C* = 2, 495 node envelope. Every pair nevertheless had
+overlap 1.0: zero recenters changed even one activated identity for the
+same embedding. Thus HNSW is already executed on the shared
+Natural/Durable path, but moving the current connection-local entry is
+not an effective consolidation-driven activation-centroid reset under
+this route.
+
+This is a rejected lifecycle behavior, not an accepted cycle. The next
+candidate must change the sparse activated centroid while keeping the
+result at *A*, query work at 5*C*, construction at *C* + *B* nodes and
+2*B* effort, and all values derived from F/S/T. It must pass the 27
+structural and nine exact production-shaped knob ablations and remain
+modality/source-id agnostic. The raw process-reset gate remains
+separate, failed, and unwaived. At neutral `.5/.5/.5`, *B* = 128; 129 is
+only the logical unprocessed *B* + 1 boundary and is never a fetched row
+or work budget.
+
+### Saturated fixed-envelope quality boundary
+
+The revised approximate-retrieval contract does not require an
+impossible perfect score from every 512-query run. Each
+production-shaped run may contain at most one exact top-1 miss
+(511/512 = 0.998046875), the nine-run aggregate must remain at least
+0.999, mean exact-identity recall@16 must remain at least 0.998,
+semantic coverage must remain at least 0.95, deterministic tie order is
+still exact, and misses may not cluster by modality, source identifier,
+memory age, or knob setting. Structural bounds, rollback, provenance,
+and ordering invariants remain 100% requirements.
+
+A full-horizon saturation experiment then lowered only the private
+routing-node envelope. At the production knobs
+*F* = .45, *S* = *T* = .5, *C* = 499 and *B* = 125. The first point,
+4*C* = 1, 996, saturated below the mature route population and met the
+revised top-1 gate with 511/512 matches, but it was rejected because
+identity recall@16 was 0.997791, below 0.998. Semantic coverage was
+0.997571.
+
+The next point added the already-derived reciprocal-update term
+*R* = max (2, ⌊*B*/16⌋), yielding 4*C* + *R* = 2, 003. Matching both the
+queue and actual-node ceilings at that value and retaining the separate
+*A* = 2*C* + 2*B* = 1, 248 consolidation snapshot bounded total query
+rows by 4*C* + *R* + *A* = 3, 251. Over 15,695 packets and 512 controls
+it measured exact top-1 0.998047, identity recall@16 0.998650, semantic
+coverage 0.998047, and deterministic tie order. At neutral knobs the
+same formulas resolve to *C* = 512, *B* = 128, *R* = 8, a 2,056-row
+route, and *A* = 1, 280; 129 remains only the logical, unprocessed
+*B* + 1 boundary.
+
+This is a quality-passing single production-knob experiment, not a
+retained algorithm or a bounded-engine result. Its 15,695-packet run
+took 206,060 ms, with mean process time 4.912 ms, mean end-to-end time
+12.824 ms, and 33 consolidations. No audited suffix passed the whole
+contract: emotional-cascade, commit, publication, and other operation
+slopes remained; the raw post-consolidation process reset and
+trough-stability gates remained failed; and the required nine-point
+aggregate, mixed-modality/source regression, Durable run, and recursive
+review have not been completed. The experiment therefore establishes
+only that the 100% per-run top-1 requirement hid a viable saturated
+quality point; it does not establish the storage-cost cure.
+
+### Consolidation-reset routing-envelope experiments
+
+The first dynamic experiment used the saturated quality point above as
+its post-consolidation floor. Consolidation reset both queue effort and
+actual-node ceiling to 4*C* + *R*, each retrieval-active query added
+*R* = max (2, ⌊*B*/16⌋), and both values saturated at the retained 5*C*
+ceiling. The separate activation snapshot remained bounded by
+*A* = 2*C* + 2*B*, so total query-row work remained at most 5*C* + *A*.
+At the production knobs this resolved to a 2,003-row floor, seven-row
+steps, a 2,495-row peak, and a 3,743-row total ceiling; at neutral knobs
+it resolves to 2,056, eight, 2,560, and 3,840 rows. No source-id or
+modality condition participates in the formula.
+
+The canonical 15,695-packet screen passed its 512-query quality control
+with top-1 1.0, recall@16 0.998650, semantic coverage 0.998666, and
+deterministic ties. It completed 34 consolidations in 204,822 ms.
+However, the corpus ended while some route peaks were still warming, so
+a second diagnostic appended one complete later owner-authorized Claude
+session using the identical extraction rules. The combined input
+contained 30,380 real packets, with no trimming, cycling, padding, or
+synthesis. This diagnostic completed 72 consolidations in 438,059 ms.
+Mature retrieval cycles reset on 30/30 evaluated edges and their peak
+and trough half ratios were 0.9972 and 1.0003, but the normalized p95
+shape error was 0.3074. More importantly, quality fell to 507/512 top-1
+(0.990234), recall@16 0.977225, and semantic coverage 0.971084. All five
+top-1 misses appeared in the late-history query quartile. The candidate
+therefore fails the numeric and anti-clustering gates and is rejected;
+the canonical corpus remains the acceptance corpus, and this
+owner-authorized extension is only a maturity diagnostic.
+
+The smallest follow-up was preregistered before measurement. It retained
+the proven 5*C* canonical floor, reset to that floor after
+consolidation, advanced queue effort and node ceiling by *R* per
+retrieval-active query, and saturated at 6*C*. Total query-row work was
+bounded by 6*C* + *A*. Production values were a 2,495-row floor,
+seven-row step, 2,994-row peak, and 4,242-row total ceiling; neutral
+values are 2,560, eight, 3,072, and 4,352 rows. The focused derivation
+and reset regression passed 16 assertions, and all 116 storage-audit
+fixtures passed after teaching the audit the new formula.
+
+The same 30,380-packet diagnostic completed 65 consolidations in 388,336
+ms, with 5.679 ms mean process time and 12.473 ms mean end-to-end time.
+Exact top-1 was 512/512 and semantic coverage was 0.989234, but exact
+identity recall@16 was only 0.992651. That is materially below the
+preregistered 0.998 floor, so the candidate is rejected despite perfect
+top-1. Its mature retrieval-cycle subcontract did pass: 24/24 cycles
+reset, peak and trough half ratios were 1.0000 and 0.9985, normalized
+p95 shape error was 0.1309, late-template error was 0.0137, and no
+routing, queue, snapshot, combined-row, distance-coverage, or activation
+bound was violated. Its shorter wall time than the lower-floor run is
+not attributed to cheaper retrieval: the live time-based detector
+requested seven fewer consolidations, and the run was not a
+fixed-schedule throughput comparison. Neither dynamic envelope is
+retained as a production algorithm, and neither result weakens the
+quality thresholds. The sanitized decision record is
+`artifacts/flat_storage_cost/dynamic-retrieval-sawtooth-maturity-v1.json`.
+
+Because the 5C-to-6C candidate passed the complete mature-cycle shape
+contract but failed only exact-neighbor recall, the next and only
+preregistered routing point raises the floor by one *C* while preserving
+the same one-*C* amplitude. It resets at 6*C*, advances by
+*R* = max (2, ⌊*B*/16⌋), and saturates at 7*C*; the separate snapshot
+remains *A*, so total query-row work is at most 7*C* + *A*. Production
+values are a 2,994-row floor, seven-row step, 3,493-row peak, and
+4,741-row total ceiling. Neutral values are 3,072, eight, 3,584, and
+4,864 rows. The 30,380-packet result retained 511/512 top-1, semantic
+coverage 0.993569, and deterministic ties, but recall@16 was 0.995833
+and therefore failed the unchanged 0.998 gate. Its mature cycle passed
+with 23/23 resets, peak/trough half ratios 1.0000/1.0003, p95 shape
+error 0.0222, late-template error 0.0035, and no work-bound violation.
+It is rejected.
+
+The next floor ablation is preregistered at 7*C* to 8*C* with the same
+*R* step and separate *A* snapshot. Production values are 3,493 floor,
+seven step, 3,992 peak, and 5,240 total rows; neutral values are 3,584,
+eight, 4,096, and 5,376. The maturity run achieved 511/512 top-1,
+recall@16 0.997672, semantic coverage 0.996856, deterministic ties,
+22/22 resets, p95 shape error 0.0230, and no work-bound violations.
+Recall was 0.000328 below the unchanged gate, so the candidate is
+rejected.
+
+The final adjacent floor point is preregistered at 8*C* to 9*C*, again
+stepped by *R* with the separate *A* snapshot. Production values are
+3,992 floor, seven step, 4,491 peak, and 5,739 total rows; neutral
+values are 4,096, eight, 4,608, and 5,888. The maturity run passed:
+top-1 was 511/512, recall@16 was 0.999265, semantic coverage was
+0.998571, ties were deterministic, and four opaque sources were
+represented. In the suffix beginning at event 18,380, 19/20 material
+cycles reset; peak and trough half ratios were 0.9991 and 0.9994, p95
+shape error was 0.1908, late-template error was 0.0795, and no routing,
+queue, snapshot, combined-row, distance-coverage, or activation bound
+was violated. The canonical 15,695-packet acceptance run then passed
+quality with 512/512 top-1, recall@16 1.0, semantic coverage 1.0,
+deterministic ties, and four opaque sources. It completed 34
+consolidations in 214,263 ms, with 5.233 ms mean process time and 13.334
+ms mean end-to-end time. This shorter corpus never reached the derived
+3,992-row floor: maximum actual retrieval work was 3,064 rows, so it
+contained no mature post-floor cycles and cannot independently prove the
+sawtooth shape. Together the runs establish canonical quality plus
+extended-history retrieval maturity, not a whole-engine cure. The
+canonical audit still failed the whole-engine plateau: the largest
+first-to-last-five timing increases were `GraphRetrieve.seed_knn_cache`
+(1.217 to 2.496 ms) and supersession current/candidate loading (about
+0.48 to 1.40 ms). At that point the nine-point aggregate, Durable path,
+hotspot attribution, and production cutover were still pending; the next
+subsection records their resolution and remaining limits.
+
+### Production-default 8C-to-9C cutover
+
+The accepted adjacent envelope was moved into the existing SQLite HNSW
+route as the production default rather than added as another retrieval
+or write path. With hooks disabled, the route now resets queue effort
+and actual-node ceiling to 8*C* after a successful consolidation
+recenter, advances both by *R* = max (2, ⌊*B*/16⌋) per retrieval-active
+query, and saturates at 9*C*. The independent consolidation snapshot
+remains bounded by *A* = 2*C* + 2*B*, so total fetched rows remain at
+most 9*C* + *A*. Restart opens at the 9*C* ceiling because the
+in-process ramp position is not durable. Historical private selectors
+remain only as reproducibility controls; a regression requires the
+former selector-24 formula to resolve identically to the production
+default. No source-id or modality label participates in any formula, and
+Natural and Durable still share the operation graph; Durable adds only
+its post-commit checkpoint.
+
+A round-two rollback review found that the internal search used to build
+a recenter snapshot could transiently advance the ramp before
+persistence. The route now excludes recenter-building searches from the
+*R* increment. A focused failure-injection regression aborts the
+metadata update and proves that both effort and node budget remain
+unchanged; successful recenter is still the only path that resets them
+to 8*C*.
+
+The no-selector 15,695-packet Natural replay at
+*F* = .45, *S* = *T* = .5 resolved *C* = 499, *B* = 125, *A* = 1, 248,
+*R* = 7, a 3,992-row floor, 4,491-row peak, and 5,739-row combined
+ceiling. It completed 34 consolidations in 203,522 ms, with 4.921 ms
+mean process time and 12.659 ms mean end-to-end time. Its 512 public
+controls passed at 512/512 exact top-1, recall@16 1.0, semantic coverage
+1.0, deterministic ties, and four opaque source identifiers. Timing
+cannot be compared causally with the earlier selector run because
+timestamps, live consolidation incidence, and build identity differ.
+
+The production-default nine-point matrix replayed 4,000 packets
+sequentially at midpoint, both joint endpoints, and each one-axis
+endpoint. All 4,608 of 4,608 controls matched exact top-1; minimum
+recall@16 and semantic coverage were both 1.0; tie order was
+deterministic; and there were no misses to cluster by modality, opaque
+source, memory age, or knob point. The focused 27-point structural grid
+and bounded-backfill, metadata-open, core-knob, and text/audio/image
+plus shared/opaque-source invariance regressions also passed. All nine
+short routes were exercised, but none produced a valid mature
+pre/post-activation pair: their active graphs remained below the 8C
+floor. The aggregate therefore classifies them as quality-passing but
+recenter-unevaluated rather than laundering warm-up into sawtooth
+evidence. The 30,380-packet run above remains the mature-cycle proof.
+Sensitivity-high took 140,392 ms versus 37,522–67,511 ms for the other
+eight points and is retained as an adverse measured result, not hidden
+by the perfect quality aggregate.
+
+The mature 8C-to-9C profile was also split into two non-overlapping late
+halves. While the persistent store continued to grow, mean process time
+fell from 8.918 to 7.858 ms. `GraphRetrieve.seed_knn_cache` fell from
+2.914 to 2.397 ms and its per-node unit ratio was 0.789; supersession
+loading fell from 1.860 to 1.520 ms and its per-candidate unit ratio was
+0.855. Emotional work rose slightly per edge, but its total fell from
+0.486 to 0.430 ms. This is evidence that mature per-store work is not
+continuing to grow under the bounded route. It does not convert the
+still-failing raw process-time reset diagnostic into a pass:
+consolidation changes retrieval locality and its work envelope, but it
+cannot force every following event to perform the same amount of
+content-dependent write work.
+
+Finally, the real 2,016-message Durable corpus used the same no-selector
+parameters and completed four consolidations in 79,481 ms, with 10.710
+ms mean process time and 39.024 ms mean end-to-end time. Its 512
+controls again passed at 512/512 top-1, recall@16 1.0, semantic coverage
+1.0, deterministic ties, and four opaque sources. The corpus cannot
+supply the required ten post-warmup 500-event windows, so this is
+shared-path, checkpoint, and quality evidence; it is not a Durable
+plateau claim. The production cutover is therefore scoped to the
+knob-derived retrieval envelope and shared operation path, not to
+bounded whole-engine restart, production-wide latency, release, or
+deployment.
 
 ## Standard Eviction-Frontier Estimate
 

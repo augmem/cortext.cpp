@@ -1,0 +1,14 @@
+{
+  "generated_claim_mismatches": [],
+  "inventory_count": 69,
+  "manifest_sha256": "222e2525511e61c12cc870dcb6d3e41dc4475ea7414163f8442be689fdf9df7d",
+  "manuscript_sha256": "f7ed5d59cadeb0cc3194da92ea4f574e20f0a030e5aa28e6ff54cefdd44a43de",
+  "missing_source_claims": [],
+  "ownership_violations": [],
+  "passed": true,
+  "proof_level_violations": [],
+  "record_count": 69,
+  "schema": "cortext_paper_traceability_audit_v1",
+  "state_sha256": "bb2c335ab974d05ae26aaf75f18ab4f1d3beab519a31b1d3ca3c0e0b6c6234fb",
+  "uncovered_inventory": []
+}

@@ -55,6 +55,8 @@ const cortext_cpp_sources = &.{
     "src/operations/meta_learning_internal.cpp",
     "src/operations/graph_build.cpp",
     "src/operations/graph_retrieval.cpp",
+    "src/operations/sparse_retrieval_route_internal.cpp",
+    "src/operations/sparse_retrieval_route_sqlite_internal.cpp",
     "src/operations/eviction_policy_override.cpp",
     "src/operations/storage_pressure.cpp",
     "src/operations/retrieval_trace_state.cpp",
@@ -300,6 +302,7 @@ pub fn build(b: *std.Build) void {
     const ggml_blas_lib = b.option([]const u8, "ggml_blas_lib", "Optional path to libggml-blas");
 
     const eigen = b.dependency("eigen", .{});
+    const hnswlib = b.dependency("hnswlib", .{});
     const nlohmann_json = b.dependency("nlohmann_json", .{});
 
     const mod = b.createModule(.{
@@ -340,6 +343,7 @@ pub fn build(b: *std.Build) void {
     mod.addIncludePath(b.path("third_party/sqlite-objstore/include"));
     mod.addIncludePath(b.path("third_party/sqlite-objstore/third_party/blake3"));
     mod.addIncludePath(eigen.path(""));
+    mod.addIncludePath(hnswlib.path(""));
     mod.addIncludePath(nlohmann_json.path("include"));
 
     const generated = b.addWriteFiles();

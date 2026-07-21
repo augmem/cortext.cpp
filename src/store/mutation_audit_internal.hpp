@@ -31,6 +31,9 @@ struct SQLiteMutationAuditBatch
   std::vector<SQLiteMutationIdentity> committed_hook_identities;
   std::vector<SQLiteMutationIdentity> committed_trigger_identities;
   bool trigger_journal_ready = false;
+#if defined(CORTEXT_TESTING)
+  std::size_t commit_vec_lookup_count = 0;
+#endif
 };
 
 /// @brief Drop schema/setup mutations and begin a fresh profiling stream.

@@ -11,6 +11,7 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
 #include "../src/operations/constructive_recall_internal.hpp"
+#include "../src/operations/active_signal_embedding_ring_internal.hpp"
 #include "../src/operations/execution_cache_sidecar_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include <memory>
 #include <new>
 #include <thread>
+#include <tuple>
 
 using namespace cortext;
 using cortext::operations::MemoryStorage;
@@ -216,6 +218,9 @@ TEST_CASE ("MemoryStorage uses default SqlObjectStore inside processor "
            == 0.0);
   REQUIRE (out.operation_ms.at (
                "MemoryStorage.supersession_historical_rows_visited")
+           == 0.0);
+  REQUIRE (out.operation_ms.at (
+               "MemoryStorage.supersession_rows_visited_activity")
            == 0.0);
   REQUIRE (out.operation_ms.at (
                "MemoryStorage.supersession_sql_fallback_count")
@@ -524,6 +529,193 @@ TEST_CASE ("MemoryStorage stores memory even when no payload",
   REQUIRE (sig_blob_id.empty ());
 }
 
+TEST_CASE ("MemoryStorage keeps exact signal vectors out of the global route",
+           "[operations][memory_storage][embedding_population][modality]")
+{
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  MemoryStorage op;
+
+  const std::vector<std::string> sources = {
+    "opaque/source/alpha", "opaque/source/beta"
+  };
+  const std::vector<std::string> modalities = { "text", "audio", "image" };
+  std::vector<Eigen::VectorXf> expected_signal_embeddings;
+  std::vector<long long> expected_memory_embedding_ids;
+
+  for (std::size_t source_index = 0; source_index < sources.size ();
+       ++source_index)
+    {
+      Signal signal;
+      signal.embedding = UnitVec (static_cast<int> (source_index));
+      signal.timestamp = 1000 + source_index * 100;
+      signal.source_id = sources[source_index];
+      signal.modality = modalities.front ();
+      signal.mimetype = "text/plain";
+
+      AccumulatorState acc;
+      acc.mu_acc = signal.embedding;
+      acc.c_t = signal.embedding;
+      acc.n_signals = static_cast<int> (modalities.size ());
+      acc.s_sum = 1.8;
+      acc.s_max = 0.8;
+      acc.t_start = signal.timestamp;
+      for (std::size_t modality_index = 0;
+           modality_index < modalities.size (); ++modality_index)
+        {
+          SignalRecord rec;
+          rec.embedding = UnitVec (
+              static_cast<int> (source_index * modalities.size ()
+                                + modality_index));
+          rec.timestamp = signal.timestamp + modality_index;
+          rec.modality = modalities[modality_index];
+          rec.mime = modalities[modality_index] == "text"
+                         ? "text/plain"
+                         : "application/octet-stream";
+          rec.score = 0.6;
+          rec.serial_position = static_cast<int> (modality_index);
+          expected_signal_embeddings.push_back (rec.embedding);
+          acc.signals.push_back (std::move (rec));
+        }
+      pctx.accumulator_states[signal.source_id] = std::move (acc);
+
+      OperationContext ctx (signal, pctx, cfg, store);
+      ctx.SetAccumulatorWriteDecision (true);
+      ctx.SetRepresentativeEmbedding (signal.embedding);
+      auto tx = store->Begin ();
+      op.Execute (ctx, *tx);
+      tx->Commit ();
+
+      REQUIRE (ctx.GetStoredEmbeddingId ().has_value ());
+      expected_memory_embedding_ids.push_back (*ctx.GetStoredEmbeddingId ());
+    }
+
+  const auto embedding_count_rows
+      = store->Execute ("SELECT COUNT(*) AS n FROM embeddings");
+  REQUIRE (embedding_count_rows.size () == 1);
+  REQUIRE (AnyToLongLong (embedding_count_rows[0].at ("n"))
+           == static_cast<long long> (sources.size ()));
+
+  const auto signal_rows = store->Execute (
+      "SELECT s.source_id, s.embedding_id, a.embedding, a.capacity "
+      "FROM signals s "
+      "LEFT JOIN cortext_active_signal_embeddings a "
+      "ON a.signal_id = s.signal_id "
+      "ORDER BY s.signal_id");
+  REQUIRE (signal_rows.size () == expected_signal_embeddings.size ());
+  for (std::size_t index = 0; index < signal_rows.size (); ++index)
+    {
+      const std::size_t source_index = index / modalities.size ();
+      REQUIRE (std::any_cast<std::string> (
+                   signal_rows[index].at ("source_id"))
+               == sources[source_index]);
+      REQUIRE (AnyToLongLong (signal_rows[index].at ("embedding_id"))
+               == expected_memory_embedding_ids[source_index]);
+      REQUIRE (AnyToLongLong (signal_rows[index].at ("capacity"))
+               == operations::active_signal_embedding_ring_internal::Capacity (
+                      cfg.focus, cfg.sensitivity, cfg.stability));
+      const auto bytes = BlobFromAny (signal_rows[index].at ("embedding"));
+      REQUIRE (bytes.size ()
+               == static_cast<std::size_t> (kEmbeddingDim)
+                      * sizeof (float));
+      Eigen::VectorXf restored (kEmbeddingDim);
+      std::memcpy (restored.data (), bytes.data (), bytes.size ());
+      REQUIRE (restored.isApprox (expected_signal_embeddings[index], 0.0f));
+    }
+}
+
+TEST_CASE ("Active signal embedding ring obeys knob-derived capacities",
+           "[operations][memory_storage][embedding_population][knobs]")
+{
+  namespace ring = operations::active_signal_embedding_ring_internal;
+  const std::vector<std::tuple<double, double, double>> points = {
+    { 0.5, 0.5, 0.5 }, { 0.0, 0.0, 0.0 }, { 1.0, 1.0, 1.0 },
+    { 0.0, 0.5, 0.5 }, { 1.0, 0.5, 0.5 }, { 0.5, 0.0, 0.5 },
+    { 0.5, 1.0, 0.5 }, { 0.5, 0.5, 0.0 }, { 0.5, 0.5, 1.0 }
+  };
+
+  for (const auto &[focus, sensitivity, stability] : points)
+    {
+      auto store = SQLiteStore::Create (":memory:");
+      cortext::testing::InitializeCoreSchema (*store);
+      const int capacity = ring::Capacity (focus, sensitivity, stability);
+      REQUIRE (capacity
+               == operations::sparse_retrieval_knobs_internal::
+                      BackfillBatchSize (focus, sensitivity, stability));
+
+      auto tx = store->Begin ();
+      for (long long signal_id = 1; signal_id <= capacity + 3; ++signal_id)
+        {
+          tx->Execute (
+              "INSERT INTO signals(signal_id, source_id, embedding_id, "
+              "timestamp, modality, created_at) VALUES (?, ?, 1, ?, ?, ?)",
+              { signal_id,
+                signal_id % 2 == 0 ? std::string ("opaque/even")
+                                    : std::string ("opaque/odd"),
+                signal_id,
+                signal_id % 3 == 0 ? std::string ("image")
+                                    : (signal_id % 3 == 1
+                                           ? std::string ("text")
+                                           : std::string ("audio")),
+                signal_id });
+          std::vector<float> embedding (kEmbeddingDim, 0.0f);
+          embedding[static_cast<std::size_t> (signal_id) % kEmbeddingDim]
+              = 1.0f;
+          ring::Upsert (*tx, signal_id, embedding, signal_id, focus,
+                        sensitivity, stability);
+        }
+      tx->Commit ();
+
+      const auto rows = store->Execute (
+          "SELECT COUNT(*) AS n, MIN(signal_id) AS first_id, "
+          "MAX(signal_id) AS last_id, MIN(capacity) AS min_capacity, "
+          "MAX(capacity) AS max_capacity "
+          "FROM cortext_active_signal_embeddings");
+      REQUIRE (rows.size () == 1);
+      REQUIRE (AnyToLongLong (rows[0].at ("n")) == capacity);
+      REQUIRE (AnyToLongLong (rows[0].at ("first_id")) == 4);
+      REQUIRE (AnyToLongLong (rows[0].at ("last_id")) == capacity + 3);
+      REQUIRE (AnyToLongLong (rows[0].at ("min_capacity")) == capacity);
+      REQUIRE (AnyToLongLong (rows[0].at ("max_capacity")) == capacity);
+    }
+
+  auto resized_store = SQLiteStore::Create (":memory:");
+  cortext::testing::InitializeCoreSchema (*resized_store);
+  auto resized_tx = resized_store->Begin ();
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+  for (long long signal_id = 1; signal_id <= 131; ++signal_id)
+    {
+      resized_tx->Execute (
+          "INSERT INTO signals(signal_id, source_id, embedding_id, timestamp, "
+          "modality, created_at) VALUES (?, 'opaque/resize', 1, ?, 'text', ?)",
+          { signal_id, signal_id, signal_id });
+      if (signal_id <= 130)
+        ring::Upsert (*resized_tx, signal_id, embedding, signal_id, 0.5, 0.5,
+                      0.5);
+      else
+        ring::Upsert (*resized_tx, signal_id, embedding, signal_id, 0.0, 0.0,
+                      0.0);
+    }
+  resized_tx->Commit ();
+  const auto resized_rows = resized_store->Execute (
+      "SELECT COUNT(*) AS n, MIN(signal_id) AS first_id, "
+      "MAX(signal_id) AS last_id, MIN(capacity) AS min_capacity, "
+      "MAX(capacity) AS max_capacity "
+      "FROM cortext_active_signal_embeddings");
+  REQUIRE (resized_rows.size () == 1);
+  REQUIRE (AnyToLongLong (resized_rows[0].at ("n")) == 64);
+  REQUIRE (AnyToLongLong (resized_rows[0].at ("first_id")) == 68);
+  REQUIRE (AnyToLongLong (resized_rows[0].at ("last_id")) == 131);
+  REQUIRE (AnyToLongLong (resized_rows[0].at ("min_capacity")) == 64);
+  REQUIRE (AnyToLongLong (resized_rows[0].at ("max_capacity")) == 64);
+}
+
 TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
            "[operations][memory_storage][supersession][fanout_cache]")
 {
@@ -772,6 +964,9 @@ TEST_CASE ("Shared embeddings retain every supersession memory sibling",
                "MemoryStorage.supersession_current_rows_visited")
            == static_cast<double> (sibling_count));
   REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_rows_visited_activity")
+           == 1.0);
+  REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_historical_coverage_proven")
            == 0.0);
   REQUIRE (ctx.GetOperationTimings ().at (
@@ -841,11 +1036,146 @@ TEST_CASE ("Exact empty supersession coverage skips the recent SQL fallback",
                "MemoryStorage.supersession_historical_rows_visited")
            == 0.0);
   REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_rows_visited_activity")
+           == 0.0);
+  REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_historical_coverage_proven")
            == 1.0);
   REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_sql_fallback_count")
            == 0.0);
+  cache::Erase (pctx);
+}
+
+TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
+           "[operations][memory_storage][supersession][hnsw][sqlite][knobs]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  namespace sqlite_route
+      = operations::sparse_retrieval_route_sqlite_internal;
+  ScopedTempDb db;
+  Store *store = db.get ();
+  REQUIRE (store != nullptr);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const auto parameters = sqlite_route::DeriveParameters (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  REQUIRE (parameters.route_capacity == 512);
+  REQUIRE (parameters.backfill_batch_size == 128);
+  const std::size_t population = parameters.route_capacity + 1;
+
+  ProcessorContext pctx;
+  std::vector<cache::Entry> historical_entries;
+  std::vector<cache::Entry> current_entries;
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  historical_entries.reserve (population);
+  current_entries.reserve (population);
+  route_entries.reserve (population);
+  const Eigen::VectorXf target = VectorWithCosineToDim0 (0.94f);
+  for (std::size_t index = 0; index < population; ++index)
+    {
+      const long long memory_id = 10 + static_cast<long long> (index);
+      const long long embedding_id = 1000 + static_cast<long long> (index);
+      const long long start_ts = 1000 + static_cast<long long> (index);
+      Eigen::VectorXf embedding = Eigen::VectorXf::Zero (kEmbeddingDim);
+      if (index == 0)
+        embedding = target;
+      else
+        {
+          embedding[1 + static_cast<Eigen::Index> (
+                            index % (kEmbeddingDim - 1))]
+              = 1.0f;
+        }
+      const std::string source_id
+          = "opaque/" + std::to_string (index % 4);
+      cortext::testing::SeedEmbeddingV2 (
+          *store, embedding_id, embedding, start_ts);
+      cortext::testing::SeedMemoryV2 (
+          *store, memory_id, embedding_id, source_id, "LONG_TERM", 1.0,
+          start_ts);
+      ProcessorContext::RetrievalSurfaceEntry surface;
+      surface.memory_id = memory_id;
+      surface.embedding_id = embedding_id;
+      surface.start_ts = start_ts;
+      surface.kind = "LONG_TERM";
+      surface.embedding = embedding;
+      pctx.UpsertRetrievalSurface (std::move (surface));
+      historical_entries.push_back (
+          { embedding_id, memory_id, start_ts, "LONG_TERM", source_id,
+            embedding });
+      current_entries.push_back (
+          { embedding_id, memory_id, start_ts, "LONG_TERM", source_id,
+            embedding, embedding_id });
+      route_entries.emplace_back (memory_id, std::move (embedding));
+    }
+  REQUIRE (cache::Reset (pctx, std::move (historical_entries),
+                         std::move (current_entries)));
+  cache::SetProcessorSurfaceComplete (pctx, true);
+  cache::SetSparseRouteParameters (pctx, parameters);
+  auto state = cache::FindMutable (pctx);
+  REQUIRE (state);
+  auto hnsw = cache::EnsureSparseRoute (*state);
+  REQUIRE (hnsw);
+  state->sqlite_sparse_route = sqlite_route::Route::Create (
+      *store, kEmbeddingDim, route_entries, *hnsw, parameters);
+  REQUIRE (state->sqlite_sparse_route);
+
+  Signal signal;
+  signal.embedding = UnitVec (0);
+  signal.timestamp = 10000;
+  signal.source_id = "opaque/correction";
+  signal.modality = "image";
+  signal.mimetype = "image/test";
+  AccumulatorState acc;
+  acc.mu_acc = signal.embedding;
+  acc.n_signals = 1;
+  acc.s_sum = 0.8;
+  acc.s_max = 0.8;
+  acc.t_start = signal.timestamp;
+  SignalRecord record;
+  record.embedding = signal.embedding;
+  record.timestamp = signal.timestamp;
+  record.modality = signal.modality;
+  record.mime = signal.mimetype;
+  record.score = 0.8;
+  acc.signals.push_back (std::move (record));
+  pctx.accumulator_states[signal.source_id] = std::move (acc);
+
+  OperationContext ctx (signal, pctx, cfg, store);
+  ctx.SetAccumulatorWriteDecision (true);
+  ctx.SetRepresentativeEmbedding (signal.embedding);
+  MemoryStorage operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Commit ();
+
+  REQUIRE (ctx.GetStoredMemoryId ());
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_current_rows_visited")
+           <= static_cast<double> (parameters.activation_identity_target));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_sparse_route_node_rows")
+           <= static_cast<double> (parameters.search_node_budget));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_sparse_route_distance_evaluations")
+           <= ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_sparse_route_node_rows"));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_historical_rows_visited")
+           == 0.0);
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_historical_coverage_proven")
+           == 1.0);
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_sql_fallback_count")
+           == 0.0);
+  const auto edge_rows = store->Execute (
+      "SELECT 1 FROM associations WHERE source_memory_id = ? "
+      "AND target_memory_id = 10 AND edge_type = 'supersedes'",
+      { *ctx.GetStoredMemoryId () });
+  REQUIRE (edge_rows.size () == 1);
   cache::Erase (pctx);
 }
 
@@ -1125,7 +1455,7 @@ TEST_CASE ("MemoryStorage preserves SQL KNN behavior with signal-only decoys",
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 
-TEST_CASE ("Runtime reconstruction occupies the sqlite-vec pre-filter cutoff",
+TEST_CASE ("Runtime reconstruction does not restore signal-only cutoff pollution",
            "[operations][memory_storage][supersession][reconstruction][knn_population]")
 {
   namespace cache
@@ -1238,7 +1568,7 @@ TEST_CASE ("Runtime reconstruction occupies the sqlite-vec pre-filter cutoff",
                                 + signal.embedding.size ()),
         static_cast<long long> (candidate_limit), *ctx.GetStoredMemoryId (),
         2000LL });
-  REQUIRE (std::none_of (
+  REQUIRE (std::any_of (
       sql_candidates.begin (), sql_candidates.end (), [] (const auto &row) {
         return AnyToLongLong (row.at ("memory_id")) == 10LL;
       }));
@@ -1247,7 +1577,7 @@ TEST_CASE ("Runtime reconstruction occupies the sqlite-vec pre-filter cutoff",
       "WHERE source_memory_id = ? AND target_memory_id = ? "
       "  AND edge_type = 'supersedes'",
       { *ctx.GetStoredMemoryId (), 10LL });
-  REQUIRE (target_edges.empty ());
+  REQUIRE (target_edges.size () == 1);
   cache::Erase (pctx);
 }
 

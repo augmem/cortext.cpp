@@ -1,5 +1,6 @@
 #include "cortext/operations/memory_strength.hpp"
 #include "historical_surface_search_cache_internal.hpp"
+#include "retrieval_trace_state.hpp"
 #include "emotional_metadata_cache_internal.hpp"
 #include "execution_cache_sidecar_internal.hpp"
 #include "association_fanout_cache_internal.hpp"
@@ -508,9 +509,6 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
             traces[2], traces[3], ts, lookup_id });
       rif_state_internal::RefreshActiveStrengthWhere (
           tx, std::string (lookup_column) + " = ?", { lookup_id });
-      rif_active_epoch_cache_internal::StageMemory (
-          execution_cache_sidecar_internal::Ensure (p_ctx)->rif_active_epoch,
-          row_memory_id);
       if (row_memory_id > 0)
         {
           p_ctx.UpdateRetrievalSurfaceUsageByMemory (row_memory_id,
@@ -677,11 +675,15 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
       association_fanout_cache::NotifyRetrievalSurfaceChanged (p_ctx,
                                                                memory_id);
       p_ctx.RemoveRetrievalSurface (memory_id);
+      retrieval_trace::RecordSurfaceRemove (memory_id);
+      historical_surface_search_cache_internal::RemoveCurrent (p_ctx,
+                                                                memory_id);
     }
   // The embedding deletion phase can preserve rows still referenced by other
   // owners. Drop the private accelerator rather than guess at post-transaction
   // membership; the exact SQL path remains authoritative after eviction.
-  historical_surface_search_cache_internal::Erase (p_ctx);
+  historical_surface_search_cache_internal::
+      InvalidateHistoricalPreserveCurrent (p_ctx);
 
   const auto reconstruction_embedding_select_start = SteadyClock::now ();
   ForEachChunk (evictable_memory_ids.size (),
@@ -849,8 +851,9 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
     {
       // Some candidates may remain referenced after eviction. Invalidate the
       // private population rather than guessing which conditional deletes won.
-      historical_surface_search_cache_internal::Erase (
-          context.GetProcessorContext ());
+      historical_surface_search_cache_internal::
+          InvalidateHistoricalPreserveCurrent (
+              context.GetProcessorContext ());
     }
   const auto embedding_delete_start = SteadyClock::now ();
   ForEachChunk (evictable_embedding_ids.size (),

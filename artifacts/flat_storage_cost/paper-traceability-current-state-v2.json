@@ -1,0 +1,114 @@
+{
+  "schema": "cortext_paper_traceability_state_overlay_v2",
+  "supersedes_state_sha256": "f0605f910ed3c10fa7838c2e175c5d0babbe352f7e4fe4e2f92fdf3c70cd1f2d",
+  "phase": "production-cutover-review",
+  "completion": false,
+  "resume_phase": "repair-review-findings",
+  "sqlite_hnsw_schema_authority": {
+    "status": "approved-current-user-through-migration-31",
+    "approver_identity": "current-user",
+    "provenance": "direct user authorization in this task",
+    "schema_migration_numbers": [29, 30, 31],
+    "authority_scope": "private internal SQLite sparse route, exact signal-vector ring, and knob-bounded activation-centroid persistence",
+    "public_api_change": false,
+    "no_release_or_deployment_grant": true
+  },
+  "sqlite_hnsw_knob_ablation": {
+    "status": "passed-production-default-8c-to-9c-quality-matrix",
+    "decision": "retained-production-default",
+    "artifact": "artifacts/flat_storage_cost/sqlite-hnsw-production-sawtooth-knob-ablation-v2.json",
+    "artifact_sha256": "08e9270ce750d5247cb52bd985f7126bb570109f8246a74f12bae99617002be9",
+    "structural_configurations": 27,
+    "corpus_configurations": 9,
+    "system_quality_query_count": 4608,
+    "exact_top1_hits": 4608,
+    "exact_top1_queries": 4608,
+    "exact_identity_recall_at_16_min": 1.0,
+    "semantic_coverage_min": 1.0,
+    "production_cutover": true,
+    "whole_engine_restart_bounded": false
+  },
+  "retrieval_sparse_knob_ablation": {
+    "status": "passed-production-default-8c-to-9c-quality-matrix",
+    "artifact": "artifacts/flat_storage_cost/sqlite-hnsw-production-sawtooth-knob-ablation-v2.json",
+    "artifact_sha256": "08e9270ce750d5247cb52bd985f7126bb570109f8246a74f12bae99617002be9",
+    "route_lifecycle_evaluated_run_count": 0,
+    "sparse_route_traversed_recenter_unproven_run_count": 9,
+    "exact_top1_per_run_max_misses": 1,
+    "exact_top1_nine_run_aggregate_min": 0.999,
+    "exact_identity_recall_at_16_min": 0.998,
+    "semantic_coverage_min": 0.95,
+    "production_cutover": true,
+    "unresolved": [
+      "mature lifecycle proof is supplied by the separate 30,380-packet experiment",
+      "whole-engine Natural and Durable plateaus remain unproven"
+    ]
+  },
+  "sqlite_hnsw_production_cutover": {
+    "decision": "retained-production-default",
+    "production_cutover": true,
+    "schema_authority": {
+      "migrations": {
+        "29": "internal SQLite HNSW route, metadata, build, node, and dirty-journal tables",
+        "31": "knob-bounded activation entry, generation, centroid, and identity snapshot columns"
+      },
+      "public_api_change": false,
+      "authority": "current user explicitly approved the SQLite shadow-memory schema design and authorized the implementation changes"
+    },
+    "retrieval_contract": {
+      "queries_per_run": 512,
+      "exact_top1_per_run_min": 0.998046875,
+      "exact_top1_per_run_max_misses": 1,
+      "exact_top1_nine_run_aggregate_min": 0.999,
+      "exact_identity_recall_at_16_min": 0.998,
+      "semantic_coverage_min": 0.95,
+      "deterministic_tie_order_required": true,
+      "miss_clustering_forbidden": [
+        "modality",
+        "opaque source id",
+        "memory-age quartile",
+        "knob point"
+      ]
+    },
+    "formulas": {
+      "C": "lround(256+256F+128S+128T)",
+      "B": "lround(64+64F+32S+32T)",
+      "A": "2C+2B",
+      "R": "max(2,B/16)",
+      "post_consolidation_floor": "8C",
+      "retrieval_peak": "9C",
+      "total_query_row_ceiling": "9C+A"
+    },
+    "quality_result": {
+      "run_count": 9,
+      "exact_top1_hits": 4608,
+      "exact_top1_queries": 4608,
+      "minimum_exact_identity_recall_at_16": 1.0,
+      "minimum_semantic_coverage": 1.0,
+      "clustered_misses": 0,
+      "modality_source_label_invariance": true
+    },
+    "evidence": {
+      "production_ablation": "artifacts/flat_storage_cost/sqlite-hnsw-production-sawtooth-knob-ablation-v2.json",
+      "production_ablation_sha256": "08e9270ce750d5247cb52bd985f7126bb570109f8246a74f12bae99617002be9",
+      "benchmark_binary_sha256": "5e884ca9f7749f57b3ba2817b7525a378a261d8fd1ce501a3f215c5e551884cd",
+      "test_binary_sha256": "942f429a28562454563b599d08e8afac4c34feef4908d163a1bd6770de24d8a3",
+      "natural_packets": 15695,
+      "durable_messages": 2016,
+      "mature_extension_packets": 30380
+    },
+    "operation_ownership": {
+      "natural_durable_shared_algorithm": true,
+      "durable_addition": "post-commit flush/checkpoint barrier only",
+      "source_id_branch": false,
+      "modality_branch": false
+    },
+    "unresolved_limits": [
+      "whole-engine raw process reset is not proven",
+      "bounded whole-engine restart is not proven",
+      "Durable plateau is not proven",
+      "production-wide boundedness is not claimed",
+      "merge, release, deployment, and publication are not authorized"
+    ]
+  }
+}

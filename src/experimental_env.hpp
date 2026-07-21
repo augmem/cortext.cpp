@@ -53,6 +53,19 @@ Flag (const char *name)
 #endif
 }
 
+inline std::optional<std::string>
+String (const char *name)
+{
+#if defined(CORTEXT_EXPERIMENT_HOOKS)
+  const auto value = detail::Get (name);
+  return value ? std::optional<std::string> (detail::Lower (*value))
+               : std::nullopt;
+#else
+  (void)name;
+  return std::nullopt;
+#endif
+}
+
 inline bool
 Bool (const char *name, bool fallback)
 {

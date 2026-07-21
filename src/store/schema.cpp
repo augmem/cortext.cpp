@@ -865,6 +865,84 @@ GetCoreMigrations ()
               "FROM memories WHERE suppression > 1e-9",
           },
       },
+      {
+          29,
+          "Persist row-addressed sparse retrieval route",
+          {
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_meta("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "schema_version INTEGER NOT NULL CHECK(schema_version = 1), "
+              "embedding_dim INTEGER NOT NULL CHECK(embedding_dim > 0), "
+              "entry_memory_id INTEGER NOT NULL CHECK(entry_memory_id >= 0), "
+              "max_level INTEGER NOT NULL CHECK(max_level >= 0), "
+              "active_count INTEGER NOT NULL CHECK(active_count >= 0), "
+              "generation INTEGER NOT NULL CHECK(generation >= 0))",
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_nodes("
+              "memory_id INTEGER PRIMARY KEY, "
+              "embedding BLOB NOT NULL, "
+              "level INTEGER NOT NULL CHECK(level >= 0), "
+              "links BLOB NOT NULL, "
+              "active INTEGER NOT NULL CHECK(active IN (0, 1)), "
+              "generation INTEGER NOT NULL CHECK(generation >= 0))",
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_build("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "schema_version INTEGER NOT NULL CHECK(schema_version = 1), "
+              "embedding_dim INTEGER NOT NULL CHECK(embedding_dim > 0), "
+              "cursor_memory_id INTEGER NOT NULL "
+              "CHECK(cursor_memory_id >= 0), "
+              "entry_memory_id INTEGER NOT NULL CHECK(entry_memory_id >= 0), "
+              "max_level INTEGER NOT NULL CHECK(max_level >= 0), "
+              "active_count INTEGER NOT NULL CHECK(active_count >= 0), "
+              "generation INTEGER NOT NULL CHECK(generation > 0))",
+              "CREATE TABLE IF NOT EXISTS "
+              "cortext_sparse_route_dirty("
+              "memory_id INTEGER PRIMARY KEY CHECK(memory_id > 0))",
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_active "
+              "ON cortext_sparse_route_nodes(generation, active, memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_generation "
+              "ON cortext_sparse_route_nodes(generation)",
+          },
+      },
+      {
+          30,
+          "Persist exact signal embeddings outside the global vector route",
+          {
+              "CREATE TABLE IF NOT EXISTS cortext_active_signal_embeddings("
+              "slot INTEGER PRIMARY KEY CHECK(slot >= 0), "
+              "signal_id INTEGER NOT NULL UNIQUE, "
+              "embedding BLOB NOT NULL, "
+              "created_at INTEGER NOT NULL, "
+              "capacity INTEGER NOT NULL CHECK(capacity > 0), "
+              "FOREIGN KEY(signal_id) REFERENCES signals(signal_id) "
+              "ON DELETE CASCADE)",
+              "DROP VIEW IF EXISTS recent_context",
+              "CREATE VIEW recent_context AS "
+              "SELECT s.signal_id, s.embedding_id, "
+              "COALESCE(a.embedding, e.embedding) AS embedding, s.timestamp "
+              "FROM signals s "
+              "LEFT JOIN cortext_active_signal_embeddings a "
+              "ON a.signal_id = s.signal_id "
+              "LEFT JOIN embeddings e ON s.embedding_id = e.embedding_id "
+              "ORDER BY s.timestamp DESC "
+              "LIMIT 64",
+          },
+      },
+      {
+          31,
+          "Persist the consolidation-rebuilt sparse activation centroid",
+          {
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_entry_memory_id INTEGER NOT NULL DEFAULT 0 "
+              "CHECK(activation_entry_memory_id >= 0)",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_generation INTEGER NOT NULL DEFAULT 0 "
+              "CHECK(activation_generation >= 0)",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_centroid BLOB",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_identity_ids BLOB",
+          },
+      },
   };
 }
 

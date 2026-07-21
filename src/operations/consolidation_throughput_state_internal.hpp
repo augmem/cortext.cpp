@@ -1,11 +1,14 @@
 #pragma once
 
+#include "sparse_retrieval_knobs_internal.hpp"
+
 #include "cortext/consolidation_state.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/processor_context.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <mutex>
 #include <unordered_map>
 
@@ -18,6 +21,8 @@ struct State
   double peak = 0.0;
   bool initialized = false;
   bool armed = true;
+  long long observations_since_ack = 0;
+  bool cooldown_active = false;
 };
 
 struct RegistryState
@@ -58,6 +63,10 @@ Reset (const ProcessorContext &ctx, State state = {})
     {
       state.peak = state.floor;
     }
+  state.observations_since_ack
+      = std::max (0LL, state.observations_since_ack);
+  if (!state.armed && !state.cooldown_active)
+    state.cooldown_active = true;
   auto &registry = Registry ();
   std::lock_guard<std::mutex> lock (registry.mutex);
   registry.states[&ctx] = state;
@@ -109,6 +118,10 @@ Observe (const ProcessorContext &ctx, double rate, double focus,
   auto &registry = Registry ();
   std::lock_guard<std::mutex> lock (registry.mutex);
   auto &state = registry.states[&ctx];
+  if (state.cooldown_active
+      && state.observations_since_ack
+             < std::numeric_limits<long long>::max ())
+    ++state.observations_since_ack;
   if (!state.initialized)
     {
       state.floor = rate;
@@ -167,6 +180,8 @@ Acknowledge (const ProcessorContext &ctx, double rate)
   state.peak = rate;
   state.initialized = true;
   state.armed = false;
+  state.observations_since_ack = 0;
+  state.cooldown_active = true;
 }
 
 inline double
@@ -190,12 +205,25 @@ RequiredTriggerFraction (double focus, double sensitivity, double stability)
          / core::ConsolidationEscalationMultiplier (stability);
 }
 
+inline long long
+MinimumBacklog (double focus, double sensitivity, double stability)
+{
+  return static_cast<long long> (
+      sparse_retrieval_knobs_internal::BackfillBatchSize (
+          focus, sensitivity, stability));
+}
+
 inline ConsolidationState
 Classify (const State &state, double current_rate, long long backlog,
           double focus, double sensitivity, double stability)
 {
   constexpr double kRangeEpsilon = 1e-9;
-  if (!state.armed || backlog <= 0 || !std::isfinite (current_rate))
+  if (!state.armed
+      || backlog < MinimumBacklog (focus, sensitivity, stability)
+      || (state.cooldown_active
+          && state.observations_since_ack
+                 < MinimumBacklog (focus, sensitivity, stability))
+      || !std::isfinite (current_rate))
     {
       return ConsolidationState::None;
     }

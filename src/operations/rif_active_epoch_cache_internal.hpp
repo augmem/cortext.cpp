@@ -3,13 +3,16 @@
 #include "cortext/store/sqlite_store.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
+#include "sparse_retrieval_knobs_internal.hpp"
 
 #include <algorithm>
 #include <any>
 #include <atomic>
 #include <cstddef>
+#include <iterator>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -18,9 +21,32 @@
 namespace cortext::operations::rif_active_epoch_cache_internal
 {
 
-inline constexpr std::size_t kEventLimit = 512;
-inline constexpr std::size_t kMutationLimit = 32768;
-inline constexpr std::size_t kAllocatedByteLimit = 64ULL * 1024ULL * 1024ULL;
+struct Limits
+{
+  std::size_t event_count = 0;
+  std::size_t mutation_count = 0;
+  std::size_t allocated_bytes = 0;
+  std::size_t row_batch_size = 0;
+
+  bool operator== (const Limits &) const = default;
+};
+
+inline Limits
+DeriveLimits (double focus, double sensitivity, double stability)
+{
+  const auto event_count = static_cast<std::size_t> (
+      sparse_retrieval_knobs_internal::RouteCapacity (
+          focus, sensitivity, stability));
+  const auto row_batch_size = static_cast<std::size_t> (
+      sparse_retrieval_knobs_internal::BackfillBatchSize (
+          focus, sensitivity, stability));
+  return {
+    event_count,
+    event_count * 64,
+    event_count * 128ULL * 1024ULL,
+    row_batch_size,
+  };
+}
 
 struct State
 {
@@ -28,6 +54,7 @@ struct State
   // snapshotted. It is read-only until the authoritative transaction commits;
   // pending publication metadata below is copied by value.
   std::shared_ptr<SQLiteStore> database;
+  Limits limits = DeriveLimits (0.5, 0.5, 0.5);
   bool valid = false;
   long long generation = 0;
   double log_factor = 0.0;
@@ -36,6 +63,7 @@ struct State
   std::size_t event_count = 0;
   std::size_t mutation_count = 0;
   std::size_t allocated_bytes = 0;
+  std::size_t row_batch_high_water = 0;
   std::vector<long long> calibration_memory_ids;
   std::vector<long long> pending_memory_ids;
   bool pending_clock = false;
@@ -45,6 +73,7 @@ struct State
   bool pending_rebuild = false;
   bool pending_rebuild_resets_counters = false;
   bool invalid_rebuild_resets_counters = true;
+  bool empty_epoch_reset_required = false;
 };
 
 struct PublishResult
@@ -53,14 +82,16 @@ struct PublishResult
   bool rebuilt = false;
   bool recovered_from_failure = false;
   std::size_t changed_rows = 0;
+  std::size_t maximum_statement_rows = 0;
 };
 
 inline bool
 RequiresConsolidation (const State &state)
 {
-  return state.event_count >= kEventLimit
-         || state.mutation_count >= kMutationLimit
-         || state.allocated_bytes >= kAllocatedByteLimit;
+  return state.event_count >= state.limits.event_count
+         || state.mutation_count >= state.limits.mutation_count
+         || state.allocated_bytes >= state.limits.allocated_bytes
+         || state.row_batch_high_water > state.limits.row_batch_size;
 }
 
 inline long long
@@ -100,12 +131,7 @@ CreateDatabase ()
       "last_ts INTEGER NOT NULL)");
   database->Execute (
       "CREATE TABLE active_state("
-      "memory_id INTEGER PRIMARY KEY, generation INTEGER NOT NULL, "
-      "anchor_suppression REAL NOT NULL, recovery_total REAL NOT NULL, "
-      "anchor_log_factor REAL NOT NULL, expires_log_factor REAL NOT NULL)");
-  database->Execute (
-      "CREATE INDEX active_state_due ON active_state("
-      "generation, expires_log_factor, memory_id)");
+      "memory_id INTEGER PRIMARY KEY)");
   return database;
 }
 
@@ -125,10 +151,55 @@ Placeholders (std::size_t count)
 
 inline std::vector<std::map<std::string, std::any>>
 LoadCurrentRows (Store &persistent, long long generation,
+                 std::size_t row_batch_size,
                  const std::vector<long long> *memory_ids = nullptr)
 {
   if (memory_ids && memory_ids->empty ())
     return {};
+  if (row_batch_size == 0)
+    throw std::invalid_argument ("RIF active-epoch row batch is zero");
+  if (!memory_ids)
+    {
+      std::vector<std::map<std::string, std::any>> rows;
+      long long after_memory_id = 0;
+      while (true)
+        {
+          auto batch_rows = persistent.Execute (
+              "SELECT memory_id FROM rif_active_state WHERE generation = ? "
+              "AND memory_id > ? ORDER BY memory_id LIMIT ?",
+              { generation, after_memory_id,
+                static_cast<long long> (row_batch_size) });
+          if (batch_rows.empty ())
+            break;
+          after_memory_id = GetInt64 (
+              batch_rows.back (), "memory_id", after_memory_id);
+          const bool complete = batch_rows.size () < row_batch_size;
+          rows.insert (rows.end (),
+                       std::make_move_iterator (batch_rows.begin ()),
+                       std::make_move_iterator (batch_rows.end ()));
+          if (complete)
+            break;
+        }
+      return rows;
+    }
+  if (memory_ids && memory_ids->size () > row_batch_size)
+    {
+      std::vector<std::map<std::string, std::any>> rows;
+      for (std::size_t begin = 0; begin < memory_ids->size ();
+           begin += row_batch_size)
+        {
+          const std::size_t end = std::min (
+              memory_ids->size (), begin + row_batch_size);
+          const std::vector<long long> batch (memory_ids->begin () + begin,
+                                              memory_ids->begin () + end);
+          auto batch_rows = LoadCurrentRows (
+              persistent, generation, row_batch_size, &batch);
+          rows.insert (rows.end (),
+                       std::make_move_iterator (batch_rows.begin ()),
+                       std::make_move_iterator (batch_rows.end ()));
+        }
+      return rows;
+    }
   std::vector<std::any> params { generation };
   std::string predicate;
   if (memory_ids && !memory_ids->empty ())
@@ -140,9 +211,8 @@ LoadCurrentRows (Store &persistent, long long generation,
         params.push_back (memory_id);
     }
   return persistent.Execute (
-      "SELECT memory_id, generation, anchor_suppression, recovery_total, "
-      "anchor_log_factor, expires_log_factor FROM rif_active_state "
-      "WHERE generation = ?" + predicate + " ORDER BY memory_id",
+      "SELECT memory_id FROM rif_active_state "
+      "WHERE generation = ?" + predicate,
       params);
 }
 
@@ -158,16 +228,32 @@ LoadClock (Store &persistent)
 }
 
 inline void
-InsertRow (Transaction &transaction,
-           const std::map<std::string, std::any> &row)
+InsertRows (Transaction &transaction,
+            const std::vector<std::map<std::string, std::any>> &rows,
+            std::size_t row_batch_size)
 {
-  transaction.Execute (
-      "INSERT OR REPLACE INTO active_state("
-      "memory_id, generation, anchor_suppression, recovery_total, "
-      "anchor_log_factor, expires_log_factor) VALUES(?, ?, ?, ?, ?, ?)",
-      { row.at ("memory_id"), row.at ("generation"),
-        row.at ("anchor_suppression"), row.at ("recovery_total"),
-        row.at ("anchor_log_factor"), row.at ("expires_log_factor") });
+  if (row_batch_size == 0)
+    throw std::invalid_argument ("RIF active-epoch row batch is zero");
+  for (std::size_t begin = 0; begin < rows.size (); begin += row_batch_size)
+    {
+      const std::size_t end
+          = std::min (rows.size (), begin + row_batch_size);
+      std::string values;
+      std::vector<std::any> params;
+      values.reserve ((end - begin) * 4);
+      params.reserve (end - begin);
+      for (std::size_t index = begin; index < end; ++index)
+        {
+          if (index > begin)
+            values += ",";
+          values += "(?)";
+          const auto &row = rows[index];
+          params.push_back (row.at ("memory_id"));
+        }
+      transaction.Execute (
+          "INSERT OR REPLACE INTO active_state(memory_id) VALUES" + values,
+          params);
+    }
 }
 
 inline void
@@ -175,25 +261,46 @@ Rebuild (State &state, Store &persistent, bool reset_counters = true)
 {
   const std::size_t prior_event_count = state.event_count;
   const std::size_t prior_mutation_count = state.mutation_count;
+  const std::size_t prior_row_batch_high_water
+      = state.row_batch_high_water;
   const auto clock = LoadClock (persistent);
   const long long generation = GetInt64 (clock, "generation", 1);
-  const auto rows = LoadCurrentRows (persistent, generation);
-  const auto calibration_rows = persistent.Execute (
-      "SELECT a.memory_id FROM rif_active_state a "
-      "JOIN rif_recovery_clock c ON c.singleton = 1 "
-      "JOIN memories m ON m.memory_id = a.memory_id "
-      "WHERE a.generation = c.generation "
-      "  AND a.anchor_log_factor = c.log_factor "
-      "  AND COALESCE(m.suppression_ts, 0) <> c.last_ts "
-      "ORDER BY a.memory_id");
+  const auto rows = LoadCurrentRows (
+      persistent, generation, state.limits.row_batch_size);
+  std::vector<std::map<std::string, std::any>> calibration_rows;
+  long long calibration_after_memory_id = 0;
+  while (true)
+    {
+      auto batch_rows = persistent.Execute (
+          "SELECT a.memory_id FROM rif_active_state a "
+          "JOIN rif_recovery_clock c ON c.singleton = 1 "
+          "JOIN memories m ON m.memory_id = a.memory_id "
+          "WHERE a.generation = c.generation "
+          "  AND a.anchor_log_factor = c.log_factor "
+          "  AND COALESCE(m.suppression_ts, 0) <> c.last_ts "
+          "  AND a.memory_id > ? ORDER BY a.memory_id LIMIT ?",
+          { calibration_after_memory_id,
+            static_cast<long long> (state.limits.row_batch_size) });
+      if (batch_rows.empty ())
+        break;
+      calibration_after_memory_id = GetInt64 (
+          batch_rows.back (), "memory_id", calibration_after_memory_id);
+      const bool complete
+          = batch_rows.size () < state.limits.row_batch_size;
+      calibration_rows.insert (
+          calibration_rows.end (),
+          std::make_move_iterator (batch_rows.begin ()),
+          std::make_move_iterator (batch_rows.end ()));
+      if (complete)
+        break;
+    }
   auto replacement = CreateDatabase ();
   auto transaction = replacement->Begin ();
   transaction->Execute (
       "INSERT INTO epoch_clock(singleton, generation, log_factor, last_ts) "
       "VALUES(1, ?, ?, ?)",
       { generation, clock.at ("log_factor"), clock.at ("last_ts") });
-  for (const auto &row : rows)
-    InsertRow (*transaction, row);
+  InsertRows (*transaction, rows, state.limits.row_batch_size);
   transaction->Commit ();
 
   state.database = std::move (replacement);
@@ -204,6 +311,12 @@ Rebuild (State &state, Store &persistent, bool reset_counters = true)
   state.active_rows = rows.size ();
   state.event_count = reset_counters ? 0 : prior_event_count;
   state.mutation_count = reset_counters ? 0 : prior_mutation_count;
+  state.row_batch_high_water
+      = reset_counters
+            ? std::min (rows.size (), state.limits.row_batch_size)
+            : std::max (prior_row_batch_high_water,
+                        std::min (rows.size (),
+                                  state.limits.row_batch_size));
   state.allocated_bytes = DatabaseBytes (*state.database);
   state.calibration_memory_ids.clear ();
   state.calibration_memory_ids.reserve (calibration_rows.size ());
@@ -221,10 +334,48 @@ Rebuild (State &state, Store &persistent, bool reset_counters = true)
 }
 
 inline void
-Ensure (State &state, Store &persistent)
+ResetActiveEpoch (State &state, Store &persistent)
 {
+  const auto clock = LoadClock (persistent);
+  const long long generation = GetInt64 (clock, "generation", 1);
+  auto replacement = CreateDatabase ();
+  auto transaction = replacement->Begin ();
+  transaction->Execute (
+      "INSERT INTO epoch_clock(singleton, generation, log_factor, last_ts) "
+      "VALUES(1, ?, ?, ?)",
+      { generation, clock.at ("log_factor"), clock.at ("last_ts") });
+  transaction->Commit ();
+
+  state.database = std::move (replacement);
+  state.valid = true;
+  state.generation = generation;
+  state.log_factor = store::AnyToDouble (clock.at ("log_factor"), 0.0);
+  state.last_ts = GetInt64 (clock, "last_ts", 0);
+  state.active_rows = 0;
+  state.event_count = 0;
+  state.mutation_count = 0;
+  state.allocated_bytes = DatabaseBytes (*state.database);
+  state.row_batch_high_water = 0;
+  state.calibration_memory_ids.clear ();
+  state.pending_memory_ids.clear ();
+  state.pending_clock = false;
+  state.pending_rebuild = false;
+  state.pending_rebuild_resets_counters = false;
+  state.invalid_rebuild_resets_counters = true;
+  state.empty_epoch_reset_required = false;
+}
+
+inline void
+Ensure (State &state, Store &persistent, Limits limits)
+{
+  state.limits = limits;
   if (!state.valid || !state.database)
-    Rebuild (state, persistent, state.invalid_rebuild_resets_counters);
+    {
+      if (state.empty_epoch_reset_required)
+        ResetActiveEpoch (state, persistent);
+      else
+        Rebuild (state, persistent, state.invalid_rebuild_resets_counters);
+    }
 }
 
 inline void
@@ -247,6 +398,8 @@ StageRebuild (State &state, bool reset_counters = false)
   state.pending_rebuild = true;
   state.pending_rebuild_resets_counters
       = state.pending_rebuild_resets_counters || reset_counters;
+  state.empty_epoch_reset_required
+      = state.empty_epoch_reset_required || reset_counters;
   state.pending_clock = true;
 }
 
@@ -307,22 +460,29 @@ PublishOnce (State &state, Store &persistent)
       && !state.pending_rebuild)
     {
       ++state.event_count;
-      return { true, false, false, 0 };
+      return { true, false, false, 0, 0 };
     }
   if (state.pending_rebuild || !state.valid || !state.database)
     {
       const bool reset_counters
-          = state.pending_rebuild
+          = state.empty_epoch_reset_required
+                || (state.pending_rebuild
                 ? state.pending_rebuild_resets_counters
-                : state.invalid_rebuild_resets_counters;
+                : state.invalid_rebuild_resets_counters);
       MaybeFailPublicationForTest (3);
-      Rebuild (state, persistent, reset_counters);
+      if (reset_counters)
+        ResetActiveEpoch (state, persistent);
+      else
+        Rebuild (state, persistent, false);
       if (!reset_counters)
         {
           ++state.event_count;
           state.mutation_count += state.active_rows;
         }
-      return { true, true, false, state.active_rows };
+      const std::size_t changed_rows
+          = reset_counters ? 0 : state.active_rows;
+      return { true, true, false, changed_rows,
+               std::min (changed_rows, state.limits.row_batch_size) };
     }
 
   const long long generation
@@ -336,7 +496,9 @@ PublishOnce (State &state, Store &persistent)
       Rebuild (state, persistent, false);
       ++state.event_count;
       state.mutation_count += state.active_rows;
-      return { true, true, false, state.active_rows };
+      return { true, true, false, state.active_rows,
+               std::min (state.active_rows,
+                         state.limits.row_batch_size) };
     }
 
   std::sort (state.pending_memory_ids.begin (),
@@ -346,7 +508,8 @@ PublishOnce (State &state, Store &persistent)
                    state.pending_memory_ids.end ()),
       state.pending_memory_ids.end ());
   const auto persistent_rows
-      = LoadCurrentRows (persistent, generation, &state.pending_memory_ids);
+      = LoadCurrentRows (persistent, generation, state.limits.row_batch_size,
+                         &state.pending_memory_ids);
   std::unordered_set<long long> present;
   present.reserve (persistent_rows.size ());
   for (const auto &row : persistent_rows)
@@ -354,15 +517,19 @@ PublishOnce (State &state, Store &persistent)
 
   std::unordered_set<long long> cached;
   cached.reserve (state.pending_memory_ids.size ());
-  if (!state.pending_memory_ids.empty ())
+  for (std::size_t begin = 0; begin < state.pending_memory_ids.size ();
+       begin += state.limits.row_batch_size)
     {
+      const std::size_t end = std::min (
+          state.pending_memory_ids.size (),
+          begin + state.limits.row_batch_size);
       std::vector<std::any> params;
-      params.reserve (state.pending_memory_ids.size ());
-      for (const long long memory_id : state.pending_memory_ids)
-        params.push_back (memory_id);
+      params.reserve (end - begin);
+      for (std::size_t index = begin; index < end; ++index)
+        params.push_back (state.pending_memory_ids[index]);
       const auto cached_rows = state.database->Execute (
           "SELECT memory_id FROM active_state WHERE memory_id IN ("
-              + Placeholders (state.pending_memory_ids.size ()) + ")",
+              + Placeholders (end - begin) + ")",
           params);
       for (const auto &row : cached_rows)
         cached.insert (GetInt64 (row, "memory_id", 0));
@@ -374,12 +541,26 @@ PublishOnce (State &state, Store &persistent)
       "UPDATE epoch_clock SET log_factor = ?, last_ts = ? "
       "WHERE singleton = 1",
       { log_factor, last_ts });
-  for (const auto &row : persistent_rows)
-    InsertRow (*transaction, row);
+  InsertRows (*transaction, persistent_rows, state.limits.row_batch_size);
+  std::vector<long long> missing;
+  missing.reserve (state.pending_memory_ids.size () - persistent_rows.size ());
   for (const long long memory_id : state.pending_memory_ids)
     if (!present.contains (memory_id))
-      transaction->Execute ("DELETE FROM active_state WHERE memory_id = ?",
-                            { memory_id });
+      missing.push_back (memory_id);
+  for (std::size_t begin = 0; begin < missing.size ();
+       begin += state.limits.row_batch_size)
+    {
+      const std::size_t end
+          = std::min (missing.size (), begin + state.limits.row_batch_size);
+      std::vector<std::any> params;
+      params.reserve (end - begin);
+      for (std::size_t index = begin; index < end; ++index)
+        params.push_back (missing[index]);
+      transaction->Execute (
+          "DELETE FROM active_state WHERE memory_id IN ("
+              + Placeholders (end - begin) + ")",
+          params);
+    }
   MaybeFailPublicationForTest (2);
   transaction->Commit ();
 
@@ -406,17 +587,21 @@ PublishOnce (State &state, Store &persistent)
           state.calibration_memory_ids.end ());
     }
   const std::size_t changed_rows = state.pending_memory_ids.size ();
+  const std::size_t maximum_statement_rows
+      = std::min (changed_rows, state.limits.row_batch_size);
   state.log_factor = log_factor;
   state.last_ts = last_ts;
   ++state.event_count;
   state.mutation_count += changed_rows + (state.pending_clock ? 1 : 0);
+  state.row_batch_high_water = std::max (
+      state.row_batch_high_water, maximum_statement_rows);
   if (changed_rows > 0)
     state.allocated_bytes = DatabaseBytes (*state.database);
   state.pending_memory_ids.clear ();
   state.pending_clock = false;
   state.pending_rebuild = false;
   state.pending_rebuild_resets_counters = false;
-  return { true, false, false, changed_rows };
+  return { true, false, false, changed_rows, maximum_statement_rows };
 }
 
 inline PublishResult
@@ -430,7 +615,9 @@ PublishAfterPersistentCommit (State &state, Store &persistent)
     {
       // Persistent SQLite has already committed. Never replay it: discard the
       // disposable epoch and rebuild only its bounded current-generation state.
-      const bool reset_counters = state.pending_rebuild_resets_counters;
+      const bool reset_counters
+          = state.empty_epoch_reset_required
+            || state.pending_rebuild_resets_counters;
       const std::size_t committed_rebuild_rows = state.active_rows;
       state.database.reset ();
       state.valid = false;
@@ -440,22 +627,30 @@ PublishAfterPersistentCommit (State &state, Store &persistent)
       state.pending_rebuild = false;
       state.pending_rebuild_resets_counters = false;
       state.invalid_rebuild_resets_counters = reset_counters;
+      state.empty_epoch_reset_required = reset_counters;
       try
         {
           MaybeFailPublicationForTest (4);
-          Rebuild (state, persistent, reset_counters);
+          if (reset_counters)
+            ResetActiveEpoch (state, persistent);
+          else
+            Rebuild (state, persistent, false);
           if (!reset_counters)
             {
               ++state.event_count;
               state.mutation_count += state.active_rows;
             }
-          return { true, true, true, state.active_rows };
+          const std::size_t changed_rows
+              = reset_counters ? 0 : state.active_rows;
+          return { true, true, true, changed_rows,
+                   std::min (changed_rows, state.limits.row_batch_size) };
         }
       catch (...)
         {
           state.database.reset ();
           state.valid = false;
           state.invalid_rebuild_resets_counters = reset_counters;
+          state.empty_epoch_reset_required = reset_counters;
           if (reset_counters)
             {
               state.event_count = 0;
@@ -466,7 +661,7 @@ PublishAfterPersistentCommit (State &state, Store &persistent)
               ++state.event_count;
               state.mutation_count += committed_rebuild_rows;
             }
-          return { false, false, true, 0 };
+          return { false, false, true, 0, 0 };
         }
     }
 }

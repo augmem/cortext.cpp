@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import subprocess
 import sys
@@ -46,6 +47,7 @@ def fixture_rows() -> list[dict[str, object]]:
                     "event_count": index + 1,
                     "mutation_count": index + 1,
                     "allocated_bytes": 16384,
+                    "row_batch_high_water": 0,
                     "required": False,
                 },
                 "behavior": {},
@@ -62,6 +64,7 @@ def fixture_operation_ms(counters: dict[str, float]) -> dict[str, float]:
         "GraphRetrieve.seed_knn_cache_rebuild": 0.1,
         "GraphRetrieve.seed_cache_family_compare": 0.1,
         "GraphRetrieve.seed_cache_distance": 0.1,
+        "GraphRetrieve.sqlite_sparse_route_distance_evaluations": 0.0,
         "cortext::operations::ApplyRetrievalCompetition": 0.1,
         "Competition.rif_recovery_active_sql": 0.1,
         "Competition.score_candidates": 0.1,
@@ -73,6 +76,8 @@ def fixture_operation_ms(counters: dict[str, float]) -> dict[str, float]:
         "MemoryStorage.supersession_historical_candidate_execution_count": 0.1,
         "MemoryStorage.supersession_current_rows_visited": 0.1,
         "MemoryStorage.supersession_historical_rows_visited": 0.1,
+        "MemoryStorage.supersession_sparse_route_node_rows": 0.0,
+        "MemoryStorage.supersession_sparse_route_dirty_rows": 0.0,
         "MemoryStorage.supersession_sql_fallback_count": 0.0,
         "cortext::operations::PropagateEmotionalCascade": 0.1,
         "EmotionalCascade.source_query": 0.1,
@@ -85,6 +90,14 @@ def fixture_operation_ms(counters: dict[str, float]) -> dict[str, float]:
     for counter, sources in audit.COUNTER_SOURCE_OPERATIONS.items():
         if len(sources) == 1:
             operations[sources[0]] = float(counters[counter])
+    operations["GraphRetrieve.rows_visited"] = float(
+        counters["graph_rows_visited"]
+    )
+    operations["GraphRetrieve.sqlite_sparse_route_node_rows"] = 0.0
+    operations[
+        "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows"
+    ] = 0.0
+    operations["GraphRetrieve.sqlite_sparse_route_activated_identities"] = 0.0
     operations["MemoryStorage.supersession_current_rows_visited"] = float(
         counters["supersession_current_candidate_count"]
     )
@@ -156,6 +169,7 @@ def plateau_fixture(
                     "event_count": event_index + 1,
                     "mutation_count": event_index + 1,
                     "allocated_bytes": 16384,
+                    "row_batch_high_water": 0,
                     "required": False,
                 },
                 "durable_barrier_ms": 0.0,
@@ -190,6 +204,9 @@ def plateau_fixture(
     profile: dict[str, object] = {
         "schema": "cortext_packet_storage_profile_v2",
         "processed_events": event_count,
+        "focus": 0.5,
+        "sensitivity": 0.5,
+        "stability": 0.5,
         "consolidation_epoch_relational_contract_sha256": (
             audit.CONSOLIDATION_EPOCH_RELATIONAL_CONTRACT_SHA256
         ),
@@ -198,7 +215,7 @@ def plateau_fixture(
         "consolidation_ms": 0.0,
         "consolidation_events": [],
         "honor_required_consolidation": True,
-        "active_epoch_limits": audit.ACTIVE_EPOCH_LIMITS,
+        "active_epoch_limits": audit.active_epoch_limits(0.5, 0.5, 0.5),
         "store_checkpoints": checkpoints,
     }
     return profile, rows
@@ -239,6 +256,7 @@ def epoch_fixture(
             }
             work_counters["graph_candidate_count"] = process_ms * 5.0
             work_counters["graph_exact_comparison_count"] = process_ms * 5.0
+            work_counters["graph_rows_visited"] = process_ms * 30.0
             work_counters["supersession_rows_visited"] = (
                 work_counters["supersession_current_candidate_count"]
                 + work_counters["supersession_historical_candidate_count"]
@@ -272,6 +290,7 @@ def epoch_fixture(
                         "event_count": events_since,
                         "mutation_count": events_since * 3,
                         "allocated_bytes": 16384,
+                        "row_batch_high_water": 0,
                         "required": False,
                     },
                     "work_counters": work_counters,
@@ -299,6 +318,7 @@ def epoch_fixture(
                         "event_count": 0,
                         "mutation_count": 0,
                         "allocated_bytes": 16384,
+                        "row_batch_high_water": 0,
                         "required": False,
                     },
                     "state_after": "none",
@@ -339,7 +359,7 @@ def epoch_fixture(
         "consolidation_ms": consolidation_total,
         "consolidation_events": events,
         "honor_required_consolidation": True,
-        "active_epoch_limits": audit.ACTIVE_EPOCH_LIMITS,
+        "active_epoch_limits": audit.active_epoch_limits(0.5, 0.5, 0.5),
         "store_checkpoints": checkpoints,
     }, rows
 
@@ -357,7 +377,190 @@ def set_fixture_retention(
             ] = 0.0
 
 
+def fixture_sparse_parameters(
+    focus: float = 0.5, sensitivity: float = 0.5, stability: float = 0.5,
+) -> dict[str, int]:
+    rounded = lambda value: math.floor(value + 0.5)
+    route_capacity = rounded(
+        256.0 + 256.0 * focus + 128.0 * sensitivity + 128.0 * stability
+    )
+    backfill_batch_size = rounded(
+        64.0 + 64.0 * focus + 32.0 * sensitivity + 32.0 * stability
+    )
+    return {
+        "route_capacity": route_capacity,
+        "activation_identity_target": route_capacity * 2 + backfill_batch_size * 2,
+        "activation_snapshot_capacity": route_capacity * 2 + backfill_batch_size * 2,
+        "total_query_row_budget": (
+            route_capacity * 11 + backfill_batch_size * 2
+        ),
+        "bootstrap_limit": route_capacity * 2,
+        "search_node_budget": route_capacity * 9,
+        "activation_search_node_budget_min": route_capacity * 8,
+        "activation_search_node_budget_step": max(2, backfill_batch_size // 16),
+        "search_expansion_batch": max(8, backfill_batch_size // 4),
+        "search_effort": route_capacity * 9,
+        "activation_search_effort_min": route_capacity * 8,
+        "activation_search_effort_step": max(2, backfill_batch_size // 16),
+        "shadow_cache_capacity": route_capacity * 24,
+        "backfill_batch_size": backfill_batch_size,
+        "backfill_search_node_budget": route_capacity + backfill_batch_size,
+        "backfill_search_effort": backfill_batch_size * 2,
+        "graph_neighbor_count": max(8, backfill_batch_size // 2),
+        "graph_level_zero_links": max(16, route_capacity // 4),
+        "family_exact_comparison_limit": route_capacity * 2,
+        "maximum_level": max(1, max(1, route_capacity - 1).bit_length()),
+        "reciprocal_update_count": max(2, backfill_batch_size // 16),
+        "hnsw_construction_effort": max(
+            32, rounded(route_capacity * 25.0 / 64.0)
+        ),
+        "hnsw_query_effort": max(
+            route_capacity, rounded(route_capacity * 5.0 / 2.0)
+        ),
+        "fallback_hydration_signal_limit": backfill_batch_size,
+    }
+
+
+def enable_sparse_retrieval_cycles(
+    profile: dict[str, object], rows: list[dict[str, object]],
+) -> None:
+    profile["sparse_route_parameters"] = fixture_sparse_parameters()
+    profile["sparse_route_parameters"].update(
+        {
+            "total_query_row_budget": 3840,
+            "search_node_budget": 2560,
+            "activation_search_node_budget_min": 1280,
+            "activation_search_node_budget_step": 10,
+            "search_effort": 2560,
+            "activation_search_effort_min": 1024,
+            "activation_search_effort_step": 12,
+        }
+    )
+    for row in rows:
+        epoch_id = int(row["consolidation_epoch_id"])
+        phase = int(row["events_since_epoch_start"])
+        operation_ms = row["operation_ms"]
+        if phase % 2 == 0:
+            if epoch_id == 0:
+                effort = 2560.0
+                node_budget = 2560.0
+                visited = 2400.0
+            else:
+                progress = (phase - 2) / 116.0
+                effort = min(2560.0, 1024.0 + 1536.0 * progress)
+                node_budget = min(2560.0, 1280.0 + 1280.0 * progress)
+                visited = 1200.0 + 800.0 * progress
+            operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_search_effort"
+            ] = effort
+            operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_search_node_budget"
+            ] = node_budget
+            operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_node_rows"
+            ] = visited
+            operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+            ] = visited
+        else:
+            operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_search_effort"
+            ] = 0.0
+            operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_search_node_budget"
+            ] = 0.0
+            operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_node_rows"
+            ] = 0.0
+            operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+            ] = 0.0
+
+
+def enable_fixed_sparse_retrieval_envelope(
+    profile: dict[str, object], rows: list[dict[str, object]],
+) -> None:
+    profile["sparse_route_parameters"] = fixture_sparse_parameters()
+    profile["experimental_sparse_node_envelope_formula"] = "5C"
+    profile["sparse_route_parameters"].update(
+        {
+            "total_query_row_budget": 3840,
+            "search_node_budget": 2560,
+            "activation_search_node_budget_min": 2560,
+            "activation_search_node_budget_step": 0,
+            "search_effort": 2560,
+            "activation_search_effort_min": 2560,
+            "activation_search_effort_step": 0,
+        }
+    )
+    bound = float(profile["sparse_route_parameters"]["search_node_budget"])
+    for row in rows:
+        operation_ms = row["operation_ms"]
+        operation_ms["GraphRetrieve.sqlite_sparse_route_search_effort"] = bound
+        operation_ms[
+            "GraphRetrieve.sqlite_sparse_route_search_node_budget"
+        ] = bound
+        operation_ms["GraphRetrieve.sqlite_sparse_route_node_rows"] = bound
+        operation_ms[
+            "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+        ] = bound
+    for event in profile["consolidation_events"]:
+        event["sqlite_sparse_route_recenter_succeeded"] = True
+        event["sqlite_sparse_route_activation_search_effort"] = bound
+        event["sqlite_sparse_route_activation_node_budget"] = bound
+        event["sqlite_sparse_route_recenter_overlap_profiled"] = True
+        event["sqlite_sparse_route_recenter_overlap_pair_valid"] = True
+        event["sqlite_sparse_route_recenter_overlap_failure_code"] = 0.0
+        event["sqlite_sparse_route_recenter_pre_activated_count"] = 1280.0
+        event["sqlite_sparse_route_recenter_post_activated_count"] = 1280.0
+        event["sqlite_sparse_route_recenter_overlap_count"] = 640.0
+
+
 class AttributionContractTest(unittest.TestCase):
+    def test_active_epoch_limits_follow_low_mid_high_and_axis_knobs(self) -> None:
+        self.assertEqual(
+            audit.active_epoch_limits(0.0, 0.0, 0.0),
+            {"event_count": 256, "mutation_count": 16384,
+             "allocated_bytes": 33554432, "row_batch_size": 64},
+        )
+        self.assertEqual(
+            audit.active_epoch_limits(0.5, 0.5, 0.5),
+            {"event_count": 512, "mutation_count": 32768,
+             "allocated_bytes": 67108864, "row_batch_size": 128},
+        )
+        self.assertEqual(
+            audit.active_epoch_limits(1.0, 1.0, 1.0),
+            {"event_count": 768, "mutation_count": 49152,
+             "allocated_bytes": 100663296, "row_batch_size": 192},
+        )
+        points = [
+            (0.5, 0.5, 0.5), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0),
+            (0.0, 0.5, 0.5), (1.0, 0.5, 0.5),
+            (0.5, 0.0, 0.5), (0.5, 1.0, 0.5),
+            (0.5, 0.5, 0.0), (0.5, 0.5, 1.0),
+        ]
+        self.assertGreater(
+            len({audit.active_epoch_limits(*point)["event_count"]
+                 for point in points}),
+            3,
+        )
+
+    def test_active_epoch_limits_reject_nonfinite_knobs(self) -> None:
+        for point in (
+            (math.nan, 0.5, 0.5),
+            (0.5, math.inf, 0.5),
+            (0.5, 0.5, -math.inf),
+        ):
+            with self.subTest(point=point):
+                with self.assertRaisesRegex(ValueError, "must be finite"):
+                    audit.active_epoch_limits(*point)
+
+    def test_active_epoch_row_batch_high_water_is_independently_bounded(self) -> None:
+        profile, rows = plateau_fixture()
+        rows[0]["active_epoch"]["row_batch_high_water"] = 129
+        with self.assertRaisesRegex(ValueError, "row batch crossed"):
+            audit.validate_profile_rows(profile, rows)
+
     def test_late_operation_is_attributed_with_zero_for_absent_rows(self) -> None:
         result = audit.attribution_result(fixture_rows(), 10)
         contributors = {
@@ -438,6 +641,303 @@ class AttributionContractTest(unittest.TestCase):
 
 
 class PlateauContractTest(unittest.TestCase):
+    def test_sparse_route_parameter_vector_is_bound_to_all_three_knobs(
+        self,
+    ) -> None:
+        for focus in (0.0, 0.5, 1.0):
+            for sensitivity in (0.0, 0.5, 1.0):
+                for stability in (0.0, 0.5, 1.0):
+                    profile, rows = plateau_fixture()
+                    profile.update(
+                        {
+                            "focus": focus,
+                            "sensitivity": sensitivity,
+                            "stability": stability,
+                            "active_epoch_limits": audit.active_epoch_limits(
+                                focus, sensitivity, stability
+                            ),
+                            "sparse_route_parameters": fixture_sparse_parameters(
+                                focus, sensitivity, stability
+                            ),
+                        }
+                    )
+                    for row in rows:
+                        row["operation_ms"][
+                            "Cortext.fallback_hydration_signal_limit"
+                        ] = float(
+                            profile["sparse_route_parameters"][
+                                "fallback_hydration_signal_limit"
+                            ]
+                        )
+                        row["operation_ms"][
+                            "Cortext.fallback_hydration_signal_rows"
+                        ] = 0.0
+                    audit.validate_profile_rows(profile, rows)
+
+        midpoint = fixture_sparse_parameters()
+        self.assertEqual(midpoint["backfill_batch_size"], 128)
+        self.assertEqual(midpoint["fallback_hydration_signal_limit"], 128)
+        self.assertEqual(midpoint["family_exact_comparison_limit"], 1024)
+        self.assertEqual(midpoint["activation_identity_target"], 1280)
+        self.assertEqual(midpoint["search_node_budget"], 4608)
+        self.assertEqual(midpoint["activation_search_node_budget_min"], 4096)
+        self.assertEqual(midpoint["activation_search_node_budget_step"], 8)
+
+    def test_rejects_one_non_knob_sparse_route_parameter(self) -> None:
+        profile, rows = plateau_fixture()
+        profile.update(
+            {
+                "focus": 0.5,
+                "sensitivity": 0.5,
+                "stability": 0.5,
+                "sparse_route_parameters": fixture_sparse_parameters(),
+            }
+        )
+        profile["sparse_route_parameters"]["search_node_budget"] += 1
+        with self.assertRaisesRegex(
+            ValueError, "search_node_budget does not match F/S/T"
+        ):
+            audit.validate_profile_rows(profile, rows)
+
+    def test_accepts_only_named_knob_derived_experimental_node_envelopes(
+        self,
+    ) -> None:
+        expected = {
+            "C": 512,
+            "A": 1280,
+            "C+B": 640,
+            "2C": 1024,
+            "4C": 2048,
+            "4C+B/16": 2056,
+            "fixed-4C+B/16": 2056,
+            "4C+B/16-to-5C": 2560,
+            "5C-to-6C-by-B/16": 3072,
+            "6C-to-7C-by-B/16": 3584,
+            "7C-to-8C-by-B/16": 4096,
+            "8C-to-9C-by-B/16": 4608,
+            "5C": 2560,
+            "6C": 3072,
+            "10C": 5120,
+            "12C": 6144,
+            "16C": 8192,
+        }
+        for formula, node_budget in expected.items():
+            profile, rows = plateau_fixture()
+            profile.update(
+                {
+                    "focus": 0.5,
+                    "sensitivity": 0.5,
+                    "stability": 0.5,
+                    "experimental_sparse_node_envelope_formula": formula,
+                    "sparse_route_parameters": fixture_sparse_parameters(),
+                }
+            )
+            profile["sparse_route_parameters"].update(
+                {
+                    "total_query_row_budget": 3840,
+                    "search_node_budget": 2560,
+                    "activation_search_node_budget_min": 2560,
+                    "activation_search_node_budget_step": 0,
+                    "search_effort": 2560,
+                    "activation_search_effort_min": 2560,
+                    "activation_search_effort_step": 0,
+                }
+            )
+            profile["sparse_route_parameters"]["search_node_budget"] = node_budget
+            profile["sparse_route_parameters"][
+                "activation_search_node_budget_min"
+            ] = node_budget
+            if formula == "fixed-4C+B/16":
+                profile["sparse_route_parameters"]["search_effort"] = node_budget
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_min"
+                ] = node_budget
+                profile["sparse_route_parameters"]["total_query_row_budget"] = (
+                    node_budget
+                    + profile["sparse_route_parameters"][
+                        "activation_identity_target"
+                    ]
+                )
+            if formula == "4C+B/16-to-5C":
+                reciprocal_update_count = profile["sparse_route_parameters"][
+                    "reciprocal_update_count"
+                ]
+                minimum = 2048 + reciprocal_update_count
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+            if formula == "5C-to-6C-by-B/16":
+                reciprocal_update_count = profile["sparse_route_parameters"][
+                    "reciprocal_update_count"
+                ]
+                minimum = 2560
+                profile["sparse_route_parameters"]["search_effort"] = node_budget
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"]["total_query_row_budget"] = (
+                    node_budget
+                    + profile["sparse_route_parameters"][
+                        "activation_identity_target"
+                    ]
+                )
+            if formula == "6C-to-7C-by-B/16":
+                reciprocal_update_count = profile["sparse_route_parameters"][
+                    "reciprocal_update_count"
+                ]
+                minimum = 3072
+                profile["sparse_route_parameters"]["search_effort"] = node_budget
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"]["total_query_row_budget"] = (
+                    node_budget
+                    + profile["sparse_route_parameters"][
+                        "activation_identity_target"
+                    ]
+                )
+            if formula == "7C-to-8C-by-B/16":
+                reciprocal_update_count = profile["sparse_route_parameters"][
+                    "reciprocal_update_count"
+                ]
+                minimum = 3584
+                profile["sparse_route_parameters"]["search_effort"] = node_budget
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"]["total_query_row_budget"] = (
+                    node_budget
+                    + profile["sparse_route_parameters"][
+                        "activation_identity_target"
+                    ]
+                )
+            if formula == "8C-to-9C-by-B/16":
+                reciprocal_update_count = profile["sparse_route_parameters"][
+                    "reciprocal_update_count"
+                ]
+                minimum = 4096
+                profile["sparse_route_parameters"]["search_effort"] = node_budget
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_effort_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_min"
+                ] = minimum
+                profile["sparse_route_parameters"][
+                    "activation_search_node_budget_step"
+                ] = reciprocal_update_count
+                profile["sparse_route_parameters"]["total_query_row_budget"] = (
+                    node_budget
+                    + profile["sparse_route_parameters"][
+                        "activation_identity_target"
+                    ]
+                )
+            for row in rows:
+                row["operation_ms"][
+                    "Cortext.fallback_hydration_signal_limit"
+                ] = 128.0
+                row["operation_ms"][
+                    "Cortext.fallback_hydration_signal_rows"
+                ] = 0.0
+            audit.validate_profile_rows(profile, rows)
+
+        profile, rows = plateau_fixture()
+        profile.update(
+            {
+                "focus": 0.5,
+                "sensitivity": 0.5,
+                "stability": 0.5,
+                "experimental_sparse_node_envelope_formula": "7C",
+                "sparse_route_parameters": fixture_sparse_parameters(),
+            }
+        )
+        for row in rows:
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_limit"
+            ] = 128.0
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_rows"
+            ] = 0.0
+        with self.assertRaisesRegex(
+            ValueError, "experimental sparse node envelope formula is invalid"
+        ):
+            audit.validate_profile_rows(profile, rows)
+
+    def test_fallback_hydration_limit_is_bound_to_knobs_and_every_event(
+        self,
+    ) -> None:
+        profile, rows = plateau_fixture()
+        profile.update({"focus": 0.5, "sensitivity": 0.5, "stability": 0.5})
+        profile["sparse_route_parameters"] = {
+            "fallback_hydration_signal_limit": 128,
+        }
+        for row in rows:
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_limit"
+            ] = 128.0
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_rows"
+            ] = 64.0
+        audit.validate_profile_rows(profile, rows)
+
+        rows[-1]["operation_ms"][
+            "Cortext.fallback_hydration_signal_limit"
+        ] = 129.0
+        with self.assertRaisesRegex(ValueError, "event fallback hydration"):
+            audit.validate_profile_rows(profile, rows)
+
+    def test_residual_bootstrap_is_exact_for_a_linear_series(self) -> None:
+        xs = [float(index) for index in range(2048)]
+        ys = [3.0 + 2.0 * value for value in xs]
+        self.assertEqual(audit.bootstrap_upper_slope(xs, ys), 2.0)
+
+    def test_residual_bootstrap_is_deterministic_for_long_epoch_series(self) -> None:
+        xs = [float(index) for index in range(2048)]
+        ys = [10.0 + 0.001 * value + (index % 7) * 0.01
+              for index, value in enumerate(xs)]
+        first = audit.bootstrap_upper_slope(xs, ys)
+        second = audit.bootstrap_upper_slope(xs, ys)
+        self.assertEqual(first, second)
+
     def test_accepts_bounded_consolidation_sawtooth(self) -> None:
         profile, rows = epoch_fixture()
         result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
@@ -447,6 +947,279 @@ class PlateauContractTest(unittest.TestCase):
         self.assertTrue(result["retrieval_cycle_symmetry"]["passed"])
         full_result = audit.suffix_plateau_result(profile, rows, 50)
         self.assertTrue(full_result["passed"], full_result["candidate_failures"])
+
+    def test_accepts_flat_process_with_knob_bounded_sparse_retrieval_cycles(
+        self,
+    ) -> None:
+        profile, rows = epoch_fixture(material=False)
+        enable_sparse_retrieval_cycles(profile, rows)
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertTrue(result["passed"], result["failures"])
+        self.assertEqual(result["mode"], "flat-envelope")
+        self.assertEqual(result["material_epoch_count"], 0)
+        self.assertTrue(result["retrieval_cycle_symmetry"]["passed"])
+        self.assertGreaterEqual(
+            result["retrieval_cycle_symmetry"]["material_cycle_count"], 10
+        )
+
+    def test_accepts_fixed_knob_bounded_sparse_retrieval_envelope(self) -> None:
+        profile, rows = epoch_fixture(material=False)
+        enable_fixed_sparse_retrieval_envelope(profile, rows)
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertTrue(result["passed"], result["failures"])
+        self.assertEqual(result["mode"], "flat-envelope")
+        self.assertEqual(
+            result["retrieval_cycle_symmetry"]["mode"], "fixed-envelope"
+        )
+        self.assertEqual(
+            result["retrieval_cycle_symmetry"]["retrieval_work_bound"], 3840
+        )
+        self.assertTrue(
+            result["retrieval_cycle_symmetry"][
+                "fixed_envelope_classifier_passed"
+            ]
+        )
+        self.assertTrue(
+            result["retrieval_cycle_symmetry"][
+                "fixed_work_envelope_subcontract_passed"
+            ]
+        )
+        self.assertTrue(
+            result["retrieval_cycle_symmetry"][
+                "activated_identity_overlap_recorded"
+            ]
+        )
+        self.assertTrue(
+            result["retrieval_cycle_symmetry"]["full_cycle_passed"]
+        )
+
+    def test_fixed_sparse_retrieval_requires_activation_overlap(self) -> None:
+        profile, rows = epoch_fixture(material=False)
+        enable_fixed_sparse_retrieval_envelope(profile, rows)
+        for event in profile["consolidation_events"]:
+            del event["sqlite_sparse_route_recenter_overlap_profiled"]
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertFalse(
+            result["retrieval_cycle_symmetry"]["full_cycle_passed"]
+        )
+        self.assertEqual(
+            result["retrieval_cycle_symmetry"][
+                "overlap_profile_missing_count"
+            ],
+            len(profile["consolidation_events"]),
+        )
+
+    def test_fixed_sparse_retrieval_envelope_is_independent_of_process_mode(
+        self,
+    ) -> None:
+        profile, rows = epoch_fixture(material=True)
+        enable_fixed_sparse_retrieval_envelope(profile, rows)
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertTrue(result["passed"], result["failures"])
+        self.assertEqual(result["mode"], "sawtooth")
+        self.assertEqual(
+            result["retrieval_cycle_symmetry"]["mode"], "fixed-envelope"
+        )
+        self.assertEqual(
+            result["retrieval_cycle_symmetry"]["retrieval_work_bound"], 3840
+        )
+
+    def test_fixed_sparse_retrieval_requires_mature_recenter_evidence(
+        self,
+    ) -> None:
+        profile, rows = epoch_fixture(material=True)
+        enable_fixed_sparse_retrieval_envelope(profile, rows)
+        for event in profile["consolidation_events"]:
+            event["sqlite_sparse_route_recenter_succeeded"] = False
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "fewer than ten mature fixed-envelope recenters",
+            result["failures"],
+        )
+
+    def test_fixed_sparse_retrieval_recenter_keeps_knob_envelope(self) -> None:
+        profile, rows = epoch_fixture(material=True)
+        enable_fixed_sparse_retrieval_envelope(profile, rows)
+        profile["consolidation_events"][-2][
+            "sqlite_sparse_route_activation_node_budget"
+        ] -= 1.0
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "fixed retrieval recenter changes F/S/T envelope",
+            result["failures"],
+        )
+
+    def test_fixed_envelope_counts_persisted_and_delta_distance_work(self) -> None:
+        profile, rows = epoch_fixture(material=False)
+        enable_fixed_sparse_retrieval_envelope(profile, rows)
+        bound = float(profile["sparse_route_parameters"]["search_node_budget"])
+        for row in rows:
+            operation_ms = row["operation_ms"]
+            if operation_ms[
+                "GraphRetrieve.sqlite_sparse_route_search_node_budget"
+            ] == 0.0:
+                continue
+            operation_ms["GraphRetrieve.sqlite_sparse_route_node_rows"] = (
+                bound - 17.0
+            )
+            operation_ms["GraphRetrieve.sqlite_sparse_route_dirty_rows"] = 17.0
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertTrue(result["passed"], result["failures"])
+        self.assertEqual(
+            result["retrieval_cycle_symmetry"]["work_mismatch_count"], 0
+        )
+
+    def test_accepts_fixed_sparse_retrieval_below_ceiling(self) -> None:
+        profile, rows = epoch_fixture(material=False)
+        enable_fixed_sparse_retrieval_envelope(profile, rows)
+        rows[1000]["operation_ms"][
+            "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+        ] -= 1.0
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertTrue(result["passed"], result["failures"])
+
+    def test_route_active_zero_or_missing_work_fails_closed(self) -> None:
+        for remove_metric in (False, True):
+            with self.subTest(remove_metric=remove_metric):
+                profile, rows = epoch_fixture(material=False)
+                enable_fixed_sparse_retrieval_envelope(profile, rows)
+                operation_ms = rows[1000]["operation_ms"]
+                operation_ms["GraphRetrieve.seed_sparse_route_active"] = 1.0
+                if remove_metric:
+                    operation_ms.pop(
+                        "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+                    )
+                else:
+                    operation_ms[
+                        "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+                    ] = 0.0
+                result = audit.consolidation_epoch_result(
+                    profile, rows, 0, len(rows)
+                )
+                self.assertFalse(result["passed"])
+                self.assertIn(
+                    "fixed retrieval work is absent on an active route",
+                    result["failures"],
+                )
+
+    def test_fixed_sparse_retrieval_metrics_are_independently_bounded(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "GraphRetrieve.sqlite_sparse_route_search_effort",
+                "fixed queue effort differs from F/S/T bound",
+            ),
+            (
+                "GraphRetrieve.sqlite_sparse_route_search_node_budget",
+                "fixed dynamic node ceiling differs from F/S/T bound",
+            ),
+            (
+                "GraphRetrieve.sqlite_sparse_route_node_rows",
+                "fixed retrieval visits exceed F/S/T bound",
+            ),
+            (
+                "GraphRetrieve.sqlite_sparse_route_activated_identities",
+                "fixed retrieval activation exceeds F/S/T target",
+            ),
+        )
+        for metric, expected_failure in cases:
+            with self.subTest(metric=metric):
+                profile, rows = epoch_fixture(material=False)
+                enable_fixed_sparse_retrieval_envelope(profile, rows)
+                bound = float(
+                    profile["sparse_route_parameters"]["search_node_budget"]
+                )
+                value = (
+                    float(
+                        profile["sparse_route_parameters"][
+                            "activation_identity_target"
+                        ]
+                    )
+                    if metric.endswith("activated_identities")
+                    else bound
+                )
+                rows[1000]["operation_ms"][metric] = value + 1.0
+                result = audit.consolidation_epoch_result(
+                    profile, rows, 0, len(rows)
+                )
+                self.assertFalse(result["passed"])
+                self.assertIn(expected_failure, result["failures"])
+
+    def test_rejects_fixed_sparse_retrieval_over_total_row_bound(self) -> None:
+        profile, rows = epoch_fixture(material=False)
+        enable_fixed_sparse_retrieval_envelope(profile, rows)
+        rows[1000]["operation_ms"][
+            "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+        ] = float(
+            profile["sparse_route_parameters"]["total_query_row_budget"] + 1
+        )
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "fixed retrieval work exceeds total F/S/T row bound",
+            result["failures"],
+        )
+
+    def test_rejects_sparse_retrieval_that_exceeds_its_current_node_ceiling(
+        self,
+    ) -> None:
+        profile, rows = epoch_fixture(material=False)
+        enable_sparse_retrieval_cycles(profile, rows)
+        row = next(
+            row
+            for row in rows
+            if row["operation_ms"].get(
+                "GraphRetrieve.sqlite_sparse_route_search_node_budget", 0.0
+            )
+            > 0.0
+        )
+        row["operation_ms"][
+            "GraphRetrieve.sqlite_sparse_route_node_rows"
+        ] = (
+            row["operation_ms"][
+                "GraphRetrieve.sqlite_sparse_route_search_node_budget"
+            ]
+            + 1.0
+        )
+        row["operation_ms"][
+            "GraphRetrieve.sqlite_sparse_route_distance_evaluations"
+        ] = row["operation_ms"][
+            "GraphRetrieve.sqlite_sparse_route_node_rows"
+        ]
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "retrieval work exceeds current dynamic node ceiling",
+            result["failures"],
+        )
+        self.assertEqual(
+            result["retrieval_cycle_symmetry"][
+                "dynamic_bound_exceeded_count"
+            ],
+            1,
+        )
+
+    def test_accumulator_state_is_observed_but_not_a_consolidation_reset(
+        self,
+    ) -> None:
+        profile, rows = epoch_fixture()
+        for event in profile["consolidation_events"]:
+            event["post_reset_counters"]["accumulator_signal_count"] = event[
+                "pre_reset_counters"
+            ]["accumulator_signal_count"]
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        self.assertTrue(result["passed"], result["failures"])
+        self.assertTrue(
+            all(
+                epoch["reset_counter_ratios"]["accumulator_signal_count"]
+                == 1.0
+                for epoch in result["complete_epochs"]
+            )
+        )
 
     def test_accepts_durable_flat_envelope_without_consolidation(self) -> None:
         profile, rows = plateau_fixture()
@@ -733,7 +1506,7 @@ class PlateauContractTest(unittest.TestCase):
             result["retrieval_cycle_symmetry"][
                 "accepted_suffix_maximum_retrieval_work"
             ],
-            200.0,
+            256.0,
         )
 
     def test_rejects_consolidation_reset_counter_that_does_not_fall(self) -> None:
@@ -744,7 +1517,7 @@ class PlateauContractTest(unittest.TestCase):
 
     def test_zero_reset_counter_must_remain_zero(self) -> None:
         profile, rows = epoch_fixture()
-        counter = "accumulator_signal_count"
+        counter = "working_memory_pending_signal_count"
         for event in profile["consolidation_events"]:
             close = event["event_index"]
             rows[close]["consolidation_epoch_counters"][counter] = 0
@@ -775,7 +1548,7 @@ class PlateauContractTest(unittest.TestCase):
     def test_nonmaterial_zero_reset_counter_must_remain_zero(self) -> None:
         profile, rows = epoch_fixture(material=False)
         set_fixture_retention(profile, rows, "durable")
-        counter = "accumulator_signal_count"
+        counter = "working_memory_pending_signal_count"
         for event in profile["consolidation_events"]:
             close = event["event_index"]
             rows[close]["consolidation_epoch_counters"][counter] = 0
@@ -1003,12 +1776,20 @@ class PlateauContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "failed post-commit barrier"):
             audit.validate_profile_rows(profile, rows)
 
-    def test_rejects_supersession_fallback_without_exact_visit_count(self) -> None:
+    def test_allows_finite_warmup_supersession_fallback(self) -> None:
         profile, rows = plateau_fixture()
         rows[0]["operation_ms"][
             "MemoryStorage.supersession_sql_fallback_count"
         ] = 1.0
-        with self.assertRaisesRegex(ValueError, "fallback"):
+        audit.validate_profile_rows(profile, rows)
+
+    def test_rejects_post_warmup_supersession_fallback(self) -> None:
+        profile, rows = plateau_fixture()
+        first_post_warmup = math.ceil(0.20 * len(rows))
+        rows[first_post_warmup]["operation_ms"][
+            "MemoryStorage.supersession_sql_fallback_count"
+        ] = 1.0
+        with self.assertRaisesRegex(ValueError, "post-warmup.*fallback"):
             audit.validate_profile_rows(profile, rows)
 
     def test_rejects_flat_plateau_above_height_ceiling(self) -> None:
@@ -1033,6 +1814,69 @@ class PlateauContractTest(unittest.TestCase):
             row["operation_ms"]["GraphRetrieve.family_exact_comparison_count"] = 0.0
         with self.assertRaisesRegex(ValueError, "all zero"):
             audit.suffix_plateau_result(profile, vacuous, 10)
+
+    def test_accepts_only_known_rejected_candidate_counter_extensions(self) -> None:
+        profile, rows = plateau_fixture()
+        for row in rows:
+            for name in audit.LEGACY_REJECTED_EMOTIONAL_WORK_COUNTERS:
+                row["work_counters"][name] = 0.0
+        audit.validate_profile_rows(profile, rows)
+        self.assertFalse(
+            audit.is_duration_operation("EmotionalCascade.edge_visit_count")
+        )
+        self.assertFalse(
+            audit.is_duration_operation("EmotionalCascade.edge_visit_limit")
+        )
+        self.assertFalse(
+            audit.is_duration_operation(
+                "MemoryStorage.supersession_current_candidate_execution_count"
+            )
+        )
+        self.assertFalse(
+            audit.is_duration_operation(
+                "GraphRetrieve.sqlite_sparse_route_search_effort"
+            )
+        )
+        for name in (
+            "GraphRetrieve.sqlite_sparse_route_activation_snapshot_cache_miss_rows",
+            "GraphRetrieve.sqlite_sparse_route_restart_rows",
+            "GraphRetrieve.sqlite_sparse_route_dirty_rows",
+        ):
+            self.assertFalse(audit.is_duration_operation(name), name)
+
+        rows[0]["work_counters"]["unknown_candidate_counter"] = 0.0
+        with self.assertRaisesRegex(ValueError, "schema mismatch"):
+            audit.validate_profile_rows(profile, rows)
+
+    def test_write_gate_profile_values_are_diagnostics_not_durations(self) -> None:
+        for name in (
+            "WriteGate.flush_trigger",
+            "WriteGate.spike_bypass",
+            "WriteGate.accumulator_available",
+            "WriteGate.n_signals",
+            "WriteGate.coverage",
+            "WriteGate.window_score",
+            "WriteGate.threshold_dynamic",
+            "WriteGate.refractory_multiplier",
+            "WriteGate.write_scale",
+            "WriteGate.effective_threshold",
+            "WriteGate.score_margin",
+            "WriteGate.force_write",
+            "WriteGate.write_accumulator",
+            "WriteGate.reason_code",
+        ):
+            self.assertFalse(audit.is_duration_operation(name), name)
+
+    def test_zero_suppression_population_is_not_vacuous_recovery_work(self) -> None:
+        profile, rows = plateau_fixture()
+        for row in rows:
+            row["work_counters"]["retrieval_suppression_id_count"] = 0.0
+            row["operation_ms"]["SignalProcessor.retrieval_suppression_id_count"] = 0.0
+            row["operation_ms"]["SignalProcessor.retrieval_suppression_id_activity"] = 0.0
+            self.assertGreater(
+                row["operation_ms"]["Competition.rif_recovery_active_sql"], 0.0
+            )
+        audit.validate_profile_rows(profile, rows)
 
     def test_rejects_emotional_neighbor_producer_mismatch(self) -> None:
         profile, rows = plateau_fixture()
@@ -1072,6 +1916,12 @@ class PlateauContractTest(unittest.TestCase):
         set_fixture_retention(profile, rows, "durable")
         ranges = audit.end_anchored_ranges(len(rows), 10)
         for row in rows:
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_limit"
+            ] = 128.0
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_rows"
+            ] = 0.0
             window_index = next(
                 (
                     index
@@ -1086,6 +1936,12 @@ class PlateauContractTest(unittest.TestCase):
             row["operation_ms"]["GraphRetrieve.seed_cache_rows"] = (
                 1.09**window_index
             )
+            row["operation_ms"][
+                "MemoryStorage.supersession_population_mismatch_count"
+            ] = 1.10**window_index
+            row["operation_ms"][
+                "SignalProcessor.commit_table_row_count.embeddings_chunks"
+            ] = 1.11**window_index
         result = audit.suffix_plateau_result(profile, rows, 10)
         self.assertTrue(result["passed"], result.get("candidate_failures"))
         self.assertNotIn(
@@ -1096,9 +1952,231 @@ class PlateauContractTest(unittest.TestCase):
             "GraphRetrieve.seed_cache_rows",
             result["accepted_suffix"]["operation_results"],
         )
+        self.assertNotIn(
+            "MemoryStorage.supersession_population_mismatch_count",
+            result["accepted_suffix"]["operation_results"],
+        )
+        self.assertNotIn(
+            "SignalProcessor.commit_table_row_count.embeddings_chunks",
+            result["accepted_suffix"]["operation_results"],
+        )
+
+    def test_rejects_growing_signal_row_insert_duration(self) -> None:
+        profile, rows = plateau_fixture()
+        ranges = audit.end_anchored_ranges(len(rows), 10)
+        for row in rows:
+            window_index = next(
+                (
+                    index
+                    for index, (start, end) in enumerate(ranges)
+                    if start <= row["event_index"] < end
+                ),
+                0,
+            )
+            row["operation_ms"]["MemoryStorage.insert_signal_rows"] = (
+                0.1 * (1.08**window_index)
+            )
+        result = audit.suffix_plateau_result(profile, rows, 10)
+        self.assertFalse(result["passed"])
+        self.assertTrue(audit.is_duration_operation("MemoryStorage.insert_signal_rows"))
 
     def test_rejects_one_growing_active_counter(self) -> None:
         profile, rows = plateau_fixture(growing_counter="graph_rows_visited")
+        self.assertFalse(audit.suffix_plateau_result(profile, rows, 10)["passed"])
+
+    def test_emotional_work_bounds_are_knob_derived(self) -> None:
+        profile = {"sparse_route_parameters": fixture_sparse_parameters()}
+        self.assertEqual(
+            audit.knob_work_counter_bound(profile, "graph_rows_visited"),
+            1280,
+        )
+        self.assertEqual(
+            audit.knob_work_counter_bound(
+                profile, "supersession_rows_visited"
+            ),
+            5888,
+        )
+        self.assertEqual(
+            audit.knob_work_counter_bound(profile, "emotional_source_count"),
+            128,
+        )
+        self.assertEqual(
+            audit.knob_work_counter_bound(profile, "emotional_neighbor_count"),
+            2560,
+        )
+        self.assertEqual(
+            audit.knob_work_counter_bound(profile, "emotional_update_count"),
+            1280,
+        )
+        self.assertFalse(
+            audit.is_duration_operation(
+                "EmotionalCascade.edge_visit_limit_reached"
+            )
+        )
+        self.assertFalse(
+            audit.is_duration_operation(
+                "GraphRetrieve.sqlite_sparse_route_node_rows"
+            )
+        )
+        self.assertFalse(
+            audit.is_duration_operation("Cortext.fallback_hydration_signal_rows")
+        )
+        self.assertEqual(
+            audit.COUNTER_SOURCE_OPERATIONS["graph_rows_visited"],
+            ("GraphRetrieve.rows_visited",),
+        )
+
+    def test_accepts_variable_exact_comparisons_under_knob_bound(self) -> None:
+        profile, rows = plateau_fixture()
+        set_fixture_retention(profile, rows, "durable")
+        profile.update(
+            {
+                "focus": 0.5,
+                "sensitivity": 0.5,
+                "stability": 0.5,
+                "sparse_route_parameters": fixture_sparse_parameters(),
+            }
+        )
+        ranges = audit.end_anchored_ranges(len(rows), 10)
+        for row in rows:
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_limit"
+            ] = 128.0
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_rows"
+            ] = 0.0
+            window_index = next(
+                (
+                    index
+                    for index, (start, end) in enumerate(ranges)
+                    if start <= row["event_index"] < end
+                ),
+                0,
+            )
+            value = min(1024.0, 10.0 * 1.2**window_index)
+            row["work_counters"]["graph_exact_comparison_count"] = value
+            row["operation_ms"][
+                "GraphRetrieve.family_exact_comparison_count"
+            ] = value
+        result = audit.suffix_plateau_result(profile, rows, 10)
+        self.assertTrue(result["passed"], result.get("candidate_failures"))
+        counter = result["accepted_suffix"]["work_counter_results"][
+            "graph_exact_comparison_count"
+        ]
+        self.assertGreater(counter["second_over_first"], 1.10)
+        self.assertTrue(counter["absolute_bound_passed"])
+
+    def test_accepts_sparse_route_rows_under_knob_bounds(self) -> None:
+        profile, rows = plateau_fixture()
+        set_fixture_retention(profile, rows, "durable")
+        profile.update(
+            {
+                "focus": 0.5,
+                "sensitivity": 0.5,
+                "stability": 0.5,
+                "sparse_route_parameters": fixture_sparse_parameters(),
+            }
+        )
+        ranges = audit.end_anchored_ranges(len(rows), 10)
+        for row in rows:
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_limit"
+            ] = 128.0
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_rows"
+            ] = 0.0
+            window_index = next(
+                (
+                    index
+                    for index, (start, end) in enumerate(ranges)
+                    if start <= row["event_index"] < end
+                ),
+                0,
+            )
+            graph_rows = min(1280.0, 10.0 * 1.2**window_index)
+            supersession_rows = min(5888.0, 20.0 * 1.2**window_index)
+            row["work_counters"]["graph_rows_visited"] = graph_rows
+            row["operation_ms"]["GraphRetrieve.rows_visited"] = graph_rows
+            row["work_counters"][
+                "supersession_rows_visited"
+            ] = supersession_rows
+            row["operation_ms"][
+                "MemoryStorage.supersession_sparse_route_node_rows"
+            ] = supersession_rows - 20.0
+        result = audit.suffix_plateau_result(profile, rows, 10)
+        self.assertTrue(result["passed"], result.get("candidate_failures"))
+        for counter_name, expected_bound in (
+            ("graph_rows_visited", 1280),
+            ("supersession_rows_visited", 5888),
+        ):
+            counter = result["accepted_suffix"]["work_counter_results"][
+                counter_name
+            ]
+            self.assertEqual(
+                counter["knob_derived_absolute_bound"], expected_bound
+            )
+            self.assertTrue(counter["absolute_bound_passed"])
+
+    def test_accepts_variable_emotional_updates_under_knob_bound(self) -> None:
+        profile, rows = plateau_fixture()
+        set_fixture_retention(profile, rows, "durable")
+        profile.update(
+            {
+                "focus": 0.5,
+                "sensitivity": 0.5,
+                "stability": 0.5,
+                "sparse_route_parameters": fixture_sparse_parameters(),
+            }
+        )
+        ranges = audit.end_anchored_ranges(len(rows), 10)
+        for row in rows:
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_limit"
+            ] = 128.0
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_rows"
+            ] = 0.0
+            window_index = next(
+                (
+                    index
+                    for index, (start, end) in enumerate(ranges)
+                    if start <= row["event_index"] < end
+                ),
+                0,
+            )
+            value = min(1280.0, 4.0 * 1.2**window_index)
+            row["work_counters"]["emotional_update_count"] = value
+            row["operation_ms"]["EmotionalCascade.update_count"] = value
+        result = audit.suffix_plateau_result(profile, rows, 10)
+        self.assertTrue(result["passed"], result.get("candidate_failures"))
+        counter = result["accepted_suffix"]["work_counter_results"][
+            "emotional_update_count"
+        ]
+        self.assertEqual(counter["knob_derived_absolute_bound"], 1280)
+        self.assertTrue(counter["absolute_bound_passed"])
+
+    def test_rejects_exact_comparison_above_knob_bound(self) -> None:
+        profile, rows = plateau_fixture()
+        set_fixture_retention(profile, rows, "durable")
+        profile.update(
+            {
+                "focus": 0.5,
+                "sensitivity": 0.5,
+                "stability": 0.5,
+                "sparse_route_parameters": fixture_sparse_parameters(),
+            }
+        )
+        for row in rows:
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_limit"
+            ] = 128.0
+            row["operation_ms"][
+                "Cortext.fallback_hydration_signal_rows"
+            ] = 0.0
+        rows[-1]["work_counters"]["graph_exact_comparison_count"] = 1025.0
+        rows[-1]["operation_ms"][
+            "GraphRetrieve.family_exact_comparison_count"
+        ] = 1025.0
         self.assertFalse(audit.suffix_plateau_result(profile, rows, 10)["passed"])
 
     def test_rejects_growing_consolidation_cost_with_flat_process(self) -> None:
@@ -1113,6 +2191,212 @@ class PlateauContractTest(unittest.TestCase):
             process_windows=[2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 2.0] + [10.0] * 5
         )
         self.assertFalse(audit.suffix_plateau_result(profile, rows, 10)["passed"])
+
+
+class ActivityNormalizedResetDiagnosticTest(unittest.TestCase):
+    @staticmethod
+    def evaluation(
+        *,
+        operation: object = "MemoryStorage",
+        epoch: int = 28,
+        trailing_ms: list[float] | None = None,
+        post_ms: list[float] | None = None,
+        trailing_activity: list[float] | None = None,
+        post_activity: list[float] | None = None,
+        modality: str = "text",
+        source_id: str = "opaque-a",
+    ) -> dict[str, object]:
+        return {
+            "epoch": epoch,
+            "operation": operation,
+            "trailing_event_indices": [100, 101],
+            "post_event_indices": [102, 103],
+            "trailing_ms": trailing_ms if trailing_ms is not None else [1.0, 1.0],
+            "post_ms": post_ms if post_ms is not None else [2.0, 2.0],
+            "trailing_activity": (
+                trailing_activity if trailing_activity is not None else [2.0, 2.0]
+            ),
+            "post_activity": (
+                post_activity if post_activity is not None else [8.0, 8.0]
+            ),
+            "modality": modality,
+            "source_id": source_id,
+        }
+
+    def test_rising_raw_peak_cannot_be_waived(self) -> None:
+        result = audit.activity_normalized_reset_diagnostic(
+            [self.evaluation()], ["sawtooth peaks rise"]
+        )
+        self.assertFalse(result["raw_gate_passed"])
+        self.assertEqual(result["raw_gate_failures"], ["sawtooth peaks rise"])
+
+    def test_rising_raw_trough_cannot_be_waived(self) -> None:
+        result = audit.activity_normalized_reset_diagnostic(
+            [self.evaluation()], ["sawtooth troughs rise"]
+        )
+        self.assertFalse(result["raw_gate_passed"])
+        self.assertEqual(result["raw_gate_failures"], ["sawtooth troughs rise"])
+
+    def test_raw_reset_miss_cannot_be_waived(self) -> None:
+        result = audit.activity_normalized_reset_diagnostic(
+            [self.evaluation()], ["material epoch does not lower following process time"]
+        )
+        self.assertFalse(result["raw_gate_passed"])
+        self.assertEqual(result["diagnostic_result"], "activity-incidence")
+
+    def test_positive_positive_uses_ratio_of_sums(self) -> None:
+        result = audit.activity_normalized_reset_diagnostic([
+            self.evaluation(
+                trailing_ms=[1.0, 9.0],
+                trailing_activity=[1.0, 9.0],
+                post_ms=[2.0, 18.0],
+                post_activity=[1.0, 99.0],
+            )
+        ], [])
+        row = result["evaluations"][0]
+        self.assertEqual(row["trailing_unit_cost"], 1.0)
+        self.assertEqual(row["post_unit_cost"], 0.2)
+        self.assertEqual(row["unit_cost_ratio"], 0.2)
+
+    def test_zero_zero_is_unevaluated_and_non_rescuing(self) -> None:
+        result = audit.activity_normalized_reset_diagnostic([
+            self.evaluation(
+                trailing_ms=[0.0, 0.0],
+                post_ms=[0.0, 0.0],
+                trailing_activity=[0.0, 0.0],
+                post_activity=[0.0, 0.0],
+            )
+        ], ["raw miss"])
+        self.assertEqual(result["evaluations"][0]["status"], "unevaluated")
+        self.assertIsNone(result["selected_hotspot"])
+        self.assertFalse(result["raw_gate_passed"])
+
+    def test_one_sided_zero_is_incomparable(self) -> None:
+        result = audit.activity_normalized_reset_diagnostic([
+            self.evaluation(
+                trailing_ms=[0.0, 0.0],
+                trailing_activity=[0.0, 0.0],
+                post_ms=[1.0, 1.0],
+                post_activity=[2.0, 2.0],
+            )
+        ], [])
+        self.assertEqual(result["evaluations"][0]["status"], "incomparable")
+        self.assertEqual(result["diagnostic_result"], "diagnostic-inconclusive")
+
+    def test_negative_value_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            audit.activity_normalized_reset_diagnostic([
+                self.evaluation(trailing_ms=[-1.0, 1.0])
+            ], [])
+
+    def test_nonfinite_value_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "finite"):
+            audit.activity_normalized_reset_diagnostic([
+                self.evaluation(trailing_ms=[math.nan, 1.0])
+            ], [])
+
+    def test_unequal_windows_are_rejected(self) -> None:
+        item = self.evaluation()
+        item["post_event_indices"] = [102]
+        with self.assertRaisesRegex(ValueError, "matching event windows"):
+            audit.activity_normalized_reset_diagnostic([item], [])
+
+    def test_equal_length_interleaved_windows_are_rejected(self) -> None:
+        item = self.evaluation()
+        item["trailing_event_indices"] = [100, 102]
+        item["post_event_indices"] = [101, 103]
+        with self.assertRaisesRegex(ValueError, "contiguous adjacent event windows"):
+            audit.activity_normalized_reset_diagnostic([item], [])
+
+    def test_operations_in_one_epoch_require_identical_windows(self) -> None:
+        first = self.evaluation(operation="MemoryStorage", epoch=28)
+        second = self.evaluation(operation="PropagateEmotionalCascade", epoch=28)
+        second["trailing_event_indices"] = [200, 201]
+        second["post_event_indices"] = [202, 203]
+        with self.assertRaisesRegex(ValueError, "same epoch must share event windows"):
+            audit.activity_normalized_reset_diagnostic([first, second], [])
+
+    def test_finite_samples_that_overflow_aggregate_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "aggregate.*finite"):
+            audit.activity_normalized_reset_diagnostic([
+                self.evaluation(post_activity=[1e308, 1e308])
+            ], [])
+
+    def test_pooled_operations_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "operation id"):
+            audit.activity_normalized_reset_diagnostic([
+                self.evaluation(operation=["MemoryStorage", "PropagateEmotionalCascade"])
+            ], [])
+
+    def test_modality_and_source_labels_do_not_change_arithmetic(self) -> None:
+        baseline = audit.activity_normalized_reset_diagnostic([
+            self.evaluation(modality="text", source_id="shared")
+        ], [])
+        for modality, source_id in (("audio", "opaque-a"), ("image", "opaque-b")):
+            with self.subTest(modality=modality, source_id=source_id):
+                varied = audit.activity_normalized_reset_diagnostic([
+                    self.evaluation(modality=modality, source_id=source_id)
+                ], [])
+                self.assertEqual(varied, baseline)
+
+    def test_non_neutral_knobs_reject_hidden_midpoint_batch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "processed rows exceed F/S/T-derived B"):
+            audit.activity_normalized_reset_diagnostic(
+                [self.evaluation()], [],
+                knob_context={"focus": 0.0, "sensitivity": 0.0, "stability": 0.0,
+                              "processed_backfill_rows": 128},
+            )
+
+    def test_neutral_b_plus_one_is_logical_not_processed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "processed rows exceed F/S/T-derived B"):
+            audit.activity_normalized_reset_diagnostic(
+                [self.evaluation()], [],
+                knob_context={"focus": 0.5, "sensitivity": 0.5, "stability": 0.5,
+                              "processed_backfill_rows": 129},
+            )
+
+    def test_no_evaluable_operation_returns_deepen_profile(self) -> None:
+        result = audit.activity_normalized_reset_diagnostic([
+            self.evaluation(
+                trailing_ms=[0.0, 0.0], post_ms=[0.0, 0.0],
+                trailing_activity=[0.0, 0.0], post_activity=[0.0, 0.0],
+            )
+        ], [])
+        self.assertEqual(result["diagnostic_result"], "diagnostic-inconclusive")
+        self.assertEqual(result["continuation"], "deepen-profile")
+        self.assertIsNone(result["selected_hotspot"])
+
+    def test_deterministic_tie_uses_operation_then_epoch(self) -> None:
+        result = audit.activity_normalized_reset_diagnostic([
+            self.evaluation(operation="PropagateEmotionalCascade", epoch=28),
+            self.evaluation(operation="MemoryStorage", epoch=35),
+        ], [])
+        self.assertEqual(result["selected_hotspot"]["operation"], "MemoryStorage")
+        self.assertEqual(result["selected_hotspot"]["epoch"], 35)
+
+    def test_consolidation_result_reports_diagnostic_without_waiving_raw_miss(
+        self,
+    ) -> None:
+        profile, rows = epoch_fixture()
+        close = profile["consolidation_events"][0]["event_index"]
+        for row in rows[close + 1 : close + 51]:
+            row["process_ms"] = 1.14
+            row["end_to_end_ms"] = 1.14
+            row["operation_ms"]["cortext::operations::MemoryStorage"] = 0.2
+            row["work_counters"]["supersession_current_candidate_count"] = 20.0
+        result = audit.consolidation_epoch_result(profile, rows, 0, len(rows))
+        diagnostic = result["activity_normalized_reset_diagnostic"]
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "material epoch does not lower following process time",
+            result["failures"],
+        )
+        self.assertFalse(diagnostic["raw_gate_passed"])
+        self.assertFalse(diagnostic["raw_gate_waived"])
+        self.assertEqual(diagnostic["diagnostic_result"], "activity-incidence")
+        self.assertEqual(
+            diagnostic["selected_hotspot"]["operation"], "MemoryStorage"
+        )
 
 
 class BoundedActivationQualityContractTest(unittest.TestCase):
@@ -1214,6 +2498,13 @@ class BoundedActivationQualityContractTest(unittest.TestCase):
                 }
             ],
         }
+        candidate_rank_digest = audit.ranked_query_evidence_result(
+            artifact, 16
+        )["candidate_identity_rank_sha256"]
+        artifact["candidate_identity_rank_sha256"] = candidate_rank_digest
+        artifact["repeat_candidate_identity_rank_sha256"] = (
+            candidate_rank_digest
+        )
         restart_probe_digest = audit.ranked_query_evidence_result(
             artifact, 16
         )["fixed_probe_identity_rank_sha256"]
@@ -1241,6 +2532,30 @@ class BoundedActivationQualityContractTest(unittest.TestCase):
         result = self.audit_result(self.quality_fixture())
         self.assertTrue(result["passed"], result["failures"])
 
+    def test_accepts_approved_lower_rank_loss_above_floor(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["query_evidence"][37]["candidate_ranked_ids"][-1] = 99999999
+        fixture["quality"]["all"]["mean_exact_id_recall_at_k"] = (
+            8191 / 8192
+        )
+        digest = audit.ranked_query_evidence_result(
+            fixture, 16
+        )["candidate_identity_rank_sha256"]
+        fixture["candidate_identity_rank_sha256"] = digest
+        fixture["repeat_candidate_identity_rank_sha256"] = digest
+        result = self.audit_result(fixture)
+        self.assertTrue(result["passed"], result["failures"])
+
+    def test_rejects_unrepeated_candidate_rank_digest(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["repeat_candidate_identity_rank_sha256"] = "f" * 64
+        result = self.audit_result(fixture)
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "candidate rank order is not repeat-deterministic",
+            result["failures"],
+        )
+
     def test_rejects_unapproved_control_digest(self) -> None:
         with self.assertRaisesRegex(ValueError, "control digest is not approved"):
             audit.bounded_activation_quality_result(
@@ -1261,8 +2576,8 @@ class BoundedActivationQualityContractTest(unittest.TestCase):
 
     def test_rejects_candidate_that_differs_from_approved_control_rank(self) -> None:
         control = self.control_fixture()
-        control["query_evidence"][37]["candidate_ranked_ids"][1:3] = reversed(
-            control["query_evidence"][37]["candidate_ranked_ids"][1:3]
+        control["query_evidence"][37]["exact_ranked_ids"][1:3] = reversed(
+            control["query_evidence"][37]["exact_ranked_ids"][1:3]
         )
         result = self.audit_result(self.quality_fixture(), control)
         self.assertFalse(result["passed"])
@@ -1310,6 +2625,11 @@ class BoundedActivationQualityContractTest(unittest.TestCase):
             probe["candidate_ranked_ids"] = fixture["query_evidence"][
                 query_number
             ]["candidate_ranked_ids"]
+        digest = audit.ranked_query_evidence_result(
+            fixture, 16
+        )["candidate_identity_rank_sha256"]
+        fixture["candidate_identity_rank_sha256"] = digest
+        fixture["repeat_candidate_identity_rank_sha256"] = digest
         fixture["quality"]["all"]["mean_exact_id_recall_at_k"] = 0.0
         fixture["quality"]["all"]["mean_top1_exact_id"] = 0.0
         for item in fixture["sqlite_restart_measurements"]:
@@ -1321,6 +2641,21 @@ class BoundedActivationQualityContractTest(unittest.TestCase):
         self.assertIn("exact identity recall below invariant", result["failures"])
         self.assertIn("exact top-1 below invariant", result["failures"])
         self.assertIn("restart remains proportional to history", result["failures"])
+
+    def test_accepts_one_nonclusterable_top1_miss_in_512_queries(self) -> None:
+        fixture = self.quality_fixture()
+        fixture["query_evidence"][37]["candidate_ranked_ids"][0:2] = reversed(
+            fixture["query_evidence"][37]["candidate_ranked_ids"][0:2]
+        )
+        digest = audit.ranked_query_evidence_result(
+            fixture, 16
+        )["candidate_identity_rank_sha256"]
+        fixture["candidate_identity_rank_sha256"] = digest
+        fixture["repeat_candidate_identity_rank_sha256"] = digest
+        fixture["quality"]["all"]["mean_top1_exact_id"] = 511 / 512
+        result = self.audit_result(fixture)
+        self.assertTrue(result["passed"], result["failures"])
+        self.assertEqual(result["exact_top1_miss_count"], 1)
 
     def test_rejects_missing_mixed_input_coverage(self) -> None:
         fixture = self.quality_fixture()
@@ -1357,9 +2692,6 @@ class BoundedActivationQualityContractTest(unittest.TestCase):
             ]["candidate_ranked_ids"]
         result = self.audit_result(fixture, control)
         self.assertFalse(result["passed"])
-        self.assertIn(
-            "deterministic exact rank order differs", result["failures"]
-        )
         self.assertIn("fixed identity-rank probe differs", result["failures"])
 
     def test_rejects_unbound_query_count(self) -> None:
@@ -1378,6 +2710,18 @@ class BoundedActivationQualityContractTest(unittest.TestCase):
         self.assertIn(
             "restart remains proportional to history", result["failures"]
         )
+
+    def test_accepts_fraction_local_restart_probe_digests(self) -> None:
+        fixture = self.quality_fixture()
+        for index, digest in enumerate(("a" * 64, "b" * 64)):
+            fixture["sqlite_restart_measurements"][index][
+                "pre_restart_probe_identity_rank_sha256"
+            ] = digest
+            fixture["sqlite_restart_measurements"][index][
+                "post_restart_probe_identity_rank_sha256"
+            ] = digest
+        result = self.audit_result(fixture)
+        self.assertTrue(result["passed"], result["failures"])
 
     def test_rejects_vacuous_restart_series(self) -> None:
         fixture = self.quality_fixture()

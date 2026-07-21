@@ -7,6 +7,7 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
 #include "../src/operations/consolidation_epoch_profile_internal.hpp"
+#include "../src/store/commit_profile_internal.hpp"
 #include "../src/store/mutation_audit_internal.hpp"
 #include <algorithm>
 #include <any>
@@ -50,6 +51,27 @@ TEST_CASE ("SQLiteStore rejects bind parameter count mismatches",
   REQUIRE_THROWS_WITH (
       store->Execute ("SELECT ? AS value", {}),
       Catch::Matchers::ContainsSubstring ("parameter count mismatch"));
+}
+
+TEST_CASE ("SQLite commit table profiling does not require epoch profiling",
+           "[store][profiling][commit][regression]")
+{
+  cortext::testing::ScopedEnvVar work ("CORTEXT_PROFILE_WORK_COUNTERS", "1");
+  cortext::testing::ScopedEnvVar epoch (
+      "CORTEXT_PROFILE_CONSOLIDATION_EPOCH", "0");
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  store->Execute ("CREATE TABLE profiled_rows(id INTEGER PRIMARY KEY)");
+  auto transaction = store->Begin ();
+  transaction->Execute ("INSERT INTO profiled_rows VALUES(1)");
+  transaction->Commit ();
+  const auto profile
+      = cortext::internal::ConsumeSQLiteCommitProfile (store.get ());
+  REQUIRE (profile.available);
+  const auto count = std::find_if (
+      profile.table_row_counts.begin (), profile.table_row_counts.end (),
+      [] (const auto &entry) { return entry.first == "profiled_rows"; });
+  REQUIRE (count != profile.table_row_counts.end ());
+  REQUIRE (count->second == 1);
 }
 
 TEST_CASE ("SQLite mutation audit publishes committed logical identities",
@@ -108,6 +130,7 @@ TEST_CASE ("SQLite mutation audit publishes committed logical identities",
       == 3);
   REQUIRE (MutationKeys (committed_batch.committed_hook_identities)
            == MutationKeys (committed_batch.committed_trigger_identities));
+  REQUIRE (committed_batch.commit_vec_lookup_count == 0);
 
   {
     auto transaction = store->Begin ();

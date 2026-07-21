@@ -6,6 +6,7 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "sparse_retrieval_knobs_internal.hpp"
 #include <algorithm>
 #include <any>
 #include <chrono>
@@ -51,13 +52,30 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   // Uses unified memories table which contains per-memory state.
   const double tag_weight = core::ConsolidationCandidateTagWeight (
       F_raw, S_raw, T);
+  const auto candidate_input_limit
+      = sparse_retrieval_knobs_internal::ActivationIdentityTarget (
+          F_raw, S_raw, T);
+  const auto association_edge_limit
+      = sparse_retrieval_knobs_internal::GraphNeighborCount (
+          F_raw, S_raw, T);
   const std::string query
-      = "WITH edge_counts AS ("
-        "  SELECT m.memory_id, "
-        "         (SELECT COUNT(*) FROM associations a "
-        "          WHERE a.source_memory_id = m.memory_id "
-        "             OR a.target_memory_id = m.memory_id) AS cnt "
-        "  FROM memories m"
+      = "WITH candidate_ids AS MATERIALIZED ("
+        "  SELECT memory_id "
+        "  FROM memories INDEXED BY idx_memories_ltm_strength_created "
+        "  WHERE kind = 'LONG_TERM' "
+        "  ORDER BY strength ASC, created_at ASC, embedding_id ASC "
+        "  LIMIT ?8"
+        "), input_count AS ("
+        "  SELECT COUNT(*) AS candidate_input_count FROM candidate_ids"
+        "), edge_counts AS ("
+        "  SELECT ci.memory_id, "
+        "         (SELECT COUNT(*) FROM ("
+        "            SELECT 1 FROM associations a "
+        "            WHERE a.source_memory_id = ci.memory_id "
+        "               OR a.target_memory_id = ci.memory_id "
+        "            LIMIT ?9"
+        "          )) AS cnt "
+        "  FROM candidate_ids ci"
         "), max_cnt AS ("
         "  SELECT COALESCE(MAX(cnt), 0) AS maximum FROM edge_counts"
         "), scored AS ("
@@ -74,30 +92,54 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
         "                  ELSE 0.0 END)) AS computed_score, "
         "         COALESCE(cme.embedding, e.embedding) AS embedding, "
         "         m.created_at "
-        "  FROM memories m "
+        "  FROM candidate_ids ci "
+        "  JOIN memories m ON m.memory_id = ci.memory_id "
         "  JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
         "  JOIN embeddings e ON m.embedding_id = e.embedding_id "
         "  LEFT JOIN current_memory_embeddings cme "
         "    ON cme.memory_id = m.memory_id "
         "  LEFT JOIN edge_counts ec ON ec.memory_id = m.memory_id "
         "  CROSS JOIN max_cnt "
-        "  WHERE m.kind = 'LONG_TERM' "
-        "    AND m.cluster_id IS NULL"
+        "  WHERE m.cluster_id IS NULL"
         ") "
-        "SELECT memory_id, embedding_id, computed_score, embedding "
-        "FROM scored WHERE computed_score < ?7 "
-        "ORDER BY computed_score ASC, created_at ASC, memory_id ASC;";
+        "SELECT memory_id, embedding_id, computed_score, embedding, "
+        "       created_at, candidate_input_count, 0 AS sentinel "
+        "FROM scored CROSS JOIN input_count WHERE computed_score < ?7 "
+        "UNION ALL "
+        "SELECT NULL, NULL, NULL, NULL, NULL, candidate_input_count, "
+        "       1 AS sentinel FROM input_count "
+        "ORDER BY sentinel ASC, computed_score ASC, created_at ASC, "
+        "         memory_id ASC;";
   const auto candidate_query_start = std::chrono::steady_clock::now ();
   auto rows = tx.Execute (
       query,
       { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
-        floor_cutoff });
+        floor_cutoff, static_cast<long long> (candidate_input_limit),
+        static_cast<long long> (association_edge_limit) });
   context.AddOperationTiming (
       "ScoreConsolidation.candidate_query_sql",
       std::chrono::duration<double, std::milli> (
           std::chrono::steady_clock::now () - candidate_query_start)
           .count ());
   internal::ThrowIfStopRequested ();
+  long long candidate_input_count = 0;
+  if (!rows.empty ())
+    {
+      const auto input_count = rows.back ().find ("candidate_input_count");
+      if (input_count != rows.back ().end ()
+          && input_count->second.type () == typeid (long long))
+        candidate_input_count
+            = std::any_cast<long long> (input_count->second);
+    }
+  context.AddOperationTiming (
+      "ScoreConsolidation.candidate_input_limit",
+      static_cast<double> (candidate_input_limit));
+  context.AddOperationTiming (
+      "ScoreConsolidation.candidate_input_count",
+      static_cast<double> (candidate_input_count));
+  context.AddOperationTiming (
+      "ScoreConsolidation.association_edge_limit",
+      static_cast<double> (association_edge_limit));
   std::vector<ConsolidationCandidate> candidates;
   if (!rows.empty())
     {
