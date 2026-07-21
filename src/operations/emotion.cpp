@@ -4,6 +4,7 @@
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
+#include "emotional_metadata_cache_internal.hpp"
 #include "../experimental_env.hpp"
 
 #include <algorithm>
@@ -133,6 +134,9 @@ ApplyEmotionalConsolidation::Execute (OperationContext &context, Transaction &tx
               "WHERE embedding_id = ?;",
               { flashbulb, mem_emotion, half_life_bonus, detail_suppression,
                 gist_components, cascade_radius, cascade_decay, id });
+  emotional_metadata_cache_internal::OverwriteEmbedding (
+      p_ctx, id, flashbulb != 0, mem_emotion, half_life_bonus,
+      cascade_radius, cascade_decay);
 }
 
 } // namespace cortext::operations

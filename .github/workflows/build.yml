@@ -19,7 +19,7 @@ jobs:
         sudo apt-get install -y cmake build-essential pkg-config libsqlite3-dev
 
     - name: Configure CMake
-      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+      run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON -DCORTEXT_EXPERIMENT_HOOKS=ON
 
     - name: Build
       run: cmake --build build -j8
@@ -38,7 +38,7 @@ jobs:
         docker run --rm -v "$PWD:/workspace" -w /workspace archlinux:base-devel bash -lc '
           pacman -Syu --noconfirm cmake make gcc pkgconf sqlite git
           git config --global --add safe.directory /workspace
-          cmake -S . -B build-arch -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+          cmake -S . -B build-arch -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON -DCORTEXT_EXPERIMENT_HOOKS=ON
           cmake --build build-arch -j"$(nproc)"
           ./build-arch/tests/cortext_tests "~[aist]" --reporter compact
         '
@@ -66,7 +66,7 @@ jobs:
       run: python3 scripts/download_aist_model.py --output-dir models --quant q8_0
 
     - name: Configure CMake
-      run: cmake -S . -B build-aist -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON
+      run: cmake -S . -B build-aist -DCMAKE_BUILD_TYPE=Release -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON -DCORTEXT_EXPERIMENT_HOOKS=ON
 
     - name: Build
       run: cmake --build build-aist -j8
@@ -86,7 +86,7 @@ jobs:
         sudo apt-get install -y cmake build-essential pkg-config libsqlite3-dev
 
     - name: Configure CMake
-      run: cmake -S . -B build-sanitizers -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON -DCORTEXT_ENABLE_ASAN=ON -DCORTEXT_ENABLE_UBSAN=ON
+      run: cmake -S . -B build-sanitizers -DCMAKE_BUILD_TYPE=Debug -DCORTEXT_FETCH_AIST_MODEL=OFF -DCORTEXT_DISABLE_OPENTELEMETRY=ON -DCORTEXT_EXPERIMENT_HOOKS=ON -DCORTEXT_ENABLE_ASAN=ON -DCORTEXT_ENABLE_UBSAN=ON
 
     - name: Build
       run: cmake --build build-sanitizers -j8

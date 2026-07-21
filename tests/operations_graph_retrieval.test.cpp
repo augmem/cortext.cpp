@@ -1,8 +1,12 @@
 #include "test_helpers.hpp"
+#include "../src/operations/association_fanout_cache_internal.hpp"
 #include "../src/operations/constructive_recall_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
+#include "../src/operations/sparse_retrieval_route_internal.hpp"
+#include "../src/operations/sparse_retrieval_route_sqlite_internal.hpp"
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cortext/core/utils.hpp>
@@ -17,9 +21,12 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -27,6 +34,32 @@
 
 using namespace cortext;
 using cortext::operations::GraphAugmentedRetrieveCandidates;
+
+TEST_CASE ("retrieval surface mutation capture is explicit and ordered",
+           "[graph-retrieval][trace]")
+{
+  using namespace cortext::operations::retrieval_trace;
+  SetSurfaceMutationCaptureEnabled (false);
+  RecordSurfaceUpsert (1, 2, { 1.0f, 0.0f });
+  REQUIRE (GetSurfaceMutations ().empty ());
+
+  SetSurfaceMutationCaptureEnabled (true);
+  ClearSurfaceMutations ();
+  RecordSurfaceUpsert (7, 11, { 0.25f, 0.75f });
+  RecordSurfaceRemove (7);
+  const auto &mutations = GetSurfaceMutations ();
+  REQUIRE (mutations.size () == 2);
+  CHECK (mutations[0].action == SurfaceMutation::Action::Upsert);
+  CHECK (mutations[0].memory_id == 7);
+  CHECK (mutations[0].embedding_id == 11);
+  CHECK ((mutations[0].embedding
+          == std::vector<float>{ 0.25f, 0.75f }));
+  CHECK (mutations[1].action == SurfaceMutation::Action::Remove);
+  CHECK (mutations[1].memory_id == 7);
+
+  SetSurfaceMutationCaptureEnabled (false);
+  REQUIRE (GetSurfaceMutations ().empty ());
+}
 
 namespace
 {
@@ -38,6 +71,930 @@ UnitVec (int dim)
   Eigen::VectorXf v = Eigen::VectorXf::Zero (kEmbeddingDim);
   v[dim] = 1.0f;
   return v;
+}
+
+TEST_CASE ("Sparse retrieval route is deterministic across upsert and remove",
+           "[operations][graph][retrieval][hnsw]")
+{
+  using operations::sparse_retrieval_route_internal::Route;
+  const std::vector<std::pair<long long, Eigen::VectorXf>> entries {
+    { 10, UnitVec (0) }, { 20, UnitVec (1) }, { 30, UnitVec (2) }
+  };
+  const auto parameters
+      = operations::sparse_retrieval_route_internal::DefaultParameters ();
+  auto first = Route::Create (kEmbeddingDim, entries, parameters);
+  auto second = Route::Create (kEmbeddingDim, entries, parameters);
+  REQUIRE (first != nullptr);
+  REQUIRE (second != nullptr);
+  REQUIRE (first->DeltaSize () == 0);
+  REQUIRE (first->Search (UnitVec (0), 2)
+           == second->Search (UnitVec (0), 2));
+  REQUIRE (first->Search (UnitVec (0), 2)->front () == 10);
+
+  REQUIRE (first->Upsert (10, UnitVec (3)));
+  REQUIRE (first->DeltaSize () == 1);
+  REQUIRE (first->Search (UnitVec (3), 3)->front () == 10);
+  REQUIRE (first->Sync (
+      { { 10, UnitVec (0) }, { 20, UnitVec (1) }, { 30, UnitVec (2) } }));
+  REQUIRE (first->DeltaSize () == 0);
+  REQUIRE (first->Remove (10));
+  REQUIRE (first->DeltaSize () == 1);
+  const auto after_remove = first->Search (UnitVec (3), 3);
+  REQUIRE (after_remove.has_value ());
+  REQUIRE (std::find (after_remove->begin (), after_remove->end (), 10)
+           == after_remove->end ());
+  REQUIRE (first->Size () == 2);
+  REQUIRE (first->SealDelta ());
+  REQUIRE (first->DeltaSize () == 0);
+  REQUIRE (first->Size () == 2);
+  REQUIRE (first->Search (UnitVec (0), 3)->front () != 10);
+  REQUIRE (first->Upsert (10, UnitVec (0)));
+  REQUIRE (first->SealDelta ());
+  REQUIRE (first->DeltaSize () == 0);
+  REQUIRE (first->Size () == 3);
+  REQUIRE (first->Search (UnitVec (0), 3)->front () == 10);
+}
+
+TEST_CASE ("Sparse retrieval route repairs below an empty upper-layer entry",
+           "[operations][graph][retrieval][hnsw][regression]")
+{
+  using operations::sparse_retrieval_route_internal::NodeSnapshot;
+  using operations::sparse_retrieval_route_internal::Route;
+  auto route = Route::CreateWithLevelsForTest (
+      kEmbeddingDim, { { 1, UnitVec (1) }, { 2, UnitVec (2) } },
+      { 2, 1 },
+      operations::sparse_retrieval_route_internal::DeriveParameters (
+          0.0, 0.0, 0.0));
+  REQUIRE (route);
+  const auto snapshot = route->Snapshot ({});
+  REQUIRE (snapshot);
+  REQUIRE (snapshot->entry_memory_id == 1);
+  REQUIRE (snapshot->max_level == 2);
+  const auto entry = std::find_if (
+      snapshot->nodes.begin (), snapshot->nodes.end (),
+      [&] (const NodeSnapshot &node) {
+        return node.memory_id == snapshot->entry_memory_id;
+      });
+  REQUIRE (entry != snapshot->nodes.end ());
+  REQUIRE (entry->links.size () == 3);
+  REQUIRE (entry->links[2].empty ());
+  const auto target = std::find_if (
+      snapshot->nodes.begin (), snapshot->nodes.end (),
+      [] (const NodeSnapshot &node) { return node.memory_id == 2; });
+  REQUIRE (target != snapshot->nodes.end ());
+  REQUIRE (target->level == 1);
+
+  const long long target_memory_id = target->memory_id;
+  REQUIRE (route->Upsert (target_memory_id, UnitVec (200)));
+  REQUIRE (route->SealDelta ());
+  const auto result = route->Search (UnitVec (200), 1);
+  REQUIRE (result);
+  REQUIRE (result->size () == 1);
+  REQUIRE (result->front () == target_memory_id);
+}
+
+TEST_CASE ("SQLite sparse route restart and query work stay row bounded",
+           "[operations][graph][retrieval][hnsw][sqlite]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters = operations::sparse_retrieval_route_sqlite_internal::
+      DefaultParameters ();
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  for (long long index = 0; index < 600; ++index)
+    entries.emplace_back (index + 1,
+                          UnitVec (static_cast<int> (
+                              index % kEmbeddingDim)));
+  auto hnsw = HnswRoute::Create (
+      kEmbeddingDim, entries,
+      operations::sparse_retrieval_route_internal::DefaultParameters ());
+  REQUIRE (hnsw != nullptr);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route != nullptr);
+  REQUIRE (route->RestartRowsLoaded () == 1);
+  REQUIRE (route->ActivationSearchEffort () == parameters.search_ef);
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.search_node_budget);
+
+  const auto initial = route->Search (UnitVec (0), 32);
+  REQUIRE (initial.has_value ());
+  REQUIRE_FALSE (initial->empty ());
+  REQUIRE (initial->front () == 1);
+  REQUIRE (route->LastSearchNodeRows () == entries.size ());
+  REQUIRE (route->LastSearchNodeRows () <= parameters.search_node_budget);
+  REQUIRE (route->CachedNodeRows () <= parameters.shadow_node_capacity);
+  REQUIRE (route->CacheOrderRows () <= parameters.shadow_node_capacity);
+
+  REQUIRE (route->ActivationEntryMemoryId () == 0);
+  const auto recenter_target
+      = route->Search (UnitVec (5), parameters.route_capacity);
+  REQUIRE (recenter_target);
+  REQUIRE_FALSE (recenter_target->empty ());
+  REQUIRE (route->Recenter (UnitVec (5)));
+  REQUIRE (route->ActivationEntryMemoryId () == recenter_target->front ());
+  REQUIRE (route->ActivationSearchEffort ()
+           == parameters.activation_search_ef_min);
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.activation_search_node_budget_min);
+  REQUIRE (route->Search (UnitVec (5), 32));
+  REQUIRE (route->ActivationSearchEffort ()
+           == std::min (parameters.search_ef,
+                        parameters.activation_search_ef_min
+                            + parameters.activation_search_ef_step));
+  REQUIRE (
+      route->ActivationSearchNodeBudget ()
+      == std::min (parameters.search_node_budget,
+                   parameters.activation_search_node_budget_min
+                       + parameters.activation_search_node_budget_step));
+  const auto effort_before_failed_recenter
+      = route->ActivationSearchEffort ();
+  const auto budget_before_failed_recenter
+      = route->ActivationSearchNodeBudget ();
+  store->Execute (
+      "CREATE TRIGGER fail_sparse_route_recenter BEFORE UPDATE "
+      "ON cortext_sparse_route_meta BEGIN "
+      "SELECT RAISE(ABORT, 'injected sparse route recenter failure'); END");
+  REQUIRE_FALSE (route->Recenter (UnitVec (6)));
+  REQUIRE (route->ActivationSearchEffort ()
+           == effort_before_failed_recenter);
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == budget_before_failed_recenter);
+  store->Execute ("DROP TRIGGER fail_sparse_route_recenter");
+  const auto before_restart = route->Search (UnitVec (0), 32);
+  REQUIRE (before_restart);
+
+  auto restarted = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (restarted != nullptr);
+  REQUIRE (restarted->RestartRowsLoaded () == 1);
+  REQUIRE (restarted->ActivationEntryMemoryId () == recenter_target->front ());
+  REQUIRE (restarted->ActivationSearchEffort () == parameters.search_ef);
+  REQUIRE (restarted->ActivationSearchNodeBudget ()
+           == parameters.search_node_budget);
+  REQUIRE (restarted->Search (UnitVec (0), 32) == before_restart);
+  REQUIRE (restarted->Upsert (1000, UnitVec (0)));
+  REQUIRE (restarted->Remove (1));
+  REQUIRE (restarted->StagePendingUpsert (1000, UnitVec (0)));
+  REQUIRE (restarted->StagePendingRemove (1));
+  REQUIRE (hnsw->Upsert (1000, UnitVec (0)));
+  REQUIRE (hnsw->Remove (1));
+  REQUIRE (hnsw->SealDelta ());
+  REQUIRE (restarted->DeltaSize () == 2);
+  store->Execute (
+      "CREATE TRIGGER fail_sparse_route_seal BEFORE UPDATE "
+      "ON cortext_sparse_route_nodes WHEN NEW.generation > 0 "
+      "BEGIN SELECT RAISE(ABORT, 'injected sparse route seal failure'); END");
+  REQUIRE_FALSE (restarted->Seal (hnsw.get ()));
+  REQUIRE (restarted->DeltaSize () == 2);
+  const auto pending = restarted->Search (UnitVec (0), 32);
+  REQUIRE (pending.has_value ());
+  REQUIRE (std::find (pending->begin (), pending->end (), 1)
+           == pending->end ());
+  REQUIRE (std::find (pending->begin (), pending->end (), 1000)
+           != pending->end ());
+  auto persisted_before_retry = SQLiteRoute::Open (
+      *store, kEmbeddingDim, parameters);
+  REQUIRE (persisted_before_retry);
+  REQUIRE (persisted_before_retry->HasDirtyMemoryIds ());
+  store->Execute ("DROP TRIGGER fail_sparse_route_seal");
+  REQUIRE (restarted->Seal (hnsw.get ()));
+  REQUIRE (restarted->DeltaSize () == 0);
+  REQUIRE (restarted->CachedNodeRows () == 0);
+  REQUIRE (restarted->CacheOrderRows () == 0);
+
+  restarted = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (restarted != nullptr);
+  const auto inserted_rows = store->Execute (
+      "SELECT active FROM cortext_sparse_route_nodes WHERE memory_id = ?",
+      { 1000LL });
+  REQUIRE (inserted_rows.size () == 1);
+  REQUIRE (store::AnyToLongLong (inserted_rows.front ().at ("active"))
+               .value_or (0)
+           == 1);
+  const auto after_seal = restarted->Search (UnitVec (0), 32);
+  REQUIRE (after_seal.has_value ());
+  REQUIRE (std::find (after_seal->begin (), after_seal->end (), 1)
+           == after_seal->end ());
+  const auto inserted = restarted->SearchActivated (UnitVec (0));
+  REQUIRE (inserted.has_value ());
+  REQUIRE (std::find (inserted->begin (), inserted->end (), 1000)
+           != inserted->end ());
+  REQUIRE (restarted->LastSearchNodeRows ()
+           <= parameters.search_node_budget);
+
+  Eigen::VectorXf row_addressed = Eigen::VectorXf::Zero (kEmbeddingDim);
+  row_addressed[0] = 0.6f;
+  row_addressed[1] = 0.8f;
+  REQUIRE (restarted->Upsert (2000, row_addressed));
+  REQUIRE (restarted->StagePendingUpsert (2000, row_addressed));
+  REQUIRE (restarted->DeltaSize () == 1);
+  REQUIRE (restarted->Seal ());
+  REQUIRE (restarted->LastSearchNodeRows ()
+           <= parameters.backfill_search_node_budget);
+  REQUIRE (restarted->ActivationSearchEffort () == parameters.search_ef);
+  REQUIRE (restarted->ActivationSearchNodeBudget ()
+           == parameters.search_node_budget);
+  REQUIRE (restarted->DeltaSize () == 0);
+  restarted = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (restarted != nullptr);
+  const auto row_addressed_inserted
+      = restarted->Search (row_addressed, 32);
+  REQUIRE (row_addressed_inserted.has_value ());
+  REQUIRE_FALSE (row_addressed_inserted->empty ());
+  REQUIRE (row_addressed_inserted->front () == 2000);
+  REQUIRE (restarted->LastSearchNodeRows ()
+           <= parameters.search_node_budget);
+  REQUIRE (restarted->Remove (2000));
+  REQUIRE (restarted->StagePendingRemove (2000));
+  REQUIRE (restarted->Seal ());
+  restarted = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (restarted != nullptr);
+  const auto row_addressed_removed
+      = restarted->Search (row_addressed, 32);
+  REQUIRE (row_addressed_removed.has_value ());
+  REQUIRE (std::find (row_addressed_removed->begin (),
+                      row_addressed_removed->end (), 2000)
+           == row_addressed_removed->end ());
+
+}
+
+TEST_CASE ("SQLite sparse route replaces a removed hierarchy entry",
+           "[operations][graph][retrieval][hnsw][sqlite][regression]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters = operations::sparse_retrieval_route_sqlite_internal::
+      DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  const std::vector<std::pair<long long, Eigen::VectorXf>> entries {
+    { 1, UnitVec (1) }, { 2, UnitVec (2) }, { 3, UnitVec (3) }
+  };
+  auto hnsw = HnswRoute::CreateWithLevelsForTest (
+      kEmbeddingDim, entries, { 3, 2, 1 }, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+
+  const auto before = store->Execute (
+      "SELECT entry_memory_id, max_level FROM cortext_sparse_route_meta");
+  REQUIRE (before.size () == 1);
+  REQUIRE (store::AnyToLongLong (before.front ().at ("entry_memory_id"))
+           == 1);
+  REQUIRE (route->Recenter (UnitVec (1)));
+  REQUIRE (route->ActivationEntryMemoryId () == 1);
+  REQUIRE (route->Remove (1));
+  REQUIRE (route->StagePendingRemove (1));
+  REQUIRE (route->Seal ());
+
+  const auto after = store->Execute (
+      "SELECT entry_memory_id, max_level, activation_entry_memory_id, "
+      "activation_generation, activation_centroid, activation_identity_ids "
+      "FROM cortext_sparse_route_meta");
+  REQUIRE (after.size () == 1);
+  REQUIRE (store::AnyToLongLong (after.front ().at ("entry_memory_id"))
+           == 2);
+  REQUIRE (store::AnyToLongLong (after.front ().at ("max_level")) == 2);
+  REQUIRE (store::AnyToLongLong (
+               after.front ().at ("activation_entry_memory_id"))
+           == 0);
+  REQUIRE (store::AnyToLongLong (
+               after.front ().at ("activation_generation"))
+           == 0);
+  REQUIRE (store::BlobFromAny (after.front ().at ("activation_centroid"))
+               .empty ());
+  REQUIRE (store::BlobFromAny (
+               after.front ().at ("activation_identity_ids"))
+               .empty ());
+  auto reopened = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (reopened);
+  REQUIRE (reopened->ActivationEntryMemoryId () == 0);
+  const auto result = reopened->Search (UnitVec (2), 3);
+  REQUIRE (result);
+  REQUIRE_FALSE (result->empty ());
+  REQUIRE (result->front () == 2);
+
+  REQUIRE (route->Upsert (1, UnitVec (1)));
+  REQUIRE (route->StagePendingUpsert (1, UnitVec (1)));
+  REQUIRE (route->Seal ());
+  const auto reactivated = store->Execute (
+      "SELECT entry_memory_id, max_level FROM cortext_sparse_route_meta");
+  REQUIRE (reactivated.size () == 1);
+  REQUIRE (store::AnyToLongLong (
+               reactivated.front ().at ("entry_memory_id"))
+           == 1);
+  REQUIRE (store::AnyToLongLong (reactivated.front ().at ("max_level"))
+           == 3);
+  reopened = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (reopened);
+  const auto restored = reopened->Search (UnitVec (1), 3);
+  REQUIRE (restored);
+  REQUIRE_FALSE (restored->empty ());
+  REQUIRE (restored->front () == 1);
+}
+
+TEST_CASE ("SQLite sparse route restores the canonical same-level entry tie",
+           "[operations][graph][retrieval][hnsw][sqlite][regression]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters = operations::sparse_retrieval_route_sqlite_internal::
+      DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  const std::vector<std::pair<long long, Eigen::VectorXf>> entries {
+    { 1, UnitVec (1) }, { 2, UnitVec (2) }, { 3, UnitVec (3) }
+  };
+  auto hnsw = HnswRoute::CreateWithLevelsForTest (
+      kEmbeddingDim, entries, { 2, 2, 1 }, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+
+  REQUIRE (route->Remove (1));
+  REQUIRE (route->StagePendingRemove (1));
+  REQUIRE (route->Seal ());
+  auto meta = store->Execute (
+      "SELECT entry_memory_id, max_level FROM cortext_sparse_route_meta");
+  REQUIRE (meta.size () == 1);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("entry_memory_id")) == 2);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("max_level")) == 2);
+
+  REQUIRE (route->Upsert (1, UnitVec (1)));
+  REQUIRE (route->StagePendingUpsert (1, UnitVec (1)));
+  REQUIRE (route->Seal ());
+  meta = store->Execute (
+      "SELECT entry_memory_id, max_level FROM cortext_sparse_route_meta");
+  REQUIRE (meta.size () == 1);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("entry_memory_id")) == 1);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("max_level")) == 2);
+
+  auto reopened = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (reopened);
+  const auto result = reopened->Search (UnitVec (1), 3);
+  REQUIRE (result);
+  REQUIRE_FALSE (result->empty ());
+  REQUIRE (result->front () == 1);
+}
+
+TEST_CASE ("SQLite sparse route invalidates stale links after an active "
+           "embedding moves",
+           "[operations][graph][retrieval][hnsw][sqlite][regression]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters = operations::sparse_retrieval_route_sqlite_internal::
+      DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  const std::vector<std::pair<long long, Eigen::VectorXf>> entries {
+    { 1, UnitVec (1) }, { 2, UnitVec (2) }, { 3, UnitVec (3) }
+  };
+  auto hnsw = HnswRoute::Create (kEmbeddingDim, entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+
+  REQUIRE (route->Upsert (2, entries[1].second));
+  REQUIRE (route->StagePendingUpsert (2, entries[1].second));
+  REQUIRE (route->Seal ());
+  REQUIRE (route->Upsert (2, UnitVec (200)));
+  REQUIRE (route->StagePendingUpsert (2, UnitVec (200)));
+  REQUIRE_FALSE (route->Seal ());
+  REQUIRE (route->LastSealFailureCode () == 62);
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_meta")
+               .empty ());
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .empty ());
+  REQUIRE_FALSE (
+      SQLiteRoute::Open (*store, kEmbeddingDim, parameters));
+}
+
+TEST_CASE ("SQLite sparse route rejects a legacy dead activation member",
+           "[operations][graph][retrieval][hnsw][sqlite][restart]"
+           "[migration][regression]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters = operations::sparse_retrieval_route_sqlite_internal::
+      DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  const std::vector<std::pair<long long, Eigen::VectorXf>> entries {
+    { 1, UnitVec (1) }, { 2, UnitVec (2) }, { 3, UnitVec (3) }
+  };
+  auto hnsw = HnswRoute::CreateWithLevelsForTest (
+      kEmbeddingDim, entries, { 3, 2, 1 }, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+  REQUIRE (route->Recenter (UnitVec (2)));
+  REQUIRE (route->ActivationEntryMemoryId () == 2);
+
+  // Prior code could seal this removal without clearing the activation
+  // snapshot. The canonical entry remains healthy, so restart must validate
+  // the independently bounded snapshot identities rather than only its root.
+  store->Execute (
+      "UPDATE cortext_sparse_route_nodes SET active = 0 WHERE memory_id = 2");
+  REQUIRE_FALSE (SQLiteRoute::Open (*store, kEmbeddingDim, parameters));
+}
+
+TEST_CASE ("SQLite sparse route rejects and rebuilds a legacy dead entry",
+           "[operations][graph][retrieval][hnsw][sqlite][restart]"
+           "[migration][regression]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters = operations::sparse_retrieval_route_sqlite_internal::
+      DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (400);
+  for (long long memory_id = 1; memory_id <= 400; ++memory_id)
+    entries.emplace_back (
+        memory_id,
+        UnitVec (static_cast<int> (memory_id % kEmbeddingDim)));
+  auto hnsw = HnswRoute::Create (kEmbeddingDim, entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  REQUIRE (SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters));
+
+  // Reproduce a route sealed by the prior code: metadata still names the
+  // removed maximum-level node, while that node is already inactive.
+  const auto prior_meta = store->Execute (
+      "SELECT entry_memory_id FROM cortext_sparse_route_meta");
+  REQUIRE (prior_meta.size () == 1);
+  const long long dead_entry
+      = store::AnyToLongLong (prior_meta.front ().at ("entry_memory_id"))
+            .value_or (0);
+  REQUIRE (dead_entry > 0);
+  store->Execute (
+      "UPDATE cortext_sparse_route_nodes SET active = 0 WHERE memory_id = ?",
+      { dead_entry });
+  REQUIRE_FALSE (SQLiteRoute::Open (*store, kEmbeddingDim, parameters));
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  state.sparse_route_parameters = parameters;
+  long long expected_memory_id = 0;
+  Eigen::VectorXf expected_embedding;
+  for (std::size_t index = 0; index < entries.size (); ++index)
+    {
+      const auto &[memory_id, embedding] = entries[index];
+      if (memory_id == dead_entry)
+        continue;
+      if (expected_memory_id == 0)
+        {
+          expected_memory_id = memory_id;
+          expected_embedding = embedding;
+        }
+      const std::size_t state_index = state.current_entries.size ();
+      state.current_entries.emplace_back (
+          memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+          embedding, memory_id);
+      state.current_memory_index.emplace (memory_id, state_index);
+      state.current_memory_order.emplace (memory_id, state_index);
+    }
+  std::size_t advances = 0;
+  while (!state.sqlite_sparse_route && advances++ < 10)
+    REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route);
+  const auto reopened = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (reopened);
+  const auto result = reopened->Search (expected_embedding, 2);
+  REQUIRE (result);
+  REQUIRE_FALSE (result->empty ());
+  REQUIRE (result->front () == expected_memory_id);
+}
+
+TEST_CASE ("Consolidation resets the experimental derived retrieval sawtooth",
+           "[operations][graph][retrieval][hnsw][sqlite][consolidation]"
+           "[activation][knobs][experiment_hooks]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  cortext::testing::ScopedEnvVar envelope (
+      "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", "20");
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.0, 0.0, 0.0);
+  const std::size_t step = parameters.reciprocal_update_count;
+  REQUIRE (parameters.activation_search_node_budget_min
+           == parameters.route_capacity * 4 + step);
+  REQUIRE (parameters.activation_search_node_budget_step == step);
+  REQUIRE (parameters.activation_search_ef_min
+           == parameters.activation_search_node_budget_min);
+  REQUIRE (parameters.activation_search_ef_step == step);
+
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (700);
+  for (long long memory_id = 1; memory_id <= 700; ++memory_id)
+    entries.emplace_back (
+        memory_id,
+        UnitVec (static_cast<int> (memory_id % kEmbeddingDim)));
+  auto hnsw = HnswRoute::Create (kEmbeddingDim, entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.search_node_budget);
+  REQUIRE (route->Recenter (UnitVec (0)));
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.activation_search_node_budget_min);
+  REQUIRE (route->ActivationSearchEffort ()
+           == parameters.activation_search_ef_min);
+
+  REQUIRE (route->SearchActivated (UnitVec (0)));
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.activation_search_node_budget_min + step);
+  REQUIRE (route->ActivationSearchEffort ()
+           == parameters.activation_search_ef_min + step);
+  while (route->ActivationSearchNodeBudget ()
+         < parameters.search_node_budget)
+    REQUIRE (route->SearchActivated (UnitVec (0)));
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.search_node_budget);
+  REQUIRE (route->ActivationSearchEffort () == parameters.search_ef);
+}
+
+TEST_CASE ("Quality-preserving experimental retrieval sawtooth keeps the "
+           "canonical floor",
+           "[operations][graph][retrieval][hnsw][sqlite][consolidation]"
+           "[activation][knobs][experiment_hooks]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  cortext::testing::ScopedEnvVar envelope (
+      "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", "21");
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.0, 0.0, 0.0);
+  const std::size_t step = parameters.reciprocal_update_count;
+  REQUIRE (parameters.activation_search_node_budget_min
+           == parameters.route_capacity * 5);
+  REQUIRE (parameters.activation_search_node_budget_step == step);
+  REQUIRE (parameters.search_node_budget == parameters.route_capacity * 6);
+  REQUIRE (parameters.search_ef == parameters.search_node_budget);
+  REQUIRE (parameters.activation_search_ef_min
+           == parameters.activation_search_node_budget_min);
+  REQUIRE (parameters.activation_search_ef_step == step);
+  REQUIRE (parameters.total_query_row_budget
+           == parameters.search_node_budget
+                  + parameters.activation_identity_target);
+
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (500);
+  for (long long memory_id = 1; memory_id <= 500; ++memory_id)
+    entries.emplace_back (
+        memory_id,
+        UnitVec (static_cast<int> (memory_id % kEmbeddingDim)));
+  auto hnsw = HnswRoute::Create (kEmbeddingDim, entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.search_node_budget);
+  REQUIRE (route->Recenter (UnitVec (0)));
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.activation_search_node_budget_min);
+  REQUIRE (route->ActivationSearchEffort ()
+           == parameters.activation_search_ef_min);
+  REQUIRE (route->SearchActivated (UnitVec (0)));
+  REQUIRE (route->ActivationSearchNodeBudget ()
+           == parameters.activation_search_node_budget_min + step);
+  REQUIRE (route->ActivationSearchEffort ()
+           == parameters.activation_search_ef_min + step);
+}
+
+TEST_CASE ("Experimental retrieval sawtooth can raise only its derived floor",
+           "[operations][graph][retrieval][hnsw][sqlite][consolidation]"
+           "[activation][knobs][experiment_hooks]")
+{
+  cortext::testing::ScopedEnvVar envelope (
+      "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", "22");
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.5, 0.5, 0.5);
+  REQUIRE (parameters.activation_search_node_budget_min
+           == parameters.route_capacity * 6);
+  REQUIRE (parameters.activation_search_ef_min
+           == parameters.route_capacity * 6);
+  REQUIRE (parameters.search_node_budget == parameters.route_capacity * 7);
+  REQUIRE (parameters.search_ef == parameters.route_capacity * 7);
+  REQUIRE (parameters.activation_search_node_budget_step
+           == parameters.reciprocal_update_count);
+  REQUIRE (parameters.activation_search_ef_step
+           == parameters.reciprocal_update_count);
+  REQUIRE (parameters.total_query_row_budget
+           == parameters.search_node_budget
+                  + parameters.activation_identity_target);
+}
+
+TEST_CASE ("Experimental retrieval floor ablation remains knob-derived",
+           "[operations][graph][retrieval][hnsw][sqlite][consolidation]"
+           "[activation][knobs][experiment_hooks]")
+{
+  cortext::testing::ScopedEnvVar envelope (
+      "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", "23");
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.5, 0.5, 0.5);
+  REQUIRE (parameters.activation_search_node_budget_min
+           == parameters.route_capacity * 7);
+  REQUIRE (parameters.activation_search_ef_min
+           == parameters.route_capacity * 7);
+  REQUIRE (parameters.search_node_budget == parameters.route_capacity * 8);
+  REQUIRE (parameters.search_ef == parameters.route_capacity * 8);
+  REQUIRE (parameters.activation_search_node_budget_step
+           == parameters.reciprocal_update_count);
+  REQUIRE (parameters.activation_search_ef_step
+           == parameters.reciprocal_update_count);
+  REQUIRE (parameters.total_query_row_budget
+           == parameters.search_node_budget
+                  + parameters.activation_identity_target);
+}
+
+TEST_CASE ("Final adjacent retrieval floor ablation remains knob-derived",
+           "[operations][graph][retrieval][hnsw][sqlite][consolidation]"
+           "[activation][knobs][experiment_hooks]")
+{
+  const auto production
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.5, 0.5, 0.5);
+  cortext::testing::ScopedEnvVar envelope (
+      "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", "24");
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.5, 0.5, 0.5);
+  REQUIRE (parameters.activation_search_node_budget_min
+           == parameters.route_capacity * 8);
+  REQUIRE (parameters.activation_search_ef_min
+           == parameters.route_capacity * 8);
+  REQUIRE (parameters.search_node_budget == parameters.route_capacity * 9);
+  REQUIRE (parameters.search_ef == parameters.route_capacity * 9);
+  REQUIRE (parameters.activation_search_node_budget_step
+           == parameters.reciprocal_update_count);
+  REQUIRE (parameters.activation_search_ef_step
+           == parameters.reciprocal_update_count);
+  REQUIRE (parameters.total_query_row_budget
+           == parameters.search_node_budget
+                  + parameters.activation_identity_target);
+  REQUIRE (parameters.search_node_budget == production.search_node_budget);
+  REQUIRE (parameters.activation_search_node_budget_min
+           == production.activation_search_node_budget_min);
+  REQUIRE (parameters.activation_search_node_budget_step
+           == production.activation_search_node_budget_step);
+  REQUIRE (parameters.search_ef == production.search_ef);
+  REQUIRE (parameters.activation_search_ef_min
+           == production.activation_search_ef_min);
+  REQUIRE (parameters.activation_search_ef_step
+           == production.activation_search_ef_step);
+  REQUIRE (parameters.total_query_row_budget
+           == production.total_query_row_budget);
+}
+
+TEST_CASE ("Mature SQLite activation fills its knob-derived node envelope "
+           "across inactive graph rows",
+           "[operations][graph][retrieval][hnsw][sqlite][consolidation]"
+           "[regression]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.0, 0.0, 0.0);
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  const long long active_count
+      = static_cast<long long> (parameters.search_node_budget - 1);
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (static_cast<std::size_t> (active_count));
+  for (long long memory_id = 1; memory_id <= active_count; ++memory_id)
+    entries.emplace_back (
+        memory_id,
+        UnitVec (static_cast<int> (memory_id % (kEmbeddingDim - 1)) + 1));
+  auto hnsw = HnswRoute::Create (
+      kEmbeddingDim, entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+  const std::vector<unsigned char> empty_level_zero_links {
+    1, 0, 0, 0, 0, 0, 0, 0
+  };
+  const long long inactive_memory_id = active_count + 1;
+  store->Execute (
+      "INSERT INTO cortext_sparse_route_nodes("
+      "memory_id, embedding, level, links, active, generation) "
+      "SELECT ?, embedding, 0, ?, 0, generation "
+      "FROM cortext_sparse_route_nodes WHERE memory_id = 1",
+      { inactive_memory_id, empty_level_zero_links });
+  const long long isolated_active_memory_id = inactive_memory_id + 1;
+  const auto isolated_embedding = UnitVec (0);
+  std::vector<unsigned char> isolated_embedding_bytes (
+      static_cast<std::size_t> (isolated_embedding.size ())
+      * sizeof (float));
+  std::memcpy (isolated_embedding_bytes.data (), isolated_embedding.data (),
+               isolated_embedding_bytes.size ());
+  store->Execute (
+      "INSERT INTO cortext_sparse_route_nodes("
+      "memory_id, embedding, level, links, active, generation) "
+      "SELECT ?, ?, 0, ?, 1, generation "
+      "FROM cortext_sparse_route_nodes WHERE memory_id = 1",
+      { isolated_active_memory_id, isolated_embedding_bytes,
+        empty_level_zero_links });
+  store->Execute (
+      "UPDATE cortext_sparse_route_meta SET active_count = active_count + 1 "
+      "WHERE singleton = 1",
+      {});
+  route.reset ();
+  route = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (route);
+
+  const auto activated = route->SearchActivated (UnitVec (0));
+  REQUIRE (activated);
+  REQUIRE (activated->size () == parameters.activation_identity_target);
+  REQUIRE (std::find (activated->begin (), activated->end (),
+                      isolated_active_memory_id)
+           != activated->end ());
+  REQUIRE (std::find (activated->begin (), activated->end (),
+                      inactive_memory_id)
+           == activated->end ());
+  REQUIRE (route->LastSearchNodeRows ()
+           == parameters.search_node_budget);
+}
+
+TEST_CASE ("Consolidation rebuilds and restarts a knob-bounded SQLite "
+           "activation centroid",
+           "[operations][graph][retrieval][hnsw][sqlite][consolidation]"
+           "[activation][knobs][restart]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters = operations::sparse_retrieval_route_sqlite_internal::
+      DeriveParameters (0.0, 0.0, 0.0);
+  REQUIRE (parameters.activation_identity_target == 640);
+  REQUIRE (parameters.search_node_budget == 2304);
+  REQUIRE (parameters.activation_search_node_budget_min == 2048);
+  REQUIRE (parameters.activation_search_node_budget_step == 4);
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (1400);
+  for (long long memory_id = 1; memory_id <= 1400; ++memory_id)
+    entries.emplace_back (memory_id,
+                          UnitVec (memory_id <= 700 ? 0 : 1));
+  auto hnsw = HnswRoute::Create (
+      kEmbeddingDim, entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+  const Eigen::VectorXf observer_query = UnitVec (2);
+  const auto canonical_observer = route->Search (observer_query, 16);
+  REQUIRE (canonical_observer);
+  REQUIRE_FALSE (canonical_observer->empty ());
+  const auto initial_activation = route->SearchActivated (observer_query);
+  REQUIRE (initial_activation);
+  REQUIRE (initial_activation->size ()
+           == parameters.activation_identity_target);
+
+  REQUIRE (route->Recenter (UnitVec (0)));
+  const long long first_entry = route->ActivationEntryMemoryId ();
+  REQUIRE (first_entry > 0);
+  REQUIRE (first_entry <= 700);
+  const auto first_snapshot = route->ActivationIdentityIds ();
+  REQUIRE (first_snapshot.size ()
+           == parameters.activation_identity_target);
+  REQUIRE (first_snapshot.front () == first_entry);
+  const auto first_activation = route->SearchActivated (observer_query);
+  REQUIRE (first_activation);
+  REQUIRE (first_activation->size ()
+           == parameters.activation_identity_target);
+  REQUIRE (route->LastSearchNodeRows ()
+           <= parameters.search_node_budget);
+
+  route = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (route);
+  REQUIRE (route->ActivationEntryMemoryId () == first_entry);
+  const auto cold_ordinary = route->Search (observer_query, 16);
+  REQUIRE (cold_ordinary);
+  REQUIRE (route->LastActivationSnapshotCacheMissRows () == 0);
+  REQUIRE (route->LastActivationFrontierSeedCount () > 0);
+  REQUIRE (route->LastActivationFrontierSeedCount ()
+           < route->ActivationIdentityIds ().size ());
+  const std::size_t cold_seed_count
+      = route->LastActivationFrontierSeedCount ();
+  route = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (route);
+  REQUIRE (route->Search (observer_query, 16) == cold_ordinary);
+  REQUIRE (route->LastActivationFrontierSeedCount () == cold_seed_count);
+  REQUIRE (route->SearchActivated (observer_query) == first_activation);
+  REQUIRE (route->LastActivationSnapshotCacheMissRows () > 0);
+  REQUIRE (route->LastActivationSnapshotCacheMissRows ()
+           <= parameters.activation_identity_target);
+  REQUIRE (route->SearchActivated (observer_query) == first_activation);
+  REQUIRE (route->LastActivationSnapshotCacheMissRows () == 0);
+  REQUIRE (route->LastActivationFrontierSeedCount () > 0);
+  REQUIRE (route->LastActivationFrontierSeedCount ()
+           <= parameters.activation_identity_target);
+  REQUIRE (route->RestartRowsLoaded () == 1);
+
+  REQUIRE (route->Recenter (UnitVec (1)));
+  REQUIRE (route->LastActivationFrontierSeedCount () == 0);
+  const long long second_entry = route->ActivationEntryMemoryId ();
+  REQUIRE (second_entry > 700);
+  REQUIRE (second_entry != first_entry);
+  const auto second_snapshot = route->ActivationIdentityIds ();
+  REQUIRE (second_snapshot.size ()
+           == parameters.activation_identity_target);
+  REQUIRE (second_snapshot.front () == second_entry);
+  REQUIRE (second_snapshot != first_snapshot);
+  const auto second_activation = route->SearchActivated (observer_query);
+  REQUIRE (second_activation);
+  REQUIRE (second_activation->size ()
+           == parameters.activation_identity_target);
+  REQUIRE (*second_activation != *first_activation);
+  REQUIRE (second_activation->front () == canonical_observer->front ());
+  const auto shifted_query = route->SearchActivated (UnitVec (0));
+  REQUIRE (shifted_query);
+  REQUIRE (shifted_query->front () == 1);
+  REQUIRE (static_cast<std::size_t> (std::count_if (
+               shifted_query->begin (), shifted_query->end (),
+               [] (const long long memory_id) { return memory_id > 700; }))
+           == parameters.reciprocal_update_count);
+  REQUIRE (route->LastActivationSnapshotRows ()
+           <= parameters.activation_identity_target);
+  REQUIRE (route->LastSearchNodeRows ()
+           <= parameters.search_node_budget);
+
+  const auto metadata = store->Execute (
+      "SELECT activation_entry_memory_id, activation_generation, "
+      "length(activation_centroid) AS centroid_bytes, "
+      "length(activation_identity_ids) AS identity_bytes "
+      "FROM cortext_sparse_route_meta WHERE singleton = 1");
+  REQUIRE (metadata.size () == 1);
+  REQUIRE (std::any_cast<long long> (
+               metadata[0].at ("activation_entry_memory_id"))
+           == second_entry);
+  REQUIRE (std::any_cast<long long> (
+               metadata[0].at ("activation_generation"))
+           == 1);
+  REQUIRE (std::any_cast<long long> (metadata[0].at ("centroid_bytes"))
+           == static_cast<long long> (kEmbeddingDim * sizeof (float)));
+  REQUIRE (std::any_cast<long long> (metadata[0].at ("identity_bytes"))
+           == static_cast<long long> (
+               sizeof (std::uint32_t)
+               + parameters.activation_identity_target
+                     * sizeof (std::uint64_t)));
+
+  route = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (route);
+  REQUIRE (route->ActivationEntryMemoryId () == second_entry);
+  REQUIRE (route->ActivationIdentityIds () == second_snapshot);
+  REQUIRE (route->SearchActivated (observer_query) == second_activation);
+  REQUIRE (route->RestartRowsLoaded () == 1);
 }
 
 Eigen::VectorXf
@@ -211,11 +1168,16 @@ TEST_CASE ("Graph retrieval returns nearest retained memory",
   const auto out = processor.Process (MakeSignal (UnitVec (0), 2000));
   const auto selected
       = operations::retrieval_trace::GetLastSelectedEmbeddingOrder ();
+  const auto seeds = operations::retrieval_trace::GetLastSeedCandidates ();
   REQUIRE_FALSE (out.candidate_memory_ids.empty ());
   REQUIRE (std::find (out.candidate_memory_ids.begin (),
                       out.candidate_memory_ids.end (), 10)
            != out.candidate_memory_ids.end ());
   REQUIRE_FALSE (selected.empty ());
+  REQUIRE_FALSE (seeds.empty ());
+  REQUIRE (seeds.front ().memory_id == 10LL);
+  REQUIRE (seeds.front ().embedding_id > 0);
+  REQUIRE (seeds.front ().score >= seeds.back ().score);
   auto current_rows = store->Execute (
       "SELECT embedding_id FROM current_memory_embeddings "
       "WHERE memory_id = ?",
@@ -450,6 +1412,87 @@ TEST_CASE ("Graph retrieval keeps historical memory before its replacement time"
   const auto out = processor.Process (MakeSignal (UnitVec (0), 3000));
   REQUIRE_FALSE (out.candidate_memory_ids.empty ());
   REQUIRE (out.candidate_memory_ids.front () == 10LL);
+
+  const auto at_replacement
+      = processor.Process (MakeSignal (UnitVec (0), 5000));
+  REQUIRE (std::find (at_replacement.candidate_memory_ids.begin (),
+                      at_replacement.candidate_memory_ids.end (), 10LL)
+           != at_replacement.candidate_memory_ids.end ());
+
+  const auto after_replacement
+      = processor.Process (MakeSignal (UnitVec (0), 5001));
+  REQUIRE (std::find (after_replacement.candidate_memory_ids.begin (),
+                      after_replacement.candidate_memory_ids.end (), 10LL)
+           == after_replacement.candidate_memory_ids.end ());
+}
+
+TEST_CASE ("Family features are cached and replaced with their embedding",
+           "[operations][graph][retrieval][cache][family]")
+{
+  namespace surface_cache
+      = operations::historical_surface_search_cache_internal;
+  ProcessorContext pctx;
+  REQUIRE (surface_cache::Reset (
+      pctx, {}, { surface_cache::Entry { 100, 10, 1000, "LONG_TERM",
+                                        "source-a", UnitVec (0), 100 } }));
+
+  auto state = surface_cache::Find (pctx);
+  REQUIRE (state);
+  REQUIRE_FALSE (state->current_entries[0].family_features.has_value ());
+  const auto &first
+      = surface_cache::FamilyFeatures (state->current_entries[0]);
+  REQUIRE (first.normalized[0] == Catch::Approx (1.0f));
+  REQUIRE (state->current_entries[0].family_features.has_value ());
+  const auto *cached = &*state->current_entries[0].family_features;
+  REQUIRE (&surface_cache::FamilyFeatures (state->current_entries[0])
+           == cached);
+
+  surface_cache::UpsertCurrent (
+      pctx, { 200, 10, 1001, "LONG_TERM", "source-b", UnitVec (1), 100 });
+  state = surface_cache::Find (pctx);
+  REQUIRE (state);
+  REQUIRE_FALSE (state->current_entries[0].family_features.has_value ());
+  const auto &replacement
+      = surface_cache::FamilyFeatures (state->current_entries[0]);
+  REQUIRE (replacement.normalized[0] == Catch::Approx (0.0f));
+  REQUIRE (replacement.normalized[1] == Catch::Approx (1.0f));
+  surface_cache::Erase (pctx);
+}
+
+TEST_CASE ("Supersession eligibility index updates only affected targets",
+           "[operations][graph][retrieval][supersession][cache][scaling]")
+{
+  ProcessorContext pctx;
+  pctx.UpsertRetrievalSurface (
+      { 20, 200, 5000, 5000, 0, 0, 0, 0, "LONG_TERM", "replacement",
+        "text", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+  auto &cache = pctx.association_fanout_cache;
+  cache.valid = true;
+  cache.out_by_source[20].push_back (
+      { 10, 100, "supersedes", 1.0, 5000 });
+  cache.in_by_target[10].push_back (
+      { 20, 200, "supersedes", 1.0, 5000 });
+  operations::association_fanout_cache::BuildSupersessionEligibility (
+      cache, pctx);
+  auto sidecar = operations::execution_cache_sidecar_internal::Find (pctx);
+  REQUIRE (sidecar);
+  REQUIRE (sidecar->supersession_eligibility.valid);
+  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10)
+           == 5000);
+
+  pctx.UpsertRetrievalSurface (
+      { 30, 300, 6000, 6000, 0, 0, 0, 0, "LONG_TERM", "unrelated",
+        "audio", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (1) });
+  REQUIRE (sidecar->supersession_eligibility.valid);
+
+  pctx.UpsertRetrievalSurface (
+      { 20, 200, 7000, 7000, 0, 0, 0, 0, "LONG_TERM", "replacement",
+        "image", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+  operations::association_fanout_cache::NotifyRetrievalSurfaceChanged (
+      pctx, 20);
+  REQUIRE (sidecar->supersession_eligibility.valid);
+  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10)
+           == 7000);
 }
 
 TEST_CASE ("Graph retrieval temporal score decays across multi-month ages",
@@ -799,7 +1842,32 @@ TEST_CASE ("Graph retrieval cache rebuild uses base embedding when constructive 
   REQUIRE (target != ranked.end ());
   REQUIRE (target->embedding_id == 100LL);
   REQUIRE (target->score > 0.99);
+  REQUIRE (operations::historical_surface_search_cache_internal::
+               BaseEmbeddingIdForMemory (pctx, 10LL, 0)
+           == 100LL);
   operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Current surface upsert preserves original base embedding lineage",
+           "[operations][graph][retrieval][constructive_recall][cache]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  ProcessorContext pctx;
+  const Eigen::VectorXf base = UnitVec (0);
+  const Eigen::VectorXf reconstructed = UnitVec (1);
+  REQUIRE (cache::Reset (
+      pctx, { { 100LL, 10LL, 1000LL, "LONG_TERM", "source", base } },
+      { { 100LL, 10LL, 0, std::string (), std::string (), base, 100LL } }));
+  cache::UpsertCurrent (
+      pctx, { 101LL, 10LL, 0, std::string (), std::string (), reconstructed });
+  REQUIRE (cache::BaseEmbeddingIdForMemory (pctx, 10LL, 0) == 100LL);
+  const auto state = cache::Find (pctx);
+  REQUIRE (state);
+  REQUIRE (state->current_entries.at (
+               state->current_memory_index.at (10LL)).embedding_id
+           == 101LL);
+  cache::Erase (pctx);
 }
 
 TEST_CASE ("Graph retrieval returns refreshed output after reconstruction",
@@ -940,7 +2008,10 @@ TEST_CASE ("Graph retrieval ranking is invariant to source and modality labels",
 {
   cortext::testing::ScopedEnvVar disable_constructive_recall (
       "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
-  auto run = [] (bool shared_source, const std::string &modality) {
+  auto run = [] (bool shared_source, const std::string &modality,
+                 bool sparse_route) {
+    cortext::testing::ScopedEnvVar sparse_route_flag (
+        "CORTEXT_HNSW_SPARSE_ROUTE", sparse_route ? "1" : "0");
     auto unique_store = SQLiteStore::Create (":memory:");
     auto store = std::shared_ptr<Store> (std::move (unique_store));
     cortext::testing::InitializeCoreSchema (*store);
@@ -978,9 +2049,1130 @@ TEST_CASE ("Graph retrieval ranking is invariant to source and modality labels",
     return signature;
   };
 
-  const auto shared_text = run (true, "text");
-  const auto unique_audio = run (false, "audio");
+  const auto shared_text = run (true, "text", false);
+  const auto unique_audio = run (false, "audio", true);
+  const auto unique_image = run (false, "image", true);
   REQUIRE (shared_text == unique_audio);
+  REQUIRE (shared_text == unique_image);
+}
+
+TEST_CASE ("Graph retrieval captures same-event exact control for sparse route",
+           "[operations][graph][retrieval][hnsw][control]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar sparse_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "1");
+  cortext::testing::ScopedEnvVar exact_control_flag (
+      "CORTEXT_CAPTURE_HNSW_EXACT_CONTROL", "1");
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  for (long long index = 0; index < 600; ++index)
+    SeedMemory (*store, index + 1, 1000 + index,
+                VectorWithCosineToDim0 (
+                    0.10f + static_cast<float> (index) * 0.001f),
+                1000 + index, "opaque/" + std::to_string (index % 4));
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  (void)processor.Process (MakeSignal (UnitVec (0), 100000));
+  const auto candidate
+      = operations::retrieval_trace::GetLastSeedCandidates ();
+  const auto exact
+      = operations::retrieval_trace::GetLastExactSeedCandidates ();
+  REQUIRE_FALSE (candidate.empty ());
+  REQUIRE_FALSE (exact.empty ());
+  REQUIRE (candidate.size () == exact.size ());
+  for (std::size_t index = 0; index < exact.size (); ++index)
+    {
+      REQUIRE (candidate[index].memory_id == exact[index].memory_id);
+      REQUIRE (candidate[index].score == exact[index].score);
+    }
+}
+
+TEST_CASE ("Graph retrieval falls back when associations underfill sparse "
+           "seed eligibility",
+           "[operations][graph][retrieval][hnsw][sqlite][association]"
+           "[regression]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar hnsw_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "0");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kAssociationCount = 650;
+  constexpr long long kEligibleTarget = kAssociationCount + 1;
+  constexpr long long kPopulation = 700;
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (kPopulation);
+  for (long long memory_id = 1; memory_id <= kAssociationCount;
+       ++memory_id)
+    {
+      SeedMemory (*store, memory_id, 1000 + memory_id, UnitVec (0),
+                  memory_id, "association/" + std::to_string (memory_id));
+      store->Execute (
+          "UPDATE memories SET kind = 'ASSOCIATION' WHERE memory_id = ?",
+          { memory_id });
+      route_entries.emplace_back (memory_id, UnitVec (0));
+    }
+  SeedMemory (*store, kEligibleTarget, 1000 + kEligibleTarget,
+              VectorWithCosineToDim0 (0.95f), kEligibleTarget,
+              "eligible/target");
+  route_entries.emplace_back (
+      kEligibleTarget, VectorWithCosineToDim0 (0.95f));
+  for (long long memory_id = kEligibleTarget + 1;
+       memory_id <= kPopulation; ++memory_id)
+    {
+      SeedMemory (*store, memory_id, 1000 + memory_id, UnitVec (2),
+                  memory_id, "eligible/" + std::to_string (memory_id));
+      route_entries.emplace_back (memory_id, UnitVec (2));
+    }
+
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.0, 0.0, 0.0);
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      kEmbeddingDim, route_entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto sqlite_route
+      = operations::sparse_retrieval_route_sqlite_internal::Route::Create (
+          *store, kEmbeddingDim, route_entries, *hnsw, parameters);
+  REQUIRE (sqlite_route);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  const auto output = processor.Process (MakeSignal (UnitVec (0), 100000));
+  REQUIRE (std::find (output.candidate_memory_ids.begin (),
+                      output.candidate_memory_ids.end (), kEligibleTarget)
+           != output.candidate_memory_ids.end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+}
+
+TEST_CASE ("Graph retrieval falls back when sparse candidates collapse below "
+           "the requested family count",
+           "[operations][graph][retrieval][hnsw][sqlite][family]"
+           "[regression]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar hnsw_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "0");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  cortext::testing::ScopedEnvVar profile_graph (
+      "CORTEXT_PROFILE_GRAPH_RETRIEVAL", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kPopulation = 769;
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (kPopulation);
+  for (long long memory_id = 1; memory_id <= kPopulation; ++memory_id)
+    {
+      SeedMemory (*store, memory_id, 1000 + memory_id, UnitVec (0),
+                  memory_id, "opaque/family");
+      // Keep HNSW construction well-conditioned while the authoritative
+      // processor surface deliberately presents one duplicate family.
+      route_entries.emplace_back (
+          memory_id,
+          VectorWithCosineAndDiverseResidual (
+              0.999f, static_cast<std::uint64_t> (memory_id)));
+    }
+
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (1.0, 1.0, 1.0);
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      kEmbeddingDim, route_entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto sqlite_route
+      = operations::sparse_retrieval_route_sqlite_internal::Route::Create (
+          *store, kEmbeddingDim, route_entries, *hnsw, parameters);
+  REQUIRE (sqlite_route);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 1.0;
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  const auto output = processor.Process (MakeSignal (UnitVec (0), 100000));
+  const int seed_limit = std::max (1, core::RetrievalMaxResults (cfg.focus));
+  const int seed_search_limit = core::RetrievalSeedSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, seed_limit);
+  INFO ("ranked="
+        << output.operation_ms.at ("GraphRetrieve.seed_cache_ranked_rows")
+        << " selected="
+        << output.operation_ms.at ("GraphRetrieve.seed_cache_selected_rows")
+        << " requested=" << seed_search_limit);
+  REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_sparse_route_active")
+           == 1.0);
+  REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_cache_ranked_rows")
+           >= static_cast<double> (seed_search_limit));
+  REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_cache_selected_rows")
+           == 0.0);
+  const auto exact_fallback
+      = operations::retrieval_trace::GetLastSeedCandidates ();
+  REQUIRE_FALSE (exact_fallback.empty ());
+  REQUIRE (exact_fallback.size ()
+           <= static_cast<std::size_t> (seed_limit));
+}
+
+TEST_CASE ("Graph retrieval reopens SQLite sparse route on the existing path",
+           "[operations][graph][retrieval][hnsw][sqlite][integration]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar hnsw_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "0");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  cortext::testing::ScopedEnvVar exact_control_flag (
+      "CORTEXT_CAPTURE_HNSW_EXACT_CONTROL", "1");
+  cortext::testing::ScopedEnvVar profile_flag (
+      "CORTEXT_PROFILE_GRAPH_RETRIEVAL", "1");
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (600);
+  for (long long index = 0; index < 600; ++index)
+    {
+      auto embedding = VectorWithCosineToDim0 (
+          0.10f + static_cast<float> (index) * 0.001f);
+      SeedMemory (*store, index + 1, 1000 + index, embedding,
+                  1000 + index,
+                  "opaque/" + std::to_string (index % 4));
+      route_entries.emplace_back (index + 1, std::move (embedding));
+    }
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      kEmbeddingDim, route_entries,
+      operations::sparse_retrieval_route_internal::DefaultParameters ());
+  REQUIRE (hnsw != nullptr);
+  auto sqlite_route = operations::sparse_retrieval_route_sqlite_internal::
+      Route::Create (
+          *store, kEmbeddingDim, route_entries, *hnsw, parameters);
+  REQUIRE (sqlite_route != nullptr);
+
+  const auto meta = store->Execute (
+      "SELECT active_count FROM cortext_sparse_route_meta "
+      "WHERE singleton = 1");
+  REQUIRE (meta.size () == 1);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("active_count"))
+               .value_or (0)
+           == 600);
+
+  struct RouteRun
+  {
+    std::vector<long long> candidate_ids;
+    double node_rows = 0.0;
+    double activated_identities = 0.0;
+    double restart_rows = 0.0;
+  };
+  const auto run = [&] (const std::string &modality,
+                        const std::string &query_source,
+                        bool shared_memory_source) {
+    store->Execute (
+        shared_memory_source
+            ? "UPDATE memories SET modality = ?, source_id = 'shared/source'"
+            : "UPDATE memories SET modality = ?, source_id = 'opaque/' || "
+              "CAST(memory_id % 4 AS TEXT)",
+        { modality });
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    cfg.focus = 0.5;
+    cfg.sensitivity = 0.5;
+    cfg.stability = 0.5;
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<ForceRetrievalGateOp> (),
+        std::make_unique<GraphAugmentedRetrieveCandidates> ());
+    SignalProcessor processor (cfg, store, std::move (ops));
+    auto signal = MakeSignal (UnitVec (0), 100000);
+    signal.source_id = query_source;
+    signal.modality = modality;
+    const auto output = processor.Process (signal);
+    const auto candidates
+        = operations::retrieval_trace::GetLastSeedCandidates ();
+    RouteRun result;
+    for (const auto &candidate : candidates)
+      result.candidate_ids.push_back (candidate.memory_id);
+    result.node_rows = output.operation_ms.at (
+        "GraphRetrieve.sqlite_sparse_route_node_rows");
+    result.activated_identities = output.operation_ms.at (
+        "GraphRetrieve.sqlite_sparse_route_activated_identities");
+    result.restart_rows = output.operation_ms.at (
+        "GraphRetrieve.sqlite_sparse_route_restart_rows");
+    return result;
+  };
+
+  const auto shared_text = run ("text", "query/shared", true);
+  const auto opaque_audio = run ("audio", "query/opaque/audio", false);
+  const auto opaque_image = run ("image", "query/opaque/image", false);
+  REQUIRE_FALSE (shared_text.candidate_ids.empty ());
+  REQUIRE (shared_text.candidate_ids == opaque_audio.candidate_ids);
+  REQUIRE (shared_text.candidate_ids == opaque_image.candidate_ids);
+  for (const auto &result : { shared_text, opaque_audio, opaque_image })
+    {
+      INFO ("sqlite route rows=" << result.node_rows);
+      REQUIRE (result.node_rows > 0.0);
+      REQUIRE (result.node_rows
+               <= static_cast<double> (parameters.search_node_budget));
+      REQUIRE (result.activated_identities
+               <= static_cast<double> (
+                   parameters.activation_identity_target));
+      REQUIRE (result.restart_rows == 1.0);
+    }
+  auto restarted = operations::sparse_retrieval_route_sqlite_internal::Route::
+      Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (restarted != nullptr);
+  REQUIRE (restarted->RestartRowsLoaded () == 1);
+  REQUIRE (
+      restarted->Search (UnitVec (0), parameters.route_capacity).has_value ());
+  REQUIRE (restarted->LastSearchNodeRows ()
+           <= parameters.search_node_budget);
+}
+
+TEST_CASE ("SQLite sparse route invalidates moved active topology after restart",
+           "[operations][graph][retrieval][hnsw][sqlite][restart]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (600);
+  for (long long memory_id = 1; memory_id <= 600; ++memory_id)
+    route_entries.emplace_back (
+        memory_id,
+        VectorWithCosineToDim0 (
+            0.10f + static_cast<float> (memory_id - 1) * 0.001f));
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      kEmbeddingDim, route_entries,
+      operations::sparse_retrieval_route_internal::DefaultParameters ());
+  REQUIRE (hnsw);
+  auto route = operations::sparse_retrieval_route_sqlite_internal::Route::
+      Create (*store, kEmbeddingDim, route_entries, *hnsw,
+              parameters);
+  REQUIRE (route);
+
+  const Eigen::VectorXf revised = UnitVec (5);
+  REQUIRE (route->Upsert (1, revised));
+  REQUIRE (route->Remove (2));
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_meta")
+               .size ()
+           == 1);
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .size ()
+           == 2);
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  state.current_entries.reserve (599);
+  for (const auto &[memory_id, embedding] : route_entries)
+    {
+      if (memory_id == 2)
+        continue;
+      const std::size_t index = state.current_entries.size ();
+      state.current_entries.emplace_back (
+          memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+          memory_id == 1 ? revised : embedding, memory_id);
+      state.current_memory_index.emplace (memory_id, index);
+      state.current_memory_order.emplace (memory_id, index);
+    }
+
+  route.reset ();
+  route = cache::OpenSQLiteSparseRoute (state, *store);
+  REQUIRE (route);
+  REQUIRE (route->RestartRowsLoaded () == 1);
+  REQUIRE (route->DeltaSize () == 0);
+  REQUIRE (route->HasDirtyMemoryIds ());
+  const auto staged_dirty
+      = cache::StageSQLiteSparseRouteDirtyForSearch (state, *route);
+  REQUIRE (staged_dirty == 2);
+  REQUIRE (route->DeltaSize () == 2);
+  const auto unsealed_revised_result
+      = route->Search (revised, parameters.route_capacity);
+  REQUIRE (unsealed_revised_result);
+  REQUIRE_FALSE (unsealed_revised_result->empty ());
+  REQUIRE (unsealed_revised_result->front () == 1);
+  const auto unsealed_removed_result
+      = route->Search (route_entries[1].second, parameters.route_capacity);
+  REQUIRE (unsealed_removed_result);
+  REQUIRE (std::find (unsealed_removed_result->begin (),
+                      unsealed_removed_result->end (), 2)
+           == unsealed_removed_result->end ());
+  REQUIRE_FALSE (cache::ReconcileSQLiteSparseRoute (
+      state, *store, route,
+      std::shared_ptr<
+          operations::sparse_retrieval_route_internal::Route>{}));
+  REQUIRE (route->LastSealFailureCode () == 62);
+  REQUIRE_FALSE (state.sqlite_sparse_route);
+  REQUIRE_FALSE (route->HasDirtyMemoryIds ());
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .empty ());
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_meta")
+               .empty ());
+  REQUIRE_FALSE (cache::OpenSQLiteSparseRoute (state, *store));
+}
+
+TEST_CASE ("SQLite sparse route backfills a large existing surface in fixed "
+           "unpublished batches",
+           "[operations][graph][retrieval][hnsw][sqlite][backfill]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  constexpr long long kEntryCount = 1300;
+  state.current_entries.reserve (kEntryCount);
+  for (long long memory_id = 1; memory_id <= kEntryCount; ++memory_id)
+    {
+      Eigen::VectorXf embedding (kEmbeddingDim);
+      for (Eigen::Index dimension = 0; dimension < embedding.size ();
+           ++dimension)
+        embedding[dimension] = std::sin (
+            static_cast<float> (memory_id * (dimension + 1)) * 0.013f);
+      embedding.normalize ();
+      const std::size_t index = state.current_entries.size ();
+      state.current_entries.emplace_back (
+          memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+          std::move (embedding), memory_id);
+      state.current_memory_index.emplace (memory_id, index);
+      state.current_memory_order.emplace (memory_id, index);
+    }
+
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE_FALSE (state.sqlite_sparse_route);
+  REQUIRE (state.sqlite_sparse_route_backfill);
+  REQUIRE (state.sqlite_sparse_route_backfill->BuildCursor ()
+           == static_cast<long long> (parameters.backfill_batch_size));
+  REQUIRE (state.sqlite_sparse_route_backfill->ActiveCount ()
+           == static_cast<long long> (parameters.backfill_batch_size));
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_meta")
+               .empty ());
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_build")
+               .size ()
+           == 1);
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_nodes")
+               .size ()
+           <= operations::sparse_retrieval_route_sqlite_internal::
+                  DefaultParameters ()
+                      .backfill_batch_size);
+
+  // Construction progress is durable, but the incomplete generation remains
+  // invisible to the normal retrieval path after restart.
+  state.sqlite_sparse_route_backfill.reset ();
+  REQUIRE_FALSE (
+      operations::sparse_retrieval_route_sqlite_internal::Route::Open (
+          *store, kEmbeddingDim, parameters));
+  state.sqlite_sparse_route_backfill
+      = operations::sparse_retrieval_route_sqlite_internal::Route::
+          OpenOrBeginBuild (*store, kEmbeddingDim, parameters);
+  REQUIRE (state.sqlite_sparse_route_backfill);
+  REQUIRE (state.sqlite_sparse_route_backfill->BuildCursor ()
+           == static_cast<long long> (parameters.backfill_batch_size));
+
+  Eigen::VectorXf revised = Eigen::VectorXf::Zero (kEmbeddingDim);
+  revised[0] = 1.0f;
+  state.current_entries.front ().embedding = revised;
+  REQUIRE (state.sqlite_sparse_route_backfill->Upsert (1, revised));
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_build")
+               .size ()
+           == 1);
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .size ()
+           == 1);
+  state.sqlite_sparse_route_backfill.reset ();
+  state.sqlite_sparse_route_backfill
+      = operations::sparse_retrieval_route_sqlite_internal::Route::
+          OpenOrBeginBuild (*store, kEmbeddingDim, parameters);
+  REQUIRE (state.sqlite_sparse_route_backfill);
+  REQUIRE (state.sqlite_sparse_route_backfill->BuildCursor ()
+           == static_cast<long long> (parameters.backfill_batch_size));
+  REQUIRE_FALSE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE_FALSE (state.sqlite_sparse_route_backfill);
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route_backfill);
+  REQUIRE (state.sqlite_sparse_route_backfill->BuildCursor ()
+           == static_cast<long long> (parameters.backfill_batch_size));
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route_backfill->BuildCursor ()
+           == static_cast<long long> (parameters.backfill_batch_size * 2));
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_build")
+               .size ()
+           == 1);
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .empty ());
+
+  std::size_t advances = 2;
+  while (!state.sqlite_sparse_route && advances++ < 20)
+    REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route);
+  REQUIRE_FALSE (state.sqlite_sparse_route_backfill);
+  REQUIRE (state.sqlite_sparse_route->ActiveCount () == kEntryCount);
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_build")
+               .empty ());
+  const auto topology = store->Execute (
+      "SELECT MAX(level) AS max_level, "
+      "SUM(CASE WHEN level > 0 THEN 1 ELSE 0 END) AS upper_nodes "
+      "FROM cortext_sparse_route_nodes WHERE active = 1");
+  REQUIRE (topology.size () == 1);
+  REQUIRE (store::AnyToLongLong (topology.front ().at ("max_level"))
+               .value_or (0)
+           > 0);
+  REQUIRE (store::AnyToLongLong (topology.front ().at ("upper_nodes"))
+               .value_or (0)
+           > 0);
+
+  auto restarted
+      = operations::sparse_retrieval_route_sqlite_internal::Route::Open (
+          *store, kEmbeddingDim, parameters);
+  REQUIRE (restarted);
+  REQUIRE (restarted->RestartRowsLoaded () == 1);
+  const auto revised_result
+      = restarted->Search (revised, parameters.route_capacity);
+  REQUIRE (revised_result);
+  REQUIRE_FALSE (revised_result->empty ());
+
+  const auto activated = restarted->SearchActivated (revised);
+  REQUIRE (activated);
+  REQUIRE (activated->size () >= revised_result->size ());
+  REQUIRE (activated->size () == parameters.activation_identity_target);
+  REQUIRE (activated->size ()
+           <= parameters.activation_identity_target);
+  REQUIRE (restarted->LastSearchNodeRows () >= activated->size ());
+  REQUIRE (restarted->LastSearchNodeRows ()
+           <= parameters.search_node_budget);
+  REQUIRE (restarted->LastSearchDistanceEvaluations () > 0);
+  REQUIRE (restarted->LastSearchDistanceEvaluations ()
+           <= restarted->LastSearchNodeRows () + restarted->DeltaSize ());
+  REQUIRE (revised_result->front () == 1);
+  for (const long long memory_id : { 1LL, 129LL, 777LL, 1300LL })
+    {
+      const auto result = restarted->Search (
+          state.current_entries[static_cast<std::size_t> (memory_id - 1)]
+              .embedding,
+          parameters.route_capacity);
+      REQUIRE (result);
+      REQUIRE_FALSE (result->empty ());
+      REQUIRE (result->front () == memory_id);
+      REQUIRE (restarted->LastSearchNodeRows ()
+               <= parameters.search_node_budget);
+    }
+}
+
+TEST_CASE ("SQLite sparse route starts backfill at the knob-derived headroom "
+           "watermark",
+           "[operations][graph][retrieval][hnsw][sqlite][backfill][knobs]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  state.sparse_route_parameters = parameters;
+  const std::size_t start_size
+      = parameters.route_capacity - parameters.backfill_batch_size;
+  auto append_entry = [&] (long long memory_id) {
+    Eigen::VectorXf embedding = Eigen::VectorXf::Zero (kEmbeddingDim);
+    embedding[static_cast<Eigen::Index> (memory_id % kEmbeddingDim)] = 1.0f;
+    const std::size_t index = state.current_entries.size ();
+    state.current_entries.emplace_back (
+        memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+        std::move (embedding), memory_id);
+    state.current_memory_index.emplace (memory_id, index);
+    state.current_memory_order.emplace (memory_id, index);
+  };
+  for (std::size_t index = 1; index < start_size; ++index)
+    append_entry (static_cast<long long> (index));
+
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE_FALSE (state.sqlite_sparse_route_backfill);
+
+  append_entry (static_cast<long long> (start_size));
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route_backfill);
+  REQUIRE (state.sqlite_sparse_route_backfill_last_sealed_rows
+           <= parameters.backfill_batch_size);
+  REQUIRE (state.sqlite_sparse_route_backfill->ActiveCount ()
+           <= static_cast<long long> (parameters.route_capacity
+                                      + parameters.backfill_batch_size));
+}
+
+TEST_CASE ("SQLite sparse route invalidates a moved active journal slice "
+           "before publishing stale topology",
+           "[operations][graph][retrieval][hnsw][sqlite][backfill]"
+           "[regression]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  namespace sqlite_route
+      = operations::sparse_retrieval_route_sqlite_internal;
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  const auto parameters = sqlite_route::DeriveParameters (0.0, 0.0, 0.0);
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  state.sparse_route_parameters = parameters;
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (600);
+  for (long long memory_id = 1; memory_id <= 600; ++memory_id)
+    {
+      auto embedding = VectorWithCosineToDim0 (
+          0.10f + static_cast<float> (memory_id - 1) * 0.001f);
+      const std::size_t index = state.current_entries.size ();
+      state.current_entries.emplace_back (
+          memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+          embedding, memory_id);
+      state.current_memory_index.emplace (memory_id, index);
+      state.current_memory_order.emplace (memory_id, index);
+      entries.emplace_back (memory_id, std::move (embedding));
+    }
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      kEmbeddingDim, entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = sqlite_route::Route::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+
+  for (long long memory_id = 1; memory_id <= 400; ++memory_id)
+    {
+      Eigen::VectorXf revised = UnitVec (
+          static_cast<int> (memory_id % kEmbeddingDim));
+      state.current_entries[static_cast<std::size_t> (memory_id - 1)]
+          .embedding = revised;
+      REQUIRE (route->Upsert (memory_id, revised));
+    }
+  REQUIRE (route->DeltaSize () == 0);
+  REQUIRE (route->HasDirtyMemoryIds ());
+  const auto first_slice = route->DirtyMemoryIds (parameters.route_capacity);
+  REQUIRE (first_slice);
+  REQUIRE (first_slice->size () == parameters.route_capacity);
+  REQUIRE_FALSE (
+      cache::StageSQLiteSparseRouteDirtyForSearch (state, *route));
+  REQUIRE (route->DeltaSize () == 0);
+
+  REQUIRE_FALSE (cache::ReconcileSQLiteSparseRoute (
+      state, *store, route,
+      std::shared_ptr<
+          operations::sparse_retrieval_route_internal::Route>{}));
+  REQUIRE (route->LastSealFailureCode () == 62);
+  REQUIRE_FALSE (state.sqlite_sparse_route);
+  REQUIRE (route->DeltaSize () == 0);
+  REQUIRE_FALSE (route->HasDirtyMemoryIds ());
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_meta")
+               .empty ());
+}
+
+TEST_CASE ("SQLite sparse route drains live build mutations in knob-bounded "
+           "slices",
+           "[operations][graph][retrieval][hnsw][sqlite][backfill]"
+           "[regression]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  namespace sqlite_route
+      = operations::sparse_retrieval_route_sqlite_internal;
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  state.sparse_route_parameters
+      = sqlite_route::DeriveParameters (0.0, 0.0, 0.0);
+  constexpr long long kEntryCount = 800;
+  state.current_entries.reserve (kEntryCount);
+  for (long long memory_id = 1; memory_id <= kEntryCount; ++memory_id)
+    {
+      Eigen::VectorXf embedding (kEmbeddingDim);
+      for (Eigen::Index dimension = 0; dimension < embedding.size ();
+           ++dimension)
+        embedding[dimension] = std::cos (
+            static_cast<float> (memory_id * (dimension + 11)) * 0.004f);
+      embedding.normalize ();
+      const std::size_t index = state.current_entries.size ();
+      state.current_entries.emplace_back (
+          memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+          std::move (embedding), memory_id);
+      state.current_memory_index.emplace (memory_id, index);
+      state.current_memory_order.emplace (memory_id, index);
+    }
+
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route_backfill);
+  auto &build = state.sqlite_sparse_route_backfill;
+  const std::size_t backfill_batch
+      = state.sparse_route_parameters.backfill_batch_size;
+  REQUIRE (build->BuildCursor ()
+           == static_cast<long long> (backfill_batch));
+  constexpr std::size_t kDirtyCount = 700;
+  for (long long memory_id = 1;
+       memory_id <= static_cast<long long> (kDirtyCount); ++memory_id)
+    REQUIRE (build->Upsert (
+        memory_id,
+        state.current_entries[static_cast<std::size_t> (memory_id - 1)]
+            .embedding));
+  REQUIRE (build->DeltaSize () == 0);
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .size ()
+           == kDirtyCount);
+  const auto bounded_dirty = build->DirtyMemoryIds (
+      state.sparse_route_parameters.route_capacity);
+  REQUIRE (bounded_dirty);
+  REQUIRE (bounded_dirty->size ()
+           == state.sparse_route_parameters.route_capacity);
+  REQUIRE (build->HasDirtyMemoryIds ());
+
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route_backfill_failure_count == 0);
+  REQUIRE (build->DeltaSize () == 0);
+  REQUIRE (build->BuildCursor ()
+           == static_cast<long long> (backfill_batch * 2));
+  REQUIRE (state.sqlite_sparse_route_backfill_last_sealed_rows
+           == backfill_batch);
+  const std::size_t expected_remaining_dirty
+      = kDirtyCount - state.sparse_route_parameters.route_capacity;
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .size ()
+           == expected_remaining_dirty);
+  REQUIRE (build->DirtyMemoryIds (
+               state.sparse_route_parameters.route_capacity)
+               ->size ()
+           == state.sparse_route_parameters.route_capacity);
+
+  std::size_t remaining_dirty = expected_remaining_dirty;
+  std::size_t drain_count = 0;
+  while (remaining_dirty > 0 && drain_count++ < 10)
+    {
+      const bool advanced
+          = cache::AdvanceSQLiteSparseRouteBackfill (state, *store);
+      CAPTURE (drain_count, build->LastSealFailureCode (),
+               build->LastSearchNodeRows (), build->DeltaSize (),
+               build->ActivationEntryMemoryId (),
+               build->ActivationSearchNodeBudget (),
+               state.sqlite_sparse_route_backfill_failure_code);
+      REQUIRE (advanced);
+      REQUIRE (state.sqlite_sparse_route_backfill_failure_count == 0);
+      REQUIRE (build->DeltaSize () == 0);
+      const std::size_t next_remaining
+          = store->Execute (
+                     "SELECT memory_id FROM cortext_sparse_route_dirty")
+                .size ();
+      REQUIRE (next_remaining < remaining_dirty);
+      REQUIRE (remaining_dirty - next_remaining
+               <= state.sparse_route_parameters.route_capacity
+                      + state.sparse_route_parameters.backfill_batch_size);
+      remaining_dirty = next_remaining;
+    }
+  REQUIRE (remaining_dirty == 0);
+}
+
+TEST_CASE ("SQLite sparse route work budgets derive from every knob",
+           "[operations][graph][retrieval][hnsw][sqlite][knobs]")
+{
+  namespace sqlite_route
+      = operations::sparse_retrieval_route_sqlite_internal;
+  for (const double focus : { 0.0, 0.5, 1.0 })
+    for (const double sensitivity : { 0.0, 0.5, 1.0 })
+      for (const double stability : { 0.0, 0.5, 1.0 })
+        {
+          CAPTURE (focus, sensitivity, stability);
+          const auto parameters = sqlite_route::DeriveParameters (
+              focus, sensitivity, stability);
+          REQUIRE (
+              parameters.route_capacity
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::RouteCapacity (
+                      focus, sensitivity, stability)));
+          REQUIRE (
+              parameters.backfill_batch_size
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::
+                      BackfillBatchSize (
+                      focus, sensitivity, stability)));
+          REQUIRE (
+              operations::sparse_retrieval_knobs_internal::
+                  HydrationFallbackSignalLimit (
+                      focus, sensitivity, stability)
+              == static_cast<int> (parameters.backfill_batch_size));
+          REQUIRE (parameters.route_bootstrap_limit
+                   == parameters.route_capacity * 2);
+          REQUIRE (parameters.activation_identity_target
+                   == parameters.route_capacity * 2
+                          + parameters.backfill_batch_size * 2);
+          REQUIRE (parameters.activation_snapshot_capacity
+                   == parameters.activation_identity_target);
+          REQUIRE (parameters.total_query_row_budget
+                   == parameters.search_node_budget
+                          + parameters.activation_snapshot_capacity);
+          REQUIRE (parameters.search_node_budget
+                   == static_cast<std::size_t> (
+                       operations::sparse_retrieval_knobs_internal::
+                           RetrievalSawtoothPeak (
+                               focus, sensitivity, stability)));
+          REQUIRE (parameters.activation_search_node_budget_min
+                   == static_cast<std::size_t> (
+                       operations::sparse_retrieval_knobs_internal::
+                           RetrievalSawtoothFloor (
+                               focus, sensitivity, stability)));
+          REQUIRE (parameters.activation_search_node_budget_step
+                   == parameters.reciprocal_update_count);
+          REQUIRE (parameters.search_expansion_batch
+                   == std::max<std::size_t> (
+                       8, parameters.backfill_batch_size / 4));
+          REQUIRE (
+              operations::sparse_retrieval_knobs_internal::OrdinarySealBatch (
+                  focus, sensitivity, stability)
+              == static_cast<int> (parameters.backfill_batch_size
+                                   - parameters.search_expansion_batch));
+          REQUIRE (parameters.search_ef == parameters.search_node_budget);
+          REQUIRE (parameters.activation_search_ef_min
+                   == parameters.activation_search_node_budget_min);
+          REQUIRE (parameters.activation_search_ef_step
+                   == parameters.reciprocal_update_count);
+          REQUIRE (parameters.shadow_node_capacity
+                   == parameters.route_capacity * 24);
+          REQUIRE (parameters.backfill_search_node_budget
+                   == parameters.route_capacity
+                          + parameters.backfill_batch_size);
+          REQUIRE (parameters.backfill_search_ef
+                   == parameters.backfill_batch_size * 2);
+          REQUIRE (
+              parameters.row_addressed_neighbor_count
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::
+                      GraphNeighborCount (
+                      focus, sensitivity, stability)));
+          REQUIRE (
+              parameters.row_addressed_level_zero_links
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::
+                      GraphLevelZeroLinks (
+                      focus, sensitivity, stability)));
+          REQUIRE (
+              parameters.family_exact_comparison_limit
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::
+                      FamilyExactComparisonLimit (
+                          focus, sensitivity, stability)));
+          REQUIRE (
+              parameters.maximum_level
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::MaximumLevel (
+                      focus, sensitivity, stability)));
+          REQUIRE (
+              parameters.reciprocal_update_count
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::
+                      ReciprocalUpdateCount (
+                      focus, sensitivity, stability)));
+          REQUIRE (parameters.hnsw.minimum_capacity
+                   == parameters.route_bootstrap_limit);
+          REQUIRE (parameters.hnsw.graph_neighbor_count
+                   == parameters.row_addressed_neighbor_count);
+          REQUIRE (
+              parameters.hnsw.construction_effort
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::
+                      ConstructionEffort (
+                      focus, sensitivity, stability)));
+          REQUIRE (
+              parameters.hnsw.query_effort
+              == static_cast<std::size_t> (
+                  operations::sparse_retrieval_knobs_internal::QueryEffort (
+                      focus, sensitivity, stability)));
+          {
+            cortext::testing::ScopedEnvVar envelope (
+                "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", "6");
+            const auto selected = sqlite_route::DeriveParameters (
+                focus, sensitivity, stability);
+            REQUIRE (selected.search_node_budget
+                     == parameters.route_capacity * 6);
+            REQUIRE (selected.activation_search_node_budget_min
+                     == parameters.route_capacity * 6);
+          }
+        }
+
+  const auto midpoint = sqlite_route::DeriveParameters (0.5, 0.5, 0.5);
+  REQUIRE (midpoint.route_capacity == 512);
+  REQUIRE (midpoint.activation_identity_target == 1280);
+  REQUIRE (midpoint.backfill_batch_size == 128);
+  REQUIRE (midpoint.row_addressed_neighbor_count == 64);
+  REQUIRE (midpoint.row_addressed_level_zero_links == 128);
+  REQUIRE (midpoint.family_exact_comparison_limit == 1024);
+  REQUIRE (midpoint.maximum_level == 9);
+  REQUIRE (midpoint.reciprocal_update_count == 8);
+  REQUIRE (midpoint.hnsw.construction_effort == 200);
+  REQUIRE (midpoint.hnsw.query_effort == 1280);
+
+  for (const auto &[selector, expected] :
+       std::vector<std::pair<std::string, std::size_t>>{
+           { "1", midpoint.route_capacity },
+           { "2", midpoint.activation_identity_target },
+           { "3", midpoint.route_capacity + midpoint.backfill_batch_size },
+           { "4", midpoint.route_capacity * 2 },
+           { "5", midpoint.route_capacity * 5 },
+           { "6", midpoint.route_capacity * 6 },
+           { "8", midpoint.route_capacity * 4 },
+           { "18", midpoint.route_capacity * 4
+                       + midpoint.reciprocal_update_count },
+           { "19", midpoint.route_capacity * 4
+                       + midpoint.reciprocal_update_count },
+           { "10", midpoint.route_capacity * 10 },
+           { "12", midpoint.route_capacity * 12 },
+           { "16", midpoint.route_capacity * 16 },
+       })
+    {
+      CAPTURE (selector, expected);
+      cortext::testing::ScopedEnvVar envelope (
+          "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", selector);
+      const auto selected = sqlite_route::DeriveParameters (0.5, 0.5, 0.5);
+      REQUIRE (selected.search_node_budget == expected);
+      REQUIRE (selected.activation_search_node_budget_min == expected);
+      REQUIRE (selected.activation_identity_target == 1280);
+      const std::size_t expected_effort
+          = selector == "19" ? expected : selected.route_capacity * 5;
+      REQUIRE (selected.search_ef == expected_effort);
+      REQUIRE (selected.activation_search_ef_min
+               == expected_effort);
+      REQUIRE (
+          selected.total_query_row_budget
+          == (selector == "19"
+                  ? expected + selected.activation_identity_target
+                  : selected.route_capacity * 5
+                        + selected.activation_identity_target));
+      REQUIRE (selected.backfill_search_node_budget
+               == selected.route_capacity + selected.backfill_batch_size);
+    }
+
+  {
+    cortext::testing::ScopedEnvVar envelope (
+        "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", "20");
+    const auto selected = sqlite_route::DeriveParameters (0.5, 0.5, 0.5);
+    const std::size_t minimum
+        = selected.route_capacity * 4 + selected.reciprocal_update_count;
+    REQUIRE (selected.search_node_budget == selected.route_capacity * 5);
+    REQUIRE (selected.search_ef == selected.route_capacity * 5);
+    REQUIRE (selected.activation_search_node_budget_min == minimum);
+    REQUIRE (selected.activation_search_ef_min == minimum);
+    REQUIRE (selected.activation_search_node_budget_step
+             == selected.reciprocal_update_count);
+    REQUIRE (selected.activation_search_ef_step
+             == selected.reciprocal_update_count);
+  }
+
+  {
+    cortext::testing::ScopedEnvVar envelope (
+        "CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE", "7");
+    const auto ignored = sqlite_route::DeriveParameters (0.5, 0.5, 0.5);
+    REQUIRE (ignored.search_node_budget == ignored.route_capacity * 5);
+    REQUIRE (ignored.activation_search_node_budget_min
+             == ignored.route_capacity * 5);
+  }
+
+  const auto first_seal_rows = [] (double focus, double sensitivity,
+                                   double stability) {
+    namespace cache
+        = operations::historical_surface_search_cache_internal;
+    auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+    cortext::testing::InitializeCoreSchema (*store);
+    cache::State state;
+    state.embedding_dim = kEmbeddingDim;
+    state.sparse_route_parameters = sqlite_route::DeriveParameters (
+        focus, sensitivity, stability);
+    constexpr long long kEntryCount = 800;
+    state.current_entries.reserve (kEntryCount);
+    for (long long memory_id = 1; memory_id <= kEntryCount; ++memory_id)
+      {
+        Eigen::VectorXf embedding (kEmbeddingDim);
+        for (Eigen::Index dimension = 0; dimension < embedding.size ();
+             ++dimension)
+          embedding[dimension] = std::sin (
+              static_cast<float> (memory_id * (dimension + 5)) * 0.009f);
+        embedding.normalize ();
+        const std::size_t index = state.current_entries.size ();
+        state.current_entries.emplace_back (
+            memory_id, memory_id, 1000 + memory_id, "LONG_TERM",
+            "opaque/" + std::to_string (memory_id % 4),
+            std::move (embedding), memory_id);
+        state.current_memory_index.emplace (memory_id, index);
+        state.current_memory_order.emplace (memory_id, index);
+      }
+    REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+    return state.sqlite_sparse_route_backfill_last_sealed_rows;
+  };
+  REQUIRE (first_seal_rows (0.0, 0.0, 0.0) == 64);
+  REQUIRE (first_seal_rows (0.5, 0.5, 0.5) == 128);
+  REQUIRE (first_seal_rows (1.0, 1.0, 1.0) == 192);
+
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (1300);
+  for (long long memory_id = 1; memory_id <= 1300; ++memory_id)
+    {
+      Eigen::VectorXf embedding (kEmbeddingDim);
+      for (Eigen::Index dimension = 0; dimension < embedding.size ();
+           ++dimension)
+        embedding[dimension] = std::sin (
+            static_cast<float> (memory_id * (dimension + 7)) * 0.005f);
+      embedding.normalize ();
+      route_entries.emplace_back (memory_id, std::move (embedding));
+    }
+  const auto low_parameters = sqlite_route::DeriveParameters (0.0, 0.0, 0.0);
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      kEmbeddingDim, route_entries, low_parameters.hnsw);
+  REQUIRE (hnsw);
+  auto sqlite = sqlite_route::Route::Create (
+      *store, kEmbeddingDim, route_entries, *hnsw, low_parameters);
+  REQUIRE (sqlite);
+  for (std::size_t query = 0; query < 64; ++query)
+    {
+      const auto result = sqlite->Search (
+          route_entries[(query * 19) % route_entries.size ()].second,
+          low_parameters.route_capacity);
+      REQUIRE (result);
+      REQUIRE (sqlite->LastSearchNodeRows ()
+               <= low_parameters.search_node_budget);
+    }
+}
+
+TEST_CASE ("SQLite sparse route backfill survives an authoritative cache "
+           "refresh",
+           "[operations][graph][retrieval][hnsw][sqlite][backfill]"
+           "[regression]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  ProcessorContext pctx;
+  std::vector<cache::Entry> current_entries;
+  constexpr long long kEntryCount = 600;
+  current_entries.reserve (kEntryCount);
+  for (long long memory_id = 1; memory_id <= kEntryCount; ++memory_id)
+    {
+      Eigen::VectorXf embedding (kEmbeddingDim);
+      for (Eigen::Index dimension = 0; dimension < embedding.size ();
+           ++dimension)
+        embedding[dimension] = std::cos (
+            static_cast<float> (memory_id * (dimension + 3)) * 0.007f);
+      embedding.normalize ();
+      current_entries.emplace_back (
+          memory_id, memory_id, 1000 + memory_id, "LONG_TERM",
+          "opaque/" + std::to_string (memory_id % 4),
+          std::move (embedding), memory_id);
+    }
+
+  REQUIRE (cache::Reset (pctx, {}, std::move (current_entries)));
+  cache::SetSparseRouteParameters (pctx, parameters);
+  cache::SetCurrentSurfaceDatabaseCurrent (pctx, true);
+  cache::SetProcessorSurfaceComplete (pctx, true);
+  auto state = cache::FindMutable (pctx);
+  REQUIRE (state);
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (*state, *store));
+  const auto build = state->sqlite_sparse_route_backfill;
+  REQUIRE (build);
+  REQUIRE (build->BuildCursor ()
+           == static_cast<long long> (parameters.backfill_batch_size));
+  REQUIRE (cache::IncrementalSparseRouteSealReady (*state, true));
+
+  auto refreshed_entries = state->current_entries;
+  REQUIRE (cache::Reset (pctx, {}, std::move (refreshed_entries)));
+  state = cache::FindMutable (pctx);
+  REQUIRE (state);
+  REQUIRE (state->current_surface_database_current);
+  REQUIRE (state->processor_surface_complete);
+  REQUIRE (state->sqlite_sparse_route_backfill == build);
+  REQUIRE (state->sqlite_sparse_route_backfill->BuildCursor ()
+           == static_cast<long long> (parameters.backfill_batch_size));
+  REQUIRE (cache::IncrementalSparseRouteSealReady (*state, true));
+
+  REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (*state, *store));
+  REQUIRE (state->sqlite_sparse_route_backfill);
+  REQUIRE (state->sqlite_sparse_route_backfill->BuildCursor ()
+           == static_cast<long long> (parameters.backfill_batch_size * 2));
+  const auto generations = store->Execute (
+      "SELECT COUNT(DISTINCT generation) AS generation_count, "
+      "MIN(generation) AS min_generation, MAX(generation) AS max_generation "
+      "FROM cortext_sparse_route_nodes");
+  REQUIRE (generations.size () == 1);
+  REQUIRE (store::AnyToLongLong (
+               generations.front ().at ("generation_count"))
+               .value_or (0)
+           == 1);
+  REQUIRE (store::AnyToLongLong (
+               generations.front ().at ("min_generation"))
+               .value_or (0)
+           == 1);
+  REQUIRE (store::AnyToLongLong (
+               generations.front ().at ("max_generation"))
+               .value_or (0)
+           == 1);
+  cache::Erase (pctx);
 }
 
 TEST_CASE ("Graph retrieval soundly collapses cosine-near families before KNN cap",
@@ -1016,6 +3208,15 @@ TEST_CASE ("Graph retrieval soundly collapses cosine-near families before KNN ca
   REQUIRE (std::find (out.candidate_memory_ids.begin (),
                       out.candidate_memory_ids.end (), kTargetMemoryId)
            != out.candidate_memory_ids.end ());
+  const auto exact_comparison_count
+      = operations::retrieval_trace::GetLastFamilyExactComparisonCount ();
+  REQUIRE (exact_comparison_count > 0);
+  REQUIRE (
+      exact_comparison_count
+      <= static_cast<std::size_t> (
+          operations::sparse_retrieval_knobs_internal::
+              FamilyExactComparisonLimit (
+                  cfg.focus, cfg.sensitivity, cfg.stability)));
 }
 
 TEST_CASE ("Graph retrieval bounds exact family checks on diverse embeddings",
@@ -1048,7 +3249,7 @@ TEST_CASE ("Graph retrieval bounds exact family checks on diverse embeddings",
   constexpr std::size_t kAllPairs
       = static_cast<std::size_t> (kEmbeddingDim)
         * static_cast<std::size_t> (kEmbeddingDim - 1) / 2;
-  REQUIRE (exact_comparisons > 0);
+  REQUIRE (exact_comparisons == 0);
   REQUIRE (exact_comparisons < kAllPairs / 4);
 }
 
@@ -1083,7 +3284,7 @@ TEST_CASE ("Graph retrieval bounds exact family checks on dense orthogonal "
   constexpr std::size_t kAllPairs
       = static_cast<std::size_t> (kEmbeddingDim)
         * static_cast<std::size_t> (kEmbeddingDim - 1) / 2;
-  REQUIRE (exact_comparisons > 0);
+  REQUIRE (exact_comparisons == 0);
   REQUIRE (exact_comparisons < kAllPairs / 4);
 }
 
@@ -1304,7 +3505,7 @@ TEST_CASE ("Graph retrieval SQL fallback performance probe",
   operations::historical_surface_search_cache_internal::
       SetProcessorSurfaceComplete (pctx, processor_surface_complete);
   operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
-      pctx);
+      pctx, true);
   auto signal = MakeSignal (UnitVec (0), 1000000000);
   signal.retention = Retention::Ephemeral;
   std::vector<double> elapsed_ms;
@@ -1414,6 +3615,64 @@ TEST_CASE ("Graph retrieval cache rebuild accepts shared base embeddings",
       [] (const auto &entry) { return entry.embedding_id == 100; });
   REQUIRE (shared_entry != state->entries.end ());
   REQUIRE (shared_entry->memory_references.size () == 1);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Graph retrieval cache rebuild covers association supersession "
+           "candidates",
+           "[operations][graph][retrieval][cache][supersession]"
+           "[association]")
+{
+  auto unique_store = SQLiteStore::Create (":memory:");
+  auto store = std::shared_ptr<Store> (std::move (unique_store));
+  cortext::testing::InitializeCoreSchema (*store);
+  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
+  store->Execute (
+      "UPDATE memories SET kind = 'ASSOCIATION' WHERE memory_id = 10");
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  ProcessorContext pctx;
+  ProcessorContext::RetrievalSurfaceEntry association_surface;
+  association_surface.memory_id = 10;
+  association_surface.embedding_id = 100;
+  association_surface.start_ts = 1000;
+  association_surface.kind = "ASSOCIATION";
+  association_surface.vector_seed_eligible = false;
+  association_surface.embedding = UnitVec (0);
+  pctx.UpsertRetrievalSurface (std::move (association_surface));
+  auto signal = MakeSignal (UnitVec (0), 2000);
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  ctx.SetShouldCheckRetrieval (true);
+  ctx.SetWriteExclusionTs (signal.timestamp);
+
+  GraphAugmentedRetrieveCandidates operation;
+  auto tx = store->Begin ();
+  operation.Execute (ctx, *tx);
+  tx->Rollback ();
+
+  const auto state
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (state);
+  REQUIRE (state->supersession_entry_by_memory.contains (10));
+  REQUIRE (state->current_memory_index.contains (10));
+  REQUIRE (operations::historical_surface_search_cache_internal::
+               CurrentPopulationCoversHistorical (*state, -1));
+
+  operations::historical_surface_search_cache_internal::
+      SetProcessorSurfaceComplete (pctx, true);
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      pctx, true);
+  OperationContext recovery_ctx (signal, pctx, cfg, store.get ());
+  recovery_ctx.SetShouldCheckRetrieval (true);
+  recovery_ctx.SetWriteExclusionTs (signal.timestamp);
+  auto recovery_tx = store->Begin ();
+  operation.Execute (recovery_ctx, *recovery_tx);
+  recovery_tx->Rollback ();
+  const auto recovered
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (recovered);
+  REQUIRE (recovered->current_memory_index.contains (10));
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 
@@ -1663,6 +3922,34 @@ TEST_CASE ("Graph retrieval fallback preserves overfetch after database reconstr
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 
+TEST_CASE ("Historical search recovery rejects recycled context state",
+           "[operations][graph][retrieval][cache][regression]")
+{
+  alignas (ProcessorContext) std::byte storage[sizeof (ProcessorContext)];
+  auto *prior = std::construct_at (
+      reinterpret_cast<ProcessorContext *> (storage));
+  operations::historical_surface_search_cache_internal::
+      SetCurrentSurfaceDatabaseCurrent (*prior, true);
+  operations::historical_surface_search_cache_internal::
+      SetProcessorSurfaceComplete (*prior, true);
+  std::destroy_at (prior);
+
+  auto *current = std::construct_at (
+      reinterpret_cast<ProcessorContext *> (storage));
+  operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
+      *current);
+  REQUIRE (operations::historical_surface_search_cache_internal::
+               RecoveryFailed (*current));
+  REQUIRE_FALSE (operations::historical_surface_search_cache_internal::
+                     CurrentSurfaceDatabaseCurrent (*current));
+  const auto state
+      = operations::historical_surface_search_cache_internal::Find (*current);
+  REQUIRE (state != nullptr);
+  REQUIRE_FALSE (state->processor_surface_complete);
+  operations::historical_surface_search_cache_internal::Erase (*current);
+  std::destroy_at (current);
+}
+
 TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstructions",
            "[operations][graph][retrieval][cache][sql][reconstruction]")
 {
@@ -1774,7 +4061,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
   operations::historical_surface_search_cache_internal::
       SetProcessorSurfaceComplete (pctx, true);
   operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
-      pctx);
+      pctx, true);
   OperationContext recovery_ctx (signal, pctx, cfg, store.get ());
   recovery_ctx.SetShouldCheckRetrieval (true);
   recovery_ctx.SetWriteExclusionTs (signal.timestamp);
@@ -1841,5 +4128,41 @@ TEST_CASE ("Historical search cache append retains memory alternative",
   REQUIRE (state->entries.size () == 1);
   REQUIRE (state->entries.front ().memory_references.size () == 1);
   REQUIRE (state->entries.front ().memory_references.front ().memory_id == 10);
+  REQUIRE (state->long_term_entry_indices
+           == std::vector<std::size_t>{ 0 });
+  REQUIRE (state->long_term_index_positions.at (0) == 0);
+  operations::historical_surface_search_cache_internal::Erase (pctx);
+}
+
+TEST_CASE ("Historical search cache tracks only long-term distance rows",
+           "[operations][graph][retrieval][cache][eligibility]")
+{
+  using operations::historical_surface_search_cache_internal::Entry;
+  ProcessorContext pctx;
+  REQUIRE (operations::historical_surface_search_cache_internal::Reset (
+      pctx,
+      { Entry{ 100, 10, 1000, "LONG_TERM", "a", UnitVec (0) },
+        Entry{ 101, 11, 1001, "SIGNAL", "b", UnitVec (1) },
+        Entry{ 102, 12, 1002, "LONG_TERM", "c", UnitVec (2) } }));
+
+  auto state
+      = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (state != nullptr);
+  REQUIRE (state->long_term_entry_indices
+           == std::vector<std::size_t>{ 0, 2 });
+
+  operations::historical_surface_search_cache_internal::RemoveEmbedding (
+      pctx, 100);
+  state = operations::historical_surface_search_cache_internal::Find (pctx);
+  REQUIRE (state->entries.size () == 2);
+  REQUIRE (state->entries[0].embedding_id == 102);
+  REQUIRE (state->long_term_entry_indices
+           == std::vector<std::size_t>{ 0 });
+  REQUIRE (state->long_term_index_positions.at (0) == 0);
+
+  operations::historical_surface_search_cache_internal::Append (
+      pctx, { 103, 13, 1003, "SIGNAL", "d", UnitVec (3) });
+  REQUIRE (state->long_term_entry_indices
+           == std::vector<std::size_t>{ 0 });
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }

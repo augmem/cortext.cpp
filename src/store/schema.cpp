@@ -830,6 +830,148 @@ GetCoreMigrations ()
               "ALTER TABLE state ADD COLUMN consolidation_rate_armed INTEGER NOT NULL DEFAULT 1",
           },
       },
+      {
+          28,
+          "Persist lazy retrieval suppression recovery state",
+          {
+              "CREATE TABLE IF NOT EXISTS rif_recovery_clock("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "generation INTEGER NOT NULL CHECK(generation > 0), "
+              "log_factor REAL NOT NULL, last_ts INTEGER NOT NULL)",
+              "CREATE TABLE IF NOT EXISTS rif_generation_resets("
+              "generation INTEGER PRIMARY KEY CHECK(generation > 0), "
+              "reset_ts INTEGER NOT NULL)",
+              "CREATE TABLE IF NOT EXISTS rif_active_state("
+              "memory_id INTEGER PRIMARY KEY, "
+              "generation INTEGER NOT NULL CHECK(generation > 0), "
+              "anchor_suppression REAL NOT NULL "
+              "CHECK(anchor_suppression > 1e-9), "
+              "recovery_total REAL NOT NULL, "
+              "anchor_log_factor REAL NOT NULL, "
+              "expires_log_factor REAL NOT NULL, "
+              "FOREIGN KEY(memory_id) REFERENCES memories(memory_id) "
+              "ON DELETE CASCADE)",
+              "CREATE INDEX IF NOT EXISTS idx_rif_active_due ON rif_active_state("
+              "generation, expires_log_factor, memory_id)",
+              "INSERT OR IGNORE INTO rif_recovery_clock("
+              "singleton, generation, log_factor, last_ts) "
+              "SELECT 1, 1, 0.0, COALESCE(MAX(suppression_ts), 0) "
+              "FROM memories WHERE suppression > 1e-9",
+              "INSERT OR REPLACE INTO rif_active_state("
+              "memory_id, generation, anchor_suppression, recovery_total, "
+              "anchor_log_factor, expires_log_factor) "
+              "SELECT memory_id, 1, suppression, strength + suppression, "
+              "0.0, ln(1e-9 / suppression) "
+              "FROM memories WHERE suppression > 1e-9",
+          },
+      },
+      {
+          29,
+          "Persist row-addressed sparse retrieval route",
+          {
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_meta("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "schema_version INTEGER NOT NULL CHECK(schema_version = 1), "
+              "embedding_dim INTEGER NOT NULL CHECK(embedding_dim > 0), "
+              "entry_memory_id INTEGER NOT NULL CHECK(entry_memory_id >= 0), "
+              "max_level INTEGER NOT NULL CHECK(max_level >= 0), "
+              "active_count INTEGER NOT NULL CHECK(active_count >= 0), "
+              "generation INTEGER NOT NULL CHECK(generation >= 0))",
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_nodes("
+              "memory_id INTEGER PRIMARY KEY, "
+              "embedding BLOB NOT NULL, "
+              "level INTEGER NOT NULL CHECK(level >= 0), "
+              "links BLOB NOT NULL, "
+              "active INTEGER NOT NULL CHECK(active IN (0, 1)), "
+              "generation INTEGER NOT NULL CHECK(generation >= 0))",
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_build("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "schema_version INTEGER NOT NULL CHECK(schema_version = 1), "
+              "embedding_dim INTEGER NOT NULL CHECK(embedding_dim > 0), "
+              "cursor_memory_id INTEGER NOT NULL "
+              "CHECK(cursor_memory_id >= 0), "
+              "entry_memory_id INTEGER NOT NULL CHECK(entry_memory_id >= 0), "
+              "max_level INTEGER NOT NULL CHECK(max_level >= 0), "
+              "active_count INTEGER NOT NULL CHECK(active_count >= 0), "
+              "generation INTEGER NOT NULL CHECK(generation > 0))",
+              "CREATE TABLE IF NOT EXISTS "
+              "cortext_sparse_route_dirty("
+              "memory_id INTEGER PRIMARY KEY CHECK(memory_id > 0))",
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_active "
+              "ON cortext_sparse_route_nodes(generation, active, memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_generation "
+              "ON cortext_sparse_route_nodes(generation)",
+          },
+      },
+      {
+          30,
+          "Persist exact signal embeddings outside the global vector route",
+          {
+              "CREATE TABLE IF NOT EXISTS cortext_active_signal_embeddings("
+              "slot INTEGER PRIMARY KEY CHECK(slot >= 0), "
+              "signal_id INTEGER NOT NULL UNIQUE, "
+              "embedding BLOB NOT NULL, "
+              "created_at INTEGER NOT NULL, "
+              "capacity INTEGER NOT NULL CHECK(capacity > 0), "
+              "FOREIGN KEY(signal_id) REFERENCES signals(signal_id) "
+              "ON DELETE CASCADE)",
+              "DROP VIEW IF EXISTS recent_context",
+              "CREATE VIEW recent_context AS "
+              "SELECT s.signal_id, s.embedding_id, "
+              "COALESCE(a.embedding, e.embedding) AS embedding, s.timestamp "
+              "FROM signals s "
+              "LEFT JOIN cortext_active_signal_embeddings a "
+              "ON a.signal_id = s.signal_id "
+              "LEFT JOIN embeddings e ON s.embedding_id = e.embedding_id "
+              "ORDER BY s.timestamp DESC "
+              "LIMIT 64",
+          },
+      },
+      {
+          31,
+          "Persist the consolidation-rebuilt sparse activation centroid",
+          {
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_entry_memory_id INTEGER NOT NULL DEFAULT 0 "
+              "CHECK(activation_entry_memory_id >= 0)",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_generation INTEGER NOT NULL DEFAULT 0 "
+              "CHECK(activation_generation >= 0)",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_centroid BLOB",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_identity_ids BLOB",
+          },
+      },
+      {
+          32,
+          "Index deterministic sparse-route entry replacement",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_entry "
+              "ON cortext_sparse_route_nodes("
+              "generation, active, level DESC, memory_id ASC)",
+          },
+      },
+      {
+          33,
+          "Index bounded emotional source reranking",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_flashbulb_intensity "
+              "ON memories(emotional_intensity DESC, memory_id ASC) "
+              "WHERE flashbulb = 1 AND embedding_id IS NOT NULL "
+              "AND kind != 'WORKING'",
+          },
+      },
+      {
+          34,
+          "Index bounded unclustered consolidation candidates",
+          {
+              "CREATE INDEX IF NOT EXISTS "
+              "idx_memories_ltm_unclustered_strength_created "
+              "ON memories(strength, created_at, embedding_id) "
+              "WHERE kind = 'LONG_TERM' AND cluster_id IS NULL",
+          },
+      },
   };
 }
 
@@ -866,6 +1008,39 @@ ApplyMigrationsThrough (Store &store, int64_t maximum_id)
               continue;
             }
           ApplySingleMigrationInTransaction (store, m);
+        }
+
+      const auto rif_tables = store.Execute (
+          "SELECT 1 FROM sqlite_master "
+          "WHERE type = 'table' AND name = 'rif_active_state' LIMIT 1");
+      if (!rif_tables.empty ())
+        {
+          // The approved migration contains only the three persistent tables
+          // and one index. Keep the derived-value seam connection-local.
+          store.Execute ("DROP VIEW IF EXISTS temp.rif_effective_memories");
+          store.Execute (
+              "CREATE TEMP VIEW rif_effective_memories AS "
+              "SELECT m.memory_id, "
+              "CASE WHEN a.memory_id IS NULL THEN m.strength "
+              "     WHEN a.generation = c.generation THEN "
+              "       MAX(0.0, a.recovery_total - "
+              "           a.anchor_suppression * "
+              "           exp(c.log_factor - a.anchor_log_factor)) "
+              "     ELSE a.recovery_total END AS strength, "
+              "CASE WHEN a.memory_id IS NULL THEN m.suppression "
+              "     WHEN a.generation = c.generation THEN "
+              "       a.anchor_suppression * "
+              "       exp(c.log_factor - a.anchor_log_factor) "
+              "     ELSE 0.0 END AS suppression, "
+              "CASE WHEN a.memory_id IS NULL THEN m.suppression_ts "
+              "     WHEN a.generation = c.generation THEN c.last_ts "
+              "     ELSE COALESCE(r.reset_ts, c.last_ts) "
+              "END AS suppression_ts "
+              "FROM memories m "
+              "CROSS JOIN rif_recovery_clock c "
+              "LEFT JOIN rif_active_state a ON a.memory_id = m.memory_id "
+              "LEFT JOIN rif_generation_resets r "
+              "  ON r.generation = a.generation");
         }
 
       store.Execute ("COMMIT");

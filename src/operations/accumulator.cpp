@@ -6,6 +6,7 @@
 #include "cortext/signal.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "../experimental_env.hpp"
+#include "signal_record_rollback_internal.hpp"
 
 #include <algorithm>
 #include <string>
@@ -164,6 +165,7 @@ UpdateAccumulator::Execute (OperationContext &context,
 
       if (accept)
         {
+          signal_record_rollback_internal::EnsureBackedUp (p_ctx);
           acc.ResetForNextUnit (signal.timestamp);
           context.SetInterruptAborted (true);
           telemetry::AddCounter ("cortext.accumulator.interrupt_abort_total", 1);

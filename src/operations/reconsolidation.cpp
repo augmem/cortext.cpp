@@ -2,6 +2,7 @@
 #include "historical_surface_search_cache_internal.hpp"
 #include "association_fanout_cache_internal.hpp"
 #include "constructive_recall_internal.hpp"
+#include "retrieval_trace_state.hpp"
 #include "neuromodulator_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -131,6 +132,8 @@ RefreshProcessorSurfaces (Transaction &tx, ProcessorContext *p_ctx,
           { new_embedding_id, memory_id, 0, std::string (), std::string (),
             embedding });
     }
+  retrieval_trace::RecordSurfaceUpsert (
+      memory_id, new_embedding_id, ToFloatVector (embedding));
 }
 
 long long
@@ -173,7 +176,8 @@ WriteEmbeddingInPlaceOrFork (Transaction &tx, long long memory_id,
       // Replacing or forking a joined base row changes both the vector and its
       // join metadata. Fall back to authoritative SQL rather than risk a
       // partially updated pre-filter population.
-      historical_surface_search_cache_internal::Erase (*p_ctx);
+      historical_surface_search_cache_internal::
+          InvalidateHistoricalPreserveCurrent (*p_ctx);
     }
   auto ref_rows = tx.Execute (
       "SELECT "

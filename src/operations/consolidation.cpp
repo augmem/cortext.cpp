@@ -6,6 +6,8 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "rif_active_epoch_cache_internal.hpp"
+#include "sparse_retrieval_knobs_internal.hpp"
 #include <algorithm>
 #include <any>
 #include <chrono>
@@ -51,19 +53,100 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   // Uses unified memories table which contains per-memory state.
   const double tag_weight = core::ConsolidationCandidateTagWeight (
       F_raw, S_raw, T);
+  const auto candidate_input_limit
+      = sparse_retrieval_knobs_internal::ActivationIdentityTarget (
+          F_raw, S_raw, T);
+  const auto association_edge_limit
+      = sparse_retrieval_knobs_internal::GraphNeighborCount (
+          F_raw, S_raw, T);
+  const auto active_state_limit
+      = rif_active_epoch_cache_internal::DeriveLimits (
+            F_raw, S_raw, T)
+            .mutation_count;
+  const auto active_count_rows = tx.Execute (
+      "SELECT COUNT(*) AS row_count FROM ("
+      "  SELECT 1 FROM rif_active_state a "
+      "  JOIN rif_recovery_clock c ON c.generation = a.generation "
+      "  WHERE c.singleton = 1 LIMIT ?"
+      ")",
+      { static_cast<long long> (active_state_limit + 1) });
+  long long active_state_count = 0;
+  if (!active_count_rows.empty ())
+    {
+      const auto row_count
+          = active_count_rows.front ().find ("row_count");
+      if (row_count != active_count_rows.front ().end ()
+          && row_count->second.type () == typeid (long long))
+        active_state_count = std::any_cast<long long> (row_count->second);
+    }
+  context.AddOperationTiming (
+      "ScoreConsolidation.active_state_limit",
+      static_cast<double> (active_state_limit));
+  context.AddOperationTiming (
+      "ScoreConsolidation.active_state_count",
+      static_cast<double> (active_state_count));
+  if (active_state_count > static_cast<long long> (active_state_limit))
+    throw StoreError (
+        "ScoreConsolidation active RIF frontier exceeds its knob-derived "
+        "work ceiling");
   const std::string query
-      = "WITH edge_counts AS ("
+      = "WITH inactive_candidate_ids AS MATERIALIZED ("
+        "  SELECT m.memory_id, m.strength AS effective_strength, "
+        "         m.created_at, m.embedding_id "
+        "  FROM memories m INDEXED BY "
+        "idx_memories_ltm_unclustered_strength_created "
+        "  WHERE m.kind = 'LONG_TERM' "
+        "    AND m.cluster_id IS NULL "
+        "    AND NOT EXISTS("
+        "      SELECT 1 FROM rif_active_state a "
+        "      JOIN rif_recovery_clock c ON c.generation = a.generation "
+        "      WHERE c.singleton = 1 AND a.memory_id = m.memory_id"
+        "    ) "
+        "  ORDER BY m.strength ASC, m.created_at ASC, "
+        "           m.embedding_id ASC "
+        "  LIMIT ?8"
+        "), active_candidate_ids AS MATERIALIZED ("
         "  SELECT m.memory_id, "
-        "         (SELECT COUNT(*) FROM associations a "
-        "          WHERE a.source_memory_id = m.memory_id "
-        "             OR a.target_memory_id = m.memory_id) AS cnt "
-        "  FROM memories m"
+        "         CASE WHEN a.generation = c.generation THEN "
+        "           MAX(0.0, a.recovery_total - "
+        "             a.anchor_suppression * "
+        "             exp(c.log_factor - a.anchor_log_factor)) "
+        "         ELSE a.recovery_total END AS effective_strength, "
+        "         m.created_at, m.embedding_id "
+        "  FROM rif_active_state a "
+        "  JOIN memories m ON m.memory_id = a.memory_id "
+        "  CROSS JOIN rif_recovery_clock c "
+        "  WHERE m.kind = 'LONG_TERM' AND m.cluster_id IS NULL "
+        "    AND c.singleton = 1 AND a.generation = c.generation "
+        "  ORDER BY effective_strength ASC, m.created_at ASC, "
+        "           m.embedding_id ASC "
+        "  LIMIT ?8"
+        "), candidate_ids AS MATERIALIZED ("
+        "  SELECT memory_id FROM ("
+        "    SELECT * FROM inactive_candidate_ids "
+        "    UNION ALL "
+        "    SELECT * FROM active_candidate_ids"
+        "  ) "
+        "  ORDER BY effective_strength ASC, created_at ASC, "
+        "           embedding_id ASC "
+        "  LIMIT ?8"
+        "), input_count AS ("
+        "  SELECT COUNT(*) AS candidate_input_count FROM candidate_ids"
+        "), edge_counts AS ("
+        "  SELECT ci.memory_id, "
+        "         (SELECT COUNT(*) FROM ("
+        "            SELECT 1 FROM associations a "
+        "            WHERE a.source_memory_id = ci.memory_id "
+        "               OR a.target_memory_id = ci.memory_id "
+        "            LIMIT ?9"
+        "          )) AS cnt "
+        "  FROM candidate_ids ci"
         "), max_cnt AS ("
         "  SELECT COALESCE(MAX(cnt), 0) AS maximum FROM edge_counts"
         "), scored AS ("
         "  SELECT m.memory_id, "
         "         COALESCE(cme.embedding_id, m.embedding_id) AS embedding_id, "
-        "         ((?1 * COALESCE(m.strength, 1.0)) "
+        "         ((?1 * COALESCE(rif.strength, 1.0)) "
         "          - (?2 * COALESCE(m.redundancy, 0.0)) "
         "          + (?3 * CASE WHEN max_cnt.maximum > 0 "
         "                 THEN CAST(ec.cnt AS REAL) / max_cnt.maximum "
@@ -74,29 +157,54 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
         "                  ELSE 0.0 END)) AS computed_score, "
         "         COALESCE(cme.embedding, e.embedding) AS embedding, "
         "         m.created_at "
-        "  FROM memories m "
+        "  FROM candidate_ids ci "
+        "  JOIN memories m ON m.memory_id = ci.memory_id "
+        "  JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
         "  JOIN embeddings e ON m.embedding_id = e.embedding_id "
         "  LEFT JOIN current_memory_embeddings cme "
         "    ON cme.memory_id = m.memory_id "
         "  LEFT JOIN edge_counts ec ON ec.memory_id = m.memory_id "
         "  CROSS JOIN max_cnt "
-        "  WHERE m.kind = 'LONG_TERM' "
-        "    AND m.cluster_id IS NULL"
+        "  WHERE m.cluster_id IS NULL"
         ") "
-        "SELECT memory_id, embedding_id, computed_score, embedding "
-        "FROM scored WHERE computed_score < ?7 "
-        "ORDER BY computed_score ASC, created_at ASC, memory_id ASC;";
+        "SELECT memory_id, embedding_id, computed_score, embedding, "
+        "       created_at, candidate_input_count, 0 AS sentinel "
+        "FROM scored CROSS JOIN input_count WHERE computed_score < ?7 "
+        "UNION ALL "
+        "SELECT NULL, NULL, NULL, NULL, NULL, candidate_input_count, "
+        "       1 AS sentinel FROM input_count "
+        "ORDER BY sentinel ASC, computed_score ASC, created_at ASC, "
+        "         memory_id ASC;";
   const auto candidate_query_start = std::chrono::steady_clock::now ();
   auto rows = tx.Execute (
       query,
       { T, F_eff, S_eff, T, tag_weight, static_cast<long long> (now_ts),
-        floor_cutoff });
+        floor_cutoff, static_cast<long long> (candidate_input_limit),
+        static_cast<long long> (association_edge_limit) });
   context.AddOperationTiming (
       "ScoreConsolidation.candidate_query_sql",
       std::chrono::duration<double, std::milli> (
           std::chrono::steady_clock::now () - candidate_query_start)
           .count ());
   internal::ThrowIfStopRequested ();
+  long long candidate_input_count = 0;
+  if (!rows.empty ())
+    {
+      const auto input_count = rows.back ().find ("candidate_input_count");
+      if (input_count != rows.back ().end ()
+          && input_count->second.type () == typeid (long long))
+        candidate_input_count
+            = std::any_cast<long long> (input_count->second);
+    }
+  context.AddOperationTiming (
+      "ScoreConsolidation.candidate_input_limit",
+      static_cast<double> (candidate_input_limit));
+  context.AddOperationTiming (
+      "ScoreConsolidation.candidate_input_count",
+      static_cast<double> (candidate_input_count));
+  context.AddOperationTiming (
+      "ScoreConsolidation.association_edge_limit",
+      static_cast<double> (association_edge_limit));
   std::vector<ConsolidationCandidate> candidates;
   if (!rows.empty())
     {

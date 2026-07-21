@@ -159,6 +159,25 @@ FetchContent_Declare(
   GIT_TAG v3.12.0
 )
 FetchContent_MakeAvailable(nlohmann_json)
+
+# hnswlib provides the private sparse candidate route used by graph retrieval.
+# Keep the exact commit pinned: SQLite and Cortext remain authoritative for
+# eligibility and final ranking; this dependency only proposes bounded IDs.
+FetchContent_Declare(
+  hnswlib
+  GIT_REPOSITORY https://github.com/nmslib/hnswlib.git
+  GIT_TAG d9b3608c83d83b46c96e25088cb1d729b29dcfe9
+)
+FetchContent_MakeAvailable(hnswlib)
+execute_process(
+  COMMAND "${CMAKE_COMMAND}"
+          "-DHNSWLIB_SOURCE_DIR=${hnswlib_SOURCE_DIR}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PatchHnswlibPrefetch.cmake"
+  RESULT_VARIABLE _cortext_hnswlib_patch_result
+)
+if(NOT _cortext_hnswlib_patch_result EQUAL 0)
+  message(FATAL_ERROR "Failed to prepare the pinned hnswlib source")
+endif()
 set(BUILD_TESTING "${_cortext_saved_dependency_build_testing}")
 
 #
@@ -256,6 +275,8 @@ add_library(cortext
     src/operations/meta_learning_internal.cpp
     src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
+    src/operations/sparse_retrieval_route_internal.cpp
+    src/operations/sparse_retrieval_route_sqlite_internal.cpp
     src/operations/eviction_policy_override.cpp
     src/operations/storage_pressure.cpp
     src/operations/retrieval_trace_state.cpp
@@ -599,6 +620,7 @@ target_compile_definitions(cortext PRIVATE SQLITE_CORE=1)
 # Link dependencies (SQLite handling differs per target)
 target_link_libraries(cortext PUBLIC Eigen3::Eigen)
 target_link_libraries(cortext PRIVATE nlohmann_json::nlohmann_json)
+target_include_directories(cortext SYSTEM PRIVATE ${hnswlib_SOURCE_DIR})
 get_target_property(CORTEXT_NLOHMANN_INCLUDE_DIRS nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
 if(CORTEXT_NLOHMANN_INCLUDE_DIRS)
   target_include_directories(cortext BEFORE PRIVATE ${CORTEXT_NLOHMANN_INCLUDE_DIRS})
@@ -669,10 +691,6 @@ if(CORTEXT_ENABLE_MSAN AND NOT EMSCRIPTEN)
   target_compile_options(cortext PUBLIC -fsanitize=memory -fno-omit-frame-pointer)
   target_link_options(cortext PUBLIC -fsanitize=memory)
   message(STATUS "MemorySanitizer enabled for cortext")
-endif()
-
-if(BUILD_TESTING)
-  target_compile_definitions(cortext PRIVATE CORTEXT_TESTING=1)
 endif()
 
 if(EMSCRIPTEN)
@@ -831,6 +849,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+  target_compile_definitions(cortext PRIVATE CORTEXT_TESTING=1)
   add_subdirectory(tests)
 endif()
 

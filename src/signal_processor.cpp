@@ -11,21 +11,36 @@
 #include "cortext/store/schema.hpp"
 #include "cortext/store/utils.hpp"
 #include "operations/constructive_recall_internal.hpp"
+#include "operations/active_signal_embedding_ring_internal.hpp"
+#include "operations/bounded_activation_shadow_internal.hpp"
+#include "operations/consolidation_epoch_profile_internal.hpp"
 #include "operations/consolidation_throughput_state_internal.hpp"
+#include "operations/emotional_metadata_cache_internal.hpp"
+#include "operations/execution_cache_sidecar_internal.hpp"
 #include "operations/historical_surface_search_cache_internal.hpp"
+#include "operations/rif_state_internal.hpp"
+#include "operations/signal_record_rollback_internal.hpp"
+#include "operations/sparse_retrieval_knobs_internal.hpp"
+#include "experimental_env.hpp"
 #include "working_memory_time_internal.hpp"
+#include "store/mutation_audit_internal.hpp"
+#include "store/commit_profile_internal.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <any>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -44,6 +59,113 @@ constexpr uint64_t kWalPassiveCheckpointIntervalSignals = 256;
 constexpr std::uintmax_t kWalPassiveCheckpointMinBytes
     = 256ULL * 1024ULL * 1024ULL;
 
+#if defined(CORTEXT_TESTING)
+std::atomic<bool> g_sqlite_checkpoint_failure_once { false };
+std::atomic<bool> g_retrieval_surface_reload_failure_once { false };
+#endif
+
+bool
+ProfileWorkCountersEnabled ()
+{
+  return internal::experimental_env::Flag ("CORTEXT_PROFILE_WORK_COUNTERS");
+}
+
+void
+AddConsolidationEpochCounters (
+    OperationContext &op_context, const std::string &prefix,
+    const operations::consolidation_epoch_profile_internal::Counters &counters)
+{
+  op_context.AddOperationTiming (
+      prefix + ".accumulator_signal_count",
+      static_cast<double> (counters.accumulator_signal_count));
+  op_context.AddOperationTiming (
+      prefix + ".working_memory_pending_signal_count",
+      static_cast<double> (counters.working_memory_pending_signal_count));
+  op_context.AddOperationTiming (
+      prefix + ".consolidation_dirty_memory_count",
+      static_cast<double> (counters.consolidation_dirty_memory_count));
+  op_context.AddOperationTiming (
+      prefix + ".consolidation_dirty_association_count",
+      static_cast<double> (counters.consolidation_dirty_association_count));
+  op_context.AddOperationTiming (
+      prefix + ".consolidation_dirty_index_count",
+      static_cast<double> (counters.consolidation_dirty_index_count));
+}
+
+void
+EnsureRifActiveEpochCache (Store *store, ProcessorContext &context,
+                           const SignalProcessor::Config &config)
+{
+  if (!store)
+    return;
+  auto sidecar
+      = operations::execution_cache_sidecar_internal::Ensure (context);
+  try
+    {
+      operations::rif_active_epoch_cache_internal::Ensure (
+          sidecar->rif_active_epoch, *store,
+          operations::rif_active_epoch_cache_internal::DeriveLimits (
+              config.focus, config.sensitivity, config.stability));
+    }
+  catch (...)
+    {
+      // The persistent representation remains authoritative. A later signal
+      // can retry the bounded current-epoch rebuild.
+      sidecar->rif_active_epoch.database.reset ();
+      sidecar->rif_active_epoch.valid = false;
+    }
+}
+
+void
+CalibrateRifActiveEpochBeforeHydration (
+    Store &store, ProcessorContext &context,
+    const SignalProcessor::Config &config)
+{
+  EnsureRifActiveEpochCache (&store, context, config);
+  auto sidecar
+      = operations::execution_cache_sidecar_internal::Ensure (context);
+  if (!sidecar->rif_active_epoch.valid
+      || !sidecar->rif_active_epoch.database)
+    {
+      throw std::runtime_error (
+          "Failed to prepare lazy RIF state before hydration");
+    }
+  const auto memory_ids
+      = sidecar->rif_active_epoch.calibration_memory_ids;
+  if (memory_ids.empty ())
+    return;
+
+  auto transaction = store.Begin ();
+  try
+    {
+      operations::rif_state_internal::CalibrateMemoryIdsAtClock (
+          *transaction, memory_ids,
+          core::RetrievalCompetitionRecoverySeconds (config.stability)
+              * 1000.0,
+          sidecar->rif_active_epoch.limits.row_batch_size);
+      transaction->Commit ();
+    }
+  catch (...)
+    {
+      try
+        {
+          transaction->Rollback ();
+        }
+      catch (...)
+        {
+        }
+      throw;
+    }
+
+  // Rebuild the disposable epoch only from the calibrated persistent state.
+  // Startup hydration must never seed working slots from the pre-calibration
+  // effective view left by a schema-27 migration.
+  sidecar->rif_active_epoch.database.reset ();
+  sidecar->rif_active_epoch.valid = false;
+  sidecar->rif_active_epoch.calibration_memory_ids.clear ();
+  EnsureRifActiveEpochCache (&store, context, config);
+}
+
 double
 ElapsedMillis (std::chrono::steady_clock::time_point start,
                std::chrono::steady_clock::time_point end)
@@ -51,6 +173,52 @@ ElapsedMillis (std::chrono::steady_clock::time_point start,
   return std::chrono::duration_cast<std::chrono::duration<double, std::milli> > (
              end - start)
       .count ();
+}
+
+struct ConsolidationActivationCentroid
+{
+  std::optional<Eigen::VectorXf> embedding;
+  std::size_t cluster_count = 0;
+  std::size_t member_count = 0;
+};
+
+ConsolidationActivationCentroid
+BuildConsolidationActivationCentroid (const OperationContext &context)
+{
+  ConsolidationActivationCentroid result;
+  Eigen::VectorXd weighted_sum;
+  for (const auto &cluster : context.GetConsolidationClusters ())
+    {
+      const std::size_t member_count
+          = cluster.memory_ids.empty () ? cluster.embedding_ids.size ()
+                                        : cluster.memory_ids.size ();
+      if (cluster.centroid.empty () || member_count == 0)
+        continue;
+      if (weighted_sum.size () == 0)
+        weighted_sum = Eigen::VectorXd::Zero (
+            static_cast<Eigen::Index> (cluster.centroid.size ()));
+      if (weighted_sum.size ()
+          != static_cast<Eigen::Index> (cluster.centroid.size ()))
+        return {};
+      for (std::size_t index = 0; index < cluster.centroid.size (); ++index)
+        {
+          const double value = cluster.centroid[index];
+          if (!std::isfinite (value))
+            return {};
+          weighted_sum[static_cast<Eigen::Index> (index)]
+              += value * static_cast<double> (member_count);
+        }
+      ++result.cluster_count;
+      result.member_count += member_count;
+    }
+  if (result.cluster_count == 0 || result.member_count == 0)
+    return result;
+  weighted_sum /= static_cast<double> (result.member_count);
+  const double norm = weighted_sum.norm ();
+  if (!(norm > 0.0) || !std::isfinite (norm))
+    return {};
+  result.embedding = weighted_sum.cast<float> ();
+  return result;
 }
 
 inline int64_t
@@ -118,6 +286,8 @@ struct DetachedProcessorCaches
       retrieval_surface_source_index;
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
   ProcessorContext::AssociationFanoutCache association_fanout_cache;
+  std::shared_ptr<operations::execution_cache_sidecar_internal::State>
+      execution_cache_sidecar;
   std::unordered_set<long long> predictive_pre_activation_embedding_ids;
   std::unordered_set<long long> predictive_pre_activation_memory_ids;
   std::unordered_set<long long> retrieval_suppression_embedding_ids;
@@ -128,8 +298,78 @@ struct DetachedProcessorCaches
       procedural_store;
 };
 
+DetachedProcessorCaches
+SnapshotProcessorCaches (const DetachedProcessorCaches &caches)
+{
+  DetachedProcessorCaches snapshot = caches;
+  if (caches.execution_cache_sidecar)
+    snapshot.execution_cache_sidecar
+        = std::make_shared<operations::execution_cache_sidecar_internal::State> (
+            *caches.execution_cache_sidecar);
+  return snapshot;
+}
+
+std::size_t
+DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
+{
+  std::size_t count
+      = caches.association_cache.size ()
+        + caches.association_cache_index.size ()
+        + caches.retrieval_surface_cache.size ()
+        + caches.retrieval_surface_index.size ()
+        + caches.retrieval_surface_embedding_index.size ()
+        + caches.retrieval_surface_source_index.size ()
+        + caches.retrieval_surface_source_index_dirty.size ()
+        + caches.association_fanout_cache.out_by_source.size ()
+        + caches.association_fanout_cache.in_by_target.size ()
+        + caches.predictive_pre_activation_embedding_ids.size ()
+        + caches.predictive_pre_activation_memory_ids.size ()
+        + caches.retrieval_suppression_embedding_ids.size ()
+        + caches.retrieval_suppression_memory_ids.size ();
+  if (caches.execution_cache_sidecar)
+    {
+      const auto &sidecar = *caches.execution_cache_sidecar;
+      count += sidecar.emotional_metadata.rows_by_memory.size ()
+               + sidecar.emotional_metadata.memory_ids_by_embedding.size ()
+               + sidecar.emotional_metadata.values_by_embedding.size ()
+               + sidecar.emotional_metadata.source_query_order.size ()
+               + sidecar.supersession_eligibility
+                     .activation_ts_by_target.size ();
+    }
+  for (const auto &[source_id, entries] : caches.retrieval_surface_source_index)
+    {
+      (void)source_id;
+      count += entries.size ();
+    }
+  for (const auto &[memory_id, edges] :
+       caches.association_fanout_cache.out_by_source)
+    {
+      (void)memory_id;
+      count += edges.size ();
+    }
+  for (const auto &[memory_id, edges] :
+       caches.association_fanout_cache.in_by_target)
+    {
+      (void)memory_id;
+      count += edges.size ();
+    }
+  count += caches.index_store.size () + caches.index_reverse.size ()
+           + caches.procedural_store.size ();
+  for (const auto &[key, ids] : caches.index_store)
+    {
+      (void)key;
+      count += ids.size ();
+    }
+  for (const auto &[key, entries] : caches.procedural_store)
+    {
+      (void)key;
+      count += entries.size ();
+    }
+  return count;
+}
+
 void
-ClearRebuildableProcessorCaches (ProcessorContext &ctx)
+ClearDbDerivedProcessorCaches (ProcessorContext &ctx)
 {
   ctx.association_cache = {};
   ctx.association_cache_index = {};
@@ -139,10 +379,17 @@ ClearRebuildableProcessorCaches (ProcessorContext &ctx)
   ctx.retrieval_surface_source_index = {};
   ctx.retrieval_surface_source_index_dirty = {};
   ctx.association_fanout_cache = {};
+  operations::execution_cache_sidecar_internal::Erase (ctx);
   ctx.predictive_pre_activation_embedding_ids = {};
   ctx.predictive_pre_activation_memory_ids = {};
   ctx.retrieval_suppression_embedding_ids = {};
   ctx.retrieval_suppression_memory_ids = {};
+}
+
+void
+ClearRebuildableProcessorCaches (ProcessorContext &ctx)
+{
+  ClearDbDerivedProcessorCaches (ctx);
   ctx.index_store = {};
   ctx.index_reverse = {};
   ctx.procedural_store = {};
@@ -164,6 +411,8 @@ DetachRebuildableProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.retrieval_surface_source_index_dirty);
   caches.association_fanout_cache
       = std::move (ctx.association_fanout_cache);
+  caches.execution_cache_sidecar
+      = operations::execution_cache_sidecar_internal::Detach (ctx);
   caches.predictive_pre_activation_embedding_ids
       = std::move (ctx.predictive_pre_activation_embedding_ids);
   caches.predictive_pre_activation_memory_ids
@@ -194,6 +443,8 @@ RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
   ctx.retrieval_surface_source_index_dirty
       = std::move (caches.retrieval_surface_source_index_dirty);
   ctx.association_fanout_cache = std::move (caches.association_fanout_cache);
+  operations::execution_cache_sidecar_internal::Restore (
+      ctx, std::move (caches.execution_cache_sidecar));
   ctx.predictive_pre_activation_embedding_ids
       = std::move (caches.predictive_pre_activation_embedding_ids);
   ctx.predictive_pre_activation_memory_ids
@@ -238,13 +489,532 @@ struct ProcessorRollbackSnapshot
   DetachedProcessorCaches caches;
   operations::consolidation_throughput_state_internal::State
       consolidation_throughput;
+  bool full_cache_snapshot = true;
   bool initialized = false;
 };
+
+struct DetachedWorkingMemoryRecords
+{
+  struct SlotRecords
+  {
+    std::size_t slot_index = 0;
+    std::vector<SignalRecord> records;
+    std::vector<std::vector<unsigned char>> blob_ids;
+  };
+
+  std::vector<SlotRecords> slots;
+};
+
+DetachedWorkingMemoryRecords
+DetachWorkingMemoryRecords (ProcessorContext &context)
+{
+  DetachedWorkingMemoryRecords detached;
+  detached.slots.reserve (context.wm_slots.size ());
+  for (std::size_t index = 0; index < context.wm_slots.size (); ++index)
+    {
+      auto &slot = context.wm_slots[index];
+      detached.slots.push_back (
+          { index, std::move (slot.signal_records),
+            std::move (slot.blob_ids) });
+      slot.signal_records.clear ();
+      slot.blob_ids.clear ();
+    }
+  return detached;
+}
+
+void
+AttachWorkingMemoryRecords (ProcessorContext &context,
+                            DetachedWorkingMemoryRecords &detached)
+{
+  for (auto &entry : detached.slots)
+    {
+      if (entry.slot_index < context.wm_slots.size ())
+        {
+          context.wm_slots[entry.slot_index].signal_records
+              = std::move (entry.records);
+          context.wm_slots[entry.slot_index].blob_ids
+              = std::move (entry.blob_ids);
+        }
+    }
+}
 
 #if defined(CORTEXT_TESTING)
 std::atomic_size_t g_processor_rollback_snapshot_owner_count { 0 };
 std::atomic_size_t g_processor_rollback_snapshot_reuse_count { 0 };
+std::atomic_size_t g_signal_record_rollback_backup_count { 0 };
+std::atomic_size_t g_signal_record_rollback_copied_record_count { 0 };
+std::atomic_int g_signal_record_snapshot_setup_throw_stage { 0 };
 #endif
+
+class SignalRecordRollbackJournal
+{
+public:
+  struct SparseIndexBackup
+  {
+    bool existed = false;
+    std::size_t size = 0;
+  };
+
+  SignalRecordRollbackJournal (ProcessorContext &context,
+                               std::string source_id, bool journal_aware)
+      : context_ (context), source_id_ (std::move (source_id)),
+        journal_aware_ (journal_aware)
+  {
+  }
+
+  void
+  CopyScalarSnapshotTo (ProcessorContext &snapshot)
+  {
+    if (!journal_aware_)
+      {
+        snapshot = context_;
+        return;
+      }
+    working_memory_sizes_.clear ();
+    working_memory_sizes_.reserve (context_.wm_slots.size ());
+    working_memory_live_to_original_.clear ();
+    working_memory_live_to_original_.reserve (context_.wm_slots.size ());
+    preserved_working_memory_.slots.clear ();
+    preserved_working_memory_.slots.reserve (context_.wm_slots.size ());
+    for (std::size_t index = 0; index < context_.wm_slots.size (); ++index)
+      {
+        working_memory_live_to_original_.push_back (index);
+      }
+
+    std::vector<SignalRecord> current_records;
+    std::vector<std::vector<unsigned char>> current_blob_ids;
+    std::unordered_map<std::string, AccumulatorState> accumulators;
+    DetachedWorkingMemoryRecords detached;
+    bool current_records_detached = false;
+    bool accumulators_detached = false;
+    bool working_memory_detached = false;
+    try
+      {
+        auto current_it = context_.accumulator_states.find (source_id_);
+        if (current_it != context_.accumulator_states.end ())
+          {
+            current_existed_ = true;
+            original_record_size_ = current_it->second.signals.size ();
+            original_blob_id_size_ = current_it->second.blob_ids.size ();
+            current_records = std::move (current_it->second.signals);
+            current_blob_ids = std::move (current_it->second.blob_ids);
+            current_records_detached = true;
+            MaybeThrowDuringSnapshotSetup (1);
+            current_before_ = current_it->second;
+            current_it->second.signals = std::move (current_records);
+            current_it->second.blob_ids = std::move (current_blob_ids);
+            current_records_detached = false;
+          }
+        accumulators = std::move (context_.accumulator_states);
+        context_.accumulator_states.clear ();
+        accumulators_detached = true;
+        MaybeThrowDuringSnapshotSetup (2);
+        detached = DetachWorkingMemoryRecords (context_);
+        working_memory_detached = true;
+        MaybeThrowDuringSnapshotSetup (3);
+        for (const auto &entry : detached.slots)
+          {
+            working_memory_sizes_.push_back (
+                { entry.records.size (), entry.blob_ids.size () });
+          }
+        snapshot = context_;
+        context_.accumulator_states = std::move (accumulators);
+        accumulators_detached = false;
+        AttachWorkingMemoryRecords (context_, detached);
+        working_memory_detached = false;
+      }
+    catch (...)
+      {
+        if (working_memory_detached)
+          {
+            AttachWorkingMemoryRecords (context_, detached);
+          }
+        if (accumulators_detached)
+          {
+            context_.accumulator_states = std::move (accumulators);
+          }
+        if (current_records_detached)
+          {
+            auto current_it = context_.accumulator_states.find (source_id_);
+            if (current_it != context_.accumulator_states.end ())
+              {
+                current_it->second.signals = std::move (current_records);
+                current_it->second.blob_ids = std::move (current_blob_ids);
+              }
+          }
+        throw;
+      }
+  }
+
+  void
+  RestoreRecordsInto (ProcessorContext &snapshot)
+  {
+    if (!journal_aware_)
+      {
+        return;
+      }
+    if (full_accumulator_backup_)
+      {
+        snapshot.accumulator_states = std::move (*full_accumulator_backup_);
+        full_accumulator_backup_.reset ();
+      }
+    else if (destructive_backup_)
+      {
+        if (current_existed_)
+          {
+            context_.accumulator_states.insert_or_assign (
+                source_id_, std::move (*current_accumulator_backup_));
+          }
+        else
+          {
+            context_.accumulator_states.erase (source_id_);
+          }
+        snapshot.accumulator_states = std::move (context_.accumulator_states);
+        current_accumulator_backup_.reset ();
+      }
+    else
+      {
+        RestoreCurrentAccumulator (context_.accumulator_states);
+        snapshot.accumulator_states = std::move (context_.accumulator_states);
+      }
+    RestoreWorkingMemoryRecordsInto (snapshot);
+    RestoreVolatileCachesInto (snapshot);
+  }
+
+  void
+  EnsureBackedUp ()
+  {
+    if (destructive_backup_ || full_accumulator_backup_)
+      {
+        return;
+      }
+    if (current_existed_)
+      {
+        current_accumulator_backup_ = CopyCurrentAccumulatorBefore ();
+      }
+#if defined(CORTEXT_TESTING)
+    std::size_t copied_records = current_accumulator_backup_
+                                     ? current_accumulator_backup_->signals.size ()
+                                     : 0;
+    g_signal_record_rollback_backup_count.fetch_add (
+        1, std::memory_order_relaxed);
+    g_signal_record_rollback_copied_record_count.fetch_add (
+        copied_records, std::memory_order_relaxed);
+#endif
+    destructive_backup_ = true;
+  }
+
+  void
+  EnsureAllBackedUp ()
+  {
+    if (full_accumulator_backup_)
+      {
+        return;
+      }
+    auto accumulator_backup = context_.accumulator_states;
+    RestoreCurrentAccumulator (accumulator_backup);
+    if (current_accumulator_backup_)
+      {
+        accumulator_backup.insert_or_assign (
+            source_id_, *current_accumulator_backup_);
+      }
+#if defined(CORTEXT_TESTING)
+    std::size_t copied_records = 0;
+    for (const auto &[_, accumulator] : accumulator_backup)
+      {
+        copied_records += accumulator.signals.size ();
+      }
+    g_signal_record_rollback_backup_count.fetch_add (
+        1, std::memory_order_relaxed);
+    g_signal_record_rollback_copied_record_count.fetch_add (
+        copied_records, std::memory_order_relaxed);
+#endif
+    full_accumulator_backup_ = std::move (accumulator_backup);
+    current_accumulator_backup_.reset ();
+    destructive_backup_ = false;
+  }
+
+  static void
+  EnsureBackedUpThunk (void *owner)
+  {
+    static_cast<SignalRecordRollbackJournal *> (owner)->EnsureBackedUp ();
+  }
+
+  static void
+  EnsureAllBackedUpThunk (void *owner)
+  {
+    static_cast<SignalRecordRollbackJournal *> (owner)->EnsureAllBackedUp ();
+  }
+
+  void
+  PreserveWorkingMemorySlotBeforeErase (std::size_t slot_index)
+  {
+    if (slot_index >= context_.wm_slots.size ()
+        || slot_index >= working_memory_live_to_original_.size ())
+      {
+        return;
+      }
+    auto &slot = context_.wm_slots[slot_index];
+    preserved_working_memory_.slots.push_back (
+        { working_memory_live_to_original_[slot_index],
+          std::move (slot.signal_records), std::move (slot.blob_ids) });
+    slot.signal_records.clear ();
+    slot.blob_ids.clear ();
+    working_memory_live_to_original_.erase (
+        working_memory_live_to_original_.begin ()
+        + static_cast<std::ptrdiff_t> (slot_index));
+  }
+
+  static void
+  PreserveWorkingMemorySlotBeforeEraseThunk (void *owner,
+                                             std::size_t slot_index)
+  {
+    static_cast<SignalRecordRollbackJournal *> (owner)
+        ->PreserveWorkingMemorySlotBeforeErase (slot_index);
+  }
+
+  void
+  PreserveSparseIndexBeforeInsert (const std::string &key,
+                                   long long memory_id)
+  {
+    if (!journal_aware_)
+      return;
+    if (!sparse_index_backups_.contains (key))
+      {
+        const auto index_it = context_.index_store.find (key);
+        sparse_index_backups_.emplace (
+            key, SparseIndexBackup {
+                     index_it != context_.index_store.end (),
+                     index_it != context_.index_store.end ()
+                         ? index_it->second.size ()
+                         : 0 });
+      }
+    if (!index_reverse_backups_.contains (memory_id))
+      {
+        const auto reverse_it = context_.index_reverse.find (memory_id);
+        index_reverse_backups_.emplace (
+            memory_id,
+            reverse_it != context_.index_reverse.end ()
+                ? std::optional<std::string> (reverse_it->second)
+                : std::nullopt);
+      }
+  }
+
+  static void
+  PreserveSparseIndexBeforeInsertThunk (void *owner, const std::string &key,
+                                        long long memory_id)
+  {
+    static_cast<SignalRecordRollbackJournal *> (owner)
+        ->PreserveSparseIndexBeforeInsert (key, memory_id);
+  }
+
+  void
+  PreserveProceduralValueBeforeUpdate (const std::string &key,
+                                       long long memory_id)
+  {
+    if (!journal_aware_)
+      return;
+    auto &key_backups = procedural_backups_[key];
+    if (key_backups.contains (memory_id))
+      return;
+    const auto outer_it = context_.procedural_store.find (key);
+    if (outer_it == context_.procedural_store.end ())
+      {
+        key_backups.emplace (memory_id, std::nullopt);
+        return;
+      }
+    const auto value_it = outer_it->second.find (memory_id);
+    key_backups.emplace (
+        memory_id,
+        value_it != outer_it->second.end ()
+            ? std::optional<double> (value_it->second)
+            : std::nullopt);
+  }
+
+  static void
+  PreserveProceduralValueBeforeUpdateThunk (void *owner,
+                                            const std::string &key,
+                                            long long memory_id)
+  {
+    static_cast<SignalRecordRollbackJournal *> (owner)
+        ->PreserveProceduralValueBeforeUpdate (key, memory_id);
+  }
+
+private:
+  static void
+  MaybeThrowDuringSnapshotSetup (int stage)
+  {
+#if defined(CORTEXT_TESTING)
+    int expected = stage;
+    if (g_signal_record_snapshot_setup_throw_stage.compare_exchange_strong (
+            expected, 0, std::memory_order_relaxed))
+      {
+        throw std::runtime_error ("injected snapshot setup failure");
+      }
+#else
+    (void)stage;
+#endif
+  }
+
+  struct RecordVectorSizes
+  {
+    std::size_t records = 0;
+    std::size_t blob_ids = 0;
+  };
+
+  AccumulatorState
+  CopyCurrentAccumulatorBefore () const
+  {
+    const auto current_it = context_.accumulator_states.find (source_id_);
+    AccumulatorState copied = current_it->second;
+    copied.signals.resize (
+        std::min (copied.signals.size (), original_record_size_));
+    copied.blob_ids.resize (
+        std::min (copied.blob_ids.size (), original_blob_id_size_));
+    AccumulatorState restored = *current_before_;
+    restored.signals = std::move (copied.signals);
+    restored.blob_ids = std::move (copied.blob_ids);
+    return restored;
+  }
+
+  void
+  RestoreCurrentAccumulator (
+      std::unordered_map<std::string, AccumulatorState> &accumulators) const
+  {
+    if (!current_existed_)
+      {
+        accumulators.erase (source_id_);
+        return;
+      }
+    auto current_it = accumulators.find (source_id_);
+    std::vector<SignalRecord> records;
+    std::vector<std::vector<unsigned char>> blob_ids;
+    if (current_it != accumulators.end ())
+      {
+        records = std::move (current_it->second.signals);
+        blob_ids = std::move (current_it->second.blob_ids);
+      }
+    records.resize (std::min (records.size (), original_record_size_));
+    blob_ids.resize (std::min (blob_ids.size (), original_blob_id_size_));
+    AccumulatorState restored = *current_before_;
+    restored.signals = std::move (records);
+    restored.blob_ids = std::move (blob_ids);
+    accumulators.insert_or_assign (source_id_, std::move (restored));
+  }
+
+  void
+  TrimWorkingMemoryToOriginalSizes (
+      DetachedWorkingMemoryRecords &records) const
+  {
+    for (auto &entry : records.slots)
+      {
+        const RecordVectorSizes original
+            = entry.slot_index < working_memory_sizes_.size ()
+                  ? working_memory_sizes_[entry.slot_index]
+                  : RecordVectorSizes{};
+        entry.records.resize (
+            std::min (entry.records.size (), original.records));
+        entry.blob_ids.resize (
+            std::min (entry.blob_ids.size (), original.blob_ids));
+      }
+  }
+
+  void
+  RestoreWorkingMemoryRecordsInto (ProcessorContext &snapshot)
+  {
+    auto live_records = DetachWorkingMemoryRecords (context_);
+    DetachedWorkingMemoryRecords restored;
+    restored.slots.reserve (working_memory_sizes_.size ());
+    const std::size_t retained_count = std::min (
+        live_records.slots.size (), working_memory_live_to_original_.size ());
+    for (std::size_t index = 0; index < retained_count; ++index)
+      {
+        auto &entry = live_records.slots[index];
+        restored.slots.push_back (
+            { working_memory_live_to_original_[index],
+              std::move (entry.records), std::move (entry.blob_ids) });
+      }
+    for (auto &entry : preserved_working_memory_.slots)
+      {
+        restored.slots.push_back (
+            { entry.slot_index, std::move (entry.records),
+              std::move (entry.blob_ids) });
+      }
+    TrimWorkingMemoryToOriginalSizes (restored);
+    AttachWorkingMemoryRecords (snapshot, restored);
+  }
+
+  void
+  RestoreVolatileCachesInto (ProcessorContext &snapshot)
+  {
+    for (const auto &[key, backup] : sparse_index_backups_)
+      {
+        if (!backup.existed)
+          {
+            context_.index_store.erase (key);
+            continue;
+          }
+        auto index_it = context_.index_store.find (key);
+        if (index_it != context_.index_store.end ())
+          index_it->second.resize (
+              std::min (index_it->second.size (), backup.size));
+      }
+    for (const auto &[memory_id, old_value] : index_reverse_backups_)
+      {
+        if (old_value)
+          context_.index_reverse.insert_or_assign (memory_id, *old_value);
+        else
+          context_.index_reverse.erase (memory_id);
+      }
+    for (const auto &[key, entries] : procedural_backups_)
+      {
+        for (const auto &[memory_id, old_value] : entries)
+          {
+            if (old_value)
+              context_.procedural_store[key].insert_or_assign (
+                  memory_id, *old_value);
+            else
+              {
+                auto outer_it = context_.procedural_store.find (key);
+                if (outer_it != context_.procedural_store.end ())
+                  {
+                    outer_it->second.erase (memory_id);
+                    if (outer_it->second.empty ())
+                      context_.procedural_store.erase (outer_it);
+                  }
+              }
+          }
+      }
+    snapshot.index_store = std::move (context_.index_store);
+    snapshot.index_reverse = std::move (context_.index_reverse);
+    snapshot.procedural_store = std::move (context_.procedural_store);
+    sparse_index_backups_.clear ();
+    index_reverse_backups_.clear ();
+    procedural_backups_.clear ();
+  }
+
+  ProcessorContext &context_;
+  std::string source_id_;
+  bool current_existed_ = false;
+  bool journal_aware_ = false;
+  std::size_t original_record_size_ = 0;
+  std::size_t original_blob_id_size_ = 0;
+  std::optional<AccumulatorState> current_before_;
+  std::vector<RecordVectorSizes> working_memory_sizes_;
+  std::vector<std::size_t> working_memory_live_to_original_;
+  DetachedWorkingMemoryRecords preserved_working_memory_;
+  bool destructive_backup_ = false;
+  std::optional<AccumulatorState> current_accumulator_backup_;
+  std::optional<std::unordered_map<std::string, AccumulatorState>>
+      full_accumulator_backup_;
+  std::unordered_map<std::string, SparseIndexBackup> sparse_index_backups_;
+  std::unordered_map<long long, std::optional<std::string>>
+      index_reverse_backups_;
+  std::unordered_map<
+      std::string,
+      std::unordered_map<long long, std::optional<double>>>
+      procedural_backups_;
+};
 
 /// Owns the caller-provided operation and the rollback storage for its
 /// SignalProcessor. A single handle already requires external synchronization;
@@ -293,7 +1063,15 @@ public:
   };
 
   explicit SnapshotOwningOperation (std::unique_ptr<IOperation> operation)
-      : operation_ (std::move (operation))
+      : journal_aware_ (
+            dynamic_cast<operations::signal_record_rollback_internal::
+                             JournalAwareOperation *> (operation.get ())
+            != nullptr),
+        engine_owned_ (
+            dynamic_cast<operations::signal_record_rollback_internal::
+                             EngineOwnedOperation *> (operation.get ())
+            != nullptr),
+        operation_ (std::move (operation))
   {
 #if defined(CORTEXT_TESTING)
     g_processor_rollback_snapshot_owner_count.fetch_add (
@@ -328,6 +1106,18 @@ public:
     return Lease (*this, snapshot);
   }
 
+  bool
+  IsJournalAware () const
+  {
+    return journal_aware_;
+  }
+
+  bool
+  IsEngineOwned () const
+  {
+    return engine_owned_;
+  }
+
   void
   Execute (OperationContext &ctx, Transaction &tx) const override
   {
@@ -341,9 +1131,302 @@ private:
     --active_depth_;
   }
 
+  bool journal_aware_ = false;
+  bool engine_owned_ = false;
   std::unique_ptr<IOperation> operation_;
   std::vector<std::unique_ptr<ProcessorRollbackSnapshot>> snapshots_;
   std::size_t active_depth_ = 0;
+};
+
+void
+InvalidateCustomOperationCaches (ProcessorContext &context)
+{
+  auto sidecar
+      = operations::execution_cache_sidecar_internal::Find (context);
+  std::optional<operations::rif_active_epoch_cache_internal::State> rif_epoch;
+  if (sidecar)
+    rif_epoch = std::move (sidecar->rif_active_epoch);
+  operations::historical_surface_search_cache_internal::Erase (context);
+  ClearDbDerivedProcessorCaches (context);
+  // Caller SQL invalidates every database-derived lookup cache, but the
+  // bounded RIF epoch counters belong to the processor event lifecycle. Keep
+  // them across the compatibility rebuild so custom SQL cannot repeatedly
+  // re-zero the consolidation safety envelope.
+  if (rif_epoch)
+    operations::execution_cache_sidecar_internal::Ensure (context)
+        ->rif_active_epoch = std::move (*rif_epoch);
+}
+
+bool
+CustomQueryMayMutate (std::string_view query)
+{
+  constexpr std::array<std::string_view, 8> kMutationTokens {
+    "INSERT", "UPDATE", "DELETE", "REPLACE",
+    "CREATE", "DROP", "ALTER", "VACUUM"
+  };
+  std::string token;
+  bool in_single_quote = false;
+  bool in_double_quote = false;
+  bool in_line_comment = false;
+  bool in_block_comment = false;
+  const auto token_mutates = [&] {
+    if (token.empty ())
+      return false;
+    const bool mutates
+        = std::find (kMutationTokens.begin (), kMutationTokens.end (), token)
+          != kMutationTokens.end ();
+    token.clear ();
+    return mutates;
+  };
+  for (std::size_t index = 0; index < query.size (); ++index)
+    {
+      const char current = query[index];
+      const char next = index + 1 < query.size () ? query[index + 1] : '\0';
+      if (in_line_comment)
+        {
+          in_line_comment = current != '\n';
+          continue;
+        }
+      if (in_block_comment)
+        {
+          if (current == '*' && next == '/')
+            {
+              in_block_comment = false;
+              ++index;
+            }
+          continue;
+        }
+      if (in_single_quote)
+        {
+          if (current == '\'' && next == '\'')
+            ++index;
+          else if (current == '\'')
+            in_single_quote = false;
+          continue;
+        }
+      if (in_double_quote)
+        {
+          if (current == '"' && next == '"')
+            ++index;
+          else if (current == '"')
+            in_double_quote = false;
+          continue;
+        }
+      if (current == '-' && next == '-')
+        {
+          if (token_mutates ())
+            return true;
+          in_line_comment = true;
+          ++index;
+          continue;
+        }
+      if (current == '/' && next == '*')
+        {
+          if (token_mutates ())
+            return true;
+          in_block_comment = true;
+          ++index;
+          continue;
+        }
+      if (current == '\'' || current == '"')
+        {
+          if (token_mutates ())
+            return true;
+          in_single_quote = current == '\'';
+          in_double_quote = current == '"';
+          continue;
+        }
+      const auto byte = static_cast<unsigned char> (current);
+      if (std::isalnum (byte) || current == '_')
+        {
+          token.push_back (static_cast<char> (std::toupper (byte)));
+          continue;
+        }
+      if (token_mutates ())
+        return true;
+    }
+  return token_mutates ();
+}
+
+template <typename Executor>
+std::vector<std::map<std::string, std::any>>
+ExecuteCustomRifCompatible (Executor &executor, const std::string &query,
+                            const std::vector<std::any> &params,
+                            ProcessorContext &context)
+{
+  // A caller-supplied statement may reach memories through a wildcard, alias,
+  // view, trigger, or subquery that cannot be classified from SQL text alone.
+  // Materialize conservatively at this compatibility boundary.
+  auto sidecar
+      = operations::execution_cache_sidecar_internal::Ensure (context);
+  operations::rif_active_epoch_cache_internal::StageRebuild (
+      sidecar->rif_active_epoch);
+  operations::rif_state_internal::MaterializeAllAndClear (executor);
+  try
+    {
+      auto rows = executor.Execute (query, params);
+      operations::rif_state_internal::RebuildFromMaterialized (executor);
+      return rows;
+    }
+  catch (...)
+    {
+      try
+        {
+          operations::rif_state_internal::RebuildFromMaterialized (executor);
+        }
+      catch (...)
+        {
+        }
+      throw;
+    }
+}
+
+class CustomOperationTransaction final : public Transaction
+{
+public:
+  CustomOperationTransaction (Transaction &transaction,
+                              ProcessorContext &context,
+                              double rif_recovery_time)
+      : transaction_ (&transaction), context_ (&context),
+        rif_recovery_time_ (rif_recovery_time)
+  {
+  }
+
+  CustomOperationTransaction (std::unique_ptr<Transaction> transaction,
+                              ProcessorContext &context,
+                              double rif_recovery_time)
+      : owned_transaction_ (std::move (transaction)),
+        transaction_ (owned_transaction_.get ()), context_ (&context),
+        rif_recovery_time_ (rif_recovery_time)
+  {
+  }
+
+  std::unique_ptr<Transaction>
+  Begin () override
+  {
+    return std::make_unique<CustomOperationTransaction> (
+        transaction_->Begin (), *context_, rif_recovery_time_);
+  }
+
+  std::vector<std::map<std::string, std::any>>
+  Execute (const std::string &query,
+           const std::vector<std::any> &params = {}) override
+  {
+    CalibrateRifIfNeeded ();
+    // Caller-supplied roots can issue SQL that bypasses the engine's
+    // incremental cache-maintenance helpers. Fail closed before the first
+    // statement can make the sidecar stale, including when a later operation
+    // in the same transaction consumes emotional metadata.
+    if (CustomQueryMayMutate (query))
+      InvalidateCustomOperationCaches (*context_);
+    return ExecuteCustomRifCompatible (*transaction_, query, params,
+                                       *context_);
+  }
+
+  void
+  Commit () override
+  {
+    transaction_->Commit ();
+  }
+
+  void
+  Rollback () override
+  {
+    transaction_->Rollback ();
+  }
+
+private:
+  void
+  CalibrateRifIfNeeded ()
+  {
+    auto sidecar
+        = operations::execution_cache_sidecar_internal::Ensure (*context_);
+    const auto memory_ids = sidecar->rif_active_epoch.calibration_memory_ids;
+    if (memory_ids.empty ())
+      return;
+    const auto changed
+        = operations::rif_state_internal::CalibrateMemoryIdsAtClock (
+            *transaction_, memory_ids, rif_recovery_time_,
+            sidecar->rif_active_epoch.limits.row_batch_size);
+    sidecar->rif_active_epoch.calibration_memory_ids.clear ();
+    operations::rif_active_epoch_cache_internal::StageMemories (
+        sidecar->rif_active_epoch, changed);
+  }
+
+  std::unique_ptr<Transaction> owned_transaction_;
+  Transaction *transaction_ = nullptr;
+  ProcessorContext *context_ = nullptr;
+  double rif_recovery_time_ = 0.0;
+};
+
+class CustomOperationStore final : public Store
+{
+public:
+  CustomOperationStore (Store &store, ProcessorContext &context,
+                        double rif_recovery_time)
+      : store_ (&store), context_ (&context),
+        rif_recovery_time_ (rif_recovery_time)
+  {
+    CalibrateRifIfNeeded ();
+  }
+
+  std::vector<std::map<std::string, std::any>>
+  Execute (const std::string &query,
+           const std::vector<std::any> &params = {}) override
+  {
+    if (CustomQueryMayMutate (query))
+      InvalidateCustomOperationCaches (*context_);
+    return ExecuteCustomRifCompatible (*store_, query, params, *context_);
+  }
+
+  std::unique_ptr<Transaction>
+  Begin () override
+  {
+    return std::make_unique<CustomOperationTransaction> (
+        store_->Begin (), *context_, rif_recovery_time_);
+  }
+
+  void
+  Commit () override
+  {
+    store_->Commit ();
+  }
+
+  void
+  Rollback () override
+  {
+    store_->Rollback ();
+  }
+
+  void
+  Close () override
+  {
+    store_->Close ();
+  }
+
+private:
+  void
+  CalibrateRifIfNeeded ()
+  {
+    auto sidecar
+        = operations::execution_cache_sidecar_internal::Ensure (*context_);
+    const auto memory_ids = sidecar->rif_active_epoch.calibration_memory_ids;
+    if (memory_ids.empty ())
+      return;
+    auto transaction = store_->Begin ();
+    const auto changed
+        = operations::rif_state_internal::CalibrateMemoryIdsAtClock (
+            *transaction, memory_ids, rif_recovery_time_,
+            sidecar->rif_active_epoch.limits.row_batch_size);
+    transaction->Commit ();
+    sidecar->rif_active_epoch.calibration_memory_ids.clear ();
+    operations::rif_active_epoch_cache_internal::StageMemories (
+        sidecar->rif_active_epoch, changed);
+  }
+
+  Store *store_ = nullptr;
+  ProcessorContext *context_ = nullptr;
+  double rif_recovery_time_ = 0.0;
 };
 
 void
@@ -547,12 +1630,19 @@ CheckpointSQLiteStore (Store *store, bool full, OperationContext *op_context,
       return;
     }
   const auto start = std::chrono::steady_clock::now ();
+  bool failed = false;
   try
     {
+#if defined(CORTEXT_TESTING)
+      if (g_sqlite_checkpoint_failure_once.exchange (
+              false, std::memory_order_relaxed))
+        throw StoreError ("injected SQLite checkpoint failure");
+#endif
       sqlite_store->Checkpoint (full);
     }
   catch (const std::exception &e)
     {
+      failed = true;
       telemetry::LogWarn (
           "cortext.sqlite_checkpoint_failed",
           { telemetry::Attribute::String ("component", "signal_processor"),
@@ -562,6 +1652,8 @@ CheckpointSQLiteStore (Store *store, bool full, OperationContext *op_context,
     {
       op_context->AddOperationTiming (
           timing_name, ElapsedMillis (start, std::chrono::steady_clock::now ()));
+      op_context->AddOperationTiming (
+          std::string (timing_name) + "_failure_count", failed ? 1.0 : 0.0);
     }
 }
 
@@ -682,6 +1774,15 @@ ApplyConsolidationHint (const Signal &signal, const SignalProcessor::Config &cfg
   if (signal.force_consolidation)
     {
       out.consolidation_state = ConsolidationState::None;
+      return;
+    }
+  const auto sidecar
+      = operations::execution_cache_sidecar_internal::Find (ctx);
+  if (sidecar
+      && operations::rif_active_epoch_cache_internal::RequiresConsolidation (
+          sidecar->rif_active_epoch))
+    {
+      out.consolidation_state = ConsolidationState::Required;
       return;
     }
   const auto rate_state
@@ -850,6 +1951,44 @@ BlobToEigen (const std::any &blob)
 
   Eigen::VectorXf result (static_cast<Eigen::Index> (size));
   std::memcpy (result.data (), data, size * sizeof (float));
+  return result;
+}
+
+ConsolidationActivationCentroid
+BuildActiveSignalRingCentroid (Store &store, int embedding_dim,
+                               double focus, double sensitivity,
+                               double stability)
+{
+  ConsolidationActivationCentroid result;
+  const int capacity
+      = operations::active_signal_embedding_ring_internal::Capacity (
+          focus, sensitivity, stability);
+  if (embedding_dim <= 0 || capacity <= 0)
+    return result;
+  const auto rows = store.Execute (
+      "SELECT embedding, capacity "
+      "FROM cortext_active_signal_embeddings "
+      "ORDER BY signal_id ASC");
+  if (rows.empty ()
+      || rows.size () > static_cast<std::size_t> (capacity))
+    return result;
+  Eigen::VectorXd sum = Eigen::VectorXd::Zero (embedding_dim);
+  for (const auto &row : rows)
+    {
+      const auto stored_capacity
+          = store::AnyToLongLong (row.at ("capacity")).value_or (0);
+      const Eigen::VectorXf embedding = BlobToEigen (row.at ("embedding"));
+      if (stored_capacity != capacity || embedding.size () != embedding_dim
+          || !embedding.allFinite ())
+        return {};
+      sum += embedding.cast<double> ();
+    }
+  sum /= static_cast<double> (rows.size ());
+  const double norm = sum.norm ();
+  if (!(norm > 0.0) || !std::isfinite (norm))
+    return result;
+  result.embedding = sum.cast<float> ();
+  result.member_count = rows.size ();
   return result;
 }
 
@@ -1328,9 +2467,16 @@ LoadRecentContext (Store &store, ProcessorContext &ctx,
                                  core::KCtx (config.stability))));
       auto rows = store.Execute (
           "SELECT embedding FROM ("
-          "  SELECT s.signal_id, s.embedding_id, e.embedding, s.timestamp "
+          "  SELECT s.signal_id, s.embedding_id, "
+          "         COALESCE(a.embedding, e.embedding) AS embedding, "
+          "         s.timestamp "
           "  FROM signals s "
-          "  JOIN embeddings e ON s.embedding_id = e.embedding_id "
+          "  LEFT JOIN cortext_active_signal_embeddings a "
+          "  ON a.signal_id = s.signal_id "
+          "  LEFT JOIN embeddings e ON s.embedding_id = e.embedding_id "
+          "  WHERE NOT EXISTS ("
+          "    SELECT 1 FROM cortext_active_signal_embeddings LIMIT 1"
+          "  ) OR a.signal_id IS NOT NULL "
           "  ORDER BY s.timestamp DESC, s.signal_id DESC "
           "  LIMIT ?"
           ") ORDER BY timestamp ASC, signal_id ASC",
@@ -1421,37 +2567,39 @@ LoadPredictivePreActivationIds (Store &store, ProcessorContext &ctx)
 void
 LoadRetrievalSuppressionIds (Store &store, ProcessorContext &ctx)
 {
-  try
-    {
-      ctx.retrieval_suppression_embedding_ids.clear ();
-      ctx.retrieval_suppression_memory_ids.clear ();
-      auto rows = store.Execute (
-          "SELECT memory_id FROM memories "
-          "WHERE COALESCE(suppression, 0.0) > 1e-9");
-      ctx.retrieval_suppression_memory_ids.reserve (rows.size ());
-      for (const auto &row : rows)
-        {
-          const long long memory_id = ExtractInt64 (row, "memory_id", 0);
-          if (memory_id > 0)
-            {
-              ctx.retrieval_suppression_memory_ids.insert (memory_id);
-            }
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load retrieval suppression ids",
-          { telemetry::Attribute::String ("component", "signal_processor"),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
+  (void)store;
+  // Lazy RIF state is persisted and indexed in SQLite.  Do not mirror the
+  // active history into ProcessorContext during initialization or rollback.
+  ctx.retrieval_suppression_embedding_ids.clear ();
+  ctx.retrieval_suppression_memory_ids.clear ();
 }
 
 void
-LoadHistoricalSurfaceSearchCache (Store &store, ProcessorContext &ctx)
+LoadHistoricalSurfaceSearchCache (
+    Store &store, ProcessorContext &ctx,
+    const std::unordered_map<long long, long long> *base_embedding_ids
+    = nullptr)
 {
   try
     {
+      std::unordered_map<long long, long long> authoritative_base_ids;
+      if (!base_embedding_ids)
+        {
+          auto base_rows = store.Execute (
+              "SELECT memory_id, embedding_id FROM memories "
+              "WHERE embedding_id IS NOT NULL");
+          authoritative_base_ids.reserve (base_rows.size ());
+          for (const auto &row : base_rows)
+            {
+              const long long memory_id
+                  = ExtractInt64 (row, "memory_id", 0);
+              const long long embedding_id
+                  = ExtractInt64 (row, "embedding_id", 0);
+              if (memory_id > 0 && embedding_id > 0)
+                authoritative_base_ids[memory_id] = embedding_id;
+            }
+          base_embedding_ids = &authoritative_base_ids;
+        }
       auto embedding_rows = store.Execute (
           "SELECT e.embedding_id, e.embedding, "
           "       COALESCE(m.memory_id, 0) AS memory_id, "
@@ -1460,7 +2608,7 @@ LoadHistoricalSurfaceSearchCache (Store &store, ProcessorContext &ctx)
           "       COALESCE(m.source_id, '') AS source_id "
           "FROM embeddings e "
           "LEFT JOIN memories m ON m.embedding_id = e.embedding_id "
-          "  AND m.kind = 'LONG_TERM' "
+          "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
           "ORDER BY e.embedding_id, COALESCE(m.start_ts, 0), m.memory_id");
       std::vector<
           operations::historical_surface_search_cache_internal::Entry>
@@ -1486,19 +2634,30 @@ LoadHistoricalSurfaceSearchCache (Store &store, ProcessorContext &ctx)
       current_entries.reserve (ctx.retrieval_surface_cache.size ());
       for (const auto &surface : ctx.retrieval_surface_cache)
         {
-          if (surface.kind != "LONG_TERM" || !surface.vector_seed_eligible
+          if ((surface.kind != "LONG_TERM"
+               && surface.kind != "ASSOCIATION")
               || surface.memory_id <= 0 || surface.embedding_id <= 0
               || surface.embedding.size () <= 0)
             {
               continue;
             }
           current_entries.push_back (
-              { surface.embedding_id, surface.memory_id, 0, std::string (),
-                std::string (), surface.embedding });
+              { surface.embedding_id, surface.memory_id, surface.start_ts,
+                surface.kind, surface.source_id, surface.embedding,
+                base_embedding_ids
+                        && base_embedding_ids->count (surface.memory_id) != 0
+                    ? base_embedding_ids->at (surface.memory_id)
+                    : surface.embedding_id });
         }
-      if (search_entries.size () != embedding_rows.size ()
-          || !operations::historical_surface_search_cache_internal::Reset (
-              ctx, std::move (search_entries), std::move (current_entries)))
+      const bool historical_complete
+          = search_entries.size () == embedding_rows.size ();
+      if (!operations::historical_surface_search_cache_internal::Reset (
+              ctx,
+              historical_complete ? std::move (search_entries)
+                                  : std::vector<operations::
+                                        historical_surface_search_cache_internal::
+                                            Entry>{},
+              std::move (current_entries)))
         {
           operations::historical_surface_search_cache_internal::Erase (ctx);
         }
@@ -1514,11 +2673,77 @@ LoadHistoricalSurfaceSearchCache (Store &store, ProcessorContext &ctx)
 }
 
 void
-LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
+LoadEmotionalMetadataCache (Store &store, ProcessorContext &ctx,
+                            double focus, double sensitivity,
+                            double stability)
 {
+  auto rows = store.Execute (
+      "SELECT memory_id, embedding_id, created_at, flashbulb, "
+      "       emotional_intensity, s_arousal_avg, half_life_bonus, "
+      "       cascade_radius, cascade_decay "
+      "FROM memories WHERE embedding_id IS NOT NULL AND kind != 'WORKING' "
+      "ORDER BY created_at DESC, memory_id ASC");
+  std::vector<operations::execution_cache_sidecar_internal::
+                  EmotionalMemoryMetadata>
+      metadata;
+  metadata.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      const long long memory_id = ExtractInt64 (row, "memory_id", 0);
+      const long long embedding_id = ExtractInt64 (row, "embedding_id", 0);
+      if (memory_id <= 0 || embedding_id <= 0)
+        continue;
+      metadata.push_back (
+          { memory_id,
+            embedding_id,
+            ExtractInt64 (row, "created_at", 0),
+            ExtractInt64 (row, "flashbulb", 0) != 0,
+            ExtractDouble (row, "emotional_intensity", 0.0),
+            ExtractDouble (row, "s_arousal_avg", 0.0),
+            ExtractDouble (row, "half_life_bonus", 0.0),
+            static_cast<int> (ExtractInt64 (row, "cascade_radius", 0)),
+            ExtractDouble (row, "cascade_decay", 0.0) });
+    }
+  const std::size_t source_query_capacity
+      = internal::experimental_env::Flag (
+            "CORTEXT_EXPERIMENT_EMOTIONAL_WINNER_COLLAPSE")
+            && internal::experimental_env::Flag (
+                "CORTEXT_EXPERIMENT_EMOTIONAL_EDGE_LIMIT")
+            ? static_cast<std::size_t> (operations::
+                  sparse_retrieval_knobs_internal::PublicQueryNodeBudget (
+                      focus, sensitivity, stability))
+            : std::numeric_limits<std::size_t>::max ();
+  operations::emotional_metadata_cache_internal::Reset (
+      ctx, std::move (metadata), source_query_capacity);
+}
+
+void
+LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
+                           double focus, double sensitivity,
+                           double stability)
+{
+  std::optional<operations::rif_active_epoch_cache_internal::State> rif_epoch;
+  auto detach_rif_epoch = [&] {
+    if (auto sidecar
+        = operations::execution_cache_sidecar_internal::Find (ctx))
+      rif_epoch = std::move (sidecar->rif_active_epoch);
+  };
+  auto restore_rif_epoch = [&] {
+    if (rif_epoch)
+      operations::execution_cache_sidecar_internal::Ensure (ctx)
+          ->rif_active_epoch = std::move (*rif_epoch);
+  };
   try
     {
-      operations::historical_surface_search_cache_internal::Erase (ctx);
+      detach_rif_epoch ();
+      operations::execution_cache_sidecar_internal::Erase (ctx);
+      restore_rif_epoch ();
+#if defined(CORTEXT_TESTING)
+      if (g_retrieval_surface_reload_failure_once.exchange (
+              false, std::memory_order_relaxed))
+        throw std::runtime_error (
+            "injected retrieval-surface reload failure");
+#endif
       ctx.retrieval_surface_cache.clear ();
       ctx.retrieval_surface_index.clear ();
       ctx.retrieval_surface_embedding_index.clear ();
@@ -1527,6 +2752,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
       ctx.association_cache.clear ();
       ctx.association_cache_index.clear ();
       ctx.association_fanout_cache = {};
+      std::unordered_map<long long, long long> base_embedding_ids;
 
       const long long constructive_recall_enabled
           = operations::constructive_recall::Disabled () ? 0LL : 1LL;
@@ -1595,6 +2821,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
       ctx.retrieval_surface_cache.reserve (rows.size ());
       ctx.retrieval_surface_index.reserve (rows.size ());
       ctx.retrieval_surface_embedding_index.reserve (rows.size ());
+      base_embedding_ids.reserve (rows.size ());
       for (const auto &row : rows)
         {
           if (ExtractInt64 (row, "current_surface_database_current", 0) == 0)
@@ -1610,6 +2837,8 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
           ProcessorContext::RetrievalSurfaceEntry entry;
           entry.memory_id = ExtractInt64 (row, "memory_id", 0);
           entry.embedding_id = ExtractInt64 (row, "embedding_id", 0);
+          base_embedding_ids[entry.memory_id]
+              = ExtractInt64 (row, "base_embedding_id", entry.embedding_id);
           entry.created_at = ExtractInt64 (row, "created_at", 0);
           entry.start_ts = ExtractInt64 (row, "start_ts", 0);
           entry.last_access = ExtractInt64 (row, "last_access", 0);
@@ -1645,7 +2874,32 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
                                       association_embedding,
                                       association_is_association);
         }
-      LoadHistoricalSurfaceSearchCache (store, ctx);
+      LoadHistoricalSurfaceSearchCache (store, ctx, &base_embedding_ids);
+      operations::historical_surface_search_cache_internal::
+          SetSparseRouteParameters (
+              ctx, operations::sparse_retrieval_route_sqlite_internal::
+                       DeriveParameters (focus, sensitivity, stability));
+      if (internal::experimental_env::Bool (
+              "CORTEXT_SQLITE_SPARSE_ROUTE", true))
+        if (auto state = operations::
+                historical_surface_search_cache_internal::FindMutable (ctx))
+          {
+            const auto route = operations::
+                historical_surface_search_cache_internal::
+                    OpenSQLiteSparseRoute (*state, store);
+            if (!route
+                && state->current_entries.size ()
+                       > state->sparse_route_parameters.route_capacity
+                && !(internal::experimental_env::Flag (
+                         "CORTEXT_HNSW_SPARSE_ROUTE")
+                     && state->current_entries.size ()
+                            <= state->sparse_route_parameters
+                                   .route_bootstrap_limit))
+              (void)operations::
+                  historical_surface_search_cache_internal::
+                      AdvanceSQLiteSparseRouteBackfill (*state, store);
+          }
+      LoadEmotionalMetadataCache (store, ctx, focus, sensitivity, stability);
       operations::historical_surface_search_cache_internal::
           SetCurrentSurfaceDatabaseCurrent (
               ctx, current_surface_database_current);
@@ -1660,7 +2914,10 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx)
     }
   catch (const std::exception &e)
     {
+      detach_rif_epoch ();
       operations::historical_surface_search_cache_internal::Erase (ctx);
+      operations::execution_cache_sidecar_internal::Erase (ctx);
+      restore_rif_epoch ();
       operations::historical_surface_search_cache_internal::
           SetCurrentSurfaceDatabaseCurrent (ctx, false);
       operations::historical_surface_search_cache_internal::
@@ -1724,13 +2981,14 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
 
       // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
       auto rows = store.Execute (
-          "SELECT memory_id, embedding_id, source_id, strength, last_access, "
-          "       strength_updated_at, "
-          "       n_signals, s_max, s_avg, s_emotion_max, s_arousal_avg, "
-          "       drift_mag, modality, start_ts "
-          "FROM memories "
-          "WHERE kind = 'WORKING' AND end_ts IS NULL "
-          "ORDER BY start_ts ASC");
+          "SELECT m.memory_id, m.embedding_id, m.source_id, "
+          "       rif.strength, m.last_access, m.strength_updated_at, "
+          "       m.n_signals, m.s_max, m.s_avg, m.s_emotion_max, "
+          "       m.s_arousal_avg, m.drift_mag, m.modality, m.start_ts "
+          "FROM memories m "
+          "JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
+          "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
+          "ORDER BY m.start_ts ASC");
 
       int pos = 0;
       for (const auto &row : rows)
@@ -1811,9 +3069,12 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
 
           // Load signal records for this WM slot (ordered)
           auto sig_rows = store.Execute (
-              "SELECT embedding_id, timestamp, modality, mime, blob_id, "
-              "       score, serial_position "
-              "FROM signals WHERE memory_id = ? "
+              "SELECT s.embedding_id, a.embedding, s.timestamp, s.modality, "
+              "       s.mime, s.blob_id, s.score, s.serial_position "
+              "FROM signals s "
+              "LEFT JOIN cortext_active_signal_embeddings a "
+              "ON a.signal_id = s.signal_id "
+              "WHERE s.memory_id = ? "
               "ORDER BY serial_position ASC",
               { slot.memory_id });
           for (const auto &sig_row : sig_rows)
@@ -1876,20 +3137,30 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
                     }
                 }
 
-              const auto sig_emb_id
-                  = ExtractInt64 (sig_row, "embedding_id", 0);
-              if (sig_emb_id > 0)
+              const auto inline_embedding = sig_row.find ("embedding");
+              if (inline_embedding != sig_row.end ()
+                  && inline_embedding->second.has_value ())
                 {
-                  auto sig_emb_rows = store.Execute (
-                      "SELECT embedding FROM embeddings WHERE embedding_id = ?",
-                      { sig_emb_id });
-                  if (!sig_emb_rows.empty ())
+                  rec.embedding = BlobToEigen (inline_embedding->second);
+                }
+              else
+                {
+                  const auto sig_emb_id
+                      = ExtractInt64 (sig_row, "embedding_id", 0);
+                  if (sig_emb_id > 0)
                     {
-                      auto it_emb = sig_emb_rows[0].find ("embedding");
-                      if (it_emb != sig_emb_rows[0].end ()
-                          && it_emb->second.has_value ())
+                      auto sig_emb_rows = store.Execute (
+                          "SELECT embedding FROM embeddings "
+                          "WHERE embedding_id = ?",
+                          { sig_emb_id });
+                      if (!sig_emb_rows.empty ())
                         {
-                          rec.embedding = BlobToEigen (it_emb->second);
+                          auto it_emb = sig_emb_rows[0].find ("embedding");
+                          if (it_emb != sig_emb_rows[0].end ()
+                              && it_emb->second.has_value ())
+                            {
+                              rec.embedding = BlobToEigen (it_emb->second);
+                            }
                         }
                     }
                 }
@@ -2021,6 +3292,54 @@ ProcessorRollbackSnapshotReuseCountForTest ()
   return g_processor_rollback_snapshot_reuse_count.load (
       std::memory_order_relaxed);
 }
+
+std::size_t
+SignalRecordRollbackBackupCountForTest ()
+{
+  return g_signal_record_rollback_backup_count.load (
+      std::memory_order_relaxed);
+}
+
+std::size_t
+SignalRecordRollbackCopiedRecordCountForTest ()
+{
+  return g_signal_record_rollback_copied_record_count.load (
+      std::memory_order_relaxed);
+}
+
+void
+SetSignalRecordSnapshotSetupThrowStageForTest (int stage)
+{
+  g_signal_record_snapshot_setup_throw_stage.store (
+      stage, std::memory_order_relaxed);
+}
+
+void
+SetRifActiveEpochPublishFailureStageForTest (int stage)
+{
+  operations::rif_active_epoch_cache_internal::
+      SetPublishFailureStageForTest (stage);
+}
+
+void
+SetRifActiveEpochPublishFailureMaskForTest (unsigned int mask)
+{
+  operations::rif_active_epoch_cache_internal::
+      SetPublishFailureMaskForTest (mask);
+}
+
+void
+SetSQLiteCheckpointFailureOnceForTest ()
+{
+  g_sqlite_checkpoint_failure_once.store (true, std::memory_order_relaxed);
+}
+
+void
+SetRetrievalSurfaceReloadFailureOnceForTest ()
+{
+  g_retrieval_surface_reload_failure_once.store (true,
+                                                  std::memory_order_relaxed);
+}
 } // namespace testing
 #endif
 
@@ -2041,6 +3360,13 @@ SignalProcessor::SignalProcessor (const Config &config,
       throw std::invalid_argument (
           "SignalProcessor requires a non-null Encoder");
     }
+  if (!std::isfinite (config_.focus)
+      || !std::isfinite (config_.sensitivity)
+      || !std::isfinite (config_.stability))
+    {
+      throw std::invalid_argument (
+          "SignalProcessor requires finite F/S/T knobs");
+    }
   // Initialize rate observation window capacity derived from Stability knob.
   if (context_)
     {
@@ -2059,6 +3385,8 @@ SignalProcessor::SignalProcessor (const Config &config,
   if (store_)
     {
       cortext::store::ApplyMigrations (*store_);
+      CalibrateRifActiveEpochBeforeHydration (
+          *store_, *context_, config_);
       if (!object_store_)
         {
           object_store_ = std::make_shared<SqlObjectStore> (store_);
@@ -2068,7 +3396,8 @@ SignalProcessor::SignalProcessor (const Config &config,
       loaded_state = LoadState (*store_, *context_, config_);      // Unified state
       LoadPredictivePreActivationIds (*store_, *context_);
       LoadRetrievalSuppressionIds (*store_, *context_);
-      LoadRetrievalSurfaceCache (*store_, *context_);
+      LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
+                                 config_.sensitivity, config_.stability);
       LoadRecentContext (*store_, *context_, config_);
       LoadRecentScores (*store_, *context_, config_);
       LoadObservedRetentionHistory (
@@ -2078,9 +3407,16 @@ SignalProcessor::SignalProcessor (const Config &config,
       LoadWorkingMemory (*store_, *context_, config_,
                          now_ms);                                  // From MEMORIES
       LoadSoftAnchors (*store_, *context_);
+      operations::bounded_activation_shadow_internal::Initialize (
+          *context_, store_.get (), config_.focus, config_.sensitivity,
+          config_.stability);
       // Accumulators are volatile staging state. Durable memories and working
       // memory are restored, but unfinished accumulator windows are discarded.
     }
+
+  internal::ResetSQLiteMutationAudit (store_.get ());
+  if (context_)
+    operations::consolidation_epoch_profile_internal::Reset (*context_);
 
   if (!loaded_state && context_)
     {
@@ -2099,7 +3435,10 @@ SignalProcessor::~SignalProcessor ()
       // Erasing it prevents a later allocation at the same address from
       // inheriting state from this processor or store.
       operations::historical_surface_search_cache_internal::Erase (*context_);
+      operations::bounded_activation_shadow_internal::Erase (*context_);
+      operations::execution_cache_sidecar_internal::Erase (*context_);
       operations::consolidation_throughput_state_internal::Erase (*context_);
+      operations::consolidation_epoch_profile_internal::Erase (*context_);
     }
 }
 
@@ -2110,10 +3449,61 @@ SignalProcessor::Process (const Signal &signal)
   telemetry::ScopedSpan span ("cortext.process");
   const bool read_only = signal.retention == Retention::Ephemeral;
   const bool maintenance = signal.force_consolidation && !read_only;
+  const bool sqlite_sparse_route_enabled = internal::experimental_env::Bool (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", true);
+  const bool hnsw_sparse_route_enabled
+      = internal::experimental_env::Flag ("CORTEXT_HNSW_SPARSE_ROUTE");
+  const bool any_sparse_route_enabled
+      = hnsw_sparse_route_enabled || sqlite_sparse_route_enabled;
+  std::shared_ptr<operations::sparse_retrieval_route_internal::Route>
+      premaintenance_sparse_route;
+  std::shared_ptr<
+      operations::sparse_retrieval_route_sqlite_internal::Route>
+      premaintenance_sqlite_sparse_route;
+  std::shared_ptr<
+      operations::sparse_retrieval_route_sqlite_internal::Route>
+      premaintenance_sqlite_sparse_route_backfill;
+  if (maintenance && any_sparse_route_enabled)
+    if (const auto state = operations::
+            historical_surface_search_cache_internal::FindMutable (*context_))
+      {
+        if (sqlite_sparse_route_enabled && !state->sqlite_sparse_route
+            && !state->sqlite_sparse_route_backfill)
+          (void)operations::historical_surface_search_cache_internal::
+              OpenSQLiteSparseRoute (*state, *store_);
+        premaintenance_sparse_route = state->sparse_route;
+        premaintenance_sqlite_sparse_route = state->sqlite_sparse_route;
+        premaintenance_sqlite_sparse_route_backfill
+            = state->sqlite_sparse_route_backfill;
+      }
+  std::optional<operations::consolidation_epoch_profile_internal::EventSnapshot>
+      consolidation_epoch_pre;
+  if (maintenance
+      && operations::consolidation_epoch_profile_internal::Enabled ())
+    consolidation_epoch_pre
+        = operations::consolidation_epoch_profile_internal::Current (
+            *context_);
+
+  // The disposable SQLite epoch is rebuilt only from committed authority and
+  // never after the signal transaction has begun.
+  EnsureRifActiveEpochCache (store_.get (), *context_, config_);
 
   // Create transaction for this signal processing
   const auto tx_begin_start = std::chrono::steady_clock::now ();
   auto tx = store_ ? store_->Begin () : nullptr;
+  const auto *sqlite_tx
+      = dynamic_cast<const SQLiteTransaction *> (tx.get ());
+  const bool root_canonical_transaction
+      = tx && (!sqlite_tx || sqlite_tx->GetSavepointName ().empty ());
+  auto bounded_shadow_observation
+      = operations::bounded_activation_shadow_internal::
+          PrepareForCanonicalTransaction (
+              operations::bounded_activation_shadow_internal::Find (
+                  *context_),
+              signal, root_canonical_transaction);
+  operations::bounded_activation_shadow_internal::
+      CanonicalTransactionJournalScope bounded_shadow_journal_scope (
+          bounded_shadow_observation);
   std::unique_ptr<ObjectTransaction> object_tx;
   if (object_store_ && tx && !maintenance)
     {
@@ -2128,12 +3518,37 @@ SignalProcessor::Process (const Signal &signal)
       = static_cast<SnapshotOwningOperation &> (*root_operation_);
   auto snapshot_lease = snapshot_owner.Acquire ();
   auto &rollback_snapshot = snapshot_lease.Get ();
+  SignalRecordRollbackJournal signal_record_journal (
+      *context_, signal.source_id, snapshot_owner.IsJournalAware ());
+  std::size_t snapshot_cache_entry_copy_count = 0;
+  bool full_cache_snapshot = true;
+  double snapshot_full_cache_copy_ms = 0.0;
+  double snapshot_cache_entry_copy_ms = 0.0;
   {
     auto detached_caches = DetachRebuildableProcessorCaches (*context_);
     try
       {
-        rollback_snapshot.context = *context_;
-        rollback_snapshot.caches = detached_caches;
+        signal_record_journal.CopyScalarSnapshotTo (
+            rollback_snapshot.context);
+        full_cache_snapshot = !snapshot_owner.IsJournalAware ();
+        rollback_snapshot.full_cache_snapshot = full_cache_snapshot;
+        if (full_cache_snapshot)
+          {
+            const auto cache_copy_start = std::chrono::steady_clock::now ();
+            rollback_snapshot.caches
+                = SnapshotProcessorCaches (detached_caches);
+            snapshot_cache_entry_copy_count
+                = DetachedProcessorCacheEntryCount (detached_caches);
+            snapshot_full_cache_copy_ms = ElapsedMillis (
+                cache_copy_start, std::chrono::steady_clock::now ());
+            if (snapshot_cache_entry_copy_count > 0)
+              snapshot_cache_entry_copy_ms = snapshot_full_cache_copy_ms;
+          }
+        else
+          {
+            rollback_snapshot.caches = {};
+            snapshot_cache_entry_copy_count = 0;
+          }
         rollback_snapshot.consolidation_throughput
             = operations::consolidation_throughput_state_internal::Find (
                 *context_);
@@ -2149,8 +3564,26 @@ SignalProcessor::Process (const Signal &signal)
   }
   const auto snapshot_end = std::chrono::steady_clock::now ();
 
-  OperationContext op_context (signal, *context_, config_, store_.get (),
+  std::unique_ptr<CustomOperationStore> custom_operation_store;
+  Store *operation_store = store_.get ();
+  if (operation_store && !snapshot_owner.IsEngineOwned ())
+    {
+      custom_operation_store = std::make_unique<CustomOperationStore> (
+          *operation_store, *context_,
+          core::RetrievalCompetitionRecoverySeconds (config_.stability)
+              * 1000.0);
+      operation_store = custom_operation_store.get ();
+    }
+  OperationContext op_context (signal, *context_, config_, operation_store,
                                object_tx.get ());
+  operations::signal_record_rollback_internal::Scope
+      signal_record_rollback_scope (
+          *context_, &signal_record_journal,
+          &SignalRecordRollbackJournal::EnsureBackedUpThunk,
+          &SignalRecordRollbackJournal::EnsureAllBackedUpThunk,
+          &SignalRecordRollbackJournal::PreserveWorkingMemorySlotBeforeEraseThunk,
+          &SignalRecordRollbackJournal::PreserveSparseIndexBeforeInsertThunk,
+          &SignalRecordRollbackJournal::PreserveProceduralValueBeforeUpdateThunk);
   if (tx)
     {
       op_context.AddOperationTiming ("SignalProcessor.begin_transaction",
@@ -2160,6 +3593,22 @@ SignalProcessor::Process (const Signal &signal)
   op_context.AddOperationTiming ("SignalProcessor.snapshot_context",
                                  ElapsedMillis (snapshot_start,
                                                 snapshot_end));
+  op_context.AddOperationTiming (
+      "SignalProcessor.snapshot_full_cache_copy_count",
+      full_cache_snapshot ? 1.0 : 0.0);
+  op_context.AddOperationTiming (
+      "SignalProcessor.snapshot_full_cache_copy_activity",
+      full_cache_snapshot ? 1.0 : 0.0);
+  op_context.AddOperationTiming (
+      "SignalProcessor.snapshot_cache_entry_copy_count",
+      static_cast<double> (snapshot_cache_entry_copy_count));
+  op_context.AddOperationTiming (
+      "SignalProcessor.snapshot_cache_entry_copy_activity",
+      snapshot_cache_entry_copy_count > 0 ? 1.0 : 0.0);
+  op_context.AddOperationTiming ("SignalProcessor.snapshot_full_cache_copy",
+                                 snapshot_full_cache_copy_ms);
+  op_context.AddOperationTiming ("SignalProcessor.snapshot_cache_entry_copy",
+                                 snapshot_cache_entry_copy_ms);
   auto rollback_object_tx = [&object_tx] {
     if (object_tx)
       {
@@ -2174,29 +3623,69 @@ SignalProcessor::Process (const Signal &signal)
   };
   auto restore_context_snapshot = [&] {
     operations::historical_surface_search_cache_internal::Erase (*context_);
+    signal_record_journal.RestoreRecordsInto (rollback_snapshot.context);
     *context_ = std::move (rollback_snapshot.context);
     operations::consolidation_throughput_state_internal::Reset (
         *context_, rollback_snapshot.consolidation_throughput);
-    RestoreRebuildableProcessorCaches (*context_, rollback_snapshot.caches);
+    if (rollback_snapshot.full_cache_snapshot)
+      {
+        RestoreRebuildableProcessorCaches (*context_, rollback_snapshot.caches);
+      }
+    else
+      {
+        ClearDbDerivedProcessorCaches (*context_);
+      }
     rollback_snapshot.initialized = false;
     if (store_)
       {
-        LoadPredictivePreActivationIds (*store_, *context_);
-        LoadRetrievalSuppressionIds (*store_, *context_);
-        LoadHistoricalSurfaceSearchCache (*store_, *context_);
+        if (rollback_snapshot.full_cache_snapshot)
+          {
+            LoadPredictivePreActivationIds (*store_, *context_);
+            LoadRetrievalSuppressionIds (*store_, *context_);
+            LoadHistoricalSurfaceSearchCache (*store_, *context_);
+          }
+        else
+          {
+            LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
+                                       config_.sensitivity,
+                                       config_.stability);
+            LoadPredictivePreActivationIds (*store_, *context_);
+            LoadRetrievalSuppressionIds (*store_, *context_);
+          }
       }
   };
   auto restore_read_only_context_snapshot = [&] {
+    signal_record_journal.RestoreRecordsInto (rollback_snapshot.context);
     *context_ = std::move (rollback_snapshot.context);
     operations::consolidation_throughput_state_internal::Reset (
         *context_, rollback_snapshot.consolidation_throughput);
-    RestoreRebuildableProcessorCaches (*context_, rollback_snapshot.caches);
+    if (rollback_snapshot.full_cache_snapshot)
+      {
+        RestoreRebuildableProcessorCaches (*context_, rollback_snapshot.caches);
+      }
+    else
+      {
+        ClearDbDerivedProcessorCaches (*context_);
+        if (store_)
+          {
+            LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
+                                       config_.sensitivity,
+                                       config_.stability);
+            LoadPredictivePreActivationIds (*store_, *context_);
+            LoadRetrievalSuppressionIds (*store_, *context_);
+          }
+      }
     rollback_snapshot.initialized = false;
   };
   std::optional<Output> read_only_output;
 
   try
     {
+      if (maintenance)
+        operations::rif_active_epoch_cache_internal::StageRebuild (
+            operations::execution_cache_sidecar_internal::Ensure (*context_)
+                ->rif_active_epoch,
+            true);
       auto op_start = std::chrono::steady_clock::now ();
       if (!maintenance)
         {
@@ -2208,7 +3697,19 @@ SignalProcessor::Process (const Signal &signal)
         }
       if (tx)
         {
-          root_operation_->Execute (op_context, *tx);
+          if (snapshot_owner.IsEngineOwned ())
+            {
+              root_operation_->Execute (op_context, *tx);
+            }
+          else
+            {
+              CustomOperationTransaction custom_transaction (
+                  *tx, *context_,
+                  core::RetrievalCompetitionRecoverySeconds (
+                      config_.stability)
+                      * 1000.0);
+              root_operation_->Execute (op_context, custom_transaction);
+            }
         }
 
       if (read_only)
@@ -2303,13 +3804,512 @@ SignalProcessor::Process (const Signal &signal)
           op_context.AddOperationTiming (
               "SignalProcessor.commit_transaction",
               ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
+          const auto commit_profile
+              = internal::ConsumeSQLiteCommitProfile (store_.get ());
+          if (commit_profile.available)
+            {
+              op_context.AddOperationTiming (
+                  "SignalProcessor.commit_sqlite",
+                  commit_profile.sqlite_commit_ms);
+              op_context.AddOperationTiming (
+                  "SignalProcessor.commit_mutation_audit_finalize",
+                  commit_profile.mutation_audit_finalize_ms);
+              op_context.AddOperationTiming (
+                  "SignalProcessor.commit_cache_write_count",
+                  static_cast<double> (commit_profile.cache_write_count));
+              op_context.AddOperationTiming (
+                  "SignalProcessor.commit_cache_spill_count",
+                  static_cast<double> (commit_profile.cache_spill_count));
+              for (const auto &[table, count] :
+                   commit_profile.table_row_counts)
+                op_context.AddOperationTiming (
+                    "SignalProcessor.commit_table_row_count." + table,
+                    static_cast<double> (count));
+            }
+          const auto bounded_shadow_publish
+              = operations::bounded_activation_shadow_internal::
+                  PublishAfterCanonicalTransactionCommit (
+                      bounded_shadow_observation);
+          if (bounded_shadow_observation.state)
+            {
+              telemetry::RecordHistogram (
+                  "cortext.bounded_activation_shadow.recall_comparisons",
+                  static_cast<double> (
+                      bounded_shadow_observation.recall_comparisons));
+              telemetry::RecordHistogram (
+                  "cortext.bounded_activation_shadow.normal_comparisons",
+                  static_cast<double> (
+                      bounded_shadow_publish.normal_comparisons));
+              telemetry::RecordHistogram (
+                  "cortext.bounded_activation_shadow.consolidation_comparisons",
+                  static_cast<double> (
+                      bounded_shadow_publish.consolidation_comparisons));
+              telemetry::RecordHistogram (
+                  "cortext.bounded_activation_shadow.candidate_count",
+                  static_cast<double> (
+                      bounded_shadow_observation.candidate_count));
+              if (bounded_shadow_publish.disabled)
+                telemetry::AddCounter (
+                    "cortext.bounded_activation_shadow.disabled_total", 1);
+            }
+          op_context.SetCurrentOperationType ("PublishRifActiveEpoch");
+          op_start = std::chrono::steady_clock::now ();
+          auto rif_sidecar
+              = operations::execution_cache_sidecar_internal::Ensure (*context_);
+          const auto rif_publish = operations::rif_active_epoch_cache_internal::
+              PublishAfterPersistentCommit (rif_sidecar->rif_active_epoch,
+                                            *store_);
+          if (maintenance && !rif_publish.published)
+            {
+              // The durable consolidation commit succeeded. Preserve the
+              // empty-epoch transition across a failed publication/recovery so
+              // the next signal cannot fall back to a full-history rebuild.
+              operations::rif_active_epoch_cache_internal::StageRebuild (
+                  rif_sidecar->rif_active_epoch, true);
+            }
+          op_context.AddOperationTiming (
+              "SignalProcessor.publish_rif_active_epoch",
+              ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
+          if (ProfileWorkCountersEnabled ())
+            {
+              op_context.AddOperationTiming (
+                  "SignalProcessor.retrieval_suppression_id_count",
+                  static_cast<double> (rif_publish.changed_rows));
+              op_context.AddOperationTiming (
+                  "SignalProcessor.retrieval_suppression_id_activity",
+                  rif_publish.changed_rows == 0 ? 0.0 : 1.0);
+            }
+          op_context.AddOperationTiming (
+              "SignalProcessor.rif_epoch_publication_rebuild_count",
+              rif_publish.rebuilt ? 1.0 : 0.0);
+          op_context.AddOperationTiming (
+              "SignalProcessor.rif_epoch_publication_recovery_count",
+              rif_publish.recovered_from_failure ? 1.0 : 0.0);
+          const auto &rif_epoch
+              = operations::execution_cache_sidecar_internal::Ensure (
+                    *context_)
+                    ->rif_active_epoch;
+          op_context.AddOperationTiming (
+              "SignalProcessor.rif_active_epoch_event_count",
+              static_cast<double> (rif_epoch.event_count));
+          op_context.AddOperationTiming (
+              "SignalProcessor.rif_active_epoch_mutation_count",
+              static_cast<double> (rif_epoch.mutation_count));
+          op_context.AddOperationTiming (
+              "SignalProcessor.rif_active_epoch_allocated_bytes",
+              static_cast<double> (rif_epoch.allocated_bytes));
+          op_context.AddOperationTiming (
+              "SignalProcessor.rif_active_epoch_row_batch_high_water",
+              static_cast<double> (rif_epoch.row_batch_high_water));
+          op_context.AddOperationTiming (
+              "SignalProcessor.rif_active_epoch_required",
+              operations::rif_active_epoch_cache_internal::
+                      RequiresConsolidation (rif_epoch)
+                  ? 1.0
+                  : 0.0);
+          if (!signal.force_consolidation && snapshot_owner.IsEngineOwned ()
+              && sqlite_sparse_route_enabled)
+            {
+              auto state = operations::
+                  historical_surface_search_cache_internal::FindMutable (
+                      *context_);
+              if (state && state->processor_surface_complete
+                  && !state->sqlite_sparse_route)
+                {
+                  op_start = std::chrono::steady_clock::now ();
+                  const bool backfill_ok = operations::
+                      historical_surface_search_cache_internal::
+                          AdvanceSQLiteSparseRouteBackfill (*state, *store_);
+                  op_context.AddOperationTiming (
+                      "SignalProcessor.sqlite_sparse_route_ordinary_backfill",
+                      ElapsedMillis (op_start,
+                                     std::chrono::steady_clock::now ()));
+                  op_context.AddOperationTiming (
+                      "SignalProcessor.sqlite_sparse_route_ordinary_backfill_rows",
+                      static_cast<double> (
+                          state
+                              ->sqlite_sparse_route_backfill_last_sealed_rows));
+                  op_context.AddOperationTiming (
+                      "SignalProcessor.sqlite_sparse_route_ordinary_backfill_published",
+                      state->sqlite_sparse_route_backfill_last_published ? 1.0
+                                                                       : 0.0);
+                  op_context.AddOperationTiming (
+                      "SignalProcessor.sqlite_sparse_route_ordinary_backfill_succeeded",
+                      backfill_ok ? 1.0 : 0.0);
+                }
+              if (state && state->sqlite_sparse_route)
+                {
+                  const std::size_t ordinary_seal_watermark
+                      = static_cast<std::size_t> (operations::
+                          sparse_retrieval_knobs_internal::OrdinarySealBatch (
+                              config_.focus, config_.sensitivity,
+                              config_.stability));
+                  const auto dirty_memory_ids
+                      = state->sqlite_sparse_route->DirtyMemoryIds (
+                          ordinary_seal_watermark + 1);
+                  if (dirty_memory_ids
+                      && dirty_memory_ids->size ()
+                             >= ordinary_seal_watermark)
+                    {
+                      const auto prior = state->sqlite_sparse_route;
+                      op_start = std::chrono::steady_clock::now ();
+                      const bool sealed = operations::
+                          historical_surface_search_cache_internal::
+                              ReconcileSQLiteSparseRoute (
+                                  *state, *store_, prior,
+                                  state->sparse_route);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_ordinary_seal",
+                          ElapsedMillis (op_start,
+                                         std::chrono::steady_clock::now ()));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_ordinary_seal_delta_count",
+                          static_cast<double> (dirty_memory_ids->size ()));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_ordinary_seal_succeeded",
+                          sealed ? 1.0 : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_ordinary_seal_failure_code",
+                          sealed ? 0.0
+                                 : static_cast<double> (
+                                       prior->LastSealFailureCode ()));
+                    }
+                }
+            }
           if (signal.force_consolidation)
             {
-              // Force persistence can prune or rewrite broad embedding sets,
-              // so its transaction invalidates the private historical mirror.
-              // Rebuild only after the authoritative commit succeeds; a failed
-              // commit restores the exact pre-signal snapshot in the catch path.
-              LoadRetrievalSurfaceCache (*store_, *context_);
+              // Engine-owned operations incrementally maintain a complete
+              // current surface. Seal that bounded epoch delta directly when
+              // the cache remained healthy; operations that prune, rewrite,
+              // or otherwise invalidate the cache still reload SQLite.
+              auto prior_sparse_route = premaintenance_sparse_route;
+              auto prior_sqlite_sparse_route
+                  = premaintenance_sqlite_sparse_route;
+              const auto prior_state = operations::
+                  historical_surface_search_cache_internal::FindMutable (
+                      *context_);
+              if (sqlite_sparse_route_enabled && prior_state
+                  && !prior_sqlite_sparse_route
+                  && !prior_state->sqlite_sparse_route_backfill)
+                prior_sqlite_sparse_route = operations::
+                    historical_surface_search_cache_internal::
+                        OpenSQLiteSparseRoute (*prior_state, *store_);
+              const bool incremental_seal
+                  = snapshot_owner.IsEngineOwned ()
+                    && any_sparse_route_enabled && prior_state
+                    && operations::
+                           historical_surface_search_cache_internal::
+                               IncrementalSparseRouteSealReady (
+                                   *prior_state,
+                                   sqlite_sparse_route_enabled);
+              const std::size_t sparse_route_delta_size
+                  = prior_sparse_route ? prior_sparse_route->DeltaSize () : 0;
+              const std::size_t sqlite_sparse_route_delta_size
+                  = prior_sqlite_sparse_route && prior_state
+                        ? prior_sqlite_sparse_route
+                              ->DirtyMemoryIds (
+                                  prior_state->sparse_route_parameters
+                                      .route_capacity)
+                              .value_or (std::vector<long long>{})
+                              .size ()
+                        : 0;
+              double reload_ms = 0.0;
+              if (!incremental_seal)
+                {
+                  // The operation invalidated the incremental surface. Make
+                  // the old persistent generation fail closed before the
+                  // authoritative reload can reopen it.
+                  if (prior_sqlite_sparse_route)
+                    {
+                      (void)prior_sqlite_sparse_route->Invalidate ();
+                      prior_sqlite_sparse_route.reset ();
+                    }
+                  if (premaintenance_sqlite_sparse_route_backfill)
+                    {
+                      (void)premaintenance_sqlite_sparse_route_backfill
+                          ->Invalidate ();
+                      premaintenance_sqlite_sparse_route_backfill.reset ();
+                    }
+                  if (prior_state)
+                    {
+                      prior_state->sparse_route.reset ();
+                      prior_state->sqlite_sparse_route.reset ();
+                      prior_state->sqlite_sparse_route_backfill.reset ();
+                    }
+                  op_start = std::chrono::steady_clock::now ();
+                  LoadRetrievalSurfaceCache (*store_, *context_,
+                                             config_.focus,
+                                             config_.sensitivity,
+                                             config_.stability);
+                  reload_ms = ElapsedMillis (
+                      op_start, std::chrono::steady_clock::now ());
+                }
+              op_context.AddOperationTiming (
+                  "SignalProcessor.reload_retrieval_surface",
+                  reload_ms);
+              op_context.AddOperationTiming (
+                  "SignalProcessor.reload_retrieval_surface_skipped",
+                  incremental_seal ? 1.0 : 0.0);
+              if (any_sparse_route_enabled)
+                {
+                  auto state = operations::
+                      historical_surface_search_cache_internal::FindMutable (
+                          *context_);
+                  if (state && sqlite_sparse_route_enabled
+                      && !state->sqlite_sparse_route
+                      && !state->sparse_route)
+                    {
+                      if (hnsw_sparse_route_enabled
+                          && state->current_entries.size ()
+                                 <= state->sparse_route_parameters
+                                        .route_bootstrap_limit)
+                        (void)operations::
+                            historical_surface_search_cache_internal::
+                                BootstrapSparseRoute (*state);
+                      else
+                        {
+                          op_start = std::chrono::steady_clock::now ();
+                          const bool backfill_ok = operations::
+                              historical_surface_search_cache_internal::
+                                  AdvanceSQLiteSparseRouteBackfill (
+                                      *state, *store_);
+                          op_context.AddOperationTiming (
+                              "SignalProcessor.sqlite_sparse_route_backfill",
+                              ElapsedMillis (
+                                  op_start,
+                                  std::chrono::steady_clock::now ()));
+                          op_context.AddOperationTiming (
+                              "SignalProcessor.sqlite_sparse_route_backfill_rows",
+                              static_cast<double> (
+                                  state
+                                      ->sqlite_sparse_route_backfill_last_sealed_rows));
+                          op_context.AddOperationTiming (
+                              "SignalProcessor.sqlite_sparse_route_backfill_published",
+                              state
+                                      ->sqlite_sparse_route_backfill_last_published
+                                  ? 1.0 : 0.0);
+                          op_context.AddOperationTiming (
+                              "SignalProcessor.sqlite_sparse_route_backfill_succeeded",
+                              backfill_ok ? 1.0 : 0.0);
+                          op_context.AddOperationTiming (
+                              "SignalProcessor.sqlite_sparse_route_backfill_failure_code",
+                              static_cast<double> (
+                                  state->sqlite_sparse_route_backfill_failure_code));
+                          op_context.AddOperationTiming (
+                              "SignalProcessor.sqlite_sparse_route_backfill_failure_count",
+                              static_cast<double> (
+                                  state->sqlite_sparse_route_backfill_failure_count));
+                        }
+                    }
+                  if (state
+                      && state->sparse_route
+                      && state->current_entries.size ()
+                             > state->sparse_route_parameters.route_capacity)
+                    {
+                      op_start = std::chrono::steady_clock::now ();
+                      const bool sealed
+                          = incremental_seal && prior_sparse_route
+                                ? operations::
+                                      historical_surface_search_cache_internal::
+                                          SealSparseRouteDelta (*state)
+                                : operations::
+                                      historical_surface_search_cache_internal::
+                                          ReconcileSparseRoute (
+                                              *state, prior_sparse_route);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sparse_route_seal",
+                          ElapsedMillis (op_start,
+                                         std::chrono::steady_clock::now ()));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sparse_route_seal_delta_count",
+                          static_cast<double> (sparse_route_delta_size));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sparse_route_seal_succeeded",
+                          sealed ? 1.0 : 0.0);
+                    }
+                }
+              if (sqlite_sparse_route_enabled)
+                {
+                  auto state = operations::
+                      historical_surface_search_cache_internal::FindMutable (
+                          *context_);
+                  if (state
+                      && state->current_entries.size ()
+                             > state->sparse_route_parameters.route_capacity
+                      && !(state->sqlite_sparse_route_backfill
+                           && !state->sqlite_sparse_route))
+                    {
+                      op_start = std::chrono::steady_clock::now ();
+                      const bool sealed = operations::
+                          historical_surface_search_cache_internal::
+                              ReconcileSQLiteSparseRoute (
+                                  *state, *store_, prior_sqlite_sparse_route,
+                                  state->sparse_route);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_seal",
+                          ElapsedMillis (op_start,
+                                         std::chrono::steady_clock::now ()));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_seal_delta_count",
+                          static_cast<double> (
+                              sqlite_sparse_route_delta_size));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_seal_succeeded",
+                          sealed ? 1.0 : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_seal_failure_code",
+                          sealed || !prior_sqlite_sparse_route
+                              ? 0.0
+                              : static_cast<double> (
+                                  prior_sqlite_sparse_route
+                                      ->LastSealFailureCode ()));
+                      const bool profile_recenter_overlap
+                          = internal::experimental_env::Flag (
+                              "CORTEXT_PROFILE_RECENTER_ACTIVATION_OVERLAP");
+                      auto consolidation_centroid
+                          = BuildConsolidationActivationCentroid (op_context);
+                      int consolidation_centroid_source = 1;
+                      if (!consolidation_centroid.embedding)
+                        {
+                          consolidation_centroid
+                              = BuildActiveSignalRingCentroid (
+                                  *store_, signal.embedding.size (),
+                                  config_.focus, config_.sensitivity,
+                                  config_.stability);
+                          consolidation_centroid_source = 2;
+                        }
+                      if (!consolidation_centroid.embedding)
+                        consolidation_centroid_source = 0;
+                      std::optional<std::vector<long long>>
+                          pre_recenter_activated;
+                      std::size_t pre_recenter_node_rows = 0;
+                      if (profile_recenter_overlap
+                          && state->sqlite_sparse_route)
+                        {
+                          pre_recenter_activated
+                              = state->sqlite_sparse_route->SearchActivated (
+                                  signal.embedding);
+                          pre_recenter_node_rows
+                              = state->sqlite_sparse_route
+                                    ->LastSearchNodeRows ();
+                        }
+                      op_start = std::chrono::steady_clock::now ();
+                      const bool recentered
+                          = sealed && state->sqlite_sparse_route
+                            && consolidation_centroid.embedding
+                            && state->sqlite_sparse_route->Recenter (
+                                *consolidation_centroid.embedding);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter",
+                          ElapsedMillis (
+                              op_start, std::chrono::steady_clock::now ()));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_succeeded",
+                          recentered ? 1.0 : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_derived_centroid",
+                          consolidation_centroid.embedding ? 1.0 : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_centroid_source",
+                          static_cast<double> (
+                              consolidation_centroid_source));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count",
+                          static_cast<double> (
+                              consolidation_centroid.cluster_count));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count",
+                          static_cast<double> (
+                              consolidation_centroid.member_count));
+                      std::optional<std::vector<long long>>
+                          post_recenter_activated;
+                      std::size_t post_recenter_node_rows = 0;
+                      if (profile_recenter_overlap && recentered)
+                        {
+                          post_recenter_activated
+                              = state->sqlite_sparse_route->SearchActivated (
+                                  signal.embedding);
+                          post_recenter_node_rows
+                              = state->sqlite_sparse_route
+                                    ->LastSearchNodeRows ();
+                        }
+                      const bool overlap_pair_valid
+                          = pre_recenter_activated.has_value ()
+                            && post_recenter_activated.has_value ();
+                      int overlap_failure_code = 0;
+                      if (profile_recenter_overlap)
+                        {
+                          if (!state->sqlite_sparse_route)
+                            overlap_failure_code = 1;
+                          else if (!pre_recenter_activated)
+                            overlap_failure_code = 2;
+                          else if (!recentered)
+                            overlap_failure_code = 3;
+                          else if (!post_recenter_activated)
+                            overlap_failure_code = 4;
+                        }
+                      std::size_t overlap_count = 0;
+                      if (overlap_pair_valid)
+                        {
+                          std::unordered_set<long long> pre_ids (
+                              pre_recenter_activated->begin (),
+                              pre_recenter_activated->end ());
+                          for (const long long memory_id
+                               : *post_recenter_activated)
+                            overlap_count += pre_ids.count (memory_id);
+                        }
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_overlap_profiled",
+                          profile_recenter_overlap ? 1.0 : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_overlap_pair_valid",
+                          overlap_pair_valid ? 1.0 : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code",
+                          static_cast<double> (overlap_failure_code));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count",
+                          pre_recenter_activated
+                              ? static_cast<double> (
+                                    pre_recenter_activated->size ())
+                              : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_post_activated_count",
+                          post_recenter_activated
+                              ? static_cast<double> (
+                                    post_recenter_activated->size ())
+                              : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_overlap_count",
+                          static_cast<double> (overlap_count));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_pre_node_count",
+                          static_cast<double> (pre_recenter_node_rows));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_recenter_post_node_count",
+                          static_cast<double> (post_recenter_node_rows));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_activation_search_effort",
+                          state->sqlite_sparse_route
+                              ? static_cast<double> (
+                                    state->sqlite_sparse_route
+                                        ->ActivationSearchEffort ())
+                              : 0.0);
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_activation_node_budget",
+                          state->sqlite_sparse_route
+                              ? static_cast<double> (
+                                    state->sqlite_sparse_route
+                                        ->ActivationSearchNodeBudget ())
+                              : 0.0);
+                    }
+                }
+            }
+          if (signal.retention == Retention::Durable)
+            {
+              // Durable is the shared ingestion transaction plus this explicit
+              // post-commit SQLite edge.  It does not select a second write
+              // pipeline or replay the committed mutation.
               CheckpointSQLiteStore (
                   store_.get (), true, &op_context,
                   "SignalProcessor.sqlite_wal_checkpoint");
@@ -2323,6 +4323,8 @@ SignalProcessor::Process (const Signal &signal)
     }
   catch (const internal::CancellationError &)
     {
+      operations::bounded_activation_shadow_internal::
+          DiscardCanonicalTransaction (bounded_shadow_observation);
       if (tx)
         {
           rollback_object_tx ();
@@ -2333,6 +4335,8 @@ SignalProcessor::Process (const Signal &signal)
     }
   catch (const std::exception &e)
     {
+      operations::bounded_activation_shadow_internal::
+          DiscardCanonicalTransaction (bounded_shadow_observation);
       if (tx)
         {
           rollback_object_tx ();
@@ -2352,6 +4356,8 @@ SignalProcessor::Process (const Signal &signal)
     }
   catch (...)
     {
+      operations::bounded_activation_shadow_internal::
+          DiscardCanonicalTransaction (bounded_shadow_observation);
       if (tx)
         {
           rollback_object_tx ();
@@ -2371,6 +4377,72 @@ SignalProcessor::Process (const Signal &signal)
     }
 
   Output out;
+  if (operations::consolidation_epoch_profile_internal::Enabled ())
+    {
+      const auto mutation_audit_start = std::chrono::steady_clock::now ();
+      const auto mutations
+          = internal::ConsumeSQLiteCommittedMutations (store_.get ());
+      op_context.AddOperationTiming (
+          "SignalProcessor.profile_mutation_audit",
+          ElapsedMillis (mutation_audit_start,
+                         std::chrono::steady_clock::now ()));
+      if (maintenance)
+        {
+          auto seal = operations::consolidation_epoch_profile_internal::Seal (
+              *context_, mutations);
+          if (consolidation_epoch_pre)
+            seal.pre = consolidation_epoch_pre->counters;
+          op_context.AddOperationTiming (
+              "ConsolidationEpoch.closed_epoch_id",
+              static_cast<double> (seal.closed_epoch_id));
+          op_context.AddOperationTiming (
+              "ConsolidationEpoch.sealed_epoch_event_count",
+              static_cast<double> (seal.sealed_epoch_event_count));
+          op_context.AddOperationTiming (
+              "ConsolidationEpoch.sealed_epoch_mutation_count",
+              static_cast<double> (seal.sealed_epoch_mutation_count));
+          op_context.AddOperationTiming (
+              "ConsolidationEpoch.sealed_mutation_identity_count",
+              static_cast<double> (seal.sealed_mutation_identity_count));
+          op_context.AddOperationTiming (
+              "ConsolidationEpoch.sealed_mutation_identity_verified",
+              seal.sealed_mutation_identity_verified ? 1.0 : 0.0);
+          op_context.AddOperationTiming (
+              "ConsolidationEpoch.close_succeeded", 1.0);
+          AddConsolidationEpochCounters (op_context,
+                                         "ConsolidationEpoch.pre", seal.pre);
+          AddConsolidationEpochCounters (op_context,
+                                         "ConsolidationEpoch.post", seal.post);
+        }
+      else if (!read_only)
+        {
+          const auto event
+              = operations::consolidation_epoch_profile_internal::ObserveEvent (
+                  *context_, mutations);
+          op_context.AddOperationTiming (
+              "ConsolidationEpoch.epoch_id",
+              static_cast<double> (event.epoch_id));
+          op_context.AddOperationTiming (
+              "ConsolidationEpoch.events_since_epoch_start",
+              static_cast<double> (event.events_since_epoch_start));
+          AddConsolidationEpochCounters (op_context, "ConsolidationEpoch",
+                                         event.counters);
+        }
+    }
+  if (ProfileWorkCountersEnabled ())
+    {
+      op_context.AddOperationTiming (
+          "SignalProcessor.predictive_id_count",
+          static_cast<double> (
+              context_->predictive_pre_activation_embedding_ids.size ()
+              + context_->predictive_pre_activation_memory_ids.size ()));
+      op_context.AddOperationTiming (
+          "SignalProcessor.predictive_id_activity",
+          context_->predictive_pre_activation_embedding_ids.empty ()
+                  && context_->predictive_pre_activation_memory_ids.empty ()
+              ? 0.0
+              : 1.0);
+    }
   if (read_only_output.has_value ())
     {
       out = std::move (*read_only_output);
@@ -2406,6 +4478,22 @@ SignalProcessor::Flush ()
     {
       return;
     }
+  std::shared_ptr<operations::sparse_retrieval_route_internal::Route>
+      preserved_sparse_route;
+  std::shared_ptr<
+      operations::sparse_retrieval_route_sqlite_internal::Route>
+      preserved_sqlite_sparse_route;
+  std::shared_ptr<
+      operations::sparse_retrieval_route_sqlite_internal::Route>
+      preserved_sqlite_sparse_route_backfill;
+  if (const auto state = operations::
+          historical_surface_search_cache_internal::FindMutable (*context_))
+    {
+      preserved_sparse_route = state->sparse_route;
+      preserved_sqlite_sparse_route = state->sqlite_sparse_route;
+      preserved_sqlite_sparse_route_backfill
+          = state->sqlite_sparse_route_backfill;
+    }
   ProcessorContext context_snapshot;
   DetachedProcessorCaches context_cache_snapshot;
   const auto consolidation_throughput_snapshot
@@ -2413,7 +4501,7 @@ SignalProcessor::Flush ()
   {
     auto detached_caches = DetachRebuildableProcessorCaches (*context_);
     context_snapshot = *context_;
-    context_cache_snapshot = detached_caches;
+    context_cache_snapshot = SnapshotProcessorCaches (detached_caches);
     RestoreRebuildableProcessorCaches (*context_, detached_caches);
   }
   auto restore_context_snapshot = [&] {
@@ -2467,7 +4555,24 @@ SignalProcessor::Flush ()
       LoadHistoricalSurfaceSearchCache (*store_, *context_);
       throw;
     }
-  LoadRetrievalSurfaceCache (*store_, *context_);
+  LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
+                             config_.sensitivity, config_.stability);
+  if (auto state = operations::historical_surface_search_cache_internal::
+          FindMutable (*context_))
+    {
+      // Flush persists state and working-memory rows only. Those writes do not
+      // alter the LONG_TERM/ASSOCIATION route population, so the route
+      // lifecycle must survive the cache rebuild even if the historical
+      // surface itself had to fall back to exact SQL.
+      if (preserved_sparse_route)
+        state->sparse_route = std::move (preserved_sparse_route);
+      if (preserved_sqlite_sparse_route)
+        state->sqlite_sparse_route
+            = std::move (preserved_sqlite_sparse_route);
+      if (preserved_sqlite_sparse_route_backfill)
+        state->sqlite_sparse_route_backfill
+            = std::move (preserved_sqlite_sparse_route_backfill);
+    }
   CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
 }
 
@@ -2760,9 +4865,12 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
   if (op_context == nullptr)
     {
       // The process-wide historical registry is not part of the processor
-      // snapshot. Rebuild it from authoritative SQL after either commit or
-      // rollback of any flush-time embedding mutation.
-      operations::historical_surface_search_cache_internal::Erase (*context_);
+      // snapshot. Flush only mutates working-memory rows, which are outside
+      // the current LONG_TERM/ASSOCIATION sparse route. Invalidate historical
+      // material while preserving the independently maintained route and any
+      // unpublished bounded backfill progress.
+      operations::historical_surface_search_cache_internal::
+          InvalidateHistoricalPreserveCurrent (*context_);
     }
 
   auto add_timing
@@ -2859,8 +4967,8 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
         {
           // Force pruning can delete a broad set of embedding rows. Exact
           // incremental ownership is not available here, so fail closed.
-          operations::historical_surface_search_cache_internal::Erase (
-              *context_);
+          operations::historical_surface_search_cache_internal::
+              InvalidateHistoricalPreserveCurrent (*context_);
         }
       const int prune_batch = force ? kClosedWorkingMemoryPruneBatch
                                     : kClosedWorkingMemoryIncrementalPruneBatch;
@@ -2987,6 +5095,8 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                         slot.s_arousal_avg, slot.drift_acc, slot.strength,
                         working_source_reliability, working_stability, ts_ms,
                         strength_ts_ms, memory_id });
+                  operations::rif_state_internal::RefreshActiveStrengthWhere (
+                      tx, "memory_id = ?", { memory_id });
                   add_timing ("SignalProcessor.wm_update_slot_memory",
                               t_sql_start);
                 }
@@ -3052,41 +5162,12 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                   const auto &rec = slot.signal_records[rec_index];
                   try
                     {
-                      long long signal_embedding_id = embedding_id;
-                      if (rec.embedding.size () > 0
-                          && rec.embedding.size () == slot.embedding.size ())
-                        {
-                          failure_stage = "insert_signal_embedding";
-                          const std::vector<float> sig_vec
-                              = ToFloatVector (rec.embedding);
-                          const auto t_sql_start
-                              = std::chrono::steady_clock::now ();
-                          tx.Execute (
-                              "INSERT INTO embeddings (embedding, created_at) "
-                              "VALUES (?, ?)",
-                              { sig_vec,
-                                static_cast<long long> (rec.timestamp) });
-                          auto sig_rows
-                              = tx.Execute ("SELECT last_insert_rowid() AS id", {});
-                          if (!sig_rows.empty ())
-                            {
-                              signal_embedding_id = ExtractInt64 (
-                                  sig_rows[0], "id", embedding_id);
-                            }
-                          if (signal_embedding_id > 0)
-                            {
-                              operations::
-                                  historical_surface_search_cache_internal::
-                                      Append (
-                                          *context_,
-                                          { signal_embedding_id, 0, 0,
-                                            std::string (), std::string (),
-                                            rec.embedding });
-                            }
-                          add_timing (
-                              "SignalProcessor.wm_insert_signal_embedding",
-                              t_sql_start);
-                        }
+                      const std::vector<float> signal_embedding
+                          = rec.embedding.size () > 0
+                                    && rec.embedding.size ()
+                                           == slot.embedding.size ()
+                                ? ToFloatVector (rec.embedding)
+                                : ToFloatVector (slot.embedding);
 
                       failure_stage = "insert_signal_row";
                       const auto t_sql_start
@@ -3100,13 +5181,28 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                           { memory_id,
                             slot.source_id.empty () ? std::string ("unknown")
                                                     : slot.source_id,
-                            signal_embedding_id,
+                            embedding_id,
                             static_cast<long long> (rec.timestamp),
                             rec.modality, rec.mime,
                             rec.blob_id.empty () ? std::any ()
                                                  : std::any (rec.blob_id),
                             static_cast<long long> (rec.serial_position),
                             rec.score, static_cast<long long> (rec.timestamp) });
+                      const auto signal_id_rows
+                          = tx.Execute ("SELECT last_insert_rowid() AS id");
+                      const long long signal_id
+                          = signal_id_rows.empty ()
+                                ? 0
+                                : ExtractInt64 (signal_id_rows.front (), "id",
+                                                0);
+                      if (signal_id <= 0)
+                        throw std::runtime_error (
+                            "working-memory signal id unavailable");
+                      operations::active_signal_embedding_ring_internal::
+                          Upsert (tx, signal_id, signal_embedding,
+                                  static_cast<long long> (rec.timestamp),
+                                  config_.focus, config_.sensitivity,
+                                  config_.stability);
                       add_timing ("SignalProcessor.wm_insert_signal_row",
                                   t_sql_start);
                     }

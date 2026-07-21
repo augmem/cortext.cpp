@@ -7,7 +7,12 @@
 #include <cortext/store/utils.hpp>
 
 #include "../../src/encoder/text_encoder_factory.hpp"
+#include "../../src/operations/bounded_activation_shadow_internal.hpp"
+#include "../../src/operations/active_signal_embedding_ring_internal.hpp"
 #include "../../src/operations/retrieval_trace_state.hpp"
+#include "../../src/operations/rif_active_epoch_cache_internal.hpp"
+#include "../../src/operations/sparse_retrieval_knobs_internal.hpp"
+#include "../../src/operations/sparse_retrieval_route_sqlite_internal.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -15,6 +20,7 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -25,12 +31,15 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -69,10 +78,21 @@ struct Config
 {
   fs::path input_dir;
   fs::path transcript;
+  fs::path packet_corpus;
+  fs::path message_corpus;
+  fs::path shadow_embedding_corpus;
+  fs::path export_shadow_embedding_corpus;
+  fs::path fixed_consolidation_indices;
   fs::path db_path = "build/chat_replay_live_run.sqlite";
   fs::path output_path = "build/chat_replay_live_run_summary.json";
   int skip_messages = 0;
   int max_messages = 1000;
+  int max_packets = -1;
+  int shadow_queries = 512;
+  int shadow_result_k = 16;
+  int public_retrieval_queries = 512;
+  int public_retrieval_result_k = 16;
+  int skip_packets = 0;
   int media_limit = 0;
   int consolidate_every = 0;
   int warmup_events = 0;
@@ -89,8 +109,13 @@ struct Config
   bool append = false;
   bool resume_from_existing = false;
   bool profile_probes_only = false;
+  bool shadow_quality_control = false;
+  bool public_retrieval_control = false;
+  bool opaque_source_control = false;
   bool checkpoint_eval_only = false;
   int progress_stride = 1000;
+  std::uint64_t fixed_timestamp_base_ms = 0;
+  std::uint64_t fixed_timestamp_step_ms = 0;
   std::uint64_t checkpoint_after_timestamp = 0;
   int checkpoint_query_count = 8;
   int checkpoint_query_stride = 1;
@@ -98,8 +123,139 @@ struct Config
   int checkpoint_queries_per_day = 0;
   bool full_operation_ms = false;
   bool behavior_oracle = false;
+  bool honor_required_consolidation = false;
+  bool no_profile_rows = false;
+  bool reuse_db = false;
+  cortext::Retention retention = cortext::Retention::Durable;
   std::string sqlite_profile = "realtime";
 };
+
+nlohmann::json
+SparseRouteParametersJson (const Config &cfg)
+{
+  const auto parameters = cortext::operations::
+      sparse_retrieval_route_sqlite_internal::DeriveParameters (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  return {
+    { "route_capacity", parameters.route_capacity },
+    { "activation_identity_target",
+      parameters.activation_identity_target },
+    { "activation_snapshot_capacity",
+      parameters.activation_snapshot_capacity },
+    { "total_query_row_budget", parameters.total_query_row_budget },
+    { "backfill_batch_size", parameters.backfill_batch_size },
+    { "fallback_hydration_signal_limit",
+      cortext::operations::sparse_retrieval_knobs_internal::
+          HydrationFallbackSignalLimit (cfg.focus, cfg.sensitivity,
+                                        cfg.stability) },
+    { "bootstrap_limit", parameters.route_bootstrap_limit },
+    { "search_node_budget", parameters.search_node_budget },
+    { "activation_search_node_budget_min",
+      parameters.activation_search_node_budget_min },
+    { "activation_search_node_budget_step",
+      parameters.activation_search_node_budget_step },
+    { "search_expansion_batch", parameters.search_expansion_batch },
+    { "search_effort", parameters.search_ef },
+    { "activation_search_effort_min",
+      parameters.activation_search_ef_min },
+    { "activation_search_effort_step",
+      parameters.activation_search_ef_step },
+    { "shadow_cache_capacity", parameters.shadow_node_capacity },
+    { "backfill_search_node_budget",
+      parameters.backfill_search_node_budget },
+    { "backfill_search_effort", parameters.backfill_search_ef },
+    { "graph_neighbor_count", parameters.row_addressed_neighbor_count },
+    { "graph_level_zero_links", parameters.row_addressed_level_zero_links },
+    { "family_exact_comparison_limit",
+      parameters.family_exact_comparison_limit },
+    { "maximum_level", parameters.maximum_level },
+    { "reciprocal_update_count", parameters.reciprocal_update_count },
+    { "hnsw_construction_effort", parameters.hnsw.construction_effort },
+    { "hnsw_query_effort", parameters.hnsw.query_effort },
+  };
+}
+
+std::optional<std::string>
+ExperimentalSparseNodeEnvelopeFormula ()
+{
+  const char *value
+      = std::getenv ("CORTEXT_EXPERIMENT_SQLITE_SPARSE_NODE_ENVELOPE");
+  if (value == nullptr)
+    return std::nullopt;
+  const std::string selector (value);
+  if (selector == "1")
+    return "C";
+  if (selector == "2")
+    return "A";
+  if (selector == "3")
+    return "C+B";
+  if (selector == "4")
+    return "2C";
+  if (selector == "5")
+    return "5C";
+  if (selector == "6")
+    return "6C";
+  if (selector == "8")
+    return "4C";
+  if (selector == "18")
+    return "4C+B/16";
+  if (selector == "19")
+    return "fixed-4C+B/16";
+  if (selector == "20")
+    return "4C+B/16-to-5C";
+  if (selector == "21")
+    return "5C-to-6C-by-B/16";
+  if (selector == "22")
+    return "6C-to-7C-by-B/16";
+  if (selector == "23")
+    return "7C-to-8C-by-B/16";
+  if (selector == "24")
+    return "8C-to-9C-by-B/16";
+  if (selector == "10")
+    return "10C";
+  if (selector == "12")
+    return "12C";
+  if (selector == "16")
+    return "16C";
+  return std::nullopt;
+}
+
+void
+RecordSparseRouteParameters (nlohmann::json &out, const Config &cfg)
+{
+  out["sparse_route_parameters"] = SparseRouteParametersJson (cfg);
+  if (const auto formula = ExperimentalSparseNodeEnvelopeFormula ())
+    out["experimental_sparse_node_envelope_formula"] = *formula;
+}
+
+struct ShadowQualityModeMetadata
+{
+  const char *role;
+  const char *control_kind;
+};
+
+constexpr ShadowQualityModeMetadata
+ShadowQualityMode (bool exact_control)
+{
+  return exact_control
+             ? ShadowQualityModeMetadata {
+                 "control-candidate",
+                 "exhaustive-embedding-neighbor-candidate",
+               }
+             : ShadowQualityModeMetadata {
+                 "candidate",
+                 "bounded-activation-router-candidate",
+               };
+}
+
+static_assert (std::string_view (ShadowQualityMode (false).role)
+               == "candidate");
+static_assert (std::string_view (ShadowQualityMode (false).control_kind)
+               == "bounded-activation-router-candidate");
+static_assert (std::string_view (ShadowQualityMode (true).role)
+               == "control-candidate");
+static_assert (std::string_view (ShadowQualityMode (true).control_kind)
+               == "exhaustive-embedding-neighbor-candidate");
 
 struct ResumeCheckpoint
 {
@@ -619,7 +775,8 @@ PublicMemoryBehaviorJson (
 }
 
 nlohmann::json
-PublicBehaviorJson (const cortext::Cortext::Context &ctx)
+PublicBehaviorJson (const cortext::Cortext::Context &ctx,
+                    bool bounded_working_memory = false)
 {
   nlohmann::json metrics = nlohmann::json::object ();
   for (const auto &[metric, value] : ctx.output.metrics)
@@ -633,8 +790,23 @@ PublicBehaviorJson (const cortext::Cortext::Context &ctx)
       std::memcpy (embedding_bytes.data (), ctx.embedding.data (),
                    embedding_bytes.size ());
     }
+  nlohmann::json working_memory;
+  if (bounded_working_memory)
+    {
+      working_memory = {
+        { "count", ctx.working_memory.size () },
+        { "first_id",
+          ctx.working_memory.empty () ? 0 : ctx.working_memory.front ().id },
+        { "last_id",
+          ctx.working_memory.empty () ? 0 : ctx.working_memory.back ().id },
+      };
+    }
+  else
+    {
+      working_memory = PublicMemoryBehaviorJson (ctx.working_memory);
+    }
   return {
-    { "working_memory", PublicMemoryBehaviorJson (ctx.working_memory) },
+    { "working_memory", std::move (working_memory) },
     { "retrieved_memory", PublicMemoryBehaviorJson (ctx.retrieved_memory) },
     { "embedding_size", ctx.embedding.size () },
     { "embedding_blake3", PrivateValueDigest (embedding_bytes) },
@@ -931,13 +1103,130 @@ RetrievalTraceJson ()
 }
 
 nlohmann::json
+WorkCountersJson (const cortext::Cortext::Context &ctx)
+{
+  const auto value = [&ctx] (const char *name) {
+    const auto it = ctx.output.operation_ms.find (name);
+    return it == ctx.output.operation_ms.end () ? 0.0 : it->second;
+  };
+  const double supersession_current
+      = value ("MemoryStorage.supersession_current_candidate_count");
+  const double supersession_historical
+      = value ("MemoryStorage.supersession_historical_candidate_count");
+  const double supersession_current_rows
+      = value ("MemoryStorage.supersession_current_rows_visited");
+  const double supersession_historical_rows
+      = value ("MemoryStorage.supersession_historical_rows_visited");
+  const double supersession_sparse_route_rows
+      = value ("MemoryStorage.supersession_sparse_route_node_rows");
+  return {
+    { "retrieval_suppression_id_count",
+      value ("SignalProcessor.retrieval_suppression_id_count") },
+    { "predictive_id_count", value ("SignalProcessor.predictive_id_count") },
+    { "rollback_full_cache_copy_count",
+      value ("SignalProcessor.snapshot_full_cache_copy_count") },
+    { "rollback_cache_entry_copy_count",
+      value ("SignalProcessor.snapshot_cache_entry_copy_count") },
+    { "graph_candidate_count", value ("GraphRetrieve.candidate_count") },
+    { "graph_exact_comparison_count",
+      value ("GraphRetrieve.family_exact_comparison_count") },
+    { "graph_cache_rebuild_count",
+      value ("GraphRetrieve.cache_rebuild_count") },
+    { "graph_rows_visited",
+      value ("GraphRetrieve.rows_visited") },
+    { "competition_candidate_count",
+      value ("Competition.candidate_count") },
+    { "competition_rows_visited", value ("Competition.rows_visited") },
+    { "competition_rows_touched", value ("Competition.rows_touched") },
+    { "supersession_current_candidate_count", supersession_current },
+    { "supersession_historical_candidate_count", supersession_historical },
+    { "supersession_rows_visited",
+      supersession_current_rows + supersession_historical_rows
+          + supersession_sparse_route_rows },
+    { "emotional_source_count", value ("EmotionalCascade.source_count") },
+    { "emotional_neighbor_count", value ("EmotionalCascade.neighbor_count") },
+    { "emotional_update_count", value ("EmotionalCascade.update_count") },
+  };
+}
+
+std::uint64_t
+RequiredOperationCounter (const cortext::Cortext::Context &ctx,
+                          const std::string &name)
+{
+  const auto value = ctx.output.operation_ms.find (name);
+  if (value == ctx.output.operation_ms.end ()
+      || !std::isfinite (value->second) || value->second < 0.0
+      || std::floor (value->second) != value->second)
+    throw std::runtime_error ("missing or invalid operation counter: " + name);
+  return static_cast<std::uint64_t> (value->second);
+}
+
+double
+OperationValue (const cortext::Cortext::Context &ctx,
+                const std::string &name)
+{
+  const auto value = ctx.output.operation_ms.find (name);
+  if (value == ctx.output.operation_ms.end ())
+      return 0.0;
+  if (!std::isfinite (value->second) || value->second < 0.0)
+    throw std::runtime_error ("invalid operation value: " + name);
+  return value->second;
+}
+
+nlohmann::json
+ConsolidationEpochCountersJson (const cortext::Cortext::Context &ctx,
+                                const std::string &prefix)
+{
+  const auto counter = [&ctx, &prefix] (const char *name) {
+    return RequiredOperationCounter (ctx, prefix + "." + name);
+  };
+  return {
+    { "accumulator_signal_count", counter ("accumulator_signal_count") },
+    { "working_memory_pending_signal_count",
+      counter ("working_memory_pending_signal_count") },
+    { "consolidation_dirty_memory_count",
+      counter ("consolidation_dirty_memory_count") },
+    { "consolidation_dirty_association_count",
+      counter ("consolidation_dirty_association_count") },
+    { "consolidation_dirty_index_count",
+      counter ("consolidation_dirty_index_count") },
+  };
+}
+
+nlohmann::json
+ActiveEpochCountersJson (const cortext::Cortext::Context &ctx)
+{
+  return {
+    { "event_count",
+      RequiredOperationCounter (
+          ctx, "SignalProcessor.rif_active_epoch_event_count") },
+    { "mutation_count",
+      RequiredOperationCounter (
+          ctx, "SignalProcessor.rif_active_epoch_mutation_count") },
+    { "allocated_bytes",
+      RequiredOperationCounter (
+          ctx, "SignalProcessor.rif_active_epoch_allocated_bytes") },
+    { "row_batch_high_water",
+      RequiredOperationCounter (
+          ctx, "SignalProcessor.rif_active_epoch_row_batch_high_water") },
+    { "required",
+      RequiredOperationCounter (
+          ctx, "SignalProcessor.rif_active_epoch_required") == 1.0 },
+  };
+}
+
+nlohmann::json
 WorkingSetCurveRow (int event_index,
                     const EventDoc &doc,
                     const cortext::Cortext::Context &ctx,
-                    bool full_operation_ms = false)
+                    bool full_operation_ms = false,
+                    bool bounded_behavior = false)
 {
   const int retrieved_tokens = EstimateMemoryPacketTokens (ctx.retrieved_memory);
-  const int working_tokens = EstimateMemoryPacketTokens (ctx.working_memory);
+  const int working_tokens = bounded_behavior
+                                 ? 0
+                                 : EstimateMemoryPacketTokens (
+                                       ctx.working_memory);
   std::vector<std::pair<std::string, double> > sorted_ops (
       ctx.output.operation_ms.begin (), ctx.output.operation_ms.end ());
   std::sort (sorted_ops.begin (), sorted_ops.end (),
@@ -961,16 +1250,23 @@ WorkingSetCurveRow (int event_index,
     { "modality", doc.modality },
     { "working_items", ctx.working_memory.size () },
     { "retrieved_items", ctx.retrieved_memory.size () },
-    { "working_tokens", working_tokens },
+    { "working_tokens",
+      bounded_behavior ? nlohmann::json (nullptr)
+                       : nlohmann::json (working_tokens) },
     { "retrieved_tokens", retrieved_tokens },
-    { "active_context_tokens", working_tokens + retrieved_tokens },
+    { "active_context_tokens",
+      bounded_behavior ? nlohmann::json (nullptr)
+                       : nlohmann::json (working_tokens + retrieved_tokens) },
+    { "working_tokens_observed", !bounded_behavior },
     { "latency_ms", ctx.total_ms },
     { "encode_ms", ctx.encode_ms },
     { "process_ms", ctx.process_ms },
     { "hydrate_ms", ctx.hydrate_ms },
     { "top_operation_ms", std::move (top_ops) },
-    { "behavior", PublicBehaviorJson (ctx) },
+    { "behavior", PublicBehaviorJson (ctx, bounded_behavior) },
   };
+  if (HasEnvValue ("CORTEXT_PROFILE_WORK_COUNTERS"))
+    row["work_counters"] = WorkCountersJson (ctx);
   if (full_operation_ms)
     {
       nlohmann::json operation_ms = nlohmann::json::object ();
@@ -1591,6 +1887,38 @@ SqlCount (const fs::path &db_path, const std::string &sql)
   return value;
 }
 
+nlohmann::json
+StoreCheckpoint (const fs::path &db_path, std::size_t event_end)
+{
+  return {
+    { "event_end", event_end },
+    { "counts",
+      {
+        { "memories", SqlCount (db_path, "SELECT COUNT(*) FROM memories") },
+        { "signals", SqlCount (db_path, "SELECT COUNT(*) FROM signals") },
+        { "associations",
+          SqlCount (db_path, "SELECT COUNT(*) FROM associations") },
+        // Read vec0's ordinary shadow tables so this separate read-only
+        // connection does not need to load the extension outside the timed
+        // engine connection.
+        { "embeddings",
+          SqlCount (db_path, "SELECT COUNT(*) FROM embeddings_rowids") },
+        { "current_memory_embeddings",
+          SqlCount (db_path,
+                    "SELECT COUNT(*) FROM "
+                    "current_memory_embeddings_rowids") },
+        { "memory_reconstructions",
+          SqlCount (db_path, "SELECT COUNT(*) FROM memory_reconstructions") },
+        { "rif_recovery_clock",
+          SqlCount (db_path, "SELECT COUNT(*) FROM rif_recovery_clock") },
+        { "rif_generation_resets",
+          SqlCount (db_path, "SELECT COUNT(*) FROM rif_generation_resets") },
+        { "rif_active_state",
+          SqlCount (db_path, "SELECT COUNT(*) FROM rif_active_state") },
+      } },
+  };
+}
+
 int
 ProbeStreamRows (const fs::path &path)
 {
@@ -1640,12 +1968,40 @@ ParseArgs (int argc, char **argv)
         cfg.input_dir = require_value ();
       else if (arg == "--transcript")
         cfg.transcript = require_value ();
+      else if (arg == "--packet-corpus")
+        cfg.packet_corpus = require_value ();
+      else if (arg == "--message-corpus")
+        cfg.message_corpus = require_value ();
+      else if (arg == "--shadow-embedding-corpus")
+        cfg.shadow_embedding_corpus = require_value ();
+      else if (arg == "--export-shadow-embedding-corpus")
+        cfg.export_shadow_embedding_corpus = require_value ();
+      else if (arg == "--fixed-consolidation-indices")
+        cfg.fixed_consolidation_indices = require_value ();
+      else if (arg == "--shadow-quality-control")
+        cfg.shadow_quality_control = true;
+      else if (arg == "--public-retrieval-control")
+        cfg.public_retrieval_control = true;
+      else if (arg == "--opaque-source-control")
+        cfg.opaque_source_control = true;
       else if (arg == "--db")
         cfg.db_path = require_value ();
       else if (arg == "--out")
         cfg.output_path = require_value ();
       else if (arg == "--max-messages")
         cfg.max_messages = std::stoi (require_value ());
+      else if (arg == "--max-packets")
+        cfg.max_packets = std::stoi (require_value ());
+      else if (arg == "--shadow-queries")
+        cfg.shadow_queries = std::stoi (require_value ());
+      else if (arg == "--shadow-result-k")
+        cfg.shadow_result_k = std::stoi (require_value ());
+      else if (arg == "--public-retrieval-queries")
+        cfg.public_retrieval_queries = std::stoi (require_value ());
+      else if (arg == "--public-retrieval-result-k")
+        cfg.public_retrieval_result_k = std::stoi (require_value ());
+      else if (arg == "--skip-packets")
+        cfg.skip_packets = std::stoi (require_value ());
       else if (arg == "--skip-messages")
         cfg.skip_messages = std::stoi (require_value ());
       else if (arg == "--media-limit")
@@ -1713,16 +2069,1686 @@ ParseArgs (int argc, char **argv)
         cfg.checkpoint_queries_per_day = std::stoi (require_value ());
       else if (arg == "--progress-stride")
         cfg.progress_stride = std::stoi (require_value ());
+      else if (arg == "--fixed-timestamp-base-ms")
+        cfg.fixed_timestamp_base_ms
+            = static_cast<std::uint64_t> (std::stoull (require_value ()));
+      else if (arg == "--fixed-timestamp-step-ms")
+        cfg.fixed_timestamp_step_ms
+            = static_cast<std::uint64_t> (std::stoull (require_value ()));
       else if (arg == "--full-operation-ms")
         cfg.full_operation_ms = true;
       else if (arg == "--behavior-oracle")
         cfg.behavior_oracle = true;
+      else if (arg == "--honor-required-consolidation")
+        cfg.honor_required_consolidation = true;
+      else if (arg == "--no-profile-rows")
+        cfg.no_profile_rows = true;
+      else if (arg == "--reuse-db")
+        cfg.reuse_db = true;
+      else if (arg == "--retention")
+        {
+          const std::string value = Lower (require_value ());
+          if (value == "natural")
+            cfg.retention = cortext::Retention::Natural;
+          else if (value == "durable")
+            cfg.retention = cortext::Retention::Durable;
+          else
+            throw std::runtime_error (
+                "--retention must be natural or durable");
+        }
       else if (arg == "--sqlite-profile")
         cfg.sqlite_profile = require_value ();
       else
         throw std::runtime_error ("unknown argument: " + arg);
     }
+  if (!std::isfinite (cfg.focus) || !std::isfinite (cfg.sensitivity)
+      || !std::isfinite (cfg.stability))
+    throw std::runtime_error ("--focus/--sensitivity/--stability must be finite");
   return cfg;
+}
+
+std::vector<std::string>
+ReadPacketCorpus (const fs::path &path, int skip_packets, int max_packets)
+{
+  std::ifstream stream (path);
+  if (!stream)
+    throw std::runtime_error ("failed to open packet corpus: "
+                              + path.string ());
+  std::vector<std::string> packets;
+  std::string line;
+  int observed = 0;
+  while (std::getline (stream, line))
+    {
+      line = Trim (line);
+      if (line.empty ())
+        continue;
+      if (observed++ < skip_packets)
+        continue;
+      packets.push_back (std::move (line));
+      if (max_packets >= 0
+          && static_cast<int> (packets.size ()) >= max_packets)
+        break;
+    }
+  return packets;
+}
+
+std::vector<std::string>
+ReadMessageCorpus (const fs::path &path, int skip_messages,
+                   int max_messages)
+{
+  std::ifstream stream (path);
+  if (!stream)
+    throw std::runtime_error ("failed to open message corpus: "
+                              + path.string ());
+  std::vector<std::string> messages;
+  std::string line;
+  int observed = 0;
+  while (std::getline (stream, line))
+    {
+      line = Trim (line);
+      if (line.empty ())
+        continue;
+      const auto value = nlohmann::json::parse (line);
+      if (!value.is_string ())
+        throw std::runtime_error (
+            "message corpus rows must be JSON strings");
+      if (observed++ < skip_messages)
+        continue;
+      messages.push_back (value.get<std::string> ());
+      if (max_messages >= 0
+          && static_cast<int> (messages.size ()) >= max_messages)
+        break;
+    }
+  return messages;
+}
+
+struct ShadowEmbeddingCorpus
+{
+  std::vector<long long> ids;
+  std::vector<cortext::operations::bounded_activation_shadow_internal::
+                  FixedEmbedding>
+      embeddings;
+};
+
+struct ShadowQueryProvenance
+{
+  std::vector<std::string> source_id_digests;
+  std::vector<std::string> modalities;
+  std::size_t history_ordinal = std::numeric_limits<std::size_t>::max ();
+  std::size_t history_count = 0;
+};
+
+ShadowEmbeddingCorpus
+ReadShadowEmbeddingCorpus (const fs::path &path)
+{
+  namespace shadow
+      = cortext::operations::bounded_activation_shadow_internal;
+  std::ifstream stream (path, std::ios::binary);
+  if (!stream)
+    throw std::runtime_error ("failed to open shadow embedding corpus: "
+                              + path.string ());
+  std::uint64_t count = 0;
+  std::uint32_t dimension = 0;
+  stream.read (reinterpret_cast<char *> (&count), sizeof (count));
+  stream.read (reinterpret_cast<char *> (&dimension), sizeof (dimension));
+  if (!stream || count == 0 || dimension == 0
+      || dimension > shadow::kMaximumEmbeddingDimension)
+    throw std::runtime_error ("invalid shadow embedding corpus header");
+  ShadowEmbeddingCorpus corpus;
+  corpus.ids.resize (static_cast<std::size_t> (count));
+  corpus.embeddings.resize (static_cast<std::size_t> (count));
+  std::unordered_set<long long> seen_ids;
+  seen_ids.reserve (static_cast<std::size_t> (count));
+  std::vector<float> values (dimension, 0.0F);
+  for (std::size_t index = 0; index < corpus.embeddings.size (); ++index)
+    {
+      stream.read (reinterpret_cast<char *> (&corpus.ids[index]),
+                   sizeof (long long));
+      stream.read (reinterpret_cast<char *> (values.data ()),
+                   static_cast<std::streamsize> (values.size ()
+                                                 * sizeof (float)));
+      if (!stream)
+        throw std::runtime_error (
+            "truncated shadow embedding corpus at record "
+            + std::to_string (index));
+      if (!seen_ids.insert (corpus.ids[index]).second)
+        throw std::runtime_error (
+            "duplicate identity in shadow embedding corpus: "
+            + std::to_string (corpus.ids[index]));
+      Eigen::Map<const Eigen::VectorXf> mapped (
+          values.data (), static_cast<Eigen::Index> (values.size ()));
+      if (!shadow::Normalize (mapped, corpus.embeddings[index]))
+        throw std::runtime_error (
+            "invalid embedding in shadow corpus at record "
+            + std::to_string (index));
+    }
+  char trailing = 0;
+  if (stream.read (&trailing, 1))
+    throw std::runtime_error ("shadow embedding corpus has trailing bytes");
+  return corpus;
+}
+
+std::vector<ShadowQueryProvenance>
+ReadShadowQueryProvenance (const fs::path &database_path,
+                           const ShadowEmbeddingCorpus &corpus)
+{
+  if (database_path.empty () || !fs::exists (database_path))
+    throw std::runtime_error (
+        "shadow quality requires the authoritative --db for query provenance");
+  sqlite3 *raw_database = nullptr;
+  if (sqlite3_open_v2 (database_path.string ().c_str (), &raw_database,
+                       SQLITE_OPEN_READONLY, nullptr)
+      != SQLITE_OK)
+    {
+      const std::string message
+          = raw_database != nullptr ? sqlite3_errmsg (raw_database)
+                                    : "failed to allocate SQLite handle";
+      if (raw_database != nullptr)
+        sqlite3_close (raw_database);
+      throw std::runtime_error ("failed to open shadow provenance database: "
+                                + message);
+    }
+  std::unique_ptr<sqlite3, decltype (&sqlite3_close)> database (
+      raw_database, sqlite3_close);
+  sqlite3_stmt *raw_statement = nullptr;
+  constexpr const char *query
+      = "SELECT m.memory_id, "
+        "       COALESCE(s.source_id, m.source_id) AS source_id, "
+        "       COALESCE(s.modality, m.modality) AS modality "
+        "FROM memories m "
+        "LEFT JOIN signals s ON s.memory_id = m.memory_id "
+        "WHERE m.kind = 'LONG_TERM' "
+        "ORDER BY m.start_ts, m.memory_id, s.serial_position, s.signal_id";
+  if (sqlite3_prepare_v2 (database.get (), query, -1, &raw_statement, nullptr)
+      != SQLITE_OK)
+    throw std::runtime_error ("failed to query shadow provenance database: "
+                              + std::string (sqlite3_errmsg (database.get ())));
+  std::unique_ptr<sqlite3_stmt, decltype (&sqlite3_finalize)> statement (
+      raw_statement, sqlite3_finalize);
+
+  std::unordered_map<long long, ShadowQueryProvenance> by_identity;
+  int step = SQLITE_ROW;
+  std::size_t history_ordinal = 0;
+  while ((step = sqlite3_step (statement.get ())) == SQLITE_ROW)
+    {
+      const auto memory_id = sqlite3_column_int64 (statement.get (), 0);
+      const auto *source = reinterpret_cast<const char *> (
+          sqlite3_column_text (statement.get (), 1));
+      const auto *modality = reinterpret_cast<const char *> (
+          sqlite3_column_text (statement.get (), 2));
+      if (source == nullptr || modality == nullptr)
+        throw std::runtime_error (
+            "shadow provenance contains a null source or modality");
+      auto [found, inserted] = by_identity.try_emplace (memory_id);
+      auto &entry = found->second;
+      if (inserted)
+        entry.history_ordinal = history_ordinal++;
+      entry.source_id_digests.push_back (PrivateValueDigest (source));
+      entry.modalities.emplace_back (modality);
+    }
+  if (step != SQLITE_DONE)
+    throw std::runtime_error ("failed while reading shadow provenance: "
+                              + std::string (sqlite3_errmsg (database.get ())));
+
+  std::vector<ShadowQueryProvenance> result;
+  result.reserve (corpus.ids.size ());
+  for (const auto memory_id : corpus.ids)
+    {
+      auto found = by_identity.find (memory_id);
+      if (found == by_identity.end ())
+        throw std::runtime_error (
+            "shadow retrieval surface lacks authoritative provenance: "
+            + std::to_string (memory_id));
+      auto provenance = found->second;
+      provenance.history_count = history_ordinal;
+      for (auto *values : { &provenance.source_id_digests,
+                            &provenance.modalities })
+        {
+          std::sort (values->begin (), values->end ());
+          values->erase (std::unique (values->begin (), values->end ()),
+                         values->end ());
+        }
+      result.push_back (std::move (provenance));
+    }
+  return result;
+}
+
+struct ShadowQualityAccumulator
+{
+  std::uint64_t count = 0;
+  double exact_id_recall = 0.0;
+  double duplicate_equivalent_recall = 0.0;
+  double top1_exact_id = 0.0;
+  double top1_duplicate_equivalent = 0.0;
+  double best_cosine_similarity = 0.0;
+  double best_cosine_regret = 0.0;
+  double semantic_coverage = 0.0;
+  double hit_similarity_0_99 = 0.0;
+  double hit_similarity_0_95 = 0.0;
+  double comparisons = 0.0;
+  double candidate_count = 0.0;
+  std::uint64_t max_comparisons = 0;
+  std::array<std::uint64_t, 4> retrieved_age_counts {};
+};
+
+nlohmann::json
+FinalShadowQuality (const ShadowQualityAccumulator &value)
+{
+  const double denominator = std::max<std::uint64_t> (1, value.count);
+  const auto age_total = std::accumulate (
+      value.retrieved_age_counts.begin (), value.retrieved_age_counts.end (),
+      std::uint64_t { 0 });
+  nlohmann::json age = nlohmann::json::array ();
+  for (const auto count : value.retrieved_age_counts)
+    age.push_back (static_cast<double> (count)
+                   / std::max<std::uint64_t> (1, age_total));
+  return {
+    { "count", value.count },
+    { "mean_exact_id_recall_at_k", value.exact_id_recall / denominator },
+    { "mean_duplicate_equivalent_recall_at_k",
+      value.duplicate_equivalent_recall / denominator },
+    { "mean_top1_exact_id", value.top1_exact_id / denominator },
+    { "mean_top1_duplicate_equivalent",
+      value.top1_duplicate_equivalent / denominator },
+    { "mean_best_cosine_similarity",
+      value.best_cosine_similarity / denominator },
+    { "mean_best_cosine_regret", value.best_cosine_regret / denominator },
+    { "mean_exact_neighbor_semantic_coverage",
+      value.semantic_coverage / denominator },
+    { "mean_hit_similarity_0_99",
+      value.hit_similarity_0_99 / denominator },
+    { "mean_hit_similarity_0_95",
+      value.hit_similarity_0_95 / denominator },
+    { "mean_comparisons", value.comparisons / denominator },
+    { "max_comparisons", value.max_comparisons },
+    { "mean_candidate_count", value.candidate_count / denominator },
+    { "retrieved_age_quartile_fraction", std::move (age) },
+  };
+}
+
+nlohmann::json
+ShadowWorkQuartiles (const std::vector<std::uint64_t> &values)
+{
+  nlohmann::json result = nlohmann::json::array ();
+  for (std::size_t quartile = 0; quartile < 4; ++quartile)
+    {
+      const std::size_t begin = values.size () * quartile / 4;
+      const std::size_t end = values.size () * (quartile + 1) / 4;
+      std::uint64_t maximum = 0;
+      long double sum = 0.0;
+      for (std::size_t index = begin; index < end; ++index)
+        {
+          maximum = std::max (maximum, values[index]);
+          sum += values[index];
+        }
+      result.push_back (
+          { { "count", end - begin },
+            { "mean", end > begin
+                          ? static_cast<double> (sum / (end - begin))
+                          : 0.0 },
+            { "max", maximum } });
+    }
+  return result;
+}
+
+int
+RunShadowEmbeddingQuality (const Config &cfg)
+{
+  namespace shadow
+      = cortext::operations::bounded_activation_shadow_internal;
+  if (cfg.shadow_queries <= 0 || cfg.shadow_result_k <= 0)
+    throw std::runtime_error (
+        "shadow query count and result k must be positive");
+  const auto corpus = ReadShadowEmbeddingCorpus (
+      cfg.shadow_embedding_corpus);
+  const auto query_provenance
+      = ReadShadowQueryProvenance (cfg.db_path, corpus);
+  const auto parameters
+      = shadow::DeriveParameters (cfg.focus, cfg.sensitivity, cfg.stability);
+  shadow::State state (parameters);
+  state.available = true;
+  std::vector<std::uint64_t> normal_work;
+  std::vector<std::uint64_t> consolidation_work;
+  normal_work.reserve (corpus.embeddings.size ());
+  consolidation_work.reserve (
+      corpus.embeddings.size () / parameters.consolidation_interval + 1);
+  const auto build_started = std::chrono::steady_clock::now ();
+  for (std::size_t index = 0; index < corpus.embeddings.size (); ++index)
+    {
+      const auto comparisons = shadow::Ingest (
+          state, corpus.embeddings[index], index, index + 1);
+      normal_work.push_back (comparisons);
+      if ((index + 1) % parameters.consolidation_interval == 0)
+        consolidation_work.push_back (shadow::Consolidate (state));
+      if (state.disabled)
+        throw std::runtime_error (
+            std::string ("shadow disabled while building corpus: ")
+            + shadow::FailureName (state.failure));
+    }
+  consolidation_work.push_back (shadow::Consolidate (state));
+  const double build_seconds
+      = std::chrono::duration<double> (
+            std::chrono::steady_clock::now () - build_started)
+            .count ();
+
+  struct RankedCandidate
+  {
+    float distance = 0.0F;
+    std::size_t index = 0;
+  };
+  const auto rank_less = [&] (const RankedCandidate &left,
+                              const RankedCandidate &right) {
+    return left.distance < right.distance
+           || (left.distance == right.distance
+               && corpus.ids[left.index] < corpus.ids[right.index]);
+  };
+  const auto take_best = [&] (std::vector<RankedCandidate> &ranked,
+                              std::size_t count) {
+    count = std::min (count, ranked.size ());
+    if (count < ranked.size ())
+      std::nth_element (ranked.begin (), ranked.begin () + count,
+                        ranked.end (), rank_less);
+    ranked.resize (count);
+    std::sort (ranked.begin (), ranked.end (), rank_less);
+  };
+
+  ShadowQualityAccumulator all;
+  ShadowQualityAccumulator duplicates;
+  ShadowQualityAccumulator nonduplicates;
+  std::array<ShadowQualityAccumulator, 4> query_age;
+  nlohmann::json query_evidence = nlohmann::json::array ();
+  const auto evaluation_started = std::chrono::steady_clock::now ();
+  for (int query_number = 0; query_number < cfg.shadow_queries;
+       ++query_number)
+    {
+      const std::size_t query_index
+          = cfg.shadow_queries == 1
+                ? 0
+                : static_cast<std::size_t> (
+                      static_cast<long double> (query_number)
+                      * (corpus.embeddings.size () - 1)
+                      / (cfg.shadow_queries - 1));
+      std::vector<RankedCandidate> exact;
+      exact.reserve (corpus.embeddings.size () - 1);
+      for (std::size_t index = 0; index < corpus.embeddings.size (); ++index)
+        if (index != query_index)
+          exact.push_back (
+              { shadow::SquaredDistance (corpus.embeddings[query_index],
+                                         corpus.embeddings[index]),
+                index });
+      take_best (exact, static_cast<std::size_t> (cfg.shadow_result_k));
+
+      shadow::PreparedObservation prepared;
+      const auto route_comparisons
+          = shadow::Route (state, corpus.embeddings[query_index], prepared);
+      std::vector<RankedCandidate> candidates;
+      candidates.reserve (prepared.candidate_count);
+      for (std::size_t candidate = 0;
+           candidate < prepared.candidate_count; ++candidate)
+        {
+          const auto index = static_cast<std::size_t> (
+              prepared.candidate_identities[candidate]);
+          if (index >= corpus.embeddings.size () || index == query_index)
+            continue;
+          candidates.push_back (
+              { shadow::SquaredDistance (corpus.embeddings[query_index],
+                                         corpus.embeddings[index]),
+                index });
+        }
+      std::size_t candidate_count = candidates.size ();
+      if (cfg.shadow_quality_control)
+        {
+          candidates = exact;
+          candidate_count = candidates.size ();
+        }
+      else
+        take_best (candidates,
+                   static_cast<std::size_t> (cfg.shadow_result_k));
+      if (exact.empty () || candidates.empty ())
+        throw std::runtime_error ("shadow quality query returned no result");
+
+      double exact_hits = 0.0;
+      for (const auto &expected : exact)
+        if (std::any_of (
+                candidates.begin (), candidates.end (),
+                [&] (const RankedCandidate &candidate) {
+                  return candidate.index == expected.index;
+                }))
+          exact_hits += 1.0;
+      double equivalent_hits = 0.0;
+      double semantic_coverage = 0.0;
+      for (const auto &expected : exact)
+        {
+          float nearest = std::numeric_limits<float>::infinity ();
+          for (const auto &candidate : candidates)
+            nearest = std::min (
+                nearest,
+                shadow::SquaredDistance (corpus.embeddings[expected.index],
+                                         corpus.embeddings[candidate.index]));
+          equivalent_hits += nearest <= 1.0e-6F ? 1.0 : 0.0;
+          semantic_coverage += 1.0 - nearest / 2.0;
+        }
+      const double exact_best_similarity = 1.0 - exact.front ().distance / 2.0;
+      const double best_similarity = 1.0 - candidates.front ().distance / 2.0;
+      const bool duplicate_query = exact.front ().distance <= 1.0e-6F;
+      nlohmann::json exact_ranked_ids = nlohmann::json::array ();
+      nlohmann::json candidate_ranked_ids = nlohmann::json::array ();
+      for (const auto &item : exact)
+        exact_ranked_ids.push_back (corpus.ids[item.index]);
+      for (const auto &item : candidates)
+        candidate_ranked_ids.push_back (corpus.ids[item.index]);
+      const auto &provenance = query_provenance[query_index];
+      const std::size_t history_segment = std::min<std::size_t> (
+          2, provenance.history_ordinal * 3 / provenance.history_count);
+      constexpr std::array<const char *, 3> history_segment_names {
+        "early", "middle", "late"
+      };
+      query_evidence.push_back (
+          { { "query_number", query_number },
+            { "query_index", query_index },
+            { "query_embedding_id", corpus.ids[query_index] },
+            { "exact_ranked_ids", std::move (exact_ranked_ids) },
+            { "candidate_ranked_ids", std::move (candidate_ranked_ids) },
+            { "exact_neighbor_semantic_coverage",
+              semantic_coverage / exact.size () },
+            { "source_ids",
+              provenance.source_id_digests },
+            { "modalities", provenance.modalities },
+            { "history_ordinal", provenance.history_ordinal },
+            { "history_count", provenance.history_count },
+            { "history_segment", history_segment_names[history_segment] } });
+
+      auto add = [&] (ShadowQualityAccumulator &accumulator) {
+        ++accumulator.count;
+        accumulator.exact_id_recall
+            += exact_hits / static_cast<double> (cfg.shadow_result_k);
+        accumulator.duplicate_equivalent_recall
+            += equivalent_hits / exact.size ();
+        accumulator.top1_exact_id
+            += candidates.front ().index == exact.front ().index ? 1.0 : 0.0;
+        accumulator.top1_duplicate_equivalent
+            += candidates.front ().distance
+                       <= exact.front ().distance + 1.0e-6F
+                   ? 1.0
+                   : 0.0;
+        accumulator.best_cosine_similarity += best_similarity;
+        accumulator.best_cosine_regret
+            += std::max (0.0, exact_best_similarity - best_similarity);
+        accumulator.semantic_coverage
+            += semantic_coverage / exact.size ();
+        accumulator.hit_similarity_0_99
+            += best_similarity >= 0.99 ? 1.0 : 0.0;
+        accumulator.hit_similarity_0_95
+            += best_similarity >= 0.95 ? 1.0 : 0.0;
+        accumulator.comparisons += route_comparisons;
+        accumulator.max_comparisons
+            = std::max (accumulator.max_comparisons, route_comparisons);
+        accumulator.candidate_count += candidate_count;
+        for (const auto &candidate : candidates)
+          {
+            const auto quartile = std::min<std::size_t> (
+                3, candidate.index * 4 / corpus.embeddings.size ());
+            ++accumulator.retrieved_age_counts[quartile];
+          }
+      };
+      add (all);
+      add (duplicate_query ? duplicates : nonduplicates);
+      add (query_age[std::min<std::size_t> (
+          3, query_index * 4 / corpus.embeddings.size ())]);
+    }
+  const double evaluation_seconds
+      = std::chrono::duration<double> (
+            std::chrono::steady_clock::now () - evaluation_started)
+            .count ();
+
+  nlohmann::json age_quality = nlohmann::json::array ();
+  for (const auto &quartile : query_age)
+    age_quality.push_back (FinalShadowQuality (quartile));
+  const auto normal_max
+      = *std::max_element (normal_work.begin (), normal_work.end ());
+  const auto consolidation_max = *std::max_element (
+      consolidation_work.begin (), consolidation_work.end ());
+  const auto normal_sum = std::accumulate (
+      normal_work.begin (), normal_work.end (), static_cast<long double> (0));
+  const auto consolidation_sum = std::accumulate (
+      consolidation_work.begin (), consolidation_work.end (),
+      static_cast<long double> (0));
+  nlohmann::json restart_measurements = nlohmann::json::array ();
+  for (const double fraction : { 0.25, 0.5, 1.0 })
+    {
+      const std::size_t row_count = std::max<std::size_t> (
+          1, static_cast<std::size_t> (
+                 corpus.embeddings.size () * fraction));
+      auto restart_store = std::shared_ptr<cortext::Store> (
+          cortext::SQLiteStore::Create (":memory:"));
+      restart_store->Execute (
+          "CREATE TABLE embeddings(embedding_id INTEGER PRIMARY KEY, "
+          "embedding BLOB NOT NULL)");
+      restart_store->Execute (
+          "CREATE TABLE signals(signal_id INTEGER PRIMARY KEY, "
+          "embedding_id INTEGER NOT NULL, timestamp INTEGER NOT NULL)");
+      auto seed = restart_store->Begin ();
+      std::vector<float> embedding (
+          corpus.embeddings.front ().dimension, 0.0F);
+      for (std::size_t index = 0; index < row_count; ++index)
+        {
+          std::copy_n (corpus.embeddings[index].values.begin (),
+                       embedding.size (), embedding.begin ());
+          const auto id = static_cast<long long> (index + 1);
+          seed->Execute (
+              "INSERT INTO embeddings(embedding_id, embedding) VALUES(?, ?)",
+              { id, embedding });
+          seed->Execute (
+              "INSERT INTO signals(signal_id, embedding_id, timestamp) "
+              "VALUES(?, ?, ?)",
+              { id, id, id });
+        }
+      seed->Commit ();
+      shadow::State rebuilt (parameters);
+      shadow::RebuildFromPersistentAuthority (rebuilt, *restart_store);
+      if (rebuilt.disabled)
+        throw std::runtime_error (
+            "shadow SQLite restart measurement failed at fraction "
+            + std::to_string (fraction));
+      restart_measurements.push_back (
+          { { "fraction", fraction },
+            { "measurement_authority",
+              "synthetic-full-history-fallback" },
+            { "retained_rows", row_count },
+            { "rows_visited", rebuilt.metrics.restart_rows_visited },
+            { "rebuild_ms", rebuilt.metrics.restart_rebuild_ms },
+            { "linear_history",
+              rebuilt.metrics.restart_rebuild_linear_history },
+            { "restart_production_gate",
+              rebuilt.metrics.restart_production_gate } });
+    }
+  nlohmann::json fixed_identity_rank_probes = nlohmann::json::array ();
+  for (int probe = 0; probe < 7; ++probe)
+    {
+      const auto query_number = static_cast<std::size_t> (
+          static_cast<long double> (probe) * (cfg.shadow_queries - 1) / 6);
+      fixed_identity_rank_probes.push_back (
+          { { "query_number", query_number },
+            { "exact_ranked_ids",
+              query_evidence[query_number]["exact_ranked_ids"] },
+            { "candidate_ranked_ids",
+              query_evidence[query_number]["candidate_ranked_ids"] } });
+    }
+  const auto quality_mode = ShadowQualityMode (cfg.shadow_quality_control);
+  nlohmann::json out {
+    { "schema", "cortext_bounded_activation_shadow_quality_v1" },
+    { "quality_role", quality_mode.role },
+    { "control_kind", quality_mode.control_kind },
+    { "observation_only", true },
+    { "corpus", cfg.shadow_embedding_corpus.string () },
+    { "embedding_count", corpus.embeddings.size () },
+    { "embedding_dimension", corpus.embeddings.front ().dimension },
+    { "query_count", cfg.shadow_queries },
+    { "result_k", cfg.shadow_result_k },
+    { "focus", cfg.focus },
+    { "sensitivity", cfg.sensitivity },
+    { "stability", cfg.stability },
+    { "build_seconds", build_seconds },
+    { "evaluation_seconds", evaluation_seconds },
+    { "root_count", state.root_count },
+    { "leaf_count", state.leaf_count },
+    { "allocated_bytes", state.allocated_bytes },
+    { "state_digest", shadow::StateDigest (state) },
+    { "fixed_embedding_slots", parameters.fixed_embedding_slots },
+    { "fixed_neighbor_slots", parameters.fixed_neighbor_slots },
+    { "normal_comparison_bound", parameters.normal_comparison_bound },
+    { "normal_comparison_mean",
+      static_cast<double> (normal_sum / normal_work.size ()) },
+    { "normal_comparison_max", normal_max },
+    { "normal_comparison_quartiles", ShadowWorkQuartiles (normal_work) },
+    { "recall_comparison_bound", parameters.recall_comparison_bound },
+    { "consolidation_comparison_bound",
+      parameters.consolidation_comparison_bound },
+    { "consolidation_comparison_mean",
+      static_cast<double> (consolidation_sum / consolidation_work.size ()) },
+    { "consolidation_comparison_max", consolidation_max },
+    { "consolidation_comparison_quartiles",
+      ShadowWorkQuartiles (consolidation_work) },
+    { "amortized_consolidation_comparisons_per_observation",
+      static_cast<double> (consolidation_sum / normal_work.size ()) },
+    { "quality",
+      { { "all", FinalShadowQuality (all) },
+        { "duplicate_queries", FinalShadowQuality (duplicates) },
+        { "nonduplicate_queries", FinalShadowQuality (nonduplicates) } } },
+    { "query_age_quartiles", std::move (age_quality) },
+    { "query_evidence", std::move (query_evidence) },
+    { "fixed_identity_rank_probes",
+      std::move (fixed_identity_rank_probes) },
+    { "sqlite_restart_measurements", std::move (restart_measurements) },
+  };
+  WriteJsonArtifact (cfg.output_path, out);
+  std::cout << DumpJsonArtifact (out) << "\n";
+  return 0;
+}
+
+int
+ExportShadowEmbeddingCorpus (const Config &cfg)
+{
+  if (cfg.db_path.empty () || !fs::exists (cfg.db_path))
+    throw std::runtime_error (
+        "shadow embedding export requires an existing --db");
+  auto store = cortext::SQLiteStore::Create (cfg.db_path.string ());
+  const auto rows = store->Execute (
+      "SELECT cme.memory_id AS identity, cme.embedding "
+      "FROM current_memory_embeddings cme "
+      "JOIN memories m ON m.memory_id = cme.memory_id "
+      "WHERE m.kind = 'LONG_TERM' "
+      "ORDER BY cme.memory_id");
+  if (rows.empty ())
+    throw std::runtime_error ("shadow embedding export found no embeddings");
+
+  std::ofstream stream (cfg.export_shadow_embedding_corpus,
+                        std::ios::binary | std::ios::trunc);
+  if (!stream)
+    throw std::runtime_error ("failed to create shadow embedding corpus: "
+                              + cfg.export_shadow_embedding_corpus.string ());
+  const std::uint64_t count = rows.size ();
+  std::uint32_t dimension = 0;
+  std::vector<std::pair<long long, std::vector<unsigned char>>> records;
+  records.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      const auto id_it = row.find ("identity");
+      const auto embedding_it = row.find ("embedding");
+      if (id_it == row.end () || embedding_it == row.end ())
+        throw std::runtime_error (
+            "shadow embedding export row lacks identity or embedding");
+      const auto id = cortext::store::AnyToLongLong (id_it->second);
+      auto bytes = cortext::store::BlobFromAny (embedding_it->second);
+      if (!id || *id <= 0 || bytes.empty ()
+          || bytes.size () % sizeof (float) != 0)
+        throw std::runtime_error ("shadow embedding export row is invalid");
+      const auto row_dimension
+          = static_cast<std::uint32_t> (bytes.size () / sizeof (float));
+      if (dimension == 0)
+        dimension = row_dimension;
+      if (row_dimension != dimension)
+        throw std::runtime_error (
+            "shadow embedding export dimensions are inconsistent");
+      records.emplace_back (*id, std::move (bytes));
+    }
+  stream.write (reinterpret_cast<const char *> (&count), sizeof (count));
+  stream.write (reinterpret_cast<const char *> (&dimension),
+                sizeof (dimension));
+  for (const auto &[id, bytes] : records)
+    {
+      stream.write (reinterpret_cast<const char *> (&id), sizeof (id));
+      stream.write (reinterpret_cast<const char *> (bytes.data ()),
+                    static_cast<std::streamsize> (bytes.size ()));
+    }
+  if (!stream)
+    throw std::runtime_error ("failed while writing shadow embedding corpus");
+  std::cout << nlohmann::json (
+      { { "schema", "cortext_retrieval_surface_export_v2" },
+        { "identity_kind", "long-term-memory-id" },
+        { "population", "current-long-term-memory-embedding-surface" },
+        { "embedding_count", count },
+        { "embedding_dimension", dimension },
+        { "output", cfg.export_shadow_embedding_corpus.string () } })
+                     .dump (2)
+            << "\n";
+  return 0;
+}
+
+int
+RunPacketCorpusProfile (const Config &cfg,
+                        const nlohmann::json &sqlite_profile)
+{
+  if (!cfg.packet_corpus.empty () && !cfg.message_corpus.empty ())
+    throw std::runtime_error (
+        "--packet-corpus and --message-corpus are mutually exclusive");
+  if ((cfg.fixed_timestamp_base_ms == 0)
+      != (cfg.fixed_timestamp_step_ms == 0))
+    throw std::runtime_error (
+        "fixed timestamp base and step must be provided together");
+  if (!cfg.db_path.parent_path ().empty ())
+    fs::create_directories (cfg.db_path.parent_path ());
+  if (!cfg.output_path.parent_path ().empty ())
+    fs::create_directories (cfg.output_path.parent_path ());
+  if (!cfg.reuse_db)
+    {
+      fs::remove (cfg.db_path);
+      fs::remove (cfg.db_path.string () + "-wal");
+      fs::remove (cfg.db_path.string () + "-shm");
+    }
+
+  const bool message_mode = !cfg.message_corpus.empty ();
+  const fs::path corpus_path
+      = message_mode ? cfg.message_corpus : cfg.packet_corpus;
+  const auto packets = message_mode
+                           ? ReadMessageCorpus (
+                                 corpus_path, cfg.skip_messages,
+                                 cfg.max_messages)
+                           : ReadPacketCorpus (
+                                 corpus_path, cfg.skip_packets,
+                                 cfg.max_packets);
+  if (packets.empty ())
+    throw std::runtime_error ("corpus contains no events");
+  if (!cfg.fixed_consolidation_indices.empty ()
+      && cfg.honor_required_consolidation)
+    throw std::runtime_error (
+        "--fixed-consolidation-indices and --honor-required-consolidation are mutually exclusive");
+  std::vector<std::size_t> fixed_consolidation_indices;
+  std::unordered_set<std::size_t> fixed_consolidation_index_set;
+  if (!cfg.fixed_consolidation_indices.empty ())
+    {
+      std::ifstream stream (cfg.fixed_consolidation_indices);
+      if (!stream)
+        throw std::runtime_error (
+            "failed to open fixed consolidation indices");
+      nlohmann::json encoded;
+      stream >> encoded;
+      if (!encoded.is_array ())
+        throw std::runtime_error (
+            "fixed consolidation indices must be a JSON array");
+      fixed_consolidation_indices.reserve (encoded.size ());
+      for (const auto &value : encoded)
+        {
+          if (!value.is_number_unsigned () && !value.is_number_integer ())
+            throw std::runtime_error (
+                "fixed consolidation indices must be positive integers");
+          const auto index = value.get<long long> ();
+          if (index <= 0
+              || static_cast<std::size_t> (index) > packets.size ())
+            throw std::runtime_error (
+                "fixed consolidation index is outside the replay");
+          const auto normalized = static_cast<std::size_t> (index);
+          if (!fixed_consolidation_index_set.insert (normalized).second)
+            throw std::runtime_error (
+                "fixed consolidation indices must be unique");
+          fixed_consolidation_indices.push_back (normalized);
+        }
+      if (!std::is_sorted (fixed_consolidation_indices.begin (),
+                           fixed_consolidation_indices.end ()))
+        throw std::runtime_error (
+            "fixed consolidation indices must be strictly increasing");
+    }
+  if (cfg.public_retrieval_control
+      && (cfg.public_retrieval_queries <= 0
+          || cfg.public_retrieval_result_k <= 0
+          || static_cast<std::size_t> (cfg.public_retrieval_queries)
+                 > packets.size ()))
+    throw std::runtime_error (
+        "public retrieval query count must fit the nonempty replay and result k must be positive");
+  if (cfg.opaque_source_control && !cfg.public_retrieval_control)
+    throw std::runtime_error (
+        "opaque source control requires public retrieval control");
+
+  SetEnvValue ("CORTEXT_PROFILE_WORK_COUNTERS", "1", true);
+  SetEnvValue ("CORTEXT_PROFILE_CONSOLIDATION_EPOCH", "1", true);
+  SetEnvValue ("CORTEXT_PROFILE_EMOTIONAL_CASCADE", "1", true);
+  if (cfg.public_retrieval_control)
+    {
+      SetEnvValue ("CORTEXT_CAPTURE_RETRIEVAL_SEEDS", "1", true);
+      SetEnvValue ("CORTEXT_CAPTURE_HNSW_EXACT_CONTROL", "1", true);
+    }
+  SetEnvValue ("CORTEXT_PROFILE_GRAPH_RETRIEVAL", "1", false);
+
+  cortext::Cortext::Config cortext_cfg;
+  cortext_cfg.focus = cfg.focus;
+  cortext_cfg.sensitivity = cfg.sensitivity;
+  cortext_cfg.stability = cfg.stability;
+  std::shared_ptr<cortext::Clock> replay_clock;
+  if (cfg.fixed_timestamp_base_ms > 0)
+    replay_clock = std::make_shared<cortext::FixedClock> (
+        cfg.fixed_timestamp_base_ms);
+  auto engine = cortext::Cortext::Create (
+      cortext_cfg, cfg.db_path.string (), std::move (replay_clock));
+
+  constexpr std::array<const char *, 105> kSelectedOperations {
+    "cortext::operations::GraphAugmentedRetrieveCandidates",
+    "GraphRetrieve.total",
+    "GraphRetrieve.family_index",
+    "GraphRetrieve.seed_cache_family_compare",
+    "GraphRetrieve.seed_cache_distance",
+    "GraphRetrieve.sqlite_sparse_route_activated_identities",
+    "GraphRetrieve.sqlite_sparse_route_node_rows",
+    "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows",
+    "GraphRetrieve.sqlite_sparse_route_distance_evaluations",
+    "GraphRetrieve.sqlite_sparse_route_search_effort",
+    "GraphRetrieve.sqlite_sparse_route_search_node_budget",
+    "GraphRetrieve.sqlite_sparse_route_restart_rows",
+    "GraphRetrieve.sqlite_sparse_route_dirty_rows",
+    "GraphRetrieve.seed_sparse_route_active",
+    "GraphRetrieve.seed_knn_cache",
+    "GraphRetrieve.seed_processor_surface",
+    "GraphRetrieve.seed_knn_cache_rebuild",
+    "GraphRetrieve.seed_knn_sql",
+    "GraphRetrieve.seed_rank",
+    "GraphRetrieve.association_expansion",
+    "GraphRetrieve.rank_candidates",
+    "GraphRetrieve.reconstruction_versions",
+    "cortext::operations::ApplyRetrievalCompetition",
+    "Competition.rif_recovery_active_sql",
+    "Competition.score_candidates",
+    "Predictive.decay_active_sql",
+    "cortext::operations::MemoryStorage",
+    "MemoryStorage.supersession_edges",
+    "MemoryStorage.supersession_candidate_load",
+    "MemoryStorage.supersession_current_candidate_execution_count",
+    "MemoryStorage.supersession_historical_candidate_execution_count",
+    "MemoryStorage.supersession_current_rows_visited",
+    "MemoryStorage.supersession_historical_rows_visited",
+    "MemoryStorage.supersession_sparse_route_node_rows",
+    "MemoryStorage.supersession_sparse_route_distance_evaluations",
+    "MemoryStorage.supersession_sparse_route_dirty_rows",
+    "MemoryStorage.supersession_sql_fallback_count",
+    "cortext::operations::PropagateEmotionalCascade",
+    "EmotionalCascade.source_execution_count",
+    "EmotionalCascade.neighbor_execution_count",
+    "EmotionalCascade.update_execution_count",
+    "SignalProcessor.snapshot_context",
+    "SignalProcessor.snapshot_full_cache_copy",
+    "SignalProcessor.snapshot_cache_entry_copy",
+    "SignalProcessor.commit_transaction",
+    "SignalProcessor.profile_mutation_audit",
+    "SignalProcessor.retrieval_suppression_id_count",
+    "SignalProcessor.retrieval_suppression_id_activity",
+    "SignalProcessor.predictive_id_count",
+    "SignalProcessor.predictive_id_activity",
+    "SignalProcessor.snapshot_full_cache_copy_count",
+    "SignalProcessor.snapshot_full_cache_copy_activity",
+    "SignalProcessor.snapshot_cache_entry_copy_count",
+    "SignalProcessor.snapshot_cache_entry_copy_activity",
+    "GraphRetrieve.candidate_count",
+    "GraphRetrieve.candidate_activity",
+    "GraphRetrieve.family_exact_comparison_count",
+    "GraphRetrieve.family_exact_comparison_activity",
+    "GraphRetrieve.cache_rebuild_count",
+    "GraphRetrieve.cache_rebuild_activity",
+    "GraphRetrieve.rows_visited",
+    "GraphRetrieve.rows_visited_activity",
+    "Competition.candidate_count",
+    "Competition.candidate_activity",
+    "Competition.rows_visited",
+    "Competition.rows_visited_activity",
+    "Competition.rows_touched",
+    "Competition.rows_touched_activity",
+    "MemoryStorage.supersession_current_candidate_count",
+    "MemoryStorage.supersession_current_candidate_activity",
+    "MemoryStorage.supersession_historical_candidate_count",
+    "MemoryStorage.supersession_historical_candidate_activity",
+    "MemoryStorage.supersession_rows_visited_activity",
+    "EmotionalCascade.source_count",
+    "EmotionalCascade.source_activity",
+    "EmotionalCascade.neighbor_count",
+    "EmotionalCascade.neighbor_activity",
+    "EmotionalCascade.update_count",
+    "EmotionalCascade.update_activity",
+    "WriteGate.flush_trigger",
+    "WriteGate.spike_bypass",
+    "WriteGate.accumulator_available",
+    "WriteGate.n_signals",
+    "WriteGate.coverage",
+    "WriteGate.window_score",
+    "WriteGate.threshold_dynamic",
+    "WriteGate.refractory_multiplier",
+    "WriteGate.write_scale",
+    "WriteGate.effective_threshold",
+    "WriteGate.score_margin",
+    "WriteGate.force_write",
+    "WriteGate.write_accumulator",
+    "WriteGate.reason_code",
+    "SignalProcessor.sqlite_sparse_route_recenter_overlap_profiled",
+    "SignalProcessor.sqlite_sparse_route_recenter_overlap_pair_valid",
+    "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code",
+    "SignalProcessor.sqlite_sparse_route_recenter_derived_centroid",
+    "SignalProcessor.sqlite_sparse_route_recenter_centroid_source",
+    "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_post_activated_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_overlap_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_pre_node_count",
+    "SignalProcessor.sqlite_sparse_route_recenter_post_node_count",
+  };
+
+  nlohmann::json rows = nlohmann::json::array ();
+  nlohmann::json consolidation_events = nlohmann::json::array ();
+  nlohmann::json store_checkpoints = nlohmann::json::array ();
+  nlohmann::json public_retrieval_observations
+      = nlohmann::json::array ();
+  nlohmann::json public_surface_mutations = nlohmann::json::array ();
+  cortext::operations::retrieval_trace::SetSurfaceMutationCaptureEnabled (
+      cfg.public_retrieval_control);
+  const auto append_surface_mutations
+      = [&] (std::size_t event_index, std::uint64_t timestamp,
+             const char *phase) {
+          for (const auto &mutation : cortext::operations::retrieval_trace::
+                   GetSurfaceMutations ())
+            {
+              nlohmann::json row = {
+                { "event_index", event_index },
+                { "event_phase", phase },
+                { "event_timestamp", timestamp },
+                { "action",
+                  mutation.action
+                          == cortext::operations::retrieval_trace::
+                                 SurfaceMutation::Action::Upsert
+                      ? "upsert"
+                      : "remove" },
+                { "memory_id", mutation.memory_id },
+                { "embedding_id", mutation.embedding_id },
+              };
+              if (mutation.action
+                  == cortext::operations::retrieval_trace::SurfaceMutation::
+                         Action::Upsert)
+                row["embedding"] = mutation.embedding;
+              public_surface_mutations.push_back (std::move (row));
+            }
+        };
+  const std::size_t checkpoint_stride = message_mode ? 100U : 500U;
+  const std::size_t leading_checkpoint
+      = packets.size () % checkpoint_stride;
+  if (leading_checkpoint == 0)
+    store_checkpoints.push_back (StoreCheckpoint (cfg.db_path, 0));
+  double process_ms_total = 0.0;
+  double total_ms_total = 0.0;
+  double consolidation_ms_total = 0.0;
+  int consolidation_runs = 0;
+  const auto wall_start = std::chrono::steady_clock::now ();
+  for (std::size_t index = 0; index < packets.size (); ++index)
+    {
+      const auto event_started = std::chrono::steady_clock::now ();
+      const std::uint64_t timestamp
+          = cfg.fixed_timestamp_base_ms > 0
+                ? cfg.fixed_timestamp_base_ms
+                      + static_cast<std::uint64_t> (cfg.skip_packets)
+                            * cfg.fixed_timestamp_step_ms
+                      + index * cfg.fixed_timestamp_step_ms
+                : static_cast<std::uint64_t> (
+                      std::chrono::duration_cast<std::chrono::milliseconds> (
+                          std::chrono::system_clock::now ().time_since_epoch ())
+                          .count ());
+      EventDoc doc {
+        static_cast<int> (index), timestamp,
+        cfg.opaque_source_control
+            ? "profile/source/" + std::to_string (index % 4)
+            : "profile/corpus",
+        "text",
+        packets[index],
+      };
+      if (cfg.public_retrieval_control)
+        cortext::operations::retrieval_trace::ClearSurfaceMutations ();
+      auto ctx = cfg.public_retrieval_control
+                     ? cortext::internal::ReplayIngress::ProcessTextAt (
+                           *engine, packets[index], doc.source_id, timestamp,
+                           cfg.retention, true)
+                     : (cfg.fixed_timestamp_base_ms > 0
+                            ? engine->ProcessTextAt (
+                                  packets[index], doc.source_id, timestamp,
+                                  cfg.retention)
+                            : engine->ProcessText (
+                                  packets[index], doc.source_id,
+                                  cfg.retention));
+      if (cfg.public_retrieval_control)
+        {
+          const auto append_ranked = [&] (const auto &candidates) {
+            nlohmann::json ranked = nlohmann::json::array ();
+            const std::size_t limit = std::min<std::size_t> (
+                candidates.size (), static_cast<std::size_t> (
+                                       cfg.public_retrieval_result_k));
+            for (std::size_t rank = 0; rank < limit; ++rank)
+              ranked.push_back (
+                  { { "memory_id", candidates[rank].memory_id },
+                    { "embedding_id", candidates[rank].embedding_id },
+                    { "score", candidates[rank].score },
+                    { "rank", rank } });
+            return ranked;
+          };
+          nlohmann::json public_ranked = nlohmann::json::array ();
+          const std::size_t public_limit = std::min<std::size_t> (
+              ctx.retrieved_memory.size (), static_cast<std::size_t> (
+                                               cfg.public_retrieval_result_k));
+          for (std::size_t rank = 0; rank < public_limit; ++rank)
+            public_ranked.push_back (
+                { { "memory_id", ctx.retrieved_memory[rank].id },
+                  { "score", ctx.retrieved_memory[rank].composite_score },
+                  { "rank", rank } });
+          auto seed_ranked = append_ranked (
+              cortext::operations::retrieval_trace::
+                  GetLastSeedCandidates ());
+          const auto &exact_seed_candidates
+              = cortext::operations::retrieval_trace::
+                    GetLastExactSeedCandidates ();
+          const bool candidate_available
+              = !exact_seed_candidates.empty ();
+          auto exact_seed_ranked
+              = candidate_available
+                    ? append_ranked (exact_seed_candidates)
+                    : nlohmann::json (seed_ranked);
+          double semantic_coverage = 0.0;
+          bool deterministic_tie_order = true;
+          if (candidate_available && !exact_seed_candidates.empty ())
+            {
+              std::unordered_map<long long, std::size_t>
+                  candidate_positions;
+              const auto &candidate_seed_candidates
+                  = cortext::operations::retrieval_trace::
+                        GetLastSeedCandidates ();
+              for (std::size_t rank = 0;
+                   rank < candidate_seed_candidates.size (); ++rank)
+                candidate_positions.emplace (
+                    candidate_seed_candidates[rank].memory_id, rank);
+              std::optional<std::size_t> previous_common_rank;
+              std::size_t exact_hits = 0;
+              for (const auto &control_candidate : exact_seed_candidates)
+                {
+                  const auto found = candidate_positions.find (
+                      control_candidate.memory_id);
+                  if (found == candidate_positions.end ())
+                    continue;
+                  ++exact_hits;
+                  if (previous_common_rank
+                      && found->second <= *previous_common_rank)
+                    deterministic_tie_order = false;
+                  previous_common_rank = found->second;
+                }
+              semantic_coverage
+                  = static_cast<double> (exact_hits)
+                    / static_cast<double> (
+                        exact_seed_candidates.size ());
+            }
+          if (!seed_ranked.empty ())
+            public_retrieval_observations.push_back (
+                { { "event_index", index },
+                  { "query_timestamp", timestamp },
+                  { "source_id_blake3",
+                    PrivateValueDigest (doc.source_id) },
+                  { "modality", doc.modality },
+                  { "query_embedding", ctx.embedding },
+                  { "control_seed_ranked",
+                    std::move (exact_seed_ranked) },
+                  { "candidate_seed_ranked",
+                    candidate_available
+                        ? std::move (seed_ranked)
+                        : nlohmann::json::array () },
+                  { "control_graph_ranked",
+                    append_ranked (
+                        cortext::operations::retrieval_trace::
+                            GetLastRankedCandidates ()) },
+                  { "control_public_ranked", std::move (public_ranked) },
+                  { "candidate_available", candidate_available },
+                  { "semantic_coverage", semantic_coverage },
+                  { "deterministic_tie_order",
+                    deterministic_tie_order } });
+          append_surface_mutations (index, timestamp, "process");
+        }
+      process_ms_total += ctx.process_ms;
+      total_ms_total += ctx.total_ms;
+      double event_consolidation_ms = 0.0;
+      std::optional<nlohmann::json> consolidation_event;
+
+      const bool fixed_consolidation
+          = fixed_consolidation_index_set.contains (index + 1);
+      if (fixed_consolidation
+          || (cfg.honor_required_consolidation
+              && ctx.consolidation_state
+                     == cortext::ConsolidationState::Required))
+        {
+          if (cfg.public_retrieval_control)
+            cortext::operations::retrieval_trace::ClearSurfaceMutations ();
+          const auto consolidation_start = std::chrono::steady_clock::now ();
+          auto consolidation_ctx = engine->Consolidate ();
+          const double consolidation_ms = std::chrono::duration<
+              double, std::milli> (
+              std::chrono::steady_clock::now () - consolidation_start)
+                                               .count ();
+          consolidation_ms_total += consolidation_ms;
+          event_consolidation_ms = consolidation_ms;
+          ++consolidation_runs;
+          consolidation_event = {
+            { "event_index", index },
+            { "closing_event_index", index },
+            { "one_based_event_index", index + 1 },
+            { "fixed_schedule", fixed_consolidation },
+            { "consolidation_epoch_id",
+              RequiredOperationCounter (
+                  consolidation_ctx,
+                  "ConsolidationEpoch.closed_epoch_id") },
+            { "sealed_epoch_event_count",
+              RequiredOperationCounter (
+                  consolidation_ctx,
+                  "ConsolidationEpoch.sealed_epoch_event_count") },
+            { "sealed_epoch_mutation_count",
+              RequiredOperationCounter (
+                  consolidation_ctx,
+                  "ConsolidationEpoch.sealed_epoch_mutation_count") },
+            { "sealed_mutation_identity_verified",
+              RequiredOperationCounter (
+                  consolidation_ctx,
+                  "ConsolidationEpoch.sealed_mutation_identity_verified")
+                  == 1 },
+            { "sealed_mutation_identity_count",
+              RequiredOperationCounter (
+                  consolidation_ctx,
+                  "ConsolidationEpoch.sealed_mutation_identity_count") },
+            { "duration_ms", consolidation_ms },
+            { "operation_ms",
+              OperationTimingsJson (
+                  consolidation_ctx.output.operation_ms) },
+            { "retrieval_surface_reload_ms",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.reload_retrieval_surface") },
+            { "sparse_route_seal_ms",
+              OperationValue (consolidation_ctx,
+                              "SignalProcessor.sparse_route_seal") },
+            { "sparse_route_seal_delta_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sparse_route_seal_delta_count") },
+            { "sparse_route_seal_succeeded",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sparse_route_seal_succeeded") == 1.0 },
+            { "sqlite_sparse_route_seal_ms",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_seal") },
+            { "sqlite_sparse_route_seal_delta_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_seal_delta_count") },
+            { "sqlite_sparse_route_seal_succeeded",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_seal_succeeded")
+                  == 1.0 },
+            { "sqlite_sparse_route_seal_failure_code",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_seal_failure_code") },
+            { "sqlite_sparse_route_recenter_ms",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter") },
+            { "sqlite_sparse_route_recenter_succeeded",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_succeeded")
+                  == 1.0 },
+            { "sqlite_sparse_route_recenter_derived_centroid",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_derived_centroid")
+                  == 1.0 },
+            { "sqlite_sparse_route_recenter_centroid_source",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_centroid_source") },
+            { "sqlite_sparse_route_recenter_centroid_cluster_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count") },
+            { "sqlite_sparse_route_recenter_centroid_member_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count") },
+            { "sqlite_sparse_route_recenter_overlap_profiled",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_overlap_profiled")
+                  == 1.0 },
+            { "sqlite_sparse_route_recenter_overlap_pair_valid",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_overlap_pair_valid")
+                  == 1.0 },
+            { "sqlite_sparse_route_recenter_overlap_failure_code",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code") },
+            { "sqlite_sparse_route_recenter_pre_activated_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count") },
+            { "sqlite_sparse_route_recenter_post_activated_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_post_activated_count") },
+            { "sqlite_sparse_route_recenter_overlap_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_overlap_count") },
+            { "sqlite_sparse_route_recenter_pre_node_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_pre_node_count") },
+            { "sqlite_sparse_route_recenter_post_node_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_recenter_post_node_count") },
+            { "sqlite_sparse_route_activation_search_effort",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_activation_search_effort") },
+            { "sqlite_sparse_route_activation_node_budget",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_activation_node_budget") },
+            { "sqlite_sparse_route_backfill_ms",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill") },
+            { "sqlite_sparse_route_backfill_rows",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_rows") },
+            { "sqlite_sparse_route_backfill_published",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_published")
+                  == 1.0 },
+            { "sqlite_sparse_route_backfill_succeeded",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_succeeded")
+                  == 1.0 },
+            { "sqlite_sparse_route_backfill_failure_code",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_failure_code") },
+            { "sqlite_sparse_route_backfill_failure_count",
+              OperationValue (
+                  consolidation_ctx,
+                  "SignalProcessor.sqlite_sparse_route_backfill_failure_count") },
+            { "pre_reset_counters",
+              ConsolidationEpochCountersJson (
+                  consolidation_ctx, "ConsolidationEpoch.pre") },
+            { "post_reset_counters",
+              ConsolidationEpochCountersJson (
+                  consolidation_ctx, "ConsolidationEpoch.post") },
+            { "post_reset_active_epoch",
+              ActiveEpochCountersJson (consolidation_ctx) },
+            { "state_after",
+              ConsolidationStateName (
+                  consolidation_ctx.consolidation_state) },
+          };
+          consolidation_events.push_back (*consolidation_event);
+          if (cfg.public_retrieval_control)
+            append_surface_mutations (index, timestamp, "consolidation");
+        }
+      const auto event_ended = std::chrono::steady_clock::now ();
+      if (!cfg.no_profile_rows)
+        {
+          auto row = WorkingSetCurveRow (
+              static_cast<int> (index), doc, ctx, true, true);
+          row["retention"] = cfg.retention == cortext::Retention::Natural
+                                 ? "natural"
+                                 : "durable";
+          row["consolidation_ms"] = event_consolidation_ms;
+          row["consolidation_epoch_id"] = RequiredOperationCounter (
+              ctx, "ConsolidationEpoch.epoch_id");
+          row["events_since_epoch_start"] = RequiredOperationCounter (
+              ctx, "ConsolidationEpoch.events_since_epoch_start");
+          row["consolidation_after_event"]
+              = consolidation_event.has_value ();
+          row["consolidation_epoch_counters"]
+              = ConsolidationEpochCountersJson (
+                  ctx, "ConsolidationEpoch");
+          row["active_epoch"] = ActiveEpochCountersJson (ctx);
+          const auto shadow_work
+              = cortext::operations::bounded_activation_shadow_internal::
+                  SingleWorkSnapshot ();
+          if (shadow_work)
+            row["bounded_activation_shadow_work"] = {
+              { "available", shadow_work->available },
+              { "disabled", shadow_work->disabled },
+              { "failure",
+                cortext::operations::bounded_activation_shadow_internal::
+                    FailureName (shadow_work->failure) },
+              { "generation", shadow_work->generation },
+              { "event_index", shadow_work->event_index },
+              { "root_count", shadow_work->root_count },
+              { "leaf_count", shadow_work->leaf_count },
+              { "normal_comparisons",
+                shadow_work->metrics.normal_comparisons },
+              { "recall_comparisons",
+                shadow_work->metrics.recall_comparisons },
+              { "consolidation_comparisons",
+                shadow_work->metrics.consolidation_comparisons },
+              { "consolidation_count",
+                shadow_work->metrics.consolidation_count },
+              { "allocation_after_initialization_count",
+                shadow_work->metrics.allocation_after_initialization_count },
+            };
+          row["durable_barrier_ms"]
+              = ctx.output.operation_ms.count (
+                    "SignalProcessor.sqlite_wal_checkpoint")
+                    ? ctx.output.operation_ms.at (
+                          "SignalProcessor.sqlite_wal_checkpoint")
+                    : 0.0;
+          row["end_to_end_ms"] = std::chrono::duration<double, std::milli> (
+                                     event_ended - event_started)
+                                     .count ();
+          for (const char *operation : kSelectedOperations)
+            {
+              if (!row["operation_ms"].contains (operation))
+                row["operation_ms"][operation] = 0.0;
+            }
+          rows.push_back (std::move (row));
+          const std::size_t event_end = index + 1;
+          if (event_end >= leading_checkpoint
+              && (event_end - leading_checkpoint) % checkpoint_stride == 0)
+            store_checkpoints.push_back (
+                StoreCheckpoint (cfg.db_path, event_end));
+        }
+      if (cfg.progress_stride > 0
+          && (index + 1) % static_cast<std::size_t> (cfg.progress_stride) == 0)
+        std::cerr << "packet profile " << (index + 1) << "/"
+                  << packets.size () << "\n";
+    }
+  const auto wall_end = std::chrono::steady_clock::now ();
+  const auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds> (
+      wall_end - wall_start).count ();
+
+  nlohmann::json out;
+  out["schema"] = "cortext_packet_storage_profile_v2";
+  out["consolidation_epoch_schema"]
+      = "post-process-pre-consolidation rows with adjacent successful close records";
+  out["consolidation_epoch_relational_contract_sha256"]
+      = "13806d20db179c8cf2dd0c7990f6355b6513c255bdf53df3b2c1082c636f0e4b";
+  out["corpus"] = corpus_path.string ();
+  out["corpus_unit"] = message_mode ? "whole_message" : "sentence_packet";
+  out["retention"] = cfg.retention == cortext::Retention::Natural
+                         ? "natural"
+                         : "durable";
+  out["processed_events"] = packets.size ();
+  out["focus"] = cfg.focus;
+  out["sensitivity"] = cfg.sensitivity;
+  out["stability"] = cfg.stability;
+  RecordSparseRouteParameters (out, cfg);
+  out["sqlite_profile"] = sqlite_profile;
+  out["full_operation_ms"] = true;
+  out["behavior_oracle"] = true;
+  out["profile_rows_enabled"] = !cfg.no_profile_rows;
+  out["honor_required_consolidation"]
+      = cfg.honor_required_consolidation;
+  out["fixed_consolidation_indices"] = fixed_consolidation_indices;
+  out["consolidation_schedule_policy"]
+      = fixed_consolidation_indices.empty ()
+            ? (cfg.honor_required_consolidation
+                   ? "live-required-hint"
+                   : "none")
+            : "fixed-one-based-control-derived-indices";
+  const auto active_epoch_limits
+      = cortext::operations::rif_active_epoch_cache_internal::DeriveLimits (
+          cfg.focus, cfg.sensitivity, cfg.stability);
+  out["active_epoch_limits"] = {
+    { "event_count", active_epoch_limits.event_count },
+    { "mutation_count", active_epoch_limits.mutation_count },
+    { "allocated_bytes", active_epoch_limits.allocated_bytes },
+    { "row_batch_size", active_epoch_limits.row_batch_size },
+  };
+  out["active_signal_embedding_ring"] = {
+    { "capacity",
+      cortext::operations::active_signal_embedding_ring_internal::Capacity (
+          cfg.focus, cfg.sensitivity, cfg.stability) },
+    { "capacity_formula", "round(64 + 64F + 32S + 32T)" },
+    { "authority", "persistent SQLite bounded exact-vector snapshot" },
+    { "source_id_branching", false },
+    { "modality_branching", false },
+  };
+  out["fixed_timestamp_base_ms"] = cfg.fixed_timestamp_base_ms;
+  out["fixed_timestamp_step_ms"] = cfg.fixed_timestamp_step_ms;
+  out["mean_process_ms"] = process_ms_total / packets.size ();
+  out["mean_total_ms"] = total_ms_total / packets.size ();
+  out["wall_ms"] = wall_ms;
+  out["consolidation_runs"] = consolidation_runs;
+  out["consolidation_ms"] = consolidation_ms_total;
+  out["consolidation_events"] = std::move (consolidation_events);
+  out["profile_window_size"] = checkpoint_stride;
+  out["store_checkpoint_policy"]
+      = "end-anchored complete-window boundaries captured outside per-event timing";
+  out["store_checkpoints"] = std::move (store_checkpoints);
+  out["peak_rss_mb"] = PeakRssMb ();
+  if (cfg.public_retrieval_control)
+    {
+      if (public_retrieval_observations.size ()
+          < static_cast<std::size_t> (cfg.public_retrieval_queries))
+        throw std::runtime_error (
+            "public retrieval replay produced too few retrieval-active events");
+      std::vector<std::size_t> selected_observations;
+      selected_observations.reserve (
+          static_cast<std::size_t> (cfg.public_retrieval_queries));
+      for (int query = 0; query < cfg.public_retrieval_queries; ++query)
+        {
+          const std::size_t observation
+              = cfg.public_retrieval_queries == 1
+                    ? public_retrieval_observations.size () - 1
+                    : static_cast<std::size_t> (
+                          static_cast<long double> (query)
+                          * static_cast<long double> (
+                              public_retrieval_observations.size () - 1)
+                          / static_cast<long double> (
+                              cfg.public_retrieval_queries - 1));
+          selected_observations.push_back (observation);
+        }
+      const auto ensure_sample_value = [&] (const char *field,
+                                             const std::string &value) {
+        const auto selected_has_value = [&] {
+          return std::any_of (
+              selected_observations.begin (), selected_observations.end (),
+              [&] (std::size_t observation) {
+                return public_retrieval_observations[observation]
+                           .value (field, std::string{})
+                       == value;
+              });
+        };
+        if (selected_has_value ())
+          return;
+        const auto target = std::find_if (
+            public_retrieval_observations.begin (),
+            public_retrieval_observations.end (), [&] (const auto &row) {
+              return row.value (field, std::string{}) == value;
+            });
+        if (target == public_retrieval_observations.end ())
+          return;
+        const auto target_index = static_cast<std::size_t> (
+            std::distance (public_retrieval_observations.begin (), target));
+        if (std::find (selected_observations.begin (),
+                       selected_observations.end (), target_index)
+            != selected_observations.end ())
+          return;
+
+        std::unordered_map<std::string, std::size_t> modality_counts;
+        std::unordered_map<std::string, std::size_t> source_counts;
+        for (const auto observation : selected_observations)
+          {
+            const auto &row = public_retrieval_observations[observation];
+            ++modality_counts[row.value ("modality", std::string{})];
+            ++source_counts[row.value ("source_id_blake3", std::string{})];
+          }
+        std::size_t replace_position = selected_observations.size ();
+        std::size_t best_distance = std::numeric_limits<std::size_t>::max ();
+        for (std::size_t position = 0;
+             position < selected_observations.size (); ++position)
+          {
+            const auto observation = selected_observations[position];
+            const auto &row = public_retrieval_observations[observation];
+            if (modality_counts[row.value ("modality", std::string{})] <= 1
+                || source_counts[row.value ("source_id_blake3",
+                                             std::string{})]
+                       <= 1)
+              continue;
+            const std::size_t distance = observation > target_index
+                                             ? observation - target_index
+                                             : target_index - observation;
+            if (distance < best_distance)
+              {
+                replace_position = position;
+                best_distance = distance;
+              }
+          }
+        if (replace_position == selected_observations.size ())
+          throw std::runtime_error (
+              "public retrieval sample cannot preserve modality/source strata");
+        selected_observations[replace_position] = target_index;
+      };
+      ensure_sample_value ("modality", "text");
+      std::unordered_set<std::string> observed_sources;
+      for (const auto &row : public_retrieval_observations)
+        observed_sources.insert (
+            row.value ("source_id_blake3", std::string{}));
+      std::vector<std::string> ordered_sources (observed_sources.begin (),
+                                                observed_sources.end ());
+      std::sort (ordered_sources.begin (), ordered_sources.end ());
+      for (const auto &source : ordered_sources)
+        ensure_sample_value ("source_id_blake3", source);
+      std::sort (selected_observations.begin (), selected_observations.end ());
+
+      nlohmann::json public_retrieval_queries = nlohmann::json::array ();
+      for (std::size_t query = 0; query < selected_observations.size ();
+           ++query)
+        {
+          auto selected
+              = public_retrieval_observations[selected_observations[query]];
+          selected["query_ordinal"] = query;
+          public_retrieval_queries.push_back (std::move (selected));
+        }
+      nlohmann::json public_control = nlohmann::json::object ();
+      public_control["schema"]
+          = "cortext_current_public_retrieval_control_v1";
+      const bool candidate_available = std::all_of (
+          public_retrieval_queries.begin (),
+          public_retrieval_queries.end (), [] (const auto &query) {
+            return query.value ("candidate_available", false);
+          });
+      public_control["status"]
+          = candidate_available
+                ? "exact-public-control-and-candidate-captured"
+                : "exact-public-control-captured-candidate-pending";
+      public_control["control_path"]
+          = "GraphAugmentedRetrieveCandidates";
+      public_control["identity_kind"] = "memory-id";
+      public_control["query_count"] = cfg.public_retrieval_queries;
+      public_control["result_k"] = cfg.public_retrieval_result_k;
+      public_control["query_sampling"]
+          = "inclusive-even-retrieval-active-event-order";
+      public_control["retrieval_active_event_count"]
+          = public_retrieval_observations.size ();
+      public_control["population"]
+          = "runtime query-time eligible current long-term memory surface";
+      public_control["eligibility_semantics"] = {
+        { "timestamp_exclusion", true },
+        { "supersession_exclusion", true },
+        { "current_surface_selection", true },
+        { "family_collapse", true },
+        { "deterministic_tie_order", true },
+      };
+      public_control["source_id_semantics"] = "opaque-provenance-only";
+      public_control["modality_semantics"]
+          = "shared-post-encoding-retrieval";
+      public_control["opaque_source_control"] = cfg.opaque_source_control;
+      public_control["coverage_contract"] = {
+        { "minimum_opaque_source_ids", cfg.opaque_source_control ? 4 : 1 },
+        { "required_modalities", { "text" } },
+        { "modality_agnostic_proof",
+          "separate active-SQLite-route source/modality label-invariance regression" },
+      };
+      public_control["candidate_available"] = candidate_available;
+      public_control["production_cutover"] = false;
+      public_control["surface_mutation_schema"]
+          = "cortext_live_retrieval_surface_mutations_v1";
+      public_control["surface_mutation_order"]
+          = "event-index-then-process-before-consolidation";
+      public_control["surface_mutation_count"]
+          = public_surface_mutations.size ();
+      public_control["surface_mutations"]
+          = std::move (public_surface_mutations);
+      public_control["queries"] = std::move (public_retrieval_queries);
+      out["public_retrieval_control"] = std::move (public_control);
+    }
+  cortext::operations::retrieval_trace::SetSurfaceMutationCaptureEnabled (
+      false);
+  const auto shadow_snapshots
+      = cortext::operations::bounded_activation_shadow_internal::Snapshots ();
+  if (!shadow_snapshots.empty ())
+    {
+      const auto &shadow = shadow_snapshots.back ();
+      const auto &parameters = shadow.parameters;
+      const auto &metrics = shadow.metrics;
+      out["bounded_activation_shadow"] = {
+        { "schema", "cortext_bounded_activation_shadow_runtime_v1" },
+        { "observation_only", true },
+        { "canonical_sqlite_authoritative", true },
+        { "available", shadow.available },
+        { "disabled", shadow.disabled },
+        { "failure",
+          cortext::operations::bounded_activation_shadow_internal::FailureName (
+              shadow.failure) },
+        { "restart_rebuild_required", shadow.restart_rebuild_required },
+        { "generation", shadow.generation },
+        { "event_index", shadow.event_index },
+        { "root_count", shadow.root_count },
+        { "leaf_count", shadow.leaf_count },
+        { "allocated_bytes", shadow.allocated_bytes },
+        { "state_digest", shadow.state_digest },
+        { "parameters",
+          { { "roots", parameters.roots },
+            { "leaf_capacity", parameters.leaf_capacity },
+            { "children_per_root", parameters.children_per_root },
+            { "root_beam", parameters.root_beam },
+            { "leaf_beam", parameters.leaf_beam },
+            { "representatives_per_leaf",
+              parameters.representatives_per_leaf },
+            { "neighbor_degree", parameters.neighbor_degree },
+            { "activated_leaves_per_consolidation",
+              parameters.activated_leaves_per_consolidation },
+            { "consolidation_interval",
+              parameters.consolidation_interval },
+            { "centroid_alpha", parameters.centroid_alpha },
+            { "root_creation_squared_distance",
+              parameters.root_creation_squared_distance },
+            { "leaf_creation_squared_distance",
+              parameters.leaf_creation_squared_distance },
+            { "fixed_embedding_slots", parameters.fixed_embedding_slots },
+            { "fixed_neighbor_slots", parameters.fixed_neighbor_slots },
+            { "normal_comparison_bound",
+              parameters.normal_comparison_bound },
+            { "recall_comparison_bound",
+              parameters.recall_comparison_bound },
+            { "consolidation_comparison_bound",
+              parameters.consolidation_comparison_bound } } },
+        { "metrics",
+          { { "normal_comparisons", metrics.normal_comparisons },
+            { "normal_comparisons_max", metrics.normal_comparisons_max },
+            { "recall_comparisons", metrics.recall_comparisons },
+            { "recall_comparisons_max", metrics.recall_comparisons_max },
+            { "consolidation_comparisons",
+              metrics.consolidation_comparisons },
+            { "consolidation_comparisons_max",
+              metrics.consolidation_comparisons_max },
+            { "consolidation_count", metrics.consolidation_count },
+            { "representative_replacements",
+              metrics.representative_replacements },
+            { "allocation_after_initialization_count",
+              metrics.allocation_after_initialization_count },
+            { "restart_rows_visited", metrics.restart_rows_visited },
+            { "restart_rebuild_ms", metrics.restart_rebuild_ms },
+            { "restart_rebuild_linear_history",
+              metrics.restart_rebuild_linear_history },
+            { "restart_production_gate",
+              metrics.restart_production_gate } } },
+      };
+    }
+  out["working_set_curve"] = std::move (rows);
+  WriteJsonArtifact (cfg.output_path, out);
+  std::cout << DumpJsonArtifact (
+      { { "processed_events", packets.size () },
+        { "retention", out["retention"] },
+        { "wall_ms", wall_ms },
+        { "consolidation_runs", consolidation_runs },
+        { "output", cfg.output_path.string () },
+        { "db", cfg.db_path.string () } })
+            << "\n";
+  return 0;
 }
 
 } // namespace
@@ -1734,8 +3760,14 @@ main (int argc, char **argv)
     {
       Config cfg = ParseArgs (argc, argv);
       ApplyReplayTimezone (cfg.replay_timezone);
+      if (!cfg.export_shadow_embedding_corpus.empty ())
+        return ExportShadowEmbeddingCorpus (cfg);
+      if (!cfg.shadow_embedding_corpus.empty ())
+        return RunShadowEmbeddingQuality (cfg);
       const nlohmann::json sqlite_profile
           = ApplySQLiteProfile (cfg.sqlite_profile);
+      if (!cfg.packet_corpus.empty () || !cfg.message_corpus.empty ())
+        return RunPacketCorpusProfile (cfg, sqlite_profile);
       const fs::path transcript
           = chat_replay::DiscoverTranscript (cfg.input_dir, cfg.transcript);
       auto messages = ParseMessages (transcript);
@@ -2293,6 +4325,7 @@ main (int argc, char **argv)
             { "sensitivity", cfg.sensitivity },
             { "stability", cfg.stability },
           };
+          RecordSparseRouteParameters (out, cfg);
           out["media_candidates_found"] = media.size ();
           out["media_attempted"] = checkpoint_media_attempted;
           out["media_processed"]
@@ -2543,6 +4576,7 @@ main (int argc, char **argv)
             { "sensitivity", cfg.sensitivity },
             { "stability", cfg.stability },
           };
+          RecordSparseRouteParameters (out, cfg);
           out["wall_ms"]
               = std::chrono::duration_cast<std::chrono::milliseconds> (
                     profile_ended - profile_started)
@@ -3177,6 +5211,7 @@ main (int argc, char **argv)
         { "sensitivity", cfg.sensitivity },
         { "stability", cfg.stability },
       };
+      RecordSparseRouteParameters (out, cfg);
       out["media_candidates_found"] = media.size ();
       out["media_attempted"] = media_attempted;
       out["media_processed"] = media_processed;

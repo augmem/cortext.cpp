@@ -89,12 +89,33 @@ struct RetrievalSummary
   double evidence_packet_confidence_mean = 0.0;
 };
 
+struct SurfaceMutation
+{
+  enum class Action
+  {
+    Upsert,
+    Remove,
+  };
+
+  Action action = Action::Upsert;
+  long long memory_id = 0;
+  long long embedding_id = 0;
+  std::vector<float> embedding;
+};
+
 void ClearLastSelectedEmbeddingOrder ();
 void SetLastSelectedEmbeddingOrder (const std::vector<long long> &embedding_ids);
 const std::vector<long long> &GetLastSelectedEmbeddingOrder ();
 void ClearLastRankedCandidates ();
 void SetLastRankedCandidates (const std::vector<RankedCandidate> &candidates);
 const std::vector<RankedCandidate> &GetLastRankedCandidates ();
+void ClearLastSeedCandidates ();
+void SetLastSeedCandidates (const std::vector<RankedCandidate> &candidates);
+const std::vector<RankedCandidate> &GetLastSeedCandidates ();
+void ClearLastExactSeedCandidates ();
+void
+SetLastExactSeedCandidates (const std::vector<RankedCandidate> &candidates);
+const std::vector<RankedCandidate> &GetLastExactSeedCandidates ();
 void ClearLastRejectedCandidates ();
 void
 SetLastRejectedCandidates (const std::vector<RejectedCandidate> &candidates);
@@ -114,6 +135,13 @@ std::size_t GetLastSqlFallbackQueryCount ();
 void ClearLastSqlFallbackMaterializedRowCount ();
 void SetLastSqlFallbackMaterializedRowCount (std::size_t count);
 std::size_t GetLastSqlFallbackMaterializedRowCount ();
+void SetSurfaceMutationCaptureEnabled (bool enabled);
+bool SurfaceMutationCaptureEnabled ();
+void ClearSurfaceMutations ();
+void RecordSurfaceUpsert (long long memory_id, long long embedding_id,
+                          std::vector<float> embedding);
+void RecordSurfaceRemove (long long memory_id);
+const std::vector<SurfaceMutation> &GetSurfaceMutations ();
 
 bool CaptureEnabled ();
 

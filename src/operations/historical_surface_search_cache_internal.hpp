@@ -1,17 +1,22 @@
 #pragma once
 
 #include "cortext/processor/processor_context.hpp"
+#include "family_embedding_features_internal.hpp"
+#include "sparse_retrieval_route_internal.hpp"
+#include "sparse_retrieval_route_sqlite_internal.hpp"
 
 #include <Eigen/Dense>
 
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -29,19 +34,25 @@ struct Entry
   };
 
   long long embedding_id = 0;
+  long long base_embedding_id = 0;
   long long memory_id = 0;
   long long start_ts = 0;
   std::string kind;
   std::string source_id;
   Eigen::VectorXf embedding;
   std::vector<MemoryReference> memory_references;
+  mutable std::optional<family_embedding_features_internal::Features>
+      family_features;
 
   Entry () = default;
 
   Entry (long long embedding_id_value, long long memory_id_value,
          long long start_ts_value, std::string kind_value,
-         std::string source_id_value, Eigen::VectorXf embedding_value)
-      : embedding_id (embedding_id_value), memory_id (memory_id_value),
+         std::string source_id_value, Eigen::VectorXf embedding_value,
+         long long base_embedding_id_value = 0)
+      : embedding_id (embedding_id_value),
+        base_embedding_id (base_embedding_id_value),
+        memory_id (memory_id_value),
         start_ts (start_ts_value), kind (std::move (kind_value)),
         source_id (std::move (source_id_value)),
         embedding (std::move (embedding_value))
@@ -49,11 +60,68 @@ struct Entry
   }
 };
 
+inline const family_embedding_features_internal::Features &
+FamilyFeatures (const Entry &entry)
+{
+  if (!entry.family_features)
+    entry.family_features
+        = family_embedding_features_internal::Build (entry.embedding);
+  return *entry.family_features;
+}
+
 struct RankedEntry
 {
   std::size_t index = 0;
   float distance = 0.0f;
 };
+
+inline bool
+HasLongTermReference (const Entry &entry)
+{
+  return std::any_of (entry.memory_references.begin (),
+                      entry.memory_references.end (), [] (const auto &reference) {
+                        return reference.memory_id > 0
+                               && reference.kind == "LONG_TERM";
+                      });
+}
+
+inline bool
+IsSupersessionCandidateEntry (const Entry &entry)
+{
+  return std::any_of (
+      entry.memory_references.begin (), entry.memory_references.end (),
+      [] (const auto &reference) {
+        return reference.memory_id > 0
+               && (reference.kind == "LONG_TERM"
+                   || reference.kind == "ASSOCIATION");
+      });
+}
+
+inline std::size_t
+SupersessionReferenceCount (const Entry &entry)
+{
+  return static_cast<std::size_t> (std::count_if (
+      entry.memory_references.begin (), entry.memory_references.end (),
+      [] (const auto &reference) {
+        return reference.memory_id > 0
+               && (reference.kind == "LONG_TERM"
+                   || reference.kind == "ASSOCIATION");
+      }));
+}
+
+inline const Entry::MemoryReference *
+FindSupersessionMemoryReference (const Entry &entry, long long memory_id)
+{
+  const auto reference = std::find_if (
+      entry.memory_references.begin (), entry.memory_references.end (),
+      [memory_id] (const auto &candidate) {
+        return candidate.memory_id == memory_id
+               && (candidate.kind == "LONG_TERM"
+                   || candidate.kind == "ASSOCIATION");
+      });
+  return reference == entry.memory_references.end () ? nullptr
+                                                      : &*reference;
+}
 
 struct State
 {
@@ -65,12 +133,409 @@ struct State
   std::vector<Entry> entries;
   std::vector<float> search;
   std::unordered_map<long long, std::size_t> embedding_index;
+  std::vector<std::size_t> long_term_entry_indices;
+  std::unordered_map<std::size_t, std::size_t> long_term_index_positions;
+  std::vector<std::size_t> supersession_entry_indices;
+  std::unordered_map<std::size_t, std::size_t>
+      supersession_index_positions;
+  std::unordered_map<long long, std::size_t>
+      supersession_entry_by_memory;
+  std::unordered_set<long long> supersession_population_mismatches;
+  bool supersession_population_ambiguous = false;
+  bool supersession_tie_order_equivalent = true;
+  bool supersession_embedding_fanout = false;
+  long long supersession_max_embedding_id = 0;
+  long long supersession_max_memory_id = 0;
   std::vector<Entry> current_entries;
   std::vector<float> current_search;
   std::unordered_map<long long, std::size_t> current_memory_index;
+  std::map<long long, std::size_t> current_memory_order;
   mutable std::vector<float> distance_scratch;
   mutable std::vector<RankedEntry> ranked_scratch;
+  sparse_retrieval_route_sqlite_internal::Parameters
+      sparse_route_parameters
+          = sparse_retrieval_route_sqlite_internal::DefaultParameters ();
+  std::shared_ptr<sparse_retrieval_route_internal::Route> sparse_route;
+  std::shared_ptr<sparse_retrieval_route_sqlite_internal::Route>
+      sqlite_sparse_route;
+  std::shared_ptr<sparse_retrieval_route_sqlite_internal::Route>
+      sqlite_sparse_route_backfill;
+  std::size_t sqlite_sparse_route_backfill_last_sealed_rows = 0;
+  bool sqlite_sparse_route_backfill_last_published = false;
+  int sqlite_sparse_route_backfill_failure_code = 0;
+  std::size_t sqlite_sparse_route_backfill_failure_count = 0;
 };
+
+inline std::shared_ptr<sparse_retrieval_route_internal::Route>
+EnsureSparseRoute (State &state)
+{
+  if (state.sparse_route)
+    return state.sparse_route;
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (state.current_entries.size ());
+  for (const auto &entry : state.current_entries)
+    {
+      if (entry.memory_id <= 0
+          || entry.embedding.size () != state.embedding_dim)
+        return nullptr;
+      entries.emplace_back (entry.memory_id, entry.embedding);
+    }
+  state.sparse_route = sparse_retrieval_route_internal::Route::Create (
+      state.embedding_dim, entries, state.sparse_route_parameters.hnsw);
+  return state.sparse_route;
+}
+
+inline std::shared_ptr<sparse_retrieval_route_internal::Route>
+BootstrapSparseRoute (State &state)
+{
+  if (state.sparse_route)
+    return state.sparse_route;
+  if (state.current_entries.size ()
+          <= state.sparse_route_parameters.route_capacity
+      || state.current_entries.size ()
+             > state.sparse_route_parameters.route_bootstrap_limit)
+    return nullptr;
+  return EnsureSparseRoute (state);
+}
+
+inline std::shared_ptr<sparse_retrieval_route_sqlite_internal::Route>
+OpenSQLiteSparseRoute (State &state, Store &store)
+{
+  if (state.sqlite_sparse_route)
+    return state.sqlite_sparse_route;
+  state.sqlite_sparse_route
+      = sparse_retrieval_route_sqlite_internal::Route::Open (
+          store, state.embedding_dim, state.sparse_route_parameters);
+  if (!state.sqlite_sparse_route)
+    return nullptr;
+
+  if (!state.sqlite_sparse_route->HasDirtyMemoryIds ()
+      && state.sqlite_sparse_route->ActiveCount ()
+             != state.current_entries.size ())
+    {
+      (void)state.sqlite_sparse_route->Invalidate ();
+      state.sqlite_sparse_route.reset ();
+    }
+  return state.sqlite_sparse_route;
+}
+
+/// Stage the durable dirty journal as a knob-bounded exact delta over the
+/// persisted graph. The graph may stay stale between consolidation edges:
+/// changed and newly inserted nodes are scored from the authoritative current
+/// surface, removed nodes are excluded, and unchanged nodes continue to use
+/// row-addressed HNSW traversal. Overflow fails closed to the exact path.
+inline std::optional<std::size_t>
+StageSQLiteSparseRouteDirtyForSearch (
+  State &state,
+    sparse_retrieval_route_sqlite_internal::Route &route)
+{
+  const std::size_t capacity
+      = state.sparse_route_parameters.route_capacity;
+  if (capacity == 0)
+    return std::nullopt;
+  // Read one derived sentinel beyond C only to prove whether the complete
+  // journal fits. At most C identities are ever staged as query work.
+  const auto dirty_memory_ids = route.DirtyMemoryIds (capacity + 1);
+  if (!dirty_memory_ids || dirty_memory_ids->size () > capacity)
+    return std::nullopt;
+  for (const long long memory_id : *dirty_memory_ids)
+    {
+      const auto current = state.current_memory_index.find (memory_id);
+      if (current == state.current_memory_index.end ())
+        {
+          if (!route.StagePendingRemove (memory_id))
+            return std::nullopt;
+          continue;
+        }
+      const std::size_t index = current->second;
+      if (index >= state.current_entries.size ()
+          || state.current_entries[index].memory_id != memory_id
+          || !route.StagePendingUpsert (
+              memory_id, state.current_entries[index].embedding))
+        return std::nullopt;
+    }
+  return dirty_memory_ids->size ();
+}
+
+inline bool
+AdvanceSQLiteSparseRouteBackfill (State &state, Store &store)
+{
+  state.sqlite_sparse_route_backfill_last_sealed_rows = 0;
+  state.sqlite_sparse_route_backfill_last_published = false;
+  const std::size_t proactive_start_size
+      = state.sparse_route_parameters.route_capacity
+                > state.sparse_route_parameters.backfill_batch_size
+            ? state.sparse_route_parameters.route_capacity
+                  - state.sparse_route_parameters.backfill_batch_size
+            : 1;
+  if (state.sqlite_sparse_route
+      || state.current_entries.size () < proactive_start_size)
+    return true;
+  if (!state.sqlite_sparse_route_backfill)
+    state.sqlite_sparse_route_backfill
+        = sparse_retrieval_route_sqlite_internal::Route::OpenOrBeginBuild (
+            store, state.embedding_dim, state.sparse_route_parameters);
+  auto &build = state.sqlite_sparse_route_backfill;
+  if (!build || !build->IsBuilding ())
+    return false;
+
+  const auto dirty_memory_ids = build->DirtyMemoryIds (
+      state.sparse_route_parameters.route_capacity);
+  if (!dirty_memory_ids)
+    return false;
+  std::size_t dirty_staged = 0;
+  for (const long long memory_id : *dirty_memory_ids)
+    {
+      const auto current = state.current_memory_index.find (memory_id);
+      if (current == state.current_memory_index.end ())
+        {
+          if (!build->StagePendingRemove (memory_id))
+            return false;
+          ++dirty_staged;
+          continue;
+        }
+      const std::size_t index = current->second;
+      if (index >= state.current_entries.size ()
+          || state.current_entries[index].memory_id != memory_id
+          || !build->StagePendingUpsert (
+              memory_id, state.current_entries[index].embedding))
+        return false;
+      ++dirty_staged;
+    }
+
+  const long long cursor = build->BuildCursor ();
+  auto current = state.current_memory_order.upper_bound (cursor);
+  std::size_t staged = 0;
+  long long next_cursor = cursor;
+  while (current != state.current_memory_order.end ()
+         && staged < state.sparse_route_parameters.backfill_batch_size)
+    {
+      const long long memory_id = current->first;
+      const std::size_t index = current->second;
+      if (index >= state.current_entries.size ()
+          || state.current_entries[index].memory_id != memory_id
+          || !build->StagePendingUpsert (
+              memory_id, state.current_entries[index].embedding))
+        {
+          (void)build->Invalidate ();
+          build.reset ();
+          return false;
+        }
+      next_cursor = memory_id;
+      ++staged;
+      ++current;
+    }
+  if (dirty_staged > 0 || staged > 0)
+    {
+      if (!build->SetBuildCursor (next_cursor) || !build->Seal ())
+        {
+          state.sqlite_sparse_route_backfill_failure_code
+              = build->LastSealFailureCode ();
+          ++state.sqlite_sparse_route_backfill_failure_count;
+          if (state.sqlite_sparse_route_backfill_failure_code == 62)
+            {
+              build.reset ();
+              return false;
+            }
+          (void)build->SetBuildCursor (cursor);
+          return false;
+        }
+      // Preserve the most recent failure code after a later successful retry.
+      // The cumulative failure count is otherwise impossible to diagnose from
+      // a completed profile because success would erase the paired cause.
+      state.sqlite_sparse_route_backfill_last_sealed_rows = staged;
+    }
+  if (build->HasDirtyMemoryIds ())
+    return true;
+  if (current != state.current_memory_order.end ())
+    return true;
+  if (build->ActiveCount () != state.current_entries.size ()
+      || !build->PublishBuild (state.current_entries.size ()))
+    return false;
+  state.sqlite_sparse_route = build;
+  build.reset ();
+  state.sqlite_sparse_route_backfill_last_published = true;
+  return true;
+}
+
+inline bool
+ReconcileSQLiteSparseRoute (
+    State &state, Store &store,
+    const std::shared_ptr<sparse_retrieval_route_sqlite_internal::Route>
+        &prior,
+    const std::shared_ptr<sparse_retrieval_route_internal::Route> &hnsw)
+{
+  if (prior)
+    {
+      const auto dirty_memory_ids = prior->DirtyMemoryIds (
+          state.sparse_route_parameters.route_capacity);
+      if (!dirty_memory_ids)
+        {
+          (void)prior->Invalidate ();
+          state.sqlite_sparse_route.reset ();
+          return false;
+        }
+      for (const long long memory_id : *dirty_memory_ids)
+        {
+          const auto current = state.current_memory_index.find (memory_id);
+          if (current == state.current_memory_index.end ())
+            {
+              if (!prior->StagePendingRemove (memory_id))
+                return false;
+              continue;
+            }
+          const std::size_t index = current->second;
+          if (index >= state.current_entries.size ()
+              || state.current_entries[index].memory_id != memory_id
+              || !prior->StagePendingUpsert (
+                  memory_id, state.current_entries[index].embedding))
+            return false;
+        }
+      if (!dirty_memory_ids->empty () && !prior->Seal ())
+        {
+          (void)prior->Invalidate ();
+          state.sqlite_sparse_route.reset ();
+          return false;
+        }
+      state.sqlite_sparse_route = prior;
+      return true;
+    }
+  if (auto persisted
+      = sparse_retrieval_route_sqlite_internal::Route::Open (
+          store, state.embedding_dim, state.sparse_route_parameters))
+    {
+      state.sqlite_sparse_route = std::move (persisted);
+      return true;
+    }
+  if (!hnsw)
+    return false;
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (state.current_entries.size ());
+  for (const auto &entry : state.current_entries)
+    {
+      if (entry.memory_id <= 0
+          || entry.embedding.size () != state.embedding_dim)
+        return false;
+      entries.emplace_back (entry.memory_id, entry.embedding);
+    }
+  state.sqlite_sparse_route
+      = sparse_retrieval_route_sqlite_internal::Route::Create (
+          store, state.embedding_dim, entries, *hnsw,
+          state.sparse_route_parameters);
+  return state.sqlite_sparse_route != nullptr;
+}
+
+inline bool
+IncrementalSparseRouteSealReady (const State &state,
+                                 bool require_sqlite_route)
+{
+  return !state.recovery_failed && state.current_surface_search_current
+         && state.processor_surface_complete
+         && (require_sqlite_route
+                 ? (state.sqlite_sparse_route != nullptr
+                    || state.sqlite_sparse_route_backfill != nullptr
+                    || state.current_entries.size ()
+                           > state.sparse_route_parameters.route_capacity)
+                 : (state.sparse_route != nullptr
+                    || state.current_entries.size ()
+                           > state.sparse_route_parameters.route_capacity));
+}
+
+inline bool
+SealSparseRouteDelta (State &state)
+{
+  if (!state.sparse_route || !state.sparse_route->SealDelta ())
+    {
+      if (state.sqlite_sparse_route)
+        (void)state.sqlite_sparse_route->Invalidate ();
+      state.sparse_route.reset ();
+      state.sqlite_sparse_route.reset ();
+      return false;
+    }
+  return true;
+}
+
+inline bool
+ReconcileSparseRoute (
+    State &state,
+    const std::shared_ptr<sparse_retrieval_route_internal::Route> &prior)
+{
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (state.current_entries.size ());
+  for (const auto &entry : state.current_entries)
+    {
+      if (entry.memory_id <= 0
+          || entry.embedding.size () != state.embedding_dim)
+        return false;
+      entries.emplace_back (entry.memory_id, entry.embedding);
+    }
+  if (prior && prior->Sync (entries) && prior->SealDelta ())
+    {
+      state.sparse_route = prior;
+      return true;
+    }
+  if (prior)
+    {
+      // A failed incremental seal must not hide an unbounded consolidation
+      // rebuild. Drop the derived route and let exact retrieval remain the
+      // correctness fallback until it can be recovered from SQLite.
+      state.sparse_route.reset ();
+      return false;
+    }
+  state.sparse_route = sparse_retrieval_route_internal::Route::Create (
+      state.embedding_dim, entries, state.sparse_route_parameters.hnsw);
+  return state.sparse_route != nullptr;
+}
+
+inline bool
+CurrentMatchesSupersessionEntry (const State &state, long long memory_id)
+{
+  const auto historical = state.supersession_entry_by_memory.find (memory_id);
+  const auto current = state.current_memory_index.find (memory_id);
+  if (historical == state.supersession_entry_by_memory.end ()
+      || current == state.current_memory_index.end ()
+      || historical->second >= state.entries.size ()
+      || current->second >= state.current_entries.size ())
+    return false;
+  const auto &base = state.entries[historical->second];
+  const auto &surface = state.current_entries[current->second];
+  return surface.base_embedding_id == base.embedding_id
+         && surface.embedding.size () == base.embedding.size ()
+         && surface.embedding.isApprox (base.embedding, 0.0f);
+}
+
+inline void
+RefreshSupersessionPopulationMismatch (State &state, long long memory_id)
+{
+  const bool has_historical
+      = state.supersession_entry_by_memory.count (memory_id) != 0;
+  const bool has_current = state.current_memory_index.count (memory_id) != 0;
+  if (!has_historical && !has_current)
+    {
+      state.supersession_population_mismatches.erase (memory_id);
+      return;
+    }
+  if (CurrentMatchesSupersessionEntry (state, memory_id))
+    state.supersession_population_mismatches.erase (memory_id);
+  else
+    state.supersession_population_mismatches.insert (memory_id);
+}
+
+inline bool
+CurrentPopulationCoversHistorical (const State &state,
+                                   long long excluded_memory_id)
+{
+  if (state.supersession_population_ambiguous
+      || state.supersession_embedding_fanout
+      || !state.supersession_tie_order_equivalent)
+    return false;
+  if (state.supersession_population_mismatches.empty ())
+    return true;
+  return state.supersession_population_mismatches.size () == 1
+         && state.supersession_population_mismatches.count (
+                excluded_memory_id)
+                == 1;
+}
 
 struct SupersessionCandidate
 {
@@ -190,19 +655,52 @@ SetProcessorSurfaceComplete (const ProcessorContext &ctx, bool complete)
 }
 
 inline void
-MarkRecoveryFailed (const ProcessorContext &ctx)
+SetSparseRouteParameters (
+    const ProcessorContext &ctx,
+    sparse_retrieval_route_sqlite_internal::Parameters parameters)
+{
+  auto &registry = Registry ();
+  std::lock_guard<std::mutex> lock (registry.mutex);
+  auto &state = registry.states[&ctx];
+  if (!state)
+    state = std::make_shared<State> ();
+  state->sparse_route_parameters = std::move (parameters);
+}
+
+inline void
+MarkRecoveryFailed (const ProcessorContext &ctx,
+                    bool preserve_surface_state = false)
 {
   auto state = std::make_shared<State> ();
   state->recovery_failed = true;
   auto &registry = Registry ();
   std::lock_guard<std::mutex> lock (registry.mutex);
   const auto existing = registry.states.find (&ctx);
-  if (existing != registry.states.end () && existing->second)
+  if (preserve_surface_state && existing != registry.states.end ()
+      && existing->second)
     {
       state->current_surface_database_current
           = existing->second->current_surface_database_current;
       state->processor_surface_complete
           = existing->second->processor_surface_complete;
+      state->embedding_dim = existing->second->embedding_dim;
+      state->sparse_route_parameters
+          = existing->second->sparse_route_parameters;
+      // Preserve only the current-to-base lineage needed to reconstruct the
+      // search surface.  The searchable vector buffer is intentionally not
+      // copied, and recovery_failed keeps every cache reader fail-closed.
+      state->current_entries = existing->second->current_entries;
+      state->current_memory_index = existing->second->current_memory_index;
+      state->current_memory_order = existing->second->current_memory_order;
+      // An unpublished generation cannot affect retrieval correctness. Keep
+      // its bounded progress across exact-SQL recovery and let the next
+      // authoritative Reset validate the population before publication.
+      state->sqlite_sparse_route_backfill
+          = existing->second->sqlite_sparse_route_backfill;
+      state->sqlite_sparse_route_backfill_failure_code
+          = existing->second->sqlite_sparse_route_backfill_failure_code;
+      state->sqlite_sparse_route_backfill_failure_count
+          = existing->second->sqlite_sparse_route_backfill_failure_count;
     }
   registry.states[&ctx] = std::move (state);
 }
@@ -215,10 +713,35 @@ Erase (const ProcessorContext &ctx)
   registry.states.erase (&ctx);
 }
 
+inline void
+InvalidateHistoricalPreserveCurrent (const ProcessorContext &ctx)
+{
+  auto state = FindMutable (ctx);
+  if (!state)
+    return;
+  state->entries.clear ();
+  state->search.clear ();
+  state->embedding_index.clear ();
+  state->long_term_entry_indices.clear ();
+  state->long_term_index_positions.clear ();
+  state->supersession_entry_indices.clear ();
+  state->supersession_index_positions.clear ();
+  state->supersession_entry_by_memory.clear ();
+  state->supersession_population_mismatches.clear ();
+  state->supersession_population_ambiguous = false;
+  state->supersession_tie_order_equivalent = true;
+  state->supersession_embedding_fanout = false;
+  state->supersession_max_embedding_id = 0;
+  state->supersession_max_memory_id = 0;
+  state->distance_scratch.clear ();
+  state->ranked_scratch.clear ();
+}
+
 inline bool
 Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
        std::vector<Entry> current_entries = {})
 {
+  const auto prior_state = FindMutable (ctx);
   auto state = std::make_shared<State> ();
   std::unordered_map<long long, std::size_t> unique_embedding_index;
   state->entries.reserve (entries.size ());
@@ -300,6 +823,57 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
         }
       state->search.insert (state->search.end (), entry.embedding.data (),
                             entry.embedding.data () + entry.embedding.size ());
+      if (HasLongTermReference (entry))
+        {
+          state->long_term_index_positions.emplace (
+              index, state->long_term_entry_indices.size ());
+          state->long_term_entry_indices.push_back (index);
+        }
+      if (IsSupersessionCandidateEntry (entry))
+        {
+          state->supersession_embedding_fanout
+              = state->supersession_embedding_fanout
+                || SupersessionReferenceCount (entry) > 1;
+          state->supersession_index_positions.emplace (
+              index, state->supersession_entry_indices.size ());
+          state->supersession_entry_indices.push_back (index);
+          for (const auto &reference : entry.memory_references)
+            {
+              if (reference.memory_id <= 0
+                  || (reference.kind != "LONG_TERM"
+                      && reference.kind != "ASSOCIATION"))
+                continue;
+              if (!state->supersession_entry_by_memory.emplace (
+                      reference.memory_id, index)
+                       .second)
+                state->supersession_population_ambiguous = true;
+            }
+        }
+    }
+  std::vector<std::pair<long long, long long>> supersession_order;
+  supersession_order.reserve (state->supersession_entry_by_memory.size ());
+  for (const auto &[memory_id, index] :
+       state->supersession_entry_by_memory)
+    {
+      if (index >= state->entries.size ())
+        {
+          Erase (ctx);
+          return false;
+        }
+      supersession_order.emplace_back (state->entries[index].embedding_id,
+                                       memory_id);
+    }
+  std::sort (supersession_order.begin (), supersession_order.end ());
+  for (std::size_t index = 0; index < supersession_order.size (); ++index)
+    {
+      const auto &[embedding_id, memory_id] = supersession_order[index];
+      if (index > 0
+          && memory_id <= supersession_order[index - 1].second)
+        state->supersession_tie_order_equivalent = false;
+      state->supersession_max_embedding_id
+          = std::max (state->supersession_max_embedding_id, embedding_id);
+      state->supersession_max_memory_id
+          = std::max (state->supersession_max_memory_id, memory_id);
     }
   state->current_entries = std::move (current_entries);
   state->current_memory_index.reserve (state->current_entries.size ());
@@ -308,7 +882,9 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
       * static_cast<std::size_t> (state->embedding_dim));
   for (std::size_t index = 0; index < state->current_entries.size (); ++index)
     {
-      const auto &entry = state->current_entries[index];
+      auto &entry = state->current_entries[index];
+      if (entry.base_embedding_id <= 0)
+        entry.base_embedding_id = entry.embedding_id;
       if (entry.memory_id <= 0 || entry.embedding_id <= 0
           || entry.embedding.size () != state->embedding_dim
           || !state->current_memory_index.emplace (entry.memory_id, index)
@@ -317,10 +893,43 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
           Erase (ctx);
           return false;
         }
+      state->current_memory_order.emplace (entry.memory_id, index);
       state->current_search.insert (state->current_search.end (),
                                     entry.embedding.data (),
                                     entry.embedding.data ()
                                         + entry.embedding.size ());
+    }
+  for (const auto &[memory_id, index] :
+       state->supersession_entry_by_memory)
+    {
+      (void)index;
+      state->supersession_population_mismatches.insert (memory_id);
+    }
+  for (const auto &entry : state->current_entries)
+    RefreshSupersessionPopulationMismatch (*state, entry.memory_id);
+  // A search-buffer refresh does not create a new retrieval-route lifecycle.
+  // Preserve process-owned route handles that have already observed the same
+  // authoritative mutations; explicit Erase/recovery paths still discard
+  // them before Reset and therefore fail closed.
+  if (prior_state && prior_state->embedding_dim == state->embedding_dim)
+    {
+      state->sparse_route_parameters
+          = prior_state->sparse_route_parameters;
+      state->current_surface_database_current
+          = prior_state->current_surface_database_current;
+      state->processor_surface_complete
+          = prior_state->processor_surface_complete;
+      if (!prior_state->recovery_failed)
+        {
+          state->sparse_route = prior_state->sparse_route;
+          state->sqlite_sparse_route = prior_state->sqlite_sparse_route;
+        }
+      state->sqlite_sparse_route_backfill
+          = prior_state->sqlite_sparse_route_backfill;
+      state->sqlite_sparse_route_backfill_failure_code
+          = prior_state->sqlite_sparse_route_backfill_failure_code;
+      state->sqlite_sparse_route_backfill_failure_count
+          = prior_state->sqlite_sparse_route_backfill_failure_count;
     }
   auto &registry = Registry ();
   state->current_surface_search_current = true;
@@ -352,6 +961,9 @@ UpsertCurrent (const ProcessorContext &ctx, Entry entry)
   if (existing != state.current_memory_index.end ())
     {
       const std::size_t index = existing->second;
+      if (entry.base_embedding_id <= 0)
+        entry.base_embedding_id
+            = state.current_entries[index].base_embedding_id;
       state.current_entries[index] = std::move (entry);
       const std::size_t offset
           = index * static_cast<std::size_t> (state.embedding_dim);
@@ -360,14 +972,67 @@ UpsertCurrent (const ProcessorContext &ctx, Entry entry)
                      + state.embedding_dim,
                  state.current_search.begin ()
                      + static_cast<std::ptrdiff_t> (offset));
+      RefreshSupersessionPopulationMismatch (
+          state, state.current_entries[index].memory_id);
+      if (state.sparse_route
+          && !state.sparse_route->Upsert (
+              state.current_entries[index].memory_id,
+              state.current_entries[index].embedding))
+        state.sparse_route.reset ();
+      if (state.sqlite_sparse_route
+          && !state.sqlite_sparse_route->Upsert (
+              state.current_entries[index].memory_id,
+              state.current_entries[index].embedding))
+        state.sqlite_sparse_route.reset ();
+      if (state.sqlite_sparse_route_backfill
+          && !state.sqlite_sparse_route_backfill->Upsert (
+              state.current_entries[index].memory_id,
+              state.current_entries[index].embedding))
+        state.sqlite_sparse_route_backfill.reset ();
       return;
     }
+  if (entry.base_embedding_id <= 0)
+    entry.base_embedding_id = entry.embedding_id;
   state.current_memory_index.emplace (entry.memory_id,
+                                      state.current_entries.size ());
+  state.current_memory_order.emplace (entry.memory_id,
                                       state.current_entries.size ());
   state.current_search.insert (state.current_search.end (),
                                entry.embedding.data (),
                                entry.embedding.data () + entry.embedding.size ());
   state.current_entries.push_back (std::move (entry));
+  RefreshSupersessionPopulationMismatch (
+      state, state.current_entries.back ().memory_id);
+  if (state.sparse_route
+      && !state.sparse_route->Upsert (state.current_entries.back ().memory_id,
+                                     state.current_entries.back ().embedding))
+    state.sparse_route.reset ();
+  if (state.sqlite_sparse_route
+      && !state.sqlite_sparse_route->Upsert (
+          state.current_entries.back ().memory_id,
+          state.current_entries.back ().embedding))
+    state.sqlite_sparse_route.reset ();
+  if (state.sqlite_sparse_route_backfill
+      && !state.sqlite_sparse_route_backfill->Upsert (
+          state.current_entries.back ().memory_id,
+          state.current_entries.back ().embedding))
+    state.sqlite_sparse_route_backfill.reset ();
+}
+
+inline long long
+BaseEmbeddingIdForMemory (const ProcessorContext &ctx, long long memory_id,
+                          long long fallback_embedding_id)
+{
+  const auto state = Find (ctx);
+  if (!state)
+    return fallback_embedding_id;
+  const auto index = state->current_memory_index.find (memory_id);
+  if (index == state->current_memory_index.end ()
+      || index->second >= state->current_entries.size ())
+    return fallback_embedding_id;
+  const long long base_embedding_id
+      = state->current_entries[index->second].base_embedding_id;
+  return base_embedding_id > 0 ? base_embedding_id : fallback_embedding_id;
 }
 
 inline void
@@ -394,6 +1059,8 @@ RemoveCurrent (const ProcessorContext &ctx, long long memory_id)
     {
       state.current_entries[index] = std::move (state.current_entries[last]);
       state.current_memory_index[state.current_entries[index].memory_id] = index;
+      state.current_memory_order[state.current_entries[index].memory_id]
+          = index;
       const std::size_t dst
           = index * static_cast<std::size_t> (state.embedding_dim);
       const std::size_t src
@@ -404,10 +1071,20 @@ RemoveCurrent (const ProcessorContext &ctx, long long memory_id)
           state.current_search.begin () + static_cast<std::ptrdiff_t> (dst));
     }
   state.current_memory_index.erase (memory_id);
+  state.current_memory_order.erase (memory_id);
   state.current_entries.pop_back ();
   state.current_search.resize (
       state.current_entries.size ()
       * static_cast<std::size_t> (state.embedding_dim));
+  RefreshSupersessionPopulationMismatch (state, memory_id);
+  if (state.sparse_route && !state.sparse_route->Remove (memory_id))
+    state.sparse_route.reset ();
+  if (state.sqlite_sparse_route
+      && !state.sqlite_sparse_route->Remove (memory_id))
+    state.sqlite_sparse_route.reset ();
+  if (state.sqlite_sparse_route_backfill
+      && !state.sqlite_sparse_route_backfill->Remove (memory_id))
+    state.sqlite_sparse_route_backfill.reset ();
 }
 
 inline void
@@ -441,9 +1118,50 @@ Append (const ProcessorContext &ctx, Entry entry)
           { entry.memory_id, entry.start_ts, entry.kind, entry.source_id });
     }
   state.embedding_index.emplace (entry.embedding_id, state.entries.size ());
+  const std::size_t index = state.entries.size ();
   state.search.insert (state.search.end (), entry.embedding.data (),
                        entry.embedding.data () + entry.embedding.size ());
   state.entries.push_back (std::move (entry));
+  if (HasLongTermReference (state.entries.back ()))
+    {
+      state.long_term_index_positions.emplace (
+          index, state.long_term_entry_indices.size ());
+      state.long_term_entry_indices.push_back (index);
+    }
+  if (IsSupersessionCandidateEntry (state.entries.back ()))
+    {
+      const auto &candidate = state.entries.back ();
+      state.supersession_embedding_fanout
+          = state.supersession_embedding_fanout
+            || SupersessionReferenceCount (candidate) > 1;
+      state.supersession_index_positions.emplace (
+          index, state.supersession_entry_indices.size ());
+      state.supersession_entry_indices.push_back (index);
+      long long candidate_max_memory_id = 0;
+      for (const auto &reference : candidate.memory_references)
+        {
+          if (reference.memory_id <= 0
+              || (reference.kind != "LONG_TERM"
+                  && reference.kind != "ASSOCIATION"))
+            continue;
+          if (!state.supersession_entry_by_memory.emplace (
+                  reference.memory_id, index)
+                   .second)
+            state.supersession_population_ambiguous = true;
+          if (reference.memory_id <= state.supersession_max_memory_id)
+            state.supersession_tie_order_equivalent = false;
+          candidate_max_memory_id
+              = std::max (candidate_max_memory_id, reference.memory_id);
+          RefreshSupersessionPopulationMismatch (state,
+                                                 reference.memory_id);
+        }
+      if (candidate.embedding_id <= state.supersession_max_embedding_id)
+        state.supersession_tie_order_equivalent = false;
+      state.supersession_max_embedding_id = std::max (
+          state.supersession_max_embedding_id, candidate.embedding_id);
+      state.supersession_max_memory_id = std::max (
+          state.supersession_max_memory_id, candidate_max_memory_id);
+    }
 }
 
 inline void
@@ -471,10 +1189,82 @@ RemoveEmbedding (const ProcessorContext &ctx, long long embedding_id)
       return;
     }
   const std::size_t last = state.entries.size () - 1;
+  std::vector<long long> removed_supersession_memory_ids;
+  if (IsSupersessionCandidateEntry (state.entries[index]))
+    for (const auto &reference : state.entries[index].memory_references)
+      if (reference.memory_id > 0
+          && (reference.kind == "LONG_TERM"
+              || reference.kind == "ASSOCIATION"))
+        removed_supersession_memory_ids.push_back (reference.memory_id);
+  const auto long_term_position = state.long_term_index_positions.find (index);
+  if (long_term_position != state.long_term_index_positions.end ())
+    {
+      const std::size_t position = long_term_position->second;
+      const std::size_t last_position
+          = state.long_term_entry_indices.size () - 1;
+      if (position != last_position)
+        {
+          const std::size_t moved_index
+              = state.long_term_entry_indices[last_position];
+          state.long_term_entry_indices[position] = moved_index;
+          state.long_term_index_positions[moved_index] = position;
+        }
+      state.long_term_entry_indices.pop_back ();
+      state.long_term_index_positions.erase (long_term_position);
+    }
+  const auto supersession_position
+      = state.supersession_index_positions.find (index);
+  if (supersession_position != state.supersession_index_positions.end ())
+    {
+      const std::size_t position = supersession_position->second;
+      const std::size_t last_position
+          = state.supersession_entry_indices.size () - 1;
+      if (position != last_position)
+        {
+          const std::size_t moved_index
+              = state.supersession_entry_indices[last_position];
+          state.supersession_entry_indices[position] = moved_index;
+          state.supersession_index_positions[moved_index] = position;
+        }
+      state.supersession_entry_indices.pop_back ();
+      state.supersession_index_positions.erase (supersession_position);
+      for (const long long memory_id : removed_supersession_memory_ids)
+        state.supersession_entry_by_memory.erase (memory_id);
+    }
   if (index != last)
     {
       state.entries[index] = std::move (state.entries[last]);
       state.embedding_index[state.entries[index].embedding_id] = index;
+      const auto moved_long_term_position
+          = state.long_term_index_positions.find (last);
+      if (moved_long_term_position != state.long_term_index_positions.end ())
+        {
+          state.long_term_entry_indices[moved_long_term_position->second]
+              = index;
+          state.long_term_index_positions.emplace (
+              index, moved_long_term_position->second);
+          state.long_term_index_positions.erase (moved_long_term_position);
+        }
+      const auto moved_supersession_position
+          = state.supersession_index_positions.find (last);
+      if (moved_supersession_position
+          != state.supersession_index_positions.end ())
+        {
+          state.supersession_entry_indices[
+              moved_supersession_position->second] = index;
+          state.supersession_index_positions.emplace (
+              index, moved_supersession_position->second);
+          state.supersession_index_positions.erase (
+              moved_supersession_position);
+          if (IsSupersessionCandidateEntry (state.entries[index]))
+            for (const auto &reference :
+                 state.entries[index].memory_references)
+              if (reference.memory_id > 0
+                  && (reference.kind == "LONG_TERM"
+                      || reference.kind == "ASSOCIATION"))
+                state.supersession_entry_by_memory[reference.memory_id]
+                    = index;
+        }
       const std::size_t dst
           = index * static_cast<std::size_t> (state.embedding_dim);
       const std::size_t src
@@ -486,7 +1276,14 @@ RemoveEmbedding (const ProcessorContext &ctx, long long embedding_id)
   state.embedding_index.erase (embedding_id);
   state.entries.pop_back ();
   state.search.resize (state.entries.size ()
-                       * static_cast<std::size_t> (state.embedding_dim));
+      * static_cast<std::size_t> (state.embedding_dim));
+  state.supersession_embedding_fanout = std::any_of (
+      state.entries.begin (), state.entries.end (), [] (const auto &entry) {
+        return SupersessionReferenceCount (entry) > 1;
+      });
+  for (const long long memory_id : removed_supersession_memory_ids)
+    RefreshSupersessionPopulationMismatch (
+        state, memory_id);
 }
 
 #ifdef CORTEXT_TESTING

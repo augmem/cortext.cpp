@@ -12,6 +12,10 @@
             .url = "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz",
             .hash = "N-V-__8AABPI6wAbBLaww8cKO-HchZ0ft-BxUOEOyQtTSccD",
         },
+        .hnswlib = .{
+            .url = "https://github.com/nmslib/hnswlib/archive/d9b3608c83d83b46c96e25088cb1d729b29dcfe9.tar.gz",
+            .hash = "N-V-__8AAD5DBQCaIfPAc4pgydlB6awwGTsNcXXdVdM7JMGl",
+        },
         .ggml = .{
             .url = "https://github.com/ggml-org/ggml/archive/refs/tags/v0.9.5.tar.gz",
             .hash = "N-V-__8AAIGx0wBZa9Sz72m_vmGB455owNYDo1MTKim86Nqw",
@@ -20,6 +24,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "cmake",
         "include",
         "scripts",
         "src",

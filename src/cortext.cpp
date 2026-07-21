@@ -1,4 +1,5 @@
 #include "cortext/cortext.hpp"
+#include "cortext_pipeline_internal.hpp"
 #include "cortext/clock.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -10,6 +11,8 @@
 #include "operations/constructive_recall_internal.hpp"
 #include "operations/meta_learning_internal.hpp"
 #include "operations/retrieval_trace_state.hpp"
+#include "operations/signal_record_rollback_internal.hpp"
+#include "operations/sparse_retrieval_knobs_internal.hpp"
 #include "experimental_env.hpp"
 #include "signal_filter.hpp"
 #include "streaming_text_probe.hpp"
@@ -40,6 +43,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iterator>
+#include <limits>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -451,6 +456,8 @@ LoadSignalBlobs (Store *store, long long memory_id,
                  ObjectStore *object_store,
                  const std::string &memory_modality,
                  const std::string &memory_mime,
+                 int max_signal_blobs,
+                 std::size_t *loaded_signal_blobs,
                  std::vector<std::vector<unsigned char>> &out)
 {
   if (!store || memory_id <= 0)
@@ -458,36 +465,79 @@ LoadSignalBlobs (Store *store, long long memory_id,
 
   try
     {
-      auto rows = store->Execute (
-          "SELECT modality, mime, blob_id FROM signals "
-          "WHERE memory_id = ? AND blob_id IS NOT NULL "
-          "ORDER BY serial_position ASC",
-          { memory_id });
-
-      for (const auto &row : rows)
+      const long long limit = std::max (1, max_signal_blobs);
+      long long cursor_position = std::numeric_limits<long long>::max ();
+      long long cursor_signal_id = std::numeric_limits<long long>::max ();
+      std::vector<std::vector<unsigned char>> matched_payloads;
+      matched_payloads.reserve (static_cast<std::size_t> (limit));
+      while (static_cast<long long> (matched_payloads.size ()) < limit)
         {
-          auto it = row.find ("blob_id");
-          if (it != row.end () && it->second.has_value ())
+          auto rows = store->Execute (
+              "SELECT signal_id, modality, mime, blob_id, "
+              "       COALESCE(serial_position, signal_id) AS sort_position "
+              "FROM signals "
+              "WHERE memory_id = ? AND blob_id IS NOT NULL "
+              "  AND (? = '' OR modality = ?) "
+              "  AND (COALESCE(serial_position, signal_id) < ? "
+              "       OR (COALESCE(serial_position, signal_id) = ? "
+              "           AND signal_id < ?)) "
+              "ORDER BY sort_position DESC, signal_id DESC "
+              "LIMIT ?",
+              { memory_id, memory_modality, memory_modality,
+                cursor_position, cursor_position, cursor_signal_id, limit });
+          if (rows.empty ())
+            break;
+
+          for (const auto &row : rows)
             {
-              auto blob_id = store::BlobFromAny (it->second);
-              if (!blob_id.empty ())
+              const auto position = store::AnyToLongLong (
+                  row.at ("sort_position"));
+              const auto signal_id = store::AnyToLongLong (
+                  row.at ("signal_id"));
+              if (!position || !signal_id)
+                throw std::runtime_error (
+                    "invalid fallback signal ordering row");
+              cursor_position = *position;
+              cursor_signal_id = *signal_id;
+
+              auto it = row.find ("blob_id");
+              if (it != row.end () && it->second.has_value ())
                 {
-                  std::vector<unsigned char> payload;
-                  if (LoadObjectPayload (store, object_store, blob_id, payload))
+                  auto blob_id = store::BlobFromAny (it->second);
+                  if (!blob_id.empty ())
                     {
-                      const std::string signal_modality
-                          = RowString (row, "modality");
-                      const std::string signal_mime = RowString (row, "mime");
-                      if (PayloadMatchesMemorySurface (
-                              memory_modality, memory_mime, signal_modality,
-                              signal_mime, payload))
+                      std::vector<unsigned char> payload;
+                      if (LoadObjectPayload (store, object_store, blob_id,
+                                             payload))
                         {
-                          out.push_back (std::move (payload));
+                          const std::string signal_modality
+                              = RowString (row, "modality");
+                          const std::string signal_mime
+                              = RowString (row, "mime");
+                          if (PayloadMatchesMemorySurface (
+                                  memory_modality, memory_mime,
+                                  signal_modality, signal_mime, payload))
+                            {
+                              matched_payloads.push_back (
+                                  std::move (payload));
+                              if (static_cast<long long> (
+                                      matched_payloads.size ())
+                                  == limit)
+                                break;
+                            }
                         }
                     }
                 }
             }
+          if (static_cast<long long> (rows.size ()) < limit)
+            break;
         }
+      std::reverse (matched_payloads.begin (), matched_payloads.end ());
+      if (loaded_signal_blobs)
+        *loaded_signal_blobs += matched_payloads.size ();
+      out.insert (out.end (),
+                  std::make_move_iterator (matched_payloads.begin ()),
+                  std::make_move_iterator (matched_payloads.end ()));
       return !out.empty ();
     }
   catch (const std::exception &e)
@@ -603,7 +653,9 @@ LoadSoftAnchors (
 void
 HydrateMemory (Store *store, ObjectStore *object_store, long long id,
                Cortext::Context::Memory &m,
-               int max_hydrated_soft_anchors)
+               int max_hydrated_soft_anchors,
+               int max_fallback_signal_blobs,
+               std::size_t *loaded_fallback_signal_blobs)
 {
   if (!store)
     return;
@@ -708,7 +760,9 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             {
               // v2 fallback: old databases may only have signal-level blobs.
               LoadSignalBlobs (store, memory_id, object_store, m.modality,
-                               m.mimetype, m.content);
+                               m.mimetype, max_fallback_signal_blobs,
+                               loaded_fallback_signal_blobs,
+                               m.content);
             }
 
           // v2: Counts are inline on memories table
@@ -971,7 +1025,9 @@ ResolveDisplayMemoriesForEmptyRetrieval (Store *store, long long memory_id,
 void
 HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
                             std::vector<Cortext::Context::Memory> &out,
-                            int max_hydrated_soft_anchors)
+                            int max_hydrated_soft_anchors,
+                            int max_fallback_signal_blobs,
+                            std::size_t *loaded_fallback_signal_blobs)
 {
   if (!store)
     return;
@@ -982,7 +1038,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
       // Content blobs are loaded separately via LoadSignalBlobs
       auto rows = store->Execute (
           "SELECT m.memory_id, m.source_id, m.modality, m.start_ts, "
-          "       m.strength, m.last_access, m.n_signals, "
+          "       rif.strength, m.last_access, m.n_signals, "
           "       m.s_max, m.s_avg, m.s_arousal_avg, "
           "       m.retrieved_count, m.used_count, m.blob_id, "
           "       (SELECT mr.blob_id FROM memory_reconstructions mr "
@@ -997,6 +1053,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           "          ORDER BY s.serial_position LIMIT 1)"
           "       ) AS signal_mime "
           "FROM memories m "
+          "JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
           "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
           "ORDER BY m.start_ts ASC");
 
@@ -1068,7 +1125,9 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
             {
               // v2 fallback: old databases may only have signal-level blobs.
               LoadSignalBlobs (store, m.id, object_store, m.modality,
-                               m.mimetype, m.content);
+                               m.mimetype, max_fallback_signal_blobs,
+                               loaded_fallback_signal_blobs,
+                               m.content);
             }
           StripSourceBlobsIfDisabled (m);
           LoadSoftAnchors (store, m.id, m.soft_anchors,
@@ -1247,10 +1306,15 @@ BuildRootOperationSet (bool probe_mode)
 
   if (probe_mode)
     {
-      return std::make_unique<ProbeRoot> ();
+      return operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (
+              std::make_unique<ProbeRoot> ());
     }
-  return std::make_unique<SignalOperationDispatch> (
-      std::make_unique<FullRoot> (), std::make_unique<MaintenanceRoot> ());
+  return operations::signal_record_rollback_internal::
+      MarkEngineOwnedJournalAware (
+          std::make_unique<SignalOperationDispatch> (
+              std::make_unique<FullRoot> (),
+              std::make_unique<MaintenanceRoot> ()));
 }
 
 namespace
@@ -1619,13 +1683,24 @@ struct Cortext::Impl
 	    const auto linked_hydration_ordering_weights
 	        = core::RetrievalLinkedHydrationOrderingWeights (
 	            cfg.focus, cfg.sensitivity, cfg.stability);
+	    const int max_fallback_signal_blobs
+	        = operations::sparse_retrieval_knobs_internal::
+	            HydrationFallbackSignalLimit (
+	            cfg.focus, cfg.sensitivity, cfg.stability);
+	    std::size_t loaded_fallback_signal_blobs = 0;
 
 	    if (hydrate_working_memory)
 	      {
 	        HydrateWorkingMemoryFromDB (store.get (), object_store.get (),
 	                                    result.working_memory,
-	                                    max_hydrated_soft_anchors);
+	                                    max_hydrated_soft_anchors,
+	                                    max_fallback_signal_blobs,
+	                                    &loaded_fallback_signal_blobs);
 	      }
+	    result.output.operation_ms["Cortext.fallback_hydration_signal_limit"]
+	        = static_cast<double> (max_fallback_signal_blobs);
+	    result.output.operation_ms["Cortext.fallback_hydration_signal_rows"]
+	        = static_cast<double> (loaded_fallback_signal_blobs);
 
     if (!hydrate_retrieved_memory)
       {
@@ -1695,7 +1770,9 @@ struct Cortext::Impl
       Cortext::Context::Memory m;
       m.id = memory_id;
       HydrateMemory (store.get (), object_store.get (), memory_id, m,
-                     max_hydrated_soft_anchors);
+                     max_hydrated_soft_anchors,
+                     max_fallback_signal_blobs,
+                     &loaded_fallback_signal_blobs);
       // Prefer a linked memory's own ranked trace. Otherwise use the
       // source-specific query/relationship score computed during linked
       // selection; never relabel the routing node's score as a source score.
@@ -1744,7 +1821,9 @@ struct Cortext::Impl
         Cortext::Context::Memory m;
         m.id = memory_id;
         HydrateMemory (store.get (), object_store.get (), memory_id, m,
-                       max_hydrated_soft_anchors);
+                       max_hydrated_soft_anchors,
+                       max_fallback_signal_blobs,
+                       &loaded_fallback_signal_blobs);
         ApplyRetrievalScore (m, ranked_by_memory_id);
         const bool has_content = HasHydratedContent (m);
         const bool prefer_linked_sources
@@ -1796,6 +1875,8 @@ struct Cortext::Impl
           }
       }
 
+    result.output.operation_ms["Cortext.fallback_hydration_signal_rows"]
+        = static_cast<double> (loaded_fallback_signal_blobs);
     return result;
   }
 };
