@@ -1,14 +1,14 @@
 {
   "generated_claim_mismatches": [],
   "inventory_count": 70,
-  "manifest_sha256": "03f2d608ded5f837609c4badb721dfe98dec1e4fc63be39b8847f0f7d4f54000",
-  "manuscript_sha256": "d7a14688db8027ea446037881d648f87b04360536c1bd775ca505b2cdb0273d6",
+  "manifest_sha256": "b4db2d9032f53b0a4dd3c702d749c3bf1603fcc4451d9acd4bac9bfcfce825aa",
+  "manuscript_sha256": "9f1e956e7759a8aa44571aa879c93583dea3de7691e2fa581aea9b0a56e0bfcc",
   "missing_source_claims": [],
   "ownership_violations": [],
   "passed": true,
   "proof_level_violations": [],
   "record_count": 70,
   "schema": "cortext_paper_traceability_audit_v1",
-  "state_sha256": "1bfe47fdafd5e6392289d7d36c4967478858ca9cffeed6ed29f63ffb01b0fee0",
+  "state_sha256": "343bbaf3dfabab7acb9fbd00f08605c4ff292f421580c94689c5abbf6c32d1d5",
   "uncovered_inventory": []
 }

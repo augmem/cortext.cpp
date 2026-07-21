@@ -402,6 +402,16 @@ ceiling, fixes downstream activation at $A=2C+2B$, and reserves the smaller
 $C+B/2B$ envelope for graph construction. These are knob-derived finite
 limits, not midpoint constants.
 
+Sparse activation is candidate generation rather than an exact completeness
+certificate. The route first rejects an activated proposal when ordinary
+eligibility leaves fewer rows than the requested seed count. It then performs
+the exact cosine-family collapse and repeats the cardinality check. This second
+check matters when the sparse proposal contains enough eligible memory rows but
+several belong to the same semantic family; if fewer distinct families remain,
+the operation rejects the sparse cache certificate and reopens the complete
+processor-surface or authoritative SQL seed path instead of returning a
+silently underfilled result.
+
 Consolidation changes activation locality without changing SQLite authority or
 introducing a second route. Restart opens at the $9C$ ceiling because
 in-process query age is not durable; every successful recenter resets the
@@ -751,16 +761,16 @@ Emotional cascade metadata is hydrated into a private, rebuildable processor
 cache keyed by memory id and base embedding id. The cache preserves the SQL
 aggregation contract for shared embeddings by retaining every member row and
 deriving current intensity and half-life bonus with the same per-embedding
-minima. Its global bounded flashbulb-source prefix is ordered by descending
-emotional intensity with ascending memory-id ties. A source insertion, removal,
-or intensity mutation
-marks that prefix dirty; before the next cascade, SQLite refreshes exactly the
-knob-derived prefix through a partial intensity/memory-id index and `LIMIT`, so
-an excluded source can enter after a retained source falls without a
-store-sized cache scan. This establishes intensity-before-truncation ordering,
-not complete selection equivalence: the cache bounds the global flashbulb
-prefix before cascade recency/arousal eligibility, while the fallback SQL
-applies those eligibility predicates before `LIMIT`. Emotional
+minima. Its bounded flashbulb-source prefix is ordered by descending emotional
+intensity with ascending memory-id ties. Before each cascade, SQLite applies
+the event's intensity, arousal, and recent-window predicates and only then
+orders and truncates to the knob-derived source limit. The private cache
+therefore consumes the same eligible prefix as the SQL fallback: a stale or
+low-arousal high-intensity row cannot hide a lower-intensity eligible source.
+This is selection-equivalence evidence, not a claim that SQLite can always
+locate that prefix in work proportional to the returned limit; a history with
+many higher-intensity ineligible rows may require additional indexed filtering.
+Emotional
 consolidation overwrites the affected embedding family, cascade propagation
 applies the existing maxima, storage and shallow consolidation append rows, and
 eviction removes them. Journal-aware rollback discards and rehydrates this
@@ -923,6 +933,10 @@ Current
 writes are excluded by timestamp, and working-memory overlap filters prevent the
 retrieval result from echoing the active memory tail. Association edges are used
 as graph evidence; they do not bypass final scoring or output caps.
+When eviction removes a replacement memory from the processor surface, removal
+is published before its outgoing `supersedes` targets are recomputed. The
+sidecar therefore cannot retain an activation timestamp derived from a surface
+entry that has just been evicted.
 One dispatch exposes at most one actually used retrieval candidate, so
 retrieval does not synthesize reinforcement pair edges from the packet. Existing
 `reinforces` edges remain eligible for decay, pruning, degree normalization, and
@@ -1023,9 +1037,15 @@ after independently clamping each knob to $[0,1]$. It therefore contains 64,
 rounding rule is C++ `std::lround`, so half-integer ties round away from zero.
 For example, $F=1/128,S=T=0$ yields 65 rather than 64. The logical
 $B+1$ probe remains an overflow/completion check; it is not a fetched or
-processed extra row. Slot selection is
-`(signal_id - 1) mod Q`, so each ring upsert replaces at most one prior
-exact-vector row. One accepted pipeline event may persist multiple accumulated
+processed extra row. When the table is below $Q$, an upsert occupies its
+lowest free bounded slot. When it is full, replacement is owned by the oldest
+`(timestamp, signal_id)` frontier; an out-of-order vector older than that
+frontier is ignored. Deletion gaps accept the next presented exact vector and
+the timestamp frontier resumes ownership as soon as the table is full.
+Existing signal identities update in place. Thus row-id gaps and out-of-order
+ingestion cannot make a numerically newer identifier displace a more recent
+event, and every ordering operation is over at most $Q$ rows. One accepted
+pipeline event may persist multiple accumulated
 signal records and therefore perform multiple bounded upserts; the measured
 Natural maximum of 14 ring-table mutations came from the earlier $B$-capacity
 experiment and is not a new $Q$-capacity benchmark. If knobs change, the
@@ -1049,7 +1069,7 @@ into an apparently full exact window. The global vector index consequently
 contains memory centroids rather than a growing population of signal-only
 decoys. The schema and routing code contain no modality or `source_id` branch;
 text, audio, image, shared, and opaque sources enter after encoding through the
-same slot formula. Direct regressions cover mixed modality/source labels, knob
+same bounded timestamp frontier. Direct regressions cover mixed modality/source labels, knob
 changes, all 27 low/mid/high F/S/T combinations, and a 151-vector neutral
 restart whose restored identities equal the exact signal vectors. A separate
 upgrade regression starts from 150 legacy exact signals, performs the first
@@ -1092,6 +1112,16 @@ slot and schedules at most one memory-row update per changed slot during normal
 persistence, and graph writes perform only O(1) cache invalidation. None adds a
 store-size-dependent query or eager graph reconstruction; working-memory
 persistence remains bounded by the configured live-slot capacity.
+
+The RIF shadow epoch is a disposable SQLite projection of committed persistent
+state. Suppression and recovery stage changed identities and clock values while
+the persistent transaction is open, but they do not pre-adjust the shadow's
+`active_rows` counter. After the persistent commit, publication compares the
+old and new shadow membership and applies each insertion or removal exactly
+once. Consolidation's active-RIF count and both candidate arms join the
+singleton recovery clock on the current generation; retired-generation rows
+may await bounded materialization, but they neither consume the active work
+ceiling nor enter the current active candidate frontier.
 
 The retained long-horizon optimization target is that mean process latency
 stays approximately flat as the database grows. The July 2026 exact-replay

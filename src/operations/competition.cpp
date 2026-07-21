@@ -92,12 +92,6 @@ ApplyRIFRecovery (OperationContext &context, Transaction &tx, long long now_ts,
       result.clock.log_factor, result.clock.last_ts);
   rif_active_epoch_cache_internal::StageMemories (
       sidecar->rif_active_epoch, result.changed_memory_ids);
-  if (result.generation_reset)
-    sidecar->rif_active_epoch.active_rows = 0;
-  else
-    sidecar->rif_active_epoch.active_rows
-        -= std::min (sidecar->rif_active_epoch.active_rows,
-                     result.expired_rows);
   auto &p_ctx = context.GetProcessorContext ();
   p_ctx.retrieval_suppression_embedding_ids.clear ();
   p_ctx.retrieval_suppression_memory_ids.clear ();
@@ -157,7 +151,6 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
                         double competition_scale,
                         long long now_ts, Transaction &tx,
                         rif_active_epoch_cache_internal::State &epoch,
-                        std::size_t &active_rows,
                         int &suppressed_count)
 {
   for (const auto &loser : losers)
@@ -185,9 +178,8 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
         continue;
       for (const long long memory_id : memory_ids)
         {
-          if (rif_state_internal::SuppressMemory (
-                  tx, memory_id, total_supp, now_ts))
-            ++active_rows;
+          rif_state_internal::SuppressMemory (
+              tx, memory_id, total_supp, now_ts);
           rif_active_epoch_cache_internal::StageMemory (epoch, memory_id);
           ++suppressed_count;
         }
@@ -282,7 +274,6 @@ ApplyRetrievalCompetition::Execute (OperationContext &context,
   ApplyLateralInhibition (winners, losers, radius, cfg.focus, cfg.sensitivity,
                           cfg.stability, competition_scale, now_ts, tx,
                           sidecar->rif_active_epoch,
-                          sidecar->rif_active_epoch.active_rows,
                           suppressed_count);
 
   // Debug logging

@@ -875,6 +875,53 @@ TEST_CASE ("RIF active epoch publishes only after persistent commit and "
   REQUIRE (restarted.allocated_bytes <= restarted.limits.allocated_bytes);
 }
 
+TEST_CASE ("RIF active row count changes exactly once during shadow "
+           "publication",
+           "[operations][competition][rif_state][active_epoch]"
+           "[publication][regression]")
+{
+  namespace cache
+      = cortext::operations::rif_active_epoch_cache_internal;
+  namespace rif = cortext::operations::rif_state_internal;
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  cortext::testing::InitializeCoreSchema (*store);
+  store->Execute (
+      "INSERT INTO memories(memory_id, source_id, kind, start_ts, n_signals, "
+      "modality, strength, suppression, suppression_ts, created_at) "
+      "VALUES(1, 'opaque/rif-count', 'LONG_TERM', 1000, 1, 'image', "
+      "1.0, 0.0, 1000, 1000)");
+  rif::RebuildFromMaterialized (*store);
+
+  cache::State epoch;
+  const auto limits = cache::DeriveLimits (0.5, 0.5, 0.5);
+  cache::Ensure (epoch, *store, limits);
+  REQUIRE (epoch.active_rows == 0);
+
+  auto tx = store->Begin ();
+  REQUIRE (rif::SuppressMemory (*tx, 1, 0.25, 2000));
+  cache::StageMemory (epoch, 1);
+  REQUIRE (epoch.active_rows == 0);
+  tx->Commit ();
+  const auto suppression_publication
+      = cache::PublishAfterPersistentCommit (epoch, *store);
+  REQUIRE (suppression_publication.published);
+  REQUIRE (epoch.active_rows == 1);
+
+  tx = store->Begin ();
+  const auto recovered = rif::AdvanceRecovery (
+      *tx, 20'000, 1.0, limits.row_batch_size);
+  REQUIRE (recovered.generation_reset);
+  cache::StageClock (epoch, recovered.clock.generation,
+                     recovered.clock.log_factor, recovered.clock.last_ts);
+  cache::StageMemories (epoch, recovered.changed_memory_ids);
+  REQUIRE (epoch.active_rows == 1);
+  tx->Commit ();
+  const auto recovery_publication
+      = cache::PublishAfterPersistentCommit (epoch, *store);
+  REQUIRE (recovery_publication.published);
+  REQUIRE (epoch.active_rows == 0);
+}
+
 TEST_CASE ("RIF active epoch row batches follow nine F S T points and "
            "preserve a live B plus one mutation",
            "[operations][competition][rif_state][active_epoch][knobs]")

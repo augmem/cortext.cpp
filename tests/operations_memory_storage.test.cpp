@@ -726,6 +726,78 @@ TEST_CASE ("Active signal embedding ring obeys knob-derived capacities",
   REQUIRE (AnyToLongLong (resized_rows[0].at ("max_capacity")) == 64);
 }
 
+TEST_CASE ("Active signal embedding ring follows timestamp recency across "
+           "out-of-order writes and deletion gaps",
+           "[operations][memory_storage][embedding_population][recency]"
+           "[regression]")
+{
+  namespace ring = operations::active_signal_embedding_ring_internal;
+  auto store = SQLiteStore::Create (":memory:");
+  cortext::testing::InitializeCoreSchema (*store);
+  const int capacity = ring::Capacity (0.0, 0.0, 0.0);
+  REQUIRE (capacity == 64);
+
+  std::vector<float> embedding (kEmbeddingDim, 0.0f);
+  embedding[0] = 1.0f;
+  auto tx = store->Begin ();
+  for (long long signal_id = 1; signal_id <= capacity; ++signal_id)
+    {
+      const long long timestamp = 1000 + signal_id;
+      tx->Execute (
+          "INSERT INTO signals(signal_id, source_id, embedding_id, "
+          "timestamp, modality, created_at) VALUES (?, 'opaque/ring', 1, "
+          "?, 'text', ?)",
+          { signal_id, timestamp, timestamp });
+      ring::Upsert (*tx, signal_id, embedding, timestamp, 0.0, 0.0, 0.0);
+    }
+  tx->Execute (
+      "INSERT INTO signals(signal_id, source_id, embedding_id, timestamp, "
+      "modality, created_at) VALUES(65, 'opaque/ring', 1, 500, 'audio', "
+      "500)");
+  ring::Upsert (*tx, 65, embedding, 500, 0.0, 0.0, 0.0);
+  tx->Commit ();
+
+  auto rows = store->Execute (
+      "SELECT COUNT(*) AS n, MIN(signal_id) AS first_id, "
+      "MAX(signal_id) AS last_id FROM cortext_active_signal_embeddings");
+  REQUIRE (AnyToLongLong (rows[0].at ("n")) == capacity);
+  REQUIRE (AnyToLongLong (rows[0].at ("first_id")) == 1);
+  REQUIRE (AnyToLongLong (rows[0].at ("last_id")) == capacity);
+
+  // A deletion gap accepts the next exact vector. Once full again, timestamp
+  // recency—not signal identity—owns the replacement frontier.
+  store->Execute (
+      "DELETE FROM cortext_active_signal_embeddings WHERE signal_id = ?",
+      { static_cast<long long> (capacity) });
+  tx = store->Begin ();
+  tx->Execute (
+      "INSERT INTO signals(signal_id, source_id, embedding_id, timestamp, "
+      "modality, created_at) VALUES(66, 'opaque/ring', 1, 600, 'image', "
+      "600)");
+  ring::Upsert (*tx, 66, embedding, 600, 0.0, 0.0, 0.0);
+  tx->Commit ();
+  rows = store->Execute (
+      "SELECT COUNT(*) AS n, SUM(signal_id = 66) AS gap_fill "
+      "FROM cortext_active_signal_embeddings");
+  REQUIRE (AnyToLongLong (rows[0].at ("n")) == capacity);
+  REQUIRE (AnyToLongLong (rows[0].at ("gap_fill")) == 1);
+
+  tx = store->Begin ();
+  tx->Execute (
+      "INSERT INTO signals(signal_id, source_id, embedding_id, timestamp, "
+      "modality, created_at) VALUES(67, 'opaque/ring', 1, 2000, 'text', "
+      "2000)");
+  ring::Upsert (*tx, 67, embedding, 2000, 0.0, 0.0, 0.0);
+  tx->Commit ();
+  rows = store->Execute (
+      "SELECT COUNT(*) AS n, SUM(signal_id = 66) AS old_present, "
+      "SUM(signal_id = 67) AS new_present "
+      "FROM cortext_active_signal_embeddings");
+  REQUIRE (AnyToLongLong (rows[0].at ("n")) == capacity);
+  REQUIRE (AnyToLongLong (rows[0].at ("old_present")) == 0);
+  REQUIRE (AnyToLongLong (rows[0].at ("new_present")) == 1);
+}
+
 TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
            "[operations][memory_storage][supersession][fanout_cache]")
 {

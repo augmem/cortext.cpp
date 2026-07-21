@@ -117,12 +117,12 @@
     ]
   },
   "pr6_exact_head_ci_repair": {
-    "decision": "seventeen-review-thread-repair-active",
+    "decision": "twenty-three-review-thread-repair-active",
     "prior_exact_head": "764e4af202a91120dae85e1d6b0d69e2ce97aa5d",
     "implementation_repair_commit": "89a06084dd05710f90572c1b7bac7e17fab79122",
     "followup_repair_commit": "25cf7b130e87837d0ed813b0e0ffda5a50701651",
     "monitor_head_binding": "resolve the live GitHub PR head at every re-entry because a repository record cannot content-address its own containing record-only commit",
-    "current_exact_head_ci": "implementation and record repair head cca844d758bc9ad7ddd12048932c274da514d8a6 is synchronized with current main; eleven checks are green, including Linux sanitizer, and Windows job 88675883348 is the only failure because checkout converted the unified HNSW patch to CRLF before git apply --check",
+    "current_exact_head_ci": "cumulative repair head d2213ea42f58666509ef96b22c86dca55d280584 is synchronized with current main and all twelve exact-head checks are green; the PR bot current-head rereview opened six P2 threads covering eviction/supersession ordering, post-family sparse underfill, timestamp-recency ring replacement, emotional eligibility-before-limit, single-owner RIF active-row publication, and retired-generation consolidation counting; all six are repaired locally and remain unresolved until the replacement head is pushed and proved",
     "windows_zig_path_repair": {
       "failing_job": "zig-cli-install (windows-latest, cortext_cli.exe)",
       "failing_head": "25cf7b130e87837d0ed813b0e0ffda5a50701651",
@@ -159,6 +159,15 @@
       "active_ci_repair": "pin cmake/hnswlib-prefetch-bounds.patch to text eol=lf so Windows checkout preserves valid unified-diff bytes without platform-specific algorithm behavior",
       "next_gate": "local proof, fresh recursive code review, final record review, non-force push, and resulting exact-head CI"
     },
+    "six_thread_repair": {
+      "review_owner": "the current user explicitly selected the replacement-head PR bot rereview instead of a local recursive blind-review loop for bot-comment repairs",
+      "candidate_boundary": "six deterministic code repairs, six focused regressions, paper/manuscript parity, exact local full-suite proof, non-force push, proof replies, thread resolution, replacement-head bot rereview, and exact-head CI",
+      "focused_proof": "36 assertions in six cases; the sparse-family case proves 769 eligible activated rows before family collapse, rejection of the post-collapse sparse certificate, and a nonempty bounded exact fallback result",
+      "broader_proof": "memory storage 460 assertions in 21 cases; emotional cascade 149 in 25; active RIF 311 in 12; bounded consolidation 110 in 6; eviction 40 in 5; SQLite HNSW 2,639 in 22",
+      "full_proof": "exact-binary clean Debug LLVM 21 media-enabled CTest passed 39,281 assertions in 710 cases in 1,413.12 seconds on binary SHA-256 02c9615a918b2675517df3dce76b7d8709ec9fcbfe32e3766da66823e749c2f1",
+      "thread_disposition": "six current-head P2 threads remain open until reviewed replacement code and exact proof are pushed",
+      "next_gate": "rebuild paper traceability, push without force, reply and resolve the six threads, then let the PR bot rereview and monitor exact-head CI"
+    },
     "review_threads": [
       "https://github.com/augmem/cortext/pull/6#discussion_r3620394273",
       "https://github.com/augmem/cortext/pull/6#discussion_r3620394282",
@@ -176,7 +185,13 @@
       "PRRT_kwDOR3IQMM6SlrZg",
       "PRRT_kwDOR3IQMM6SopGj",
       "PRRT_kwDOR3IQMM6SopGm",
-      "PRRT_kwDOR3IQMM6SopGo"
+      "PRRT_kwDOR3IQMM6SopGo",
+      "PRRT_kwDOR3IQMM6SqPHn",
+      "PRRT_kwDOR3IQMM6SqPHr",
+      "PRRT_kwDOR3IQMM6SqPHu",
+      "PRRT_kwDOR3IQMM6SqPHx",
+      "PRRT_kwDOR3IQMM6SqPH2",
+      "PRRT_kwDOR3IQMM6SqPH4"
     ],
     "repairs": [
       "calibrate migrated lazy-RIF state transactionally before working-memory hydration and rebuild the disposable epoch from committed persistent authority",
@@ -199,7 +214,13 @@
       "treat sparse supersession activation as candidates rather than an exact coverage certificate, retaining exact historical proof or SQLite fallback even though this can restore history-sized write work",
       "backfill the migration-30 empty active-signal ring with the newest knob-derived legacy exact-vector window before the first post-migration aggregate-linked write",
       "resolve legacy embedding-only RIF candidates to every memory sharing the embedding while retaining the ordinary structured memory-scoped path",
-      "fall back to exact SQL seed discovery when ASSOCIATION filtering underfills a sparse HNSW proposal"
+      "fall back to exact SQL seed discovery when ASSOCIATION filtering underfills a sparse HNSW proposal",
+      "remove an evicted replacement from the retrieval surface before recomputing supersession eligibility for its targets",
+      "reject a sparse seed certificate after exact family collapse when distinct selected families underfill, reopening the complete processor-surface or SQL seed path",
+      "replace exact signal-ring rows by timestamp and stable signal-id tie rather than signal-id modulo, including out-of-order writes and slot gaps",
+      "apply emotional intensity, arousal, and recent-window eligibility before bounded intensity ordering and truncation",
+      "leave disposable RIF active_rows unchanged until post-commit shadow publication applies each membership delta exactly once",
+      "count and select only current recovery-clock-generation RIF rows during consolidation so retired generations do not consume the active ceiling"
     ],
     "source_sha256": {
       "signal_processor": "0fb2b4d064531bbbfd86c270072e4f60b454b8db7059d9274603e3de7c784306",
@@ -232,18 +253,27 @@
       ,"competition_test": "3751cb6fea2ad83962a264fc8be3f496bf623835d804b2d5f0979e89cd3aee06"
       ,"graph_retrieval_source": "a7e1c1f92b91d18164167fffa0550797f72b4b0a167430d4acc703673082985d"
       ,"graph_retrieval_test": "fa60d62e9141b92c9096634ecfdd7ce06d472b3ff7a1e43791b476080d3174b2"
+      ,"active_signal_embedding_ring_six_thread": "d498573e9305f97481ba182fa5bbe68878dbd0fb6b10a7b5dcc15d99ab4422a1"
+      ,"competition_six_thread": "18ee4f12f68d37f85d81b790571cfaafd3ef8a204437bb7165b9618a6e2b3b0c"
+      ,"consolidation_six_thread": "5068ffc72f5168b5f41a84b2cedd274d1f8363a97528e33ba43e7f06c16af8aa"
+      ,"emotion_cascade_six_thread": "9a2b630d798367d0d80068a742055fdd67952187160062aeb660ca272bdc4486"
+      ,"emotional_metadata_cache_six_thread": "76672dc8a6c4d18d9ed4c309beb7f50494b8f09935f85ac7bc8c14551f9f35f9"
+      ,"graph_retrieval_six_thread": "1f109a81c2b608b960363659a278063f766153cff30dca131ff815bb3d40d3cb"
+      ,"memory_strength_six_thread": "d3cd685fcd47de03d9876289607eec8e054d342f938c37e9b924c64969c6daee"
+      ,"exact_test_binary_six_thread": "02c9615a918b2675517df3dce76b7d8709ec9fcbfe32e3766da66823e749c2f1"
     },
     "local_proof": {
       "preceding_full_media_ctest": "preceding exact candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 38,730 assertions in 697 cases",
       "preceding_full_media_test_binary_sha256": "0fd25b6e322913cb0e76e3aa5a1fbcc6836d8696b6bbd5886224a3144fea1ec8",
-      "current_full_media_ctest": "exact cumulative LF-checkout and seventeen-thread repaired candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 39,245 assertions in 704 cases",
-      "current_full_media_test_binary_sha256": "c5508e7b083d77cac768b717c04af0862cf64d7c48d339e5a3aa1c0f6b00f068",
+      "current_full_media_ctest": "exact cumulative six-current-head-thread repaired candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 39,281 assertions in 710 cases",
+      "current_full_media_test_binary_sha256": "02c9615a918b2675517df3dce76b7d8709ec9fcbfe32e3766da66823e749c2f1",
       "rif_focus": "312 assertions in 19 cases",
       "hnsw_focus": "the exact canonical-entry reactivation, missing-snapshot ordinary-search restart, and prior-snapshot-free recenter rebuild regressions pass in the four-case 107-assertion follow-up set",
       "consolidation_focus": "the four-case follow-up set passes 107 assertions, including both clustered-row prefilter arms, the eligible-only inactive query plan, and migration 34 structure",
       "zig_build_local_patch": "fresh Zig text-only check passes 12/12; a core.autocrlf=true checkout retains an LF-only patch that applies cleanly, while the CRLF-adversarial stream is rejected as corrupt; the build-local patch remains an explicit input and the global hnswlib cache remains unpatched",
       "new_review_thread_focus": "27-point active-signal ring proof passes 225 assertions; a neutral exact restart passes 154 assertions; adversarial fallback hydration passes 5 assertions; sparse supersession exact-coverage regression passes 15 assertions; broader MemoryStorage passes 451 assertions in 20 cases and hydration passes 173 assertions in 13 cases",
       "latest_review_thread_focus": "migration-30 exact-ring upgrade passes 155 assertions; embedding-only shared-memory RIF passes 5 assertions; sparse ASSOCIATION underfill fallback passes 4 assertions; broader recent-context passes 309 assertions in 2 cases, competition passes 331 assertions in 17 cases, and SQLite HNSW retrieval passes 2,638 assertions in 21 cases",
+      "six_thread_focus": "six focused regressions pass 36 assertions; broader memory storage passes 460 assertions in 21 cases, emotional cascade 149 in 25, active RIF 311 in 12, bounded consolidation 110 in 6, eviction 40 in 5, and SQLite HNSW 2,639 in 22",
       "wasm_bundle": "built successfully with Emscripten 4.0.18",
       "focused_test_binary_sha256": "c5508e7b083d77cac768b717c04af0862cf64d7c48d339e5a3aa1c0f6b00f068",
       "wasm_sha256": "17d31e0a61327e91d7a53577b73689442583d5f4c84aa76d5844ac309e9791aa"
@@ -261,7 +291,7 @@
     },
     "unresolved_limits": [
       "Windows execution and replacement exact-head CI for the LF checkout repair remain pending",
-      "the three newest P2 review-thread repairs have focused, broader, and full-suite deterministic proof; the current user waived the local recursive blind-review loop for bot-comment repairs, so the replacement-head PR bot rereview, non-force push, proof-backed replies, and exact-head CI remain",
+      "the six current-head P2 repairs have focused and broader deterministic proof; exact-binary full-suite completion, non-force push, proof-backed replies, thread resolution, replacement-head PR bot rereview, and exact-head CI remain",
       "legacy embedding-only RIF compatibility may perform work proportional to shared-embedding membership; ordinary structured competition remains memory-scoped",
       "sparse graph retrieval falls back to the exact SQL seed path when operation-specific eligibility filtering underfills, so store-sized fallback work remains possible",
       "the three newest P2 thread repairs have full applicable proof and completed recursive review, are pushed at cca844d758bc9ad7ddd12048932c274da514d8a6, and their proof-backed threads are resolved; resulting exact-head CI remains pending",

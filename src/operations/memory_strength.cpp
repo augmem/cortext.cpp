@@ -672,9 +672,9 @@ UpdateMemoryStrength::Execute (OperationContext &context, Transaction &tx) const
 
   for (const long long memory_id : evictable_memory_ids)
     {
+      p_ctx.RemoveRetrievalSurface (memory_id);
       association_fanout_cache::NotifyRetrievalSurfaceChanged (p_ctx,
                                                                memory_id);
-      p_ctx.RemoveRetrievalSurface (memory_id);
       retrieval_trace::RecordSurfaceRemove (memory_id);
       historical_surface_search_cache_internal::RemoveCurrent (p_ctx,
                                                                 memory_id);

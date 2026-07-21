@@ -5834,6 +5834,17 @@ it by *R* only until the 9*C* ceiling, fixes downstream activation at
 graph construction. These are knob-derived finite limits, not midpoint
 constants.
 
+Sparse activation is candidate generation rather than an exact
+completeness certificate. The route first rejects an activated proposal
+when ordinary eligibility leaves fewer rows than the requested seed
+count. It then performs the exact cosine-family collapse and repeats the
+cardinality check. This second check matters when the sparse proposal
+contains enough eligible memory rows but several belong to the same
+semantic family; if fewer distinct families remain, the operation
+rejects the sparse cache certificate and reopens the complete
+processor-surface or authoritative SQL seed path instead of returning a
+silently underfilled result.
+
 Consolidation changes activation locality without changing SQLite
 authority or introducing a second route. Restart opens at the 9*C*
 ceiling because in-process query age is not durable; every successful
@@ -6207,21 +6218,21 @@ Emotional cascade metadata is hydrated into a private, rebuildable
 processor cache keyed by memory id and base embedding id. The cache
 preserves the SQL aggregation contract for shared embeddings by
 retaining every member row and deriving current intensity and half-life
-bonus with the same per-embedding minima. Its global bounded
-flashbulb-source prefix is ordered by descending emotional intensity
-with ascending memory-id ties. A source insertion, removal, or intensity
-mutation marks that prefix dirty; before the next cascade, SQLite
-refreshes exactly the knob-derived prefix through a partial
-intensity/memory-id index and `LIMIT`, so an excluded source can enter
-after a retained source falls without a store-sized cache scan. This
-establishes intensity-before-truncation ordering, not complete selection
-equivalence: the cache bounds the global flashbulb prefix before cascade
-recency/arousal eligibility, while the fallback SQL applies those
-eligibility predicates before `LIMIT`. Emotional consolidation
-overwrites the affected embedding family, cascade propagation applies
-the existing maxima, storage and shallow consolidation append rows, and
-eviction removes them. Journal-aware rollback discards and rehydrates
-this database-derived cache, while arbitrary custom pipelines retain the
+bonus with the same per-embedding minima. Its bounded flashbulb-source
+prefix is ordered by descending emotional intensity with ascending
+memory-id ties. Before each cascade, SQLite applies the event’s
+intensity, arousal, and recent-window predicates and only then orders
+and truncates to the knob-derived source limit. The private cache
+therefore consumes the same eligible prefix as the SQL fallback: a stale
+or low-arousal high-intensity row cannot hide a lower-intensity eligible
+source. This is selection-equivalence evidence, not a claim that SQLite
+can always locate that prefix in work proportional to the returned
+limit; a history with many higher-intensity ineligible rows may require
+additional indexed filtering. Emotional consolidation overwrites the
+affected embedding family, cascade propagation applies the existing
+maxima, storage and shallow consolidation append rows, and eviction
+removes them. Journal-aware rollback discards and rehydrates this
+database-derived cache, while arbitrary custom pipelines retain the
 complete snapshot path. This changes execution ownership only; source
 thresholds, tie order, traversal, decay, updates, and persisted rows are
 unchanged. When multiple emotional sources require traversal, the
@@ -6386,13 +6397,17 @@ search because the authoritative surface was already searched. Current
 writes are excluded by timestamp, and working-memory overlap filters
 prevent the retrieval result from echoing the active memory tail.
 Association edges are used as graph evidence; they do not bypass final
-scoring or output caps. One dispatch exposes at most one actually used
-retrieval candidate, so retrieval does not synthesize reinforcement pair
-edges from the packet. Existing `reinforces` edges remain eligible for
-decay, pruning, degree normalization, and graph evidence. Historical
-public knob helpers for the removed packet-pair writer remain
-source-compatible calibrations; only the step calibration still feeds
-the production pruning floor.
+scoring or output caps. When eviction removes a replacement memory from
+the processor surface, removal is published before its outgoing
+`supersedes` targets are recomputed. The sidecar therefore cannot retain
+an activation timestamp derived from a surface entry that has just been
+evicted. One dispatch exposes at most one actually used retrieval
+candidate, so retrieval does not synthesize reinforcement pair edges
+from the packet. Existing `reinforces` edges remain eligible for decay,
+pruning, degree normalization, and graph evidence. Historical public
+knob helpers for the removed packet-pair writer remain source-compatible
+calibrations; only the step calibration still feeds the production
+pruning floor.
 
 The retrieval trace path records a ranking ledger for selected and
 rejected candidates. Production graph retrieval populates composite
@@ -6495,14 +6510,21 @@ corners. The logical rounding rule is C++ `std::lround`, so half-integer
 ties round away from zero. For example, *F* = 1/128, *S* = *T* = 0
 yields 65 rather than 64. The logical *B* + 1 probe remains an
 overflow/completion check; it is not a fetched or processed extra row.
-Slot selection is `(signal_id - 1) mod Q`, so each ring upsert replaces
-at most one prior exact-vector row. One accepted pipeline event may
-persist multiple accumulated signal records and therefore perform
-multiple bounded upserts; the measured Natural maximum of 14 ring-table
-mutations came from the earlier *B*-capacity experiment and is not a new
-*Q*-capacity benchmark. If knobs change, the table rehashes only the
-newest rows that fit the newly resolved *Q* and remains bounded by the
-old or new knob-derived capacity throughout the transition.
+When the table is below *Q*, an upsert occupies its lowest free bounded
+slot. When it is full, replacement is owned by the oldest
+`(timestamp, signal_id)` frontier; an out-of-order vector older than
+that frontier is ignored. Deletion gaps accept the next presented exact
+vector and the timestamp frontier resumes ownership as soon as the table
+is full. Existing signal identities update in place. Thus row-id gaps
+and out-of-order ingestion cannot make a numerically newer identifier
+displace a more recent event, and every ordering operation is over at
+most *Q* rows. One accepted pipeline event may persist multiple
+accumulated signal records and therefore perform multiple bounded
+upserts; the measured Natural maximum of 14 ring-table mutations came
+from the earlier *B*-capacity experiment and is not a new *Q*-capacity
+benchmark. If knobs change, the table rehashes only the newest rows that
+fit the newly resolved *Q* and remains bounded by the old or new
+knob-derived capacity throughout the transition.
 
 When the ring contains rows, recent-context restart hydration admits
 only signals with an exact ring vector; it does not silently substitute
@@ -6521,13 +6543,14 @@ vectors into an apparently full exact window. The global vector index
 consequently contains memory centroids rather than a growing population
 of signal-only decoys. The schema and routing code contain no modality
 or `source_id` branch; text, audio, image, shared, and opaque sources
-enter after encoding through the same slot formula. Direct regressions
-cover mixed modality/source labels, knob changes, all 27 low/mid/high
-F/S/T combinations, and a 151-vector neutral restart whose restored
-identities equal the exact signal vectors. A separate upgrade regression
-starts from 150 legacy exact signals, performs the first post-migration
-aggregate-linked write, and restores all 151 exact vectors; it passes
-155 assertions. This does not claim bounded whole-engine restart.
+enter after encoding through the same bounded timestamp frontier. Direct
+regressions cover mixed modality/source labels, knob changes, all 27
+low/mid/high F/S/T combinations, and a 151-vector neutral restart whose
+restored identities equal the exact signal vectors. A separate upgrade
+regression starts from 150 legacy exact signals, performs the first
+post-migration aggregate-linked write, and restores all 151 exact
+vectors; it passes 155 assertions. This does not claim bounded
+whole-engine restart.
 
 Emotional propagation separately limits enqueued mutation statements to
 the existing activation target *A* = 2*C* + 2*B*. This is a hard bound
@@ -6568,6 +6591,17 @@ per changed slot during normal persistence, and graph writes perform
 only O(1) cache invalidation. None adds a store-size-dependent query or
 eager graph reconstruction; working-memory persistence remains bounded
 by the configured live-slot capacity.
+
+The RIF shadow epoch is a disposable SQLite projection of committed
+persistent state. Suppression and recovery stage changed identities and
+clock values while the persistent transaction is open, but they do not
+pre-adjust the shadow’s `active_rows` counter. After the persistent
+commit, publication compares the old and new shadow membership and
+applies each insertion or removal exactly once. Consolidation’s
+active-RIF count and both candidate arms join the singleton recovery
+clock on the current generation; retired-generation rows may await
+bounded materialization, but they neither consume the active work
+ceiling nor enter the current active candidate frontier.
 
 The retained long-horizon optimization target is that mean process
 latency stays approximately flat as the database grows. The July 2026
@@ -6674,13 +6708,15 @@ The current branch includes the following implementation-level changes:
 <td>replace per-event recovery of every active row with a persistent
 global log clock, indexed exact-threshold expiry, generation resets, and
 a bounded connection-local SQLite active-epoch projection; publish the
-projection only after the shared persistent commit; resolve a legacy
-embedding-only loser to every memory sharing that embedding</td>
+projection only after the shared persistent commit and change its
+active-row count only from the published membership delta; resolve a
+legacy embedding-only loser to every memory sharing that embedding</td>
 <td>effective strength, suppression, timestamp, <span
 class="math inline">10<sup>−9</sup></span> freeze, restart, rollback,
 caller SQL, eviction, and deterministic ranking remain exact;
 publication failure rebuilds from persistent authority without replay;
-Natural and Durable use the same transaction and Durable adds only its
+retired generations do not consume the current active ceiling; Natural
+and Durable use the same transaction and Durable adds only its
 checkpoint barrier; no source-id or modality branch and no full-history
 projection; ordinary structured competition remains memory-scoped, while
 legacy embedding-only compatibility work may scale with shared-embedding
@@ -6735,10 +6771,12 @@ not activation edges</td>
 <td>derive target-to-earliest-replacement timestamps in an internal
 execution sidecar beside the shared association fanout cache and
 incrementally publish committed MemoryStorage supersession edges instead
-of invalidating and rebuilding all fanout rows</td>
+of invalidating and rebuilding all fanout rows; remove an evicted
+replacement surface before recomputing its targets</td>
 <td>exact edge direction, base embedding ids, strict timestamp boundary,
 source/modality independence, SQLite fallback, rollback rehydration, and
-the public processor layout are retained</td>
+the public processor layout are retained; an evicted replacement cannot
+leave a stale target timestamp</td>
 </tr>
 <tr>
 <td>reconstruction</td>
@@ -6780,10 +6818,12 @@ explicitly unclaimed</td>
 <td>score vector similarity first, restrict recency to a tie-break, cap
 graph bonus, reserve final occupancy for direct semantic anchors, and
 reject an underfilled sparse seed proposal after operation-specific
-eligibility filtering</td>
+eligibility filtering and again after exact semantic-family
+collapse</td>
 <td>recent unrelated rows and noisy graph neighbors cannot displace the
-semantic seed surface; <code>ASSOCIATION</code> routing rows cannot
-consume sparse slots and suppress the exact SQL fallback</td>
+semantic seed surface; neither <code>ASSOCIATION</code> routing rows nor
+duplicate activated family members can suppress the exact SQL
+fallback</td>
 </tr>
 <tr>
 <td>rollback snapshots</td>
@@ -6806,25 +6846,28 @@ and retention semantics are unchanged</td>
 <tr>
 <td>emotional cascade metadata</td>
 <td>maintain a private rebuildable cache of per-memory emotional rows,
-per-embedding shared-member minima, recency-ordered flashbulb sources,
-and the expandable topology footprint of the last fixed point; update it
-at the same successful storage, consolidation, cascade, association, and
-eviction decisions and rehydrate it after journal-aware rollback;
-caller-supplied roots invalidate the sidecar before forwarding their
-first transaction statement, while cache-only roots retain their exact
-snapshot; share breadth-first edge visits across source-order 64-bit
-batches while retaining a distinct visited bit and radius for every
-source</td>
+per-embedding shared-member minima, runtime-eligible flashbulb sources,
+and the expandable topology footprint of the last fixed point; apply
+intensity, arousal, and recent-window predicates before intensity-order
+truncation; update the cache at the same successful storage,
+consolidation, cascade, association, and eviction decisions and
+rehydrate it after journal-aware rollback; caller-supplied roots
+invalidate the sidecar before forwarding their first transaction
+statement, while cache-only roots retain their exact snapshot; share
+breadth-first edge visits across source-order 64-bit batches while
+retaining a distinct visited bit and radius for every source</td>
 <td>source eligibility and stable tie order, shared-embedding
 <code>MIN</code>/<code>MAX</code> semantics, shortest depth per source,
 first-source-wins ordering, custom raw-SQL updates within the current
 transaction, update decisions, and durable database state match the
-scalar path; an inserted edge outside every source’s remaining-radius
-footprint advances the fixed point without a graph walk, topology
-rebuilds invalidate conservatively, batches continue for arbitrary
-source counts, and neither path keys behavior by source id or modality;
-ordinary engine-owned snapshot work still copies zero store-sized cache
-entries</td>
+scalar path; high-intensity stale or low-arousal rows cannot hide
+eligible sources, though locating the eligible prefix is not claimed to
+require only returned-prefix work; an inserted edge outside every
+source’s remaining-radius footprint advances the fixed point without a
+graph walk, topology rebuilds invalidate conservatively, batches
+continue for arbitrary source counts, and neither path keys behavior by
+source id or modality; ordinary engine-owned snapshot work still copies
+zero store-sized cache entries</td>
 </tr>
 <tr>
 <td>synaptic tagging</td>
@@ -8793,11 +8836,14 @@ currently be outside the prefix. The retained repair marks rank-changing
 mutations dirty and rebuilds only the knob-derived prefix from a partial
 SQLite index. Regressions cover a retained source falling below an
 excluded source and an excluded source rising to the front; query-plan
-proof confirms that refresh uses the index rather than a store scan.
-This proof is specifically intensity-before-truncation. The bounded
-cache still chooses its global flashbulb prefix before recency/arousal
-eligibility, whereas fallback SQL filters eligibility before `LIMIT`;
-complete cache/fallback source-selection equivalence remains unclaimed.
+proof confirms that refresh uses the index rather than a store scan. At
+this experiment state the proof was specifically
+intensity-before-truncation: the bounded cache still chose its global
+flashbulb prefix before recency/arousal eligibility, whereas fallback
+SQL filtered eligibility before `LIMIT`. The later exact-head edge
+repair recorded below moves those predicates before truncation and
+supersedes this selection gap; it does not retroactively turn this
+earlier timing run into evidence for the repaired query.
 
 The complete exact-winner replay kept top-1 at 1.0, recall at 16 at
 0.999386, and semantic coverage at 0.999381, but it did not improve the
@@ -8971,6 +9017,28 @@ passes 4 assertions. Broader recent-context, competition, and SQLite
 HNSW groups pass 309, 331, and 2,638 assertions respectively. These are
 deterministic source-health and completeness experiments, not new
 long-horizon performance or whole-engine boundedness evidence.
+
+A later exact-head bot review found six additional edge cases in that
+repair surface. They were reproduced and corrected together. Eviction
+now removes a replacement from the retrieval surface before recomputing
+supersession eligibility. Sparse retrieval rechecks requested
+cardinality after exact semantic-family collapse, so duplicate activated
+rows cannot certify a distinct-family underfill or suppress the complete
+processor/SQL seed path. The exact-signal ring orders replacement by
+signal timestamp with signal identity only as a stable tie, including
+out-of-order writes and physical slot gaps. Emotional source refresh
+applies the runtime recency, arousal, and intensity predicates before
+the bounded intensity order and `LIMIT`. RIF suppression and recovery
+leave `active_rows` unchanged until post-commit shadow publication
+applies the membership delta exactly once. Finally, consolidation counts
+and selects only rows whose generation matches the singleton recovery
+clock, so retired rows do not consume the active-RIF ceiling. The six
+focused regressions pass 36 assertions; the surrounding memory-storage,
+emotional-cascade, active-RIF, bounded-consolidation, and eviction
+groups pass 460, 149, 311, 110, and 40 assertions respectively. These
+tests establish deterministic edge behavior on the repaired local
+binary; they are not a replacement for exact-head CI, the historical
+long-horizon quality matrix, or a new whole-engine boundedness claim.
 
 The remaining consolidation scan was bounded by the same knobs. Let
 *A* = 2*C* + 2*B* and *N* = max (8, ⌊*B*/2⌋). Score consolidation now

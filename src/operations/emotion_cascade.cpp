@@ -608,7 +608,7 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
             "CORTEXT_PROFILE_EMOTIONAL_METADATA_SQL");
   if (use_metadata_cache
       && !emotional_metadata_cache_internal::RefreshBoundedSourceOrder (
-          p_ctx, tx))
+          p_ctx, tx, recent_window_ts, theta_intensity, theta_arousal))
     use_metadata_cache = false;
   const std::uint64_t emotional_input_generation
       = use_metadata_cache
