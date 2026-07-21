@@ -1547,6 +1547,22 @@ tests establish deterministic edge behavior on the repaired local binary;
 they are not a replacement for exact-head CI, the historical long-horizon
 quality matrix, or a new whole-engine boundedness claim.
 
+The next exact-head rereview exposed three narrower ordering and recovery
+edges. An exact-signal ring that becomes empty after migration now backfills
+only legacy signal embeddings that can be distinguished from their owning
+memory centroid, so surviving flattened rows cannot be relabeled as exact.
+Sparse supersession applies self, kind, and timestamp eligibility to the full
+activated proposal before its candidate truncation, preserving an eligible
+duplicate placed immediately behind a nearer ineligible prefix. Reactivating a
+persisted HNSW node now restores it as the canonical entry when it ties the
+current maximum level and has the lower memory id. These changes preserve the
+existing SQLite authority, knob-derived envelopes, source/modality neutrality,
+and Natural/Durable operation path; they add no schema or public API. Focused
+regressions construct the emptied-ring recovery, a larger-than-route
+supersession population with an ineligible top-k prefix, and a same-level
+remove/reactivate tie. They are deterministic correctness checks rather than a
+new throughput, long-horizon quality, or engine-wide boundedness result.
+
 The remaining consolidation scan was bounded by the same knobs. Let
 $A=2C+2B$ and $N=\max(8,\lfloor B/2\rfloor)$. Score consolidation now admits
 at most $A$ low-effective-strength long-term identities after merging two

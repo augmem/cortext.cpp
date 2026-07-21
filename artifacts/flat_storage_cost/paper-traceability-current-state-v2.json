@@ -117,12 +117,12 @@
     ]
   },
   "pr6_exact_head_ci_repair": {
-    "decision": "twenty-three-review-thread-repair-active",
+    "decision": "twenty-six-review-thread-repair-active",
     "prior_exact_head": "764e4af202a91120dae85e1d6b0d69e2ce97aa5d",
     "implementation_repair_commit": "89a06084dd05710f90572c1b7bac7e17fab79122",
     "followup_repair_commit": "25cf7b130e87837d0ed813b0e0ffda5a50701651",
     "monitor_head_binding": "resolve the live GitHub PR head at every re-entry because a repository record cannot content-address its own containing record-only commit",
-    "current_exact_head_ci": "cumulative repair head d2213ea42f58666509ef96b22c86dca55d280584 is synchronized with current main and all twelve exact-head checks are green; the PR bot current-head rereview opened six P2 threads covering eviction/supersession ordering, post-family sparse underfill, timestamp-recency ring replacement, emotional eligibility-before-limit, single-owner RIF active-row publication, and retired-generation consolidation counting; all six are repaired locally and remain unresolved until the replacement head is pushed and proved",
+    "current_exact_head_ci": "cumulative repair head 3f4d2e5e7c5bf981e24f942b4bf29020ffbc4c7f is synchronized with current main and all twelve exact-head checks are green; all six prior P2 threads are proof-replied and resolved; the PR bot exact-head rereview opened three new threads covering flattened-row ring recovery, sparse supersession eligibility-before-limit, and canonical same-level HNSW reactivation; all three are repaired locally and remain unresolved until the replacement head is pushed and proved",
     "windows_zig_path_repair": {
       "failing_job": "zig-cli-install (windows-latest, cortext_cli.exe)",
       "failing_head": "25cf7b130e87837d0ed813b0e0ffda5a50701651",
@@ -168,6 +168,15 @@
       "thread_disposition": "six current-head P2 threads remain open until reviewed replacement code and exact proof are pushed",
       "next_gate": "rebuild paper traceability, push without force, reply and resolve the six threads, then let the PR bot rereview and monitor exact-head CI"
     },
+    "three_latest_thread_repair": {
+      "review_owner": "the current user explicitly selected the replacement-head PR bot rereview instead of a local recursive blind-review loop for bot-comment repairs",
+      "candidate_boundary": "three deterministic code repairs, three focused regressions, paper/manuscript parity, exact local full-suite proof, non-force push, proof replies, thread resolution, replacement-head bot rereview, and exact-head CI",
+      "focused_proof": "39 assertions in three cases: an emptied exact ring excludes surviving flattened centroids, an eligible supersession target behind 67 nearer ineligible activated rows remains visible without SQL fallback, and same-level HNSW reactivation restores the lower canonical memory id",
+      "broader_proof": "active-signal embedding population 274 assertions in 4 cases; memory-storage supersession 111 in 10; SQLite HNSW regressions 1,259 in 11; neutral legacy-ring restart 155 in 1",
+      "full_proof": "exact Debug LLVM 21 media-enabled CTest passed in four disjoint Catch2 shards with fixed seed 424242: 39,305 assertions in 712 cases, slowest-shard wall 505.87 seconds, binary SHA-256 9a2d819dddef5a2355e4f4beead7f83646b6865ba02ad3ea41aa0bf25a72e67b",
+      "thread_disposition": "three exact-head review threads remain open until the replacement code and exact proof are pushed",
+      "next_gate": "rebuild paper traceability, push without force, reply and resolve the three threads, then let the PR bot rereview and monitor exact-head CI"
+    },
     "review_threads": [
       "https://github.com/augmem/cortext/pull/6#discussion_r3620394273",
       "https://github.com/augmem/cortext/pull/6#discussion_r3620394282",
@@ -191,7 +200,10 @@
       "PRRT_kwDOR3IQMM6SqPHu",
       "PRRT_kwDOR3IQMM6SqPHx",
       "PRRT_kwDOR3IQMM6SqPH2",
-      "PRRT_kwDOR3IQMM6SqPH4"
+      "PRRT_kwDOR3IQMM6SqPH4",
+      "PRRT_kwDOR3IQMM6Ss08m",
+      "PRRT_kwDOR3IQMM6Ss08q",
+      "PRRT_kwDOR3IQMM6Ss08w"
     ],
     "repairs": [
       "calibrate migrated lazy-RIF state transactionally before working-memory hydration and rebuild the disposable epoch from committed persistent authority",
@@ -220,7 +232,10 @@
       "replace exact signal-ring rows by timestamp and stable signal-id tie rather than signal-id modulo, including out-of-order writes and slot gaps",
       "apply emotional intensity, arousal, and recent-window eligibility before bounded intensity ordering and truncation",
       "leave disposable RIF active_rows unchanged until post-commit shadow publication applies each membership delta exactly once",
-      "count and select only current recovery-clock-generation RIF rows during consolidation so retired generations do not consume the active ceiling"
+      "count and select only current recovery-clock-generation RIF rows during consolidation so retired generations do not consume the active ceiling",
+      "backfill an empty exact-signal ring only from legacy signal embeddings certifiably distinct from their owning memory centroid, leaving later flattened rows out of exact recovery",
+      "apply current sparse-supersession self, kind, and timestamp eligibility before the knob-derived candidate truncation",
+      "restore a reactivated same-level HNSW node as the canonical entry when its memory id wins the persisted deterministic tie"
     ],
     "source_sha256": {
       "signal_processor": "0fb2b4d064531bbbfd86c270072e4f60b454b8db7059d9274603e3de7c784306",
@@ -232,8 +247,8 @@
       "zig_hnswlib_prepare": "f2ea37b7bfaca95edcb3b6486120b0d0c6c33060b32d96a40f46fafdd53e2773",
       "zig_package_manifest": "25f58d123ab581319b140bed7e4355a7bd524e1e17dce96a219ccea68ec74c9a",
       "hnsw_route_header": "a68c6825551cadd3d9d843986a82ab1294128b993106ffe58d3370e70ec79c82",
-      "hnsw_route_source": "3d6a559de3445a800a18df1e05e4926ce5bef71f0a4123de9990a3c2869e4184",
-      "hnsw_repair_test": "98f092f86b5ef4e10b8c06fe41f15b31127556ce5480565d16fcd2fb8620e8f8",
+      "hnsw_route_source": "c0586a9badb2b8ca9e9c31bc50d26bafe4e6cc4db52159d1e5dfcd848cf6af64",
+      "hnsw_repair_test": "9958cbb5f0effc693a6f41b5772bbafa499dde3e56e6c96d8118ce199bb9a620",
       "consolidation_source": "b6dd39b64318e3720be0da46e62f7457fc6fc41bc48f1e01b5a51b5df5b12880",
       "consolidation_test": "716ed3c2f8568338591453fd1e7776af99d9307be90115e2654e2671fca419e1",
       "emotion_cascade_source": "8135e0f9a07d55a62d6bfdf7f63c83c5b2110237cc208c4fff2ef1ae6e135634",
@@ -241,11 +256,11 @@
       "emotion_cascade_test": "47b0d780994832bbd36f06fcba4abee9d2935ad0267b4c9bd9e7cb6659df5afe",
       "schema_source": "b4c3b0c873fd225781d1eab856a82b3fc2868909f131f867031c71c792f9fbe3",
       "migration_test": "4e76c44cc7ec9d5a1ec26fb963c1291c7f98e47b65050bac8ff4ff0df09b64cc"
-      ,"active_signal_embedding_ring": "01a6d8cdab4dc973a634d499785993427fbc7c83fceb5c78669c78dc3ad1f6af"
+      ,"active_signal_embedding_ring": "9432ed850915067b5f6d8922672215d33454972a3e865181535e8ef590419efa"
       ,"sparse_retrieval_knobs": "d99e020e322c5d28dc1dacbd72c6a650f0eaa4f3561758c379cc62b1d58793ef"
       ,"cortext_hydration": "0ba377e833452cd13520d34c1bf57eaf3a8df5da3607780845a0e6931aa291eb"
-      ,"memory_storage": "2c662b5bdbe22dba92a39335ea5959cf22f38dcaa0cc78e19f19a3aa352f182f"
-      ,"memory_storage_test": "7f8eade4e9b0124551296f6cad3d0a183db07785749fc38dd082665261b154f7"
+      ,"memory_storage": "dac3c9e9a54a217f5488fa751354391c6344a3bb8d48e8044ce00c878c0e5e9c"
+      ,"memory_storage_test": "acea20d1675037cbf3e3497613dc3611515c4dfa48982fdabd3610243543590b"
       ,"cortext_test": "52d2e143f793a3446616bd5d22a4798dddd609b56d9504ac2a9ea2d317e442dd"
       ,"signal_processor_test": "ae69155678e8daa057d02ff11de9f7c04e2836117d6966a6b1f0eb06ca96ac62"
       ,"rif_state_internal": "5e0a58aedfc0db22317bf613fc25297820d138feb6da8621942b1bf23f555ae1"
@@ -261,12 +276,13 @@
       ,"graph_retrieval_six_thread": "1f109a81c2b608b960363659a278063f766153cff30dca131ff815bb3d40d3cb"
       ,"memory_strength_six_thread": "d3cd685fcd47de03d9876289607eec8e054d342f938c37e9b924c64969c6daee"
       ,"exact_test_binary_six_thread": "02c9615a918b2675517df3dce76b7d8709ec9fcbfe32e3766da66823e749c2f1"
+      ,"exact_test_binary_three_latest_thread": "9a2d819dddef5a2355e4f4beead7f83646b6865ba02ad3ea41aa0bf25a72e67b"
     },
     "local_proof": {
       "preceding_full_media_ctest": "preceding exact candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 38,730 assertions in 697 cases",
       "preceding_full_media_test_binary_sha256": "0fd25b6e322913cb0e76e3aa5a1fbcc6836d8696b6bbd5886224a3144fea1ec8",
-      "current_full_media_ctest": "exact cumulative six-current-head-thread repaired candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 39,281 assertions in 710 cases",
-      "current_full_media_test_binary_sha256": "02c9615a918b2675517df3dce76b7d8709ec9fcbfe32e3766da66823e749c2f1",
+      "current_full_media_ctest": "exact cumulative twenty-six-thread repaired candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled, four disjoint Catch2 shards at fixed seed 424242: 39,305 assertions in 712 cases; slowest shard 505.87 seconds",
+      "current_full_media_test_binary_sha256": "9a2d819dddef5a2355e4f4beead7f83646b6865ba02ad3ea41aa0bf25a72e67b",
       "rif_focus": "312 assertions in 19 cases",
       "hnsw_focus": "the exact canonical-entry reactivation, missing-snapshot ordinary-search restart, and prior-snapshot-free recenter rebuild regressions pass in the four-case 107-assertion follow-up set",
       "consolidation_focus": "the four-case follow-up set passes 107 assertions, including both clustered-row prefilter arms, the eligible-only inactive query plan, and migration 34 structure",
@@ -274,6 +290,7 @@
       "new_review_thread_focus": "27-point active-signal ring proof passes 225 assertions; a neutral exact restart passes 154 assertions; adversarial fallback hydration passes 5 assertions; sparse supersession exact-coverage regression passes 15 assertions; broader MemoryStorage passes 451 assertions in 20 cases and hydration passes 173 assertions in 13 cases",
       "latest_review_thread_focus": "migration-30 exact-ring upgrade passes 155 assertions; embedding-only shared-memory RIF passes 5 assertions; sparse ASSOCIATION underfill fallback passes 4 assertions; broader recent-context passes 309 assertions in 2 cases, competition passes 331 assertions in 17 cases, and SQLite HNSW retrieval passes 2,638 assertions in 21 cases",
       "six_thread_focus": "six focused regressions pass 36 assertions; broader memory storage passes 460 assertions in 21 cases, emotional cascade 149 in 25, active RIF 311 in 12, bounded consolidation 110 in 6, eviction 40 in 5, and SQLite HNSW 2,639 in 22",
+      "three_latest_thread_focus": "three focused regressions pass 39 assertions; broader active-signal population passes 274 assertions in 4 cases, supersession passes 111 in 10, SQLite HNSW regressions pass 1,259 in 11, and neutral legacy-ring restart passes 155 in 1",
       "wasm_bundle": "built successfully with Emscripten 4.0.18",
       "focused_test_binary_sha256": "c5508e7b083d77cac768b717c04af0862cf64d7c48d339e5a3aa1c0f6b00f068",
       "wasm_sha256": "17d31e0a61327e91d7a53577b73689442583d5f4c84aa76d5844ac309e9791aa"
@@ -290,11 +307,11 @@
       "modality_branch": false
     },
     "unresolved_limits": [
-      "Windows execution and replacement exact-head CI for the LF checkout repair remain pending",
-      "the six current-head P2 repairs have focused and broader deterministic proof; exact-binary full-suite completion, non-force push, proof-backed replies, thread resolution, replacement-head PR bot rereview, and exact-head CI remain",
+      "Windows execution and all twelve checks passed on exact head 3f4d2e5e7c5bf981e24f942b4bf29020ffbc4c7f; replacement-head CI for the three latest repairs remains pending",
+      "the three latest review-thread repairs have focused, broader, and exact-binary full-suite proof; non-force push, proof-backed replies, thread resolution, replacement-head PR bot rereview, and exact-head CI remain",
       "legacy embedding-only RIF compatibility may perform work proportional to shared-embedding membership; ordinary structured competition remains memory-scoped",
       "sparse graph retrieval falls back to the exact SQL seed path when operation-specific eligibility filtering underfills, so store-sized fallback work remains possible",
-      "the three newest P2 thread repairs have full applicable proof and completed recursive review, are pushed at cca844d758bc9ad7ddd12048932c274da514d8a6, and their proof-backed threads are resolved; resulting exact-head CI remains pending",
+      "the prior nine bot-thread repairs are pushed on 3f4d2e5e7c5bf981e24f942b4bf29020ffbc4c7f, proof-replied and resolved, and all twelve exact-head checks are green; the replacement bot rereview produced the three currently active findings",
       "an old smaller exact-signal ring can temporarily restore fewer than Q exact vectors after a knob increase until new writes refill it; aggregate memory centroids are not substituted",
       "fallback hydration output remains capped at B, but malformed or nonmatching legacy history can require more than B candidate rows to be inspected",
       "exact supersession verification can remain history-sized after bounded sparse current-candidate selection, so flat write cost is not claimed",

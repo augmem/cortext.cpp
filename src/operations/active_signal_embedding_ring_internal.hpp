@@ -126,13 +126,17 @@ EnsureCapacity (Transaction &tx, int capacity)
   if (capacity_rows.empty ())
     {
       // Migration 30 starts with an empty ring while pre-migration signal
-      // rows still reference their exact per-signal embeddings. Capture the
-      // newest legacy window before the first post-migration signal switches
-      // signals.embedding_id to the aggregate memory embedding.
+      // rows may still reference their exact per-signal embeddings. Only
+      // backfill rows whose embedding is certifiably distinct from the owning
+      // memory centroid. A later cascade can empty an established ring while
+      // flattened signal rows remain; those rows must not be relabeled exact.
       auto legacy_rows = tx.Execute (
           "SELECT s.signal_id, e.embedding, s.timestamp AS created_at "
           "FROM signals s "
           "JOIN embeddings e ON e.embedding_id = s.embedding_id "
+          "LEFT JOIN memories m ON m.memory_id = s.memory_id "
+          "WHERE s.memory_id IS NULL "
+          "   OR s.embedding_id != m.embedding_id "
           "ORDER BY s.timestamp DESC, s.signal_id DESC LIMIT ?",
           { static_cast<long long> (capacity) });
       std::reverse (legacy_rows.begin (), legacy_rows.end ());

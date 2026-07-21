@@ -798,6 +798,54 @@ TEST_CASE ("Active signal embedding ring follows timestamp recency across "
   REQUIRE (AnyToLongLong (rows[0].at ("new_present")) == 1);
 }
 
+TEST_CASE ("An emptied exact signal ring does not rebuild from flattened "
+           "memory centroids",
+           "[operations][memory_storage][embedding_population][regression]")
+{
+  namespace ring = operations::active_signal_embedding_ring_internal;
+  auto store = SQLiteStore::Create (":memory:");
+  cortext::testing::InitializeCoreSchema (*store);
+  const int capacity = ring::Capacity (0.0, 0.0, 0.0);
+
+  const Eigen::VectorXf aggregate = UnitVec (0);
+  cortext::testing::SeedEmbeddingV2 (*store, 100, aggregate, 1000);
+  cortext::testing::SeedMemoryV2 (
+      *store, 10, 100, "opaque/flattened", "LONG_TERM", 1.0, 1000);
+  store->Execute (
+      "INSERT INTO signals(signal_id, memory_id, source_id, embedding_id, "
+      "timestamp, modality, created_at) "
+      "VALUES(1, 10, 'opaque/flattened', 100, 1000, 'audio', 1000)");
+  std::vector<float> prior_exact (kEmbeddingDim, 0.0f);
+  prior_exact[1] = 1.0f;
+  auto tx = store->Begin ();
+  ring::InsertAtCapacity (*tx, 1, prior_exact, 1000, capacity);
+  tx->Commit ();
+
+  // Simulate a later cascade that removes every currently retained exact
+  // vector while an older flattened signal row remains authoritative.
+  store->Execute ("DELETE FROM cortext_active_signal_embeddings");
+  store->Execute (
+      "INSERT INTO signals(signal_id, memory_id, source_id, embedding_id, "
+      "timestamp, modality, created_at) "
+      "VALUES(2, 10, 'opaque/new', 100, 2000, 'image', 2000)");
+  std::vector<float> newest_exact (kEmbeddingDim, 0.0f);
+  newest_exact[2] = 1.0f;
+  tx = store->Begin ();
+  ring::Upsert (*tx, 2, newest_exact, 2000, 0.0, 0.0, 0.0);
+  tx->Commit ();
+
+  const auto rows = store->Execute (
+      "SELECT signal_id, embedding FROM cortext_active_signal_embeddings");
+  REQUIRE (rows.size () == 1);
+  REQUIRE (AnyToLongLong (rows.front ().at ("signal_id")) == 2);
+  const auto bytes = BlobFromAny (rows.front ().at ("embedding"));
+  REQUIRE (bytes.size () == static_cast<std::size_t> (kEmbeddingDim)
+                                * sizeof (float));
+  Eigen::VectorXf restored (kEmbeddingDim);
+  std::memcpy (restored.data (), bytes.data (), bytes.size ());
+  REQUIRE (restored.isApprox (UnitVec (2), 0.0f));
+}
+
 TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
            "[operations][memory_storage][supersession][fanout_cache]")
 {
@@ -1142,14 +1190,19 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.0;
+  cfg.focus = 1.0;
   cfg.sensitivity = 0.0;
   cfg.stability = 0.0;
   const auto parameters = sqlite_route::DeriveParameters (
       cfg.focus, cfg.sensitivity, cfg.stability);
-  REQUIRE (parameters.route_capacity == 256);
-  REQUIRE (parameters.backfill_batch_size == 64);
+  REQUIRE (parameters.route_capacity == 512);
+  REQUIRE (parameters.backfill_batch_size == 128);
   const std::size_t population = parameters.route_capacity + 1;
+  const int candidate_limit = core::SupersessionCandidateLimit (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  REQUIRE (candidate_limit == 67);
+  REQUIRE (static_cast<std::size_t> (candidate_limit) < population);
+  const long long expected_target_id = 10 + candidate_limit;
 
   ProcessorContext pctx;
   std::vector<cache::Entry> historical_entries;
@@ -1163,9 +1216,16 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
     {
       const long long memory_id = 10 + static_cast<long long> (index);
       const long long embedding_id = 1000 + static_cast<long long> (index);
-      const long long start_ts = 1000 + static_cast<long long> (index);
+      const bool blocks_unfiltered_top_k
+          = index < static_cast<std::size_t> (candidate_limit);
+      const long long start_ts
+          = blocks_unfiltered_top_k
+                ? 20000 + static_cast<long long> (index)
+                : 1000 + static_cast<long long> (index);
       Eigen::VectorXf embedding = Eigen::VectorXf::Zero (kEmbeddingDim);
-      if (index == 0)
+      if (index < static_cast<std::size_t> (candidate_limit))
+        embedding = UnitVec (0);
+      else if (index == static_cast<std::size_t> (candidate_limit))
         embedding = target;
       else
         {
@@ -1258,8 +1318,8 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
            == 0.0);
   const auto edge_rows = store->Execute (
       "SELECT 1 FROM associations WHERE source_memory_id = ? "
-      "AND target_memory_id = 10 AND edge_type = 'supersedes'",
-      { *ctx.GetStoredMemoryId () });
+      "AND target_memory_id = ? AND edge_type = 'supersedes'",
+      { *ctx.GetStoredMemoryId (), expected_target_id });
   REQUIRE (edge_rows.size () == 1);
   cache::Erase (pctx);
 }

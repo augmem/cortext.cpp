@@ -402,6 +402,53 @@ TEST_CASE ("SQLite sparse route replaces a removed hierarchy entry",
   REQUIRE (restored->front () == 1);
 }
 
+TEST_CASE ("SQLite sparse route restores the canonical same-level entry tie",
+           "[operations][graph][retrieval][hnsw][sqlite][regression]")
+{
+  using HnswRoute
+      = operations::sparse_retrieval_route_internal::Route;
+  using SQLiteRoute
+      = operations::sparse_retrieval_route_sqlite_internal::Route;
+  const auto parameters = operations::sparse_retrieval_route_sqlite_internal::
+      DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  const std::vector<std::pair<long long, Eigen::VectorXf>> entries {
+    { 1, UnitVec (1) }, { 2, UnitVec (2) }, { 3, UnitVec (3) }
+  };
+  auto hnsw = HnswRoute::CreateWithLevelsForTest (
+      kEmbeddingDim, entries, { 2, 2, 1 }, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto route = SQLiteRoute::Create (
+      *store, kEmbeddingDim, entries, *hnsw, parameters);
+  REQUIRE (route);
+
+  REQUIRE (route->Remove (1));
+  REQUIRE (route->StagePendingRemove (1));
+  REQUIRE (route->Seal ());
+  auto meta = store->Execute (
+      "SELECT entry_memory_id, max_level FROM cortext_sparse_route_meta");
+  REQUIRE (meta.size () == 1);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("entry_memory_id")) == 2);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("max_level")) == 2);
+
+  REQUIRE (route->Upsert (1, UnitVec (1)));
+  REQUIRE (route->StagePendingUpsert (1, UnitVec (1)));
+  REQUIRE (route->Seal ());
+  meta = store->Execute (
+      "SELECT entry_memory_id, max_level FROM cortext_sparse_route_meta");
+  REQUIRE (meta.size () == 1);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("entry_memory_id")) == 1);
+  REQUIRE (store::AnyToLongLong (meta.front ().at ("max_level")) == 2);
+
+  auto reopened = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (reopened);
+  const auto result = reopened->Search (UnitVec (1), 3);
+  REQUIRE (result);
+  REQUIRE_FALSE (result->empty ());
+  REQUIRE (result->front () == 1);
+}
+
 TEST_CASE ("SQLite sparse route invalidates stale links after an active "
            "embedding moves",
            "[operations][graph][retrieval][hnsw][sqlite][regression]")

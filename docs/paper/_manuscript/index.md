@@ -6016,8 +6016,10 @@ asks a lower level node for nonexistent upper adjacency. If the removed
 node later becomes active again without changing its embedding,
 row-addressed sealing preserves its persisted links and level and
 promotes it back to the canonical entry whenever that level exceeds the
-current active maximum. Thus metadata continues to name the highest
-active hierarchy root after both deletion and reactivation. If any
+current active maximum, or when it has the same maximum level and the
+lower memory id required by the canonical `(level DESC, memory_id ASC)`
+order. Thus metadata continues to name the highest active hierarchy root
+with its deterministic tie after both deletion and reactivation. If any
 sealed removal overlaps the persisted consolidation activation snapshot,
 the snapshot entry, generation, centroid, and identity list are cleared
 in the same transaction; in-process and restarted queries then use the
@@ -6129,27 +6131,31 @@ materialized on each public call.
 
 The same bounded activation surface now serves supersession selection
 after the current memory population exceeds *C*. `MemoryStorage` asks
-the persisted route for at most *A* identities, exactly reranks those
-current embeddings, and keeps its existing timestamp, kind, threshold,
-duplicate-band, edge-count, and tie rules. On this sparse path the
-latest current embedding is the memory’s active centroid. A bounded HNSW
-result is now treated only as a candidate set, never as proof that it
-covers the exact current population. The historical cache’s exact
-coverage/ranking proof therefore remains active after sparse routing;
-when that proof cannot be established, the existing SQLite fallback
-remains enabled. This prevents an approximate current result from
-suppressing a predecessor outside the activated subset. It deliberately
-permits history-sized supersession verification work on a write, so the
-9*C* + *A* retrieval-row ceiling does not imply flat supersession-write
-cost. This is the accepted correctness side of the
-write-throughput/retrieval-symmetry tradeoff and keeps production-wide
-boundedness unclaimed. Until the route is published, when the dirty
-delta exceeds *C*, or when route validation fails, the operation retains
-the exact fallback. This is one shared, modality- and source-agnostic
-candidate route for Natural and Durable; it does not add a second write
-API or make the connection-local cache authoritative. The 4,000-event
-knob ablation predates this exact-coverage correction and its remaining
-full-horizon limits are reported in the optimization section.
+the persisted route for at most *A* identities, applies self, timestamp,
+and kind eligibility to that activated set before the knob-derived
+candidate cut, and then exactly reranks the surviving current
+embeddings. Threshold, duplicate-band, edge-count, and deterministic tie
+rules remain unchanged. This prevents a nearer ineligible activated
+identity from consuming the top-k slice and hiding an eligible duplicate
+immediately behind it. On this sparse path the latest current embedding
+is the memory’s active centroid. A bounded HNSW result is now treated
+only as a candidate set, never as proof that it covers the exact current
+population. The historical cache’s exact coverage/ranking proof
+therefore remains active after sparse routing; when that proof cannot be
+established, the existing SQLite fallback remains enabled. This prevents
+an approximate current result from suppressing a predecessor outside the
+activated subset. It deliberately permits history-sized supersession
+verification work on a write, so the 9*C* + *A* retrieval-row ceiling
+does not imply flat supersession-write cost. This is the accepted
+correctness side of the write-throughput/retrieval-symmetry tradeoff and
+keeps production-wide boundedness unclaimed. Until the route is
+published, when the dirty delta exceeds *C*, or when route validation
+fails, the operation retains the exact fallback. This is one shared,
+modality- and source-agnostic candidate route for Natural and Durable;
+it does not add a second write API or make the connection-local cache
+authoritative. The 4,000-event knob ablation predates this
+exact-coverage correction and its remaining full-horizon limits are
+reported in the optimization section.
 `TRACE[state:integrated_hnsw_sparse_route_experiment]` and
 `TRACE[state:sqlite_hnsw_knob_ablation]`.
 
@@ -6529,17 +6535,21 @@ knob-derived capacity throughout the transition.
 When the ring contains rows, recent-context restart hydration admits
 only signals with an exact ring vector; it does not silently substitute
 a memory centroid for a missing per-signal vector. Migration 30 itself
-creates an empty ring, so the first capacity check copies the newest *Q*
-signal vectors from their `signals.embedding_id` references. The main
-MemoryStorage path performs that check before it inserts
-aggregate-linked rows. The auxiliary working-memory persistence path may
-insert its new aggregate-linked row first, but the same `Upsert`
-immediately replaces that row’s ring slot with the exact event vector,
-leaving the newest *Q* slots exact in either ordering. A truly empty
-legacy database remains empty. Once any exact ring row exists, an older
-store whose prior ring was smaller can temporarily restore a shorter
-exact context until new writes fill *Q*, rather than mixing aggregate
-vectors into an apparently full exact window. The global vector index
+creates an empty ring, so the first capacity check copies up to the
+newest *Q* legacy signal vectors only when their `signals.embedding_id`
+is certifiably distinct from the owning memory centroid (or the signal
+has no owner). The main MemoryStorage path performs that check before it
+inserts aggregate-linked rows. The auxiliary working-memory persistence
+path may insert its new aggregate-linked row first, but the same
+`Upsert` immediately replaces that row’s ring slot with the exact event
+vector, leaving the newest *Q* slots exact in either ordering. A truly
+empty legacy database remains empty. Once any exact ring row exists, an
+older store whose prior ring was smaller can temporarily restore a
+shorter exact context until new writes fill *Q*, rather than mixing
+aggregate vectors into an apparently full exact window. If a later
+cascade empties the ring while flattened signal rows remain, the same
+certification rule leaves those rows out and begins the new ring only
+from exact vectors supplied by later writes. The global vector index
 consequently contains memory centroids rather than a growing population
 of signal-only decoys. The schema and routing code contain no modality
 or `source_id` branch; text, audio, image, shared, and opaque sources
@@ -9039,6 +9049,24 @@ groups pass 460, 149, 311, 110, and 40 assertions respectively. These
 tests establish deterministic edge behavior on the repaired local
 binary; they are not a replacement for exact-head CI, the historical
 long-horizon quality matrix, or a new whole-engine boundedness claim.
+
+The next exact-head rereview exposed three narrower ordering and
+recovery edges. An exact-signal ring that becomes empty after migration
+now backfills only legacy signal embeddings that can be distinguished
+from their owning memory centroid, so surviving flattened rows cannot be
+relabeled as exact. Sparse supersession applies self, kind, and
+timestamp eligibility to the full activated proposal before its
+candidate truncation, preserving an eligible duplicate placed
+immediately behind a nearer ineligible prefix. Reactivating a persisted
+HNSW node now restores it as the canonical entry when it ties the
+current maximum level and has the lower memory id. These changes
+preserve the existing SQLite authority, knob-derived envelopes,
+source/modality neutrality, and Natural/Durable operation path; they add
+no schema or public API. Focused regressions construct the emptied-ring
+recovery, a larger-than-route supersession population with an ineligible
+top-k prefix, and a same-level remove/reactivate tie. They are
+deterministic correctness checks rather than a new throughput,
+long-horizon quality, or engine-wide boundedness result.
 
 The remaining consolidation scan was bounded by the same knobs. Let
 *A* = 2*C* + 2*B* and *N* = max (8, ⌊*B*/2⌋). Score consolidation now
