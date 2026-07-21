@@ -1470,7 +1470,9 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                   node.active = true;
                   updates[memory_id] = std::move (node);
                   if (next_entry_memory_id == 0
-                      || prior->second.level > next_max_level)
+                      || prior->second.level > next_max_level
+                      || (prior->second.level == next_max_level
+                          && memory_id < next_entry_memory_id))
                     {
                       next_entry_memory_id = memory_id;
                       next_max_level = prior->second.level;

@@ -572,8 +572,10 @@ level node for nonexistent upper adjacency.
 If the removed node later becomes active again without changing its embedding,
 row-addressed sealing preserves its persisted links and level and promotes it
 back to the canonical entry whenever that level exceeds the current active
-maximum. Thus metadata continues to name the highest active hierarchy root
-after both deletion and reactivation.
+maximum, or when it has the same maximum level and the lower memory id required
+by the canonical `(level DESC, memory_id ASC)` order. Thus metadata continues
+to name the highest active hierarchy root with its deterministic tie after both
+deletion and reactivation.
 If any sealed removal overlaps the persisted consolidation activation snapshot,
 the snapshot entry, generation, centroid, and identity list are cleared in the
 same transaction; in-process and restarted queries then use the canonical
@@ -675,11 +677,14 @@ payloads actually materialized on each public call.
 
 The same bounded activation surface now serves supersession selection after the
 current memory population exceeds $C$. `MemoryStorage` asks the persisted route
-for at most $A$ identities, exactly reranks those current embeddings, and keeps
-its existing timestamp, kind, threshold, duplicate-band, edge-count, and tie
-rules. On this sparse path the latest current embedding is the memory's active
-centroid. A bounded HNSW result is now treated only as a candidate set, never as
-proof that it covers the exact current population. The historical cache's exact
+for at most $A$ identities, applies self, timestamp, and kind eligibility to
+that activated set before the knob-derived candidate cut, and then exactly
+reranks the surviving current embeddings. Threshold, duplicate-band,
+edge-count, and deterministic tie rules remain unchanged. This prevents a
+nearer ineligible activated identity from consuming the top-k slice and hiding
+an eligible duplicate immediately behind it. On this sparse path the latest
+current embedding is the memory's active centroid. A bounded HNSW result is now
+treated only as a candidate set, never as proof that it covers the exact current population. The historical cache's exact
 coverage/ranking proof therefore remains active after sparse routing; when that
 proof cannot be established, the existing SQLite fallback remains enabled.
 This prevents an approximate current result from suppressing a predecessor
@@ -1056,8 +1061,9 @@ capacity throughout the transition.
 When the ring contains rows, recent-context restart hydration admits only
 signals with an exact ring vector; it does not silently substitute a memory
 centroid for a missing per-signal vector. Migration 30 itself creates an empty
-ring, so the first capacity check copies the newest $Q$ signal vectors from
-their `signals.embedding_id` references. The main MemoryStorage path performs
+ring, so the first capacity check copies up to the newest $Q$ legacy signal
+vectors only when their `signals.embedding_id` is certifiably distinct from
+the owning memory centroid (or the signal has no owner). The main MemoryStorage path performs
 that check before it inserts aggregate-linked rows. The auxiliary
 working-memory persistence path may insert its new aggregate-linked row first,
 but the same `Upsert` immediately replaces that row's ring slot with the exact
@@ -1065,7 +1071,9 @@ event vector, leaving the newest $Q$ slots exact in either ordering. A truly
 empty legacy database remains empty. Once any exact ring row exists, an
 older store whose prior ring was smaller can temporarily restore a shorter
 exact context until new writes fill $Q$, rather than mixing aggregate vectors
-into an apparently full exact window. The global vector index consequently
+into an apparently full exact window. If a later cascade empties the ring while
+flattened signal rows remain, the same certification rule leaves those rows out
+and begins the new ring only from exact vectors supplied by later writes. The global vector index consequently
 contains memory centroids rather than a growing population of signal-only
 decoys. The schema and routing code contain no modality or `source_id` branch;
 text, audio, image, shared, and opaque sources enter after encoding through the

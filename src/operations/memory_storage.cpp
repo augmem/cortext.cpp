@@ -593,6 +593,21 @@ LoadCurrentSupersessionRowsFromCache (
       if (entry.memory_id <= 0 || entry.embedding_id <= 0
           || entry.embedding.size () != embedding_dim)
         return std::nullopt;
+      if (use_sparse_route)
+        {
+          const auto surface_it = p_ctx.retrieval_surface_index.find (
+              entry.memory_id);
+          if (surface_it == p_ctx.retrieval_surface_index.end ()
+              || surface_it->second >= p_ctx.retrieval_surface_cache.size ())
+            return std::nullopt;
+          const auto &surface
+              = p_ctx.retrieval_surface_cache[surface_it->second];
+          if (entry.memory_id == memory_id
+              || (surface.kind != "LONG_TERM"
+                  && surface.kind != "ASSOCIATION")
+              || surface.start_ts >= end_ts)
+            continue;
+        }
       ranked.push_back ({
         index,
         use_sparse_route
@@ -644,9 +659,11 @@ LoadCurrentSupersessionRowsFromCache (
           return std::nullopt;
         }
       const auto &surface = p_ctx.retrieval_surface_cache[surface_it->second];
-      if (entry.memory_id == memory_id
-          || (surface.kind != "LONG_TERM" && surface.kind != "ASSOCIATION")
-          || surface.start_ts >= end_ts)
+      if (!use_sparse_route
+          && (entry.memory_id == memory_id
+              || (surface.kind != "LONG_TERM"
+                  && surface.kind != "ASSOCIATION")
+              || surface.start_ts >= end_ts))
         {
           continue;
         }
