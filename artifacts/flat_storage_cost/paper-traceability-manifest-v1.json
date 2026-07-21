@@ -799,9 +799,9 @@
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
-      "decision": "repair-review-and-exact-head-ci-before-disposition",
+      "decision": "native-test-and-sanitizer-repair-reviewed-push-pending",
       "evidence_fingerprints": [
-        "271d8f3eece933f293384f6f2f04c7c97f83bb7978e012605443cf2c8809f51c"
+        "05378353dc522ca3bf044fd35b767278af215f967ddb18f825325b3cbbd25c20"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:pr6_exact_head_ci_repair",

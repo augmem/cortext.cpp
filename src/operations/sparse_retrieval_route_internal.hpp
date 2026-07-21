@@ -73,6 +73,13 @@ public:
       const std::vector<std::pair<long long, Eigen::VectorXf>> &entries,
       Parameters parameters);
 
+#if defined(CORTEXT_TESTING)
+  static std::shared_ptr<Route> CreateWithLevelsForTest (
+      int embedding_dim,
+      const std::vector<std::pair<long long, Eigen::VectorXf>> &entries,
+      const std::vector<int> &levels, Parameters parameters);
+#endif
+
   ~Route ();
 
   Route (const Route &) = delete;

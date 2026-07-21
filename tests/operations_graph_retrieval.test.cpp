@@ -119,36 +119,29 @@ TEST_CASE ("Sparse retrieval route repairs below an empty upper-layer entry",
 {
   using operations::sparse_retrieval_route_internal::NodeSnapshot;
   using operations::sparse_retrieval_route_internal::Route;
-  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
-  entries.reserve (72);
-  for (long long memory_id = 1; memory_id <= 72; ++memory_id)
-    entries.emplace_back (
-        memory_id, UnitVec (static_cast<int> (memory_id % kEmbeddingDim)));
-
-  auto route = Route::Create (
-      kEmbeddingDim, entries,
+  auto route = Route::CreateWithLevelsForTest (
+      kEmbeddingDim, { { 1, UnitVec (1) }, { 2, UnitVec (2) } },
+      { 2, 1 },
       operations::sparse_retrieval_route_internal::DeriveParameters (
           0.0, 0.0, 0.0));
   REQUIRE (route);
   const auto snapshot = route->Snapshot ({});
   REQUIRE (snapshot);
-  REQUIRE (snapshot->max_level > 0);
+  REQUIRE (snapshot->entry_memory_id == 1);
+  REQUIRE (snapshot->max_level == 2);
   const auto entry = std::find_if (
       snapshot->nodes.begin (), snapshot->nodes.end (),
       [&] (const NodeSnapshot &node) {
         return node.memory_id == snapshot->entry_memory_id;
       });
   REQUIRE (entry != snapshot->nodes.end ());
-  REQUIRE (entry->links.size ()
-           > static_cast<std::size_t> (snapshot->max_level));
-  REQUIRE (entry->links[static_cast<std::size_t> (snapshot->max_level)]
-               .empty ());
+  REQUIRE (entry->links.size () == 3);
+  REQUIRE (entry->links[2].empty ());
   const auto target = std::find_if (
       snapshot->nodes.begin (), snapshot->nodes.end (),
-      [&] (const NodeSnapshot &node) {
-        return node.level < snapshot->max_level;
-      });
+      [] (const NodeSnapshot &node) { return node.memory_id == 2; });
   REQUIRE (target != snapshot->nodes.end ());
+  REQUIRE (target->level == 1);
 
   const long long target_memory_id = target->memory_id;
   REQUIRE (route->Upsert (target_memory_id, UnitVec (200)));
