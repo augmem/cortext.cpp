@@ -316,6 +316,10 @@ public:
   /// repeated query may reuse the bounded generation-qualified shadow cache,
   /// while SQLite remains authoritative across seals and restarts.
   std::size_t LastActivationSnapshotCacheMissRows () const;
+  /// Activation-snapshot identities admitted as level-zero frontier seeds by
+  /// the last query. Recenter rebuilds must report zero because the prior
+  /// snapshot cannot steer its replacement.
+  std::size_t LastActivationFrontierSeedCount () const;
   std::size_t LastSearchDistanceEvaluations () const;
   std::size_t CachedNodeRows () const;
   std::size_t CacheOrderRows () const;

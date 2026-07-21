@@ -15,6 +15,8 @@ file(COPY "${HNSWLIB_SOURCE_DIR}/hnswlib"
 
 get_filename_component(_repo_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 file(RELATIVE_PATH _output_relative "${_repo_root}" "${HNSWLIB_OUTPUT_DIR}")
+# git apply interprets --directory as a Git path even on Windows.
+string(REPLACE "\\" "/" _output_relative "${_output_relative}")
 set(_patch "${CMAKE_CURRENT_LIST_DIR}/hnswlib-prefetch-bounds.patch")
 execute_process(
   COMMAND git apply --check --unsafe-paths

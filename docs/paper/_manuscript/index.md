@@ -5837,26 +5837,33 @@ packed snapshot through its independent *A* row budget and uses all
 valid snapshot identities as deterministic level-zero entry points.
 Neighbor rows discovered from those entry points remain charged to the
 current canonical 8*C*–9*C* budget, so consolidation can steer the walk
-without widening either envelope. The internal search used to construct
-a recenter snapshot does not advance the retrieval-age ramp. If snapshot
-persistence fails, both queue effort and the actual-node budget remain
-at their pre-attempt values; only a successful recenter resets them to
-8*C*. The floor, increment, and ceiling are derived from F/S/T rather
-than independently tunable fourth knobs. Every query records its ceiling
-and actual visited rows; canonical rows above the current ceiling or
-above 9*C* fail the audit. The persisted snapshot remains independently
-charged under its *A* ceiling and is joined with the canonical
-candidates for final exact reranking. The returned set makes the
-existing formula explicit: its best 2*C* canonical identities are
-protected, while consolidation may supply the remaining 2*B* identities
-in *A* = 2*C* + 2*B*. The final selected set is reranked by exact
-distance. Total fetched-row work is therefore bounded by 9*C* + *A*. A
-separate returned-identity counter still fails above *A*, so a changed
-semantic center cannot be mistaken for an unbounded working set. The
-normalized center, snapshot generation, and packed identity list live in
-the single SQLite route-metadata row and survive reopen; malformed,
-stale, duplicate, or over-capacity metadata invalidates the route. Graph
-and memory rows remain authoritative in SQLite.
+without widening either envelope. The internal rebuild of a replacement
+snapshot deliberately excludes the prior snapshot’s identities from its
+frontier seeds; only the canonical route and the new consolidation
+embedding may choose the replacement centroid neighborhood. The same
+identities may still be rediscovered through canonical adjacency or the
+active indexed fill and retained by exact reranking; this rule removes
+stale seeding authority, not otherwise relevant memories. The internal
+search used to construct a recenter snapshot does not advance the
+retrieval-age ramp. If snapshot persistence fails, both queue effort and
+the actual-node budget remain at their pre-attempt values; only a
+successful recenter resets them to 8*C*. The floor, increment, and
+ceiling are derived from F/S/T rather than independently tunable fourth
+knobs. Every query records its ceiling and actual visited rows;
+canonical rows above the current ceiling or above 9*C* fail the audit.
+The persisted snapshot remains independently charged under its *A*
+ceiling and is joined with the canonical candidates for final exact
+reranking. The returned set makes the existing formula explicit: its
+best 2*C* canonical identities are protected, while consolidation may
+supply the remaining 2*B* identities in *A* = 2*C* + 2*B*. The final
+selected set is reranked by exact distance. Total fetched-row work is
+therefore bounded by 9*C* + *A*. A separate returned-identity counter
+still fails above *A*, so a changed semantic center cannot be mistaken
+for an unbounded working set. The normalized center, snapshot
+generation, and packed identity list live in the single SQLite
+route-metadata row and survive reopen; malformed, stale, duplicate, or
+over-capacity metadata invalidates the route. Graph and memory rows
+remain authoritative in SQLite.
 
 Decoded activation-snapshot rows reuse the route’s existing
 generation-qualified shadow-node cache rather than being selected and
@@ -5951,7 +5958,15 @@ isolated active identity just beyond an inactive slice. CMake and Zig
 compile the same pinned HNSW safety patch. The Zig graph copies the
 header-only dependency into a build-local declared output and patches
 that copy, leaving the content-addressed global package cache immutable
-and safe for concurrent builds.
+and safe for concurrent builds. The build-local output is normalized to
+Git’s forward-slash path form before `git apply`, so the same content
+check no longer receives host-native backslashes. The patch itself is
+also a declared build input, so changing it invalidates the preparation
+step instead of reusing a stale patched output. Local POSIX proof
+passes; replacement Windows CI remains the execution owner. The Zig
+package manifest includes the `cmake` directory so downstream package
+consumers receive both the preparation script and its content-checked
+patch rather than only the top-level build graph.
 
 When a sealed removal targets the canonical hierarchy entry, replacement
 is selected by highest level and then lowest memory id through the
@@ -5959,10 +5974,15 @@ is selected by highest level and then lowest memory id through the
 at most the staged removal count plus one row: at most that many leading
 rows can be excluded by the same seal. The replacement’s level becomes
 the new `max_level`, so restart never begins from an inactive entry or
-asks a lower level node for nonexistent upper adjacency. If any sealed
-removal overlaps the persisted consolidation activation snapshot, the
-snapshot entry, generation, centroid, and identity list are cleared in
-the same transaction; in-process and restarted queries then use the
+asks a lower level node for nonexistent upper adjacency. If the removed
+node later becomes active again without changing its embedding,
+row-addressed sealing preserves its persisted links and level and
+promotes it back to the canonical entry whenever that level exceeds the
+current active maximum. Thus metadata continues to name the highest
+active hierarchy root after both deletion and reactivation. If any
+sealed removal overlaps the persisted consolidation activation snapshot,
+the snapshot entry, generation, centroid, and identity list are cleared
+in the same transaction; in-process and restarted queries then use the
 canonical route until the next successful recenter builds a new bounded
 snapshot. Restart validates that the metadata entry exists in the same
 generation, is active, and carries the recorded maximum level. A legacy
@@ -8844,11 +8864,17 @@ deterministic route completion now draws from the indexed
 active-generation slice, so an inactive row cannot consume the fixed
 envelope or hide a later active identity. The CMake and Zig build graphs
 apply the same content-checked HNSW bounds patch; Zig patches a
-build-local copy rather than mutating its shared package cache. The RIF
-changed-row counter now records work performed by the current event
-rather than the historical active population. Each correction has a
-red-then-green regression and changes measurement, not public retrieval
-semantics.
+build-local copy rather than mutating its shared package cache, and
+normalizes the build output to Git’s forward-slash path form before
+applying the patch so the Windows command no longer receives
+backslash-separated Git paths. The patch is a declared build input, so a
+patch-only change invalidates the preparation step. Local POSIX proof
+passes, while replacement Windows CI remains required; the Zig package
+allowlist now carries the `cmake` preparation and patch assets used by
+that build graph. The RIF changed-row counter now records work performed
+by the current event rather than the historical active population. Each
+correction has a red-then-green regression and changes measurement, not
+public retrieval semantics.
 
 The remaining consolidation scan was bounded by the same knobs. Let
 *A* = 2*C* + 2*B* and *N* = max (8, ⌊*B*/2⌋). Score consolidation now
@@ -8857,11 +8883,17 @@ merging two frontiers: at most *A* inactive identities from the indexed
 materialized strength/time order and at most *A* active identities
 ordered by their exact clock-derived RIF strength. A 64*C* + 1 sentinel
 count fails closed before the active branch when the existing
-active-epoch mutation ceiling would be exceeded. This bounds the
-inactive index scan by *A* + 64*C*, the dynamic active calculation by
-64*C*, and the merged/downstream frontier by *A*, without a
-history-sized sort. It also prevents partially recovered rows with stale
-low materialized strength from excluding a genuinely weak row. The
+active-epoch mutation ceiling would be exceeded. Both arms exclude
+already-clustered memories before applying their *A* limits, so
+clustered low-strength rows cannot consume the bounded slice and hide
+the next eligible unclustered memory. The inactive arm uses a partial
+strength/time/embedding index containing only unclustered long-term
+rows; after at most 64*C* active-RIF exclusions it can therefore admit
+*A* inactive rows without scanning a clustered history prefix. This
+bounds the inactive index scan by *A* + 64*C*, the dynamic active
+calculation by 64*C*, and the merged/downstream frontier by *A*, without
+a history-sized sort. It also prevents partially recovered rows with
+stale low materialized strength from excluding a genuinely weak row. The
 scorer counts at most *N* association edges per admitted identity. A
 sentinel row publishes the exact input cardinality even when no
 candidate is selected. The formula, counter, and source/modality
@@ -9395,26 +9427,30 @@ deployment remain unclaimed.</td>
 before working-memory hydration; pinned HNSW speculative neighbor
 prefetches are adjacency-bounded without disabling SIMD distance
 kernels; empty adjacency snapshots skip a zero-byte copy whose vector
-destination may be null; Zig applies the same patch to a build-local
-copy; deterministic route fill excludes inactive rows; entry removal
-promotes an indexed active hierarchy root, atomically clears overlapping
-activation snapshots, and restart rejects legacy dead canonical or
-snapshot identities; changed active embeddings invalidate stale
-adjacency for bounded rebuild; consolidation merges exact active-RIF and
-indexed inactive frontiers under the existing <span
-class="math inline">64<em>C</em></span>/<span
-class="math inline"><em>A</em></span> ceilings; bounded emotional-source
-discovery preserves SQL intensity order and refreshes rank-changing
-mutations through an indexed knob-sized prefix; partial edge-limited
-cascade traversals do not become fixed points; and cache-byte arithmetic
-uses explicit <code>std::size_t</code> width for WebAssembly. The full
-media CTest baseline, focused RIF/HNSW/consolidation regressions,
-build-local Zig proof, and WebAssembly bundle build pass locally. The
-sandboxed macOS ASAN runtime cannot execute because dynamic-shadow
-discovery or sanitizer-runtime code signing fails before
-<code>main()</code>, so replacement exact-head Linux sanitizer CI
-remains the required owner; the historical 4,608-query quality matrix is
-not relabeled as evidence from the repaired binary.</td>
+destination may be null; Zig applies the same patch to a packaged
+build-local copy with host paths normalized to Git form; deterministic
+route fill excludes inactive rows; entry removal promotes an indexed
+active hierarchy root, reactivation restores a higher persisted root,
+overlapping activation snapshots clear atomically, recenter rebuilds do
+not use prior snapshot identities as explicit frontier seeds, and
+restart rejects legacy dead canonical or snapshot identities; changed
+active embeddings invalidate stale adjacency for bounded rebuild;
+consolidation merges exact active-RIF and indexed inactive frontiers
+under the existing <span class="math inline">64<em>C</em></span>/<span
+class="math inline"><em>A</em></span> ceilings and filters clustered
+memories through an eligible-only partial index before either bounded
+arm; bounded emotional-source discovery preserves SQL intensity order
+and refreshes rank-changing mutations through an indexed knob-sized
+prefix; partial edge-limited cascade traversals do not become fixed
+points; and cache-byte arithmetic uses explicit <code>std::size_t</code>
+width for WebAssembly. The full media CTest baseline, focused
+RIF/HNSW/consolidation regressions, build-local Zig proof, and
+WebAssembly bundle build pass locally. The sandboxed macOS ASAN runtime
+cannot execute because dynamic-shadow discovery or sanitizer-runtime
+code signing fails before <code>main()</code>, so replacement exact-head
+Linux sanitizer CI remains the required owner; the historical
+4,608-query quality matrix is not relabeled as evidence from the
+repaired binary.</td>
 </tr>
 <tr>
 <td><code>TRACE[state:hnsw_fixed_6c_experiment]</code></td>

@@ -374,6 +374,7 @@ struct Route::Impl
   mutable std::size_t last_search_node_rows = 0;
   mutable std::size_t last_activation_snapshot_rows = 0;
   mutable std::size_t last_activation_snapshot_cache_miss_rows = 0;
+  mutable std::size_t last_activation_frontier_seed_count = 0;
   mutable std::size_t last_search_distance_evaluations = 0;
   mutable int last_search_failure_code = 0;
   mutable int last_seal_failure_code = 0;
@@ -754,6 +755,7 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       impl_->last_search_node_rows = 0;
       impl_->last_activation_snapshot_rows = 0;
       impl_->last_activation_snapshot_cache_miss_rows = 0;
+      impl_->last_activation_frontier_seed_count = 0;
       impl_->last_search_distance_evaluations = 0;
       const bool use_construction_envelope
           = impl_->building || construction_search;
@@ -998,16 +1000,17 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       visited.reserve (search_node_budget + activation_nodes.size ());
       auto seed_frontier = [&] (const long long memory_id) {
         if (memory_id <= 0 || !visited.insert (memory_id).second)
-          return;
+          return false;
         const auto node = cache.find (memory_id);
         if (node == cache.end ())
-          return;
+          return false;
         const float distance = persisted_query_distance (memory_id);
         frontier.emplace (distance, memory_id);
         if (node->second.row->active
             && impl_->removed.count (memory_id) == 0
             && impl_->delta_embeddings.count (memory_id) == 0)
           best.emplace (distance, memory_id);
+        return true;
       };
       seed_frontier (current_id);
       // Consolidation persists an A-bounded activation snapshot in SQLite.
@@ -1015,8 +1018,10 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       // changed centroid actually steers the next sparse walk; their rows are
       // charged to the separate A envelope and never consume the current
       // 8C-to-9C traversal budget.
-      for (const long long memory_id : impl_->activation_identity_ids)
-        seed_frontier (memory_id);
+      if (!rebuild_activation)
+        for (const long long memory_id : impl_->activation_identity_ids)
+          if (seed_frontier (memory_id))
+            ++impl_->last_activation_frontier_seed_count;
 
       std::size_t expanded_count = 0;
       while (!frontier.empty () && canonical_node_rows < node_fetch_budget
@@ -1464,8 +1469,12 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                   node.embedding = delta->second;
                   node.active = true;
                   updates[memory_id] = std::move (node);
-                  if (next_entry_memory_id == 0)
-                    next_entry_memory_id = memory_id;
+                  if (next_entry_memory_id == 0
+                      || prior->second.level > next_max_level)
+                    {
+                      next_entry_memory_id = memory_id;
+                      next_max_level = prior->second.level;
+                    }
                   continue;
                 }
 
@@ -2089,6 +2098,15 @@ Route::LastActivationSnapshotCacheMissRows () const
     return 0;
   std::lock_guard<std::mutex> lock (impl_->mutex);
   return impl_->last_activation_snapshot_cache_miss_rows;
+}
+
+std::size_t
+Route::LastActivationFrontierSeedCount () const
+{
+  if (!impl_)
+    return 0;
+  std::lock_guard<std::mutex> lock (impl_->mutex);
+  return impl_->last_activation_frontier_seed_count;
 }
 
 std::size_t

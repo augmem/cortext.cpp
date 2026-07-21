@@ -1,15 +1,15 @@
 {
   "schema": "cortext_paper_traceability_state_overlay_v2",
   "supersedes_state_sha256": "f0605f910ed3c10fa7838c2e175c5d0babbe352f7e4fe4e2f92fdf3c70cd1f2d",
-  "phase": "repair-pr-review-threads",
+  "phase": "repair-pr-ci",
   "completion": true,
   "resume_phase": "refresh-pr-state",
   "sqlite_hnsw_schema_authority": {
-    "status": "approved-current-user-through-migration-33",
+    "status": "approved-current-user-through-migration-34",
     "approver_identity": "current-user",
     "provenance": "direct user authorization in this task",
-    "schema_migration_numbers": [29, 30, 31, 32, 33],
-    "authority_scope": "private internal SQLite sparse route, deterministic active-entry replacement index, exact signal-vector ring, knob-bounded activation-centroid persistence, and bounded emotional-source reranking index",
+    "schema_migration_numbers": [29, 30, 31, 32, 33, 34],
+    "authority_scope": "private internal SQLite sparse route, deterministic active-entry replacement index, exact signal-vector ring, knob-bounded activation-centroid persistence, bounded emotional-source reranking index, and eligible-only bounded consolidation frontier index",
     "public_api_change": false,
     "no_release_or_deployment_grant": true
   },
@@ -54,7 +54,8 @@
         "29": "internal SQLite HNSW route, metadata, build, node, and dirty-journal tables",
         "31": "knob-bounded activation entry, generation, centroid, and identity snapshot columns",
         "32": "deterministic active sparse-route entry replacement index",
-        "33": "bounded emotional-source intensity reranking index"
+        "33": "bounded emotional-source intensity reranking index",
+        "34": "eligible-only unclustered long-term consolidation frontier index"
       },
       "public_api_change": false,
       "authority": "current user explicitly approved the SQLite shadow-memory schema design and authorized the implementation changes"
@@ -116,10 +117,20 @@
     ]
   },
   "pr6_exact_head_ci_repair": {
-    "decision": "seven-review-thread-repair-proven-at-round-five-p1",
-    "prior_exact_head": "5f2e3b38edbc5d582b2a0cbb37d7ec10f8ceb1cb",
-    "current_exact_head": "764e4af202a91120dae85e1d6b0d69e2ce97aa5d",
-    "current_exact_head_ci": "12-of-12-green-before-the-seven-thread-candidate-push",
+    "decision": "eleven-review-thread-repair-with-follow-up-p2-proof-active",
+    "prior_exact_head": "764e4af202a91120dae85e1d6b0d69e2ce97aa5d",
+    "implementation_repair_commit": "89a06084dd05710f90572c1b7bac7e17fab79122",
+    "monitor_head_binding": "resolve the live GitHub PR head at every re-entry because a repository record cannot content-address its own containing record-only commit",
+    "current_exact_head_ci": "Windows zig-cli-install failed because Git received a backslash-separated --directory path for the build-local HNSW patch; all other check conclusions must be resolved live from GitHub at every re-entry",
+    "windows_zig_path_repair": {
+      "failing_job": "zig-cli-install (windows-latest, cortext_cli.exe)",
+      "failing_head": "89a06084dd05710f90572c1b7bac7e17fab79122",
+      "cause": "CMake file(RELATIVE_PATH) returned Windows separators but git apply --directory consumes Git forward-slash paths",
+      "repair": "normalize only the build-local output relative path from backslash to forward slash before both checked and applied git apply calls",
+      "local_proof": "native Zig ReleaseFast static CLI build passes and the emitted build-local hnswlib copy passes complete reverse patch verification",
+      "review": "Windows path normalization passed recursive round-three P1 review; the four follow-up P2 repairs await fresh cumulative review",
+      "proof_not_claimed": "Windows validation remains owned by replacement exact-head CI"
+    },
     "review": {
       "baseline_tree": "156dd7bc27b7cda2c661a9467bfddfe72c771e8a",
       "candidate_tree": "0b4069c73955147da28add9b9eaea480bad48249",
@@ -128,6 +139,12 @@
         "P2: the bounded cache ranks its global flashbulb prefix before applying cascade recency/arousal eligibility, whereas the SQL fallback filters eligibility before LIMIT; this does not regress the public thread's required intensity-before-truncation order, but full cache/fallback selection equivalence remains unclaimed"
       ]
     },
+    "followup_review": {
+      "round_one_candidate_tree": "ba6d938a5c77fabdd2b3b3b18b447663786f47fe",
+      "round_one_verdict": "Not ready at all-findings threshold: one P1 unbounded clustered-prefix scan, one P2 stale overlay identity, and two P3 diagnostic/paper wording findings",
+      "repairs": "migration 34 adds an eligible-only partial index selected by the inactive frontier; adversarial query-plan proof verifies that index; the seed counter counts actual frontier insertions; the paper states only that prior snapshot identities are not explicit seeds",
+      "next_gate": "fresh round-two P1/P2 review"
+    },
     "review_threads": [
       "https://github.com/augmem/cortext/pull/6#discussion_r3620394273",
       "https://github.com/augmem/cortext/pull/6#discussion_r3620394282",
@@ -135,7 +152,11 @@
       "https://github.com/augmem/cortext/pull/6#discussion_r3620632960",
       "https://github.com/augmem/cortext/pull/6#discussion_r3620632969",
       "https://github.com/augmem/cortext/pull/6#discussion_r3620632977",
-      "https://github.com/augmem/cortext/pull/6#discussion_r3620632985"
+      "https://github.com/augmem/cortext/pull/6#discussion_r3620632985",
+      "PRRT_kwDOR3IQMM6SjHep",
+      "PRRT_kwDOR3IQMM6SjHes",
+      "PRRT_kwDOR3IQMM6SjHev",
+      "PRRT_kwDOR3IQMM6SjHe1"
     ],
     "repairs": [
       "calibrate migrated lazy-RIF state transactionally before working-memory hydration and rebuild the disposable epoch from committed persistent authority",
@@ -148,33 +169,42 @@
       "invalidate a route generation when an active normalized embedding moves beyond the fixed cosine tolerance, then use exact retrieval while the existing knob-bounded builder reconstructs coherent adjacency",
       "retain the bounded emotional-source prefix in the SQL fallback's intensity-descending and memory-id-ascending order, marking rank-changing mutations dirty and refilling exactly the knob-derived prefix through the partial SQLite intensity index",
       "treat an edge-visit-limited emotional traversal as an incomplete prefix that cannot publish a fixed point",
-      "perform knob-derived cache-byte multiplication explicitly in std::size_t for WebAssembly width portability"
+      "perform knob-derived cache-byte multiplication explicitly in std::size_t for WebAssembly width portability",
+      "promote a same-vector reactivated row-addressed node when its persisted level exceeds the current canonical entry",
+      "exclude the prior activation snapshot from frontier seeding while rebuilding its consolidation-centroid replacement",
+      "filter clustered memories before both inactive and active bounded consolidation candidate limits, using an eligible-only partial index so the inactive arm cannot scan a clustered history prefix",
+      "include the CMake HNSW preparation and patch assets in the Zig package allowlist"
     ],
     "source_sha256": {
       "signal_processor": "7d255a3db0b4e9f0dcedac9fa841d093b1ad39af3c90af43969a17aba481e07b",
       "rif_cache_header": "55985ae0d5d0d69480ae3a3d8204779faec8b23f2051e2e924b8de31e1d130a8",
       "hnswlib_patch": "4180985795ccdac233cf7c50e82ec0bb2108fd191aece8951f8cedc12932d54a",
       "hnswlib_patch_driver": "3506b957d155d0994cd975d12d93e3bdb60f0d205b13dc496b474aeb73e8662a",
-      "zig_build": "7336dcc354cc970fc8fc71e1f40a9f96ac549622a859a19e6dc55a0ed069357c",
-      "zig_hnswlib_prepare": "c4635b5ed46654e19285cee1e2861c1385d214b67d058767c51bfc505d30f33f",
-      "hnsw_route_header": "4996c6575e70c4e74da29d6e289695df250f3316feeaae3724be29c3fda74ad8",
-      "hnsw_route_source": "9582307376d8a8dcb40e85351382142e3a985df6448e7d8ef5a4f52e69268424",
-      "hnsw_repair_test": "c904515074515cd6c4325318d34a89ae10da4c0b9a3d7b9c34b2ebccbfbe7407",
-      "consolidation_source": "c5b0863f43e1f1080e006d213bc62ed145b3c740a906697327d2c91ba98e7e18",
-      "consolidation_test": "0bca3997b4c0a68ab475355b5c8be962ec06cbcbb19f628a3eb266d6fa4e071d",
+      "zig_build": "f4a36709d3eeab3be92bd5300e7d071621290189b24d13fdc4976e6c04d9d8ce",
+      "zig_hnswlib_prepare": "f2ea37b7bfaca95edcb3b6486120b0d0c6c33060b32d96a40f46fafdd53e2773",
+      "zig_package_manifest": "25f58d123ab581319b140bed7e4355a7bd524e1e17dce96a219ccea68ec74c9a",
+      "hnsw_route_header": "a68c6825551cadd3d9d843986a82ab1294128b993106ffe58d3370e70ec79c82",
+      "hnsw_route_source": "3d6a559de3445a800a18df1e05e4926ce5bef71f0a4123de9990a3c2869e4184",
+      "hnsw_repair_test": "98f092f86b5ef4e10b8c06fe41f15b31127556ce5480565d16fcd2fb8620e8f8",
+      "consolidation_source": "b6dd39b64318e3720be0da46e62f7457fc6fc41bc48f1e01b5a51b5df5b12880",
+      "consolidation_test": "716ed3c2f8568338591453fd1e7776af99d9307be90115e2654e2671fca419e1",
       "emotion_cascade_source": "8135e0f9a07d55a62d6bfdf7f63c83c5b2110237cc208c4fff2ef1ae6e135634",
       "emotional_metadata_cache": "a8deda12553ffb9c07389f4665645187b85e4dd55f3c055ba230385cfcfbf88a",
       "emotion_cascade_test": "47b0d780994832bbd36f06fcba4abee9d2935ad0267b4c9bd9e7cb6659df5afe",
-      "schema_source": "c42ac2cac86b6464d3bccdef87c1ddd02731cafccba179e229b16284e0f87cf4"
+      "schema_source": "b4c3b0c873fd225781d1eab856a82b3fc2868909f131f867031c71c792f9fbe3",
+      "migration_test": "4e76c44cc7ec9d5a1ec26fb963c1291c7f98e47b65050bac8ff4ff0df09b64cc"
     },
     "local_proof": {
-      "full_media_ctest": "clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 38,730 assertions in 697 cases",
+      "preceding_full_media_ctest": "preceding exact candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 38,730 assertions in 697 cases",
+      "preceding_full_media_test_binary_sha256": "0fd25b6e322913cb0e76e3aa5a1fbcc6836d8696b6bbd5886224a3144fea1ec8",
+      "current_full_media_ctest": "exact repaired candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 38,766 assertions in 699 cases",
+      "current_full_media_test_binary_sha256": "2ad4b947a5728fa767680a7cb399ebe969661b0a47e2ca5f269434ca34d0f02c",
       "rif_focus": "312 assertions in 19 cases",
-      "hnsw_focus": "complete SQLite-HNSW suite passes 2,614 assertions in 20 cases; focused replacement-entry and activation-snapshot clearing, moved-embedding invalidation with unchanged-vector tolerance, legacy dead-snapshot rejection, legacy dead-entry restart rebuild, active-only fill, and bounded-backfill regressions pass",
-      "consolidation_focus": "4,309 assertions in 32 cases, including exact effective-RIF selection and the 16,384-row all-low active-state ceiling",
-      "zig_build_local_patch": "text-only shared build passed; global hnswlib cache remained unpatched while the declared build-local copy passed reverse patch verification",
+      "hnsw_focus": "the exact canonical-entry reactivation, missing-snapshot ordinary-search restart, and prior-snapshot-free recenter rebuild regressions pass in the four-case 107-assertion follow-up set",
+      "consolidation_focus": "the four-case follow-up set passes 107 assertions, including both clustered-row prefilter arms, the eligible-only inactive query plan, and migration 34 structure",
+      "zig_build_local_patch": "ReleaseFast static CLI build passed after Git-path normalization; global hnswlib cache remained unpatched while the declared build-local copy passed complete reverse patch verification; the patch file is an explicit build input",
       "wasm_bundle": "built successfully with Emscripten 4.0.18",
-      "test_binary_sha256": "0fd25b6e322913cb0e76e3aa5a1fbcc6836d8696b6bbd5886224a3144fea1ec8",
+      "focused_test_binary_sha256": "2ad4b947a5728fa767680a7cb399ebe969661b0a47e2ca5f269434ca34d0f02c",
       "wasm_sha256": "17d31e0a61327e91d7a53577b73689442583d5f4c84aa76d5844ac309e9791aa"
     },
     "sanitizer_proof": {
@@ -189,7 +219,8 @@
       "modality_branch": false
     },
     "unresolved_limits": [
-      "record-transition review, push, and replacement exact-head CI for the seven-thread repair remain pending",
+      "Windows execution and replacement exact-head CI for the Zig Git-path repair remain pending",
+      "push and replacement exact-head CI for the four follow-up P2 repairs remain pending; round-three and final cumulative reviews are Proven at P1",
       "whole-engine raw process reset is not proven",
       "bounded whole-engine restart is not proven",
       "Durable plateau and production-wide boundedness are not claimed"
