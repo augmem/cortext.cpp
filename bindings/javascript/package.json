@@ -1,6 +1,6 @@
 {
   "name": "@augmem/cortext",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "JavaScript and TypeScript bindings for the Cortext memory engine",
   "main": "index.js",
   "types": "index.d.ts",
