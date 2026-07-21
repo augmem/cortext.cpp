@@ -16,7 +16,7 @@ namespace cortext::operations::active_signal_embedding_ring_internal
 inline int
 Capacity (double focus, double sensitivity, double stability)
 {
-  return sparse_retrieval_knobs_internal::BackfillBatchSize (
+  return sparse_retrieval_knobs_internal::ActiveSignalEmbeddingCapacity (
       focus, sensitivity, stability);
 }
 

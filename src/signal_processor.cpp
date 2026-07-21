@@ -2474,6 +2474,9 @@ LoadRecentContext (Store &store, ProcessorContext &ctx,
           "  LEFT JOIN cortext_active_signal_embeddings a "
           "  ON a.signal_id = s.signal_id "
           "  LEFT JOIN embeddings e ON s.embedding_id = e.embedding_id "
+          "  WHERE NOT EXISTS ("
+          "    SELECT 1 FROM cortext_active_signal_embeddings LIMIT 1"
+          "  ) OR a.signal_id IS NOT NULL "
           "  ORDER BY s.timestamp DESC, s.signal_id DESC "
           "  LIMIT ?"
           ") ORDER BY timestamp ASC, signal_id ASC",

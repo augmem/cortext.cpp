@@ -1,5 +1,7 @@
 #pragma once
 
+#include "cortext/core/knobs.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -33,6 +35,16 @@ BackfillBatchSize (double focus, double sensitivity, double stability)
   const double t = ClampUnit (stability);
   return static_cast<int> (
       std::lround (64.0 + 64.0 * f + 32.0 * s + 32.0 * t));
+}
+
+inline int
+ActiveSignalEmbeddingCapacity (double focus, double sensitivity,
+                               double stability)
+{
+  const double t = ClampUnit (stability);
+  return std::max (
+      BackfillBatchSize (focus, sensitivity, stability),
+      static_cast<int> (core::NCtx (t) + core::KCtx (t)));
 }
 
 inline int

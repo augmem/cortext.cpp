@@ -1433,6 +1433,66 @@ struct SetOrCaptureThroughputOp : IOperation
   }
 };
 
+TEST_CASE ("SignalProcessor restart restores only exact ring embeddings for "
+           "the full knob-derived context window",
+           "[processor][recent_context][restart][knobs]")
+{
+  namespace ring = operations::active_signal_embedding_ring_internal;
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  const int capacity = ring::Capacity (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  REQUIRE (capacity == 151);
+
+  const Eigen::VectorXf centroid
+      = Eigen::VectorXf::Constant (256, -1.0f);
+  cortext::testing::SeedEmbeddingV2 (*store, 1, centroid, 0);
+  auto tx = store->Begin ();
+  for (long long signal_id = 1; signal_id <= capacity; ++signal_id)
+    {
+      tx->Execute (
+          "INSERT INTO signals(signal_id, source_id, embedding_id, "
+          "timestamp, modality, created_at) "
+          "VALUES (?, 'opaque/restart', 1, ?, 'text', ?)",
+          { signal_id, signal_id, signal_id });
+      std::vector<float> exact (256, 0.0f);
+      exact[0] = static_cast<float> (signal_id);
+      ring::Upsert (*tx, signal_id, exact, signal_id, cfg.focus,
+                    cfg.sensitivity, cfg.stability);
+    }
+  tx->Commit ();
+
+  ProcessorContext *captured = nullptr;
+  auto capture = std::make_unique<SetOrCaptureThroughputOp> ();
+  capture->context_address = &captured;
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.timestamp = static_cast<std::uint64_t> (capacity + 1);
+  signal.source_id = "opaque/observer";
+  signal.modality = "image";
+  signal.mimetype = "image/test";
+  SignalProcessor restarted (
+      cfg, store,
+      std::make_unique<DynamicOperationSet> (std::move (capture)));
+  restarted.Process (signal);
+
+  REQUIRE (captured != nullptr);
+  REQUIRE (captured->recent_context_embeddings.size ()
+           == static_cast<std::size_t> (capacity));
+  for (int index = 0; index < capacity; ++index)
+    {
+      REQUIRE (captured->recent_context_embeddings[
+                   static_cast<std::size_t> (index)][0]
+               == static_cast<float> (index + 1));
+    }
+}
+
 TEST_CASE ("SignalProcessor processes and flushes to SQLite", "[processor]")
 {
   auto uniq = SQLiteStore::Create (":memory:");

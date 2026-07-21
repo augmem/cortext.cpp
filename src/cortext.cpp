@@ -43,6 +43,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iterator>
+#include <limits>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -464,45 +466,78 @@ LoadSignalBlobs (Store *store, long long memory_id,
   try
     {
       const long long limit = std::max (1, max_signal_blobs);
-      auto rows = store->Execute (
-          "SELECT modality, mime, blob_id FROM ("
-          "  SELECT modality, mime, blob_id, serial_position "
-          "  FROM signals "
-          "  WHERE memory_id = ? AND blob_id IS NOT NULL "
-          "  ORDER BY serial_position DESC "
-          "  LIMIT ?"
-          ") recent_signals "
-          "ORDER BY serial_position ASC",
-          { memory_id, limit });
-
-      for (const auto &row : rows)
+      long long cursor_position = std::numeric_limits<long long>::max ();
+      long long cursor_signal_id = std::numeric_limits<long long>::max ();
+      std::vector<std::vector<unsigned char>> matched_payloads;
+      matched_payloads.reserve (static_cast<std::size_t> (limit));
+      while (static_cast<long long> (matched_payloads.size ()) < limit)
         {
-          auto it = row.find ("blob_id");
-          if (it != row.end () && it->second.has_value ())
+          auto rows = store->Execute (
+              "SELECT signal_id, modality, mime, blob_id, "
+              "       COALESCE(serial_position, signal_id) AS sort_position "
+              "FROM signals "
+              "WHERE memory_id = ? AND blob_id IS NOT NULL "
+              "  AND (? = '' OR modality = ?) "
+              "  AND (COALESCE(serial_position, signal_id) < ? "
+              "       OR (COALESCE(serial_position, signal_id) = ? "
+              "           AND signal_id < ?)) "
+              "ORDER BY sort_position DESC, signal_id DESC "
+              "LIMIT ?",
+              { memory_id, memory_modality, memory_modality,
+                cursor_position, cursor_position, cursor_signal_id, limit });
+          if (rows.empty ())
+            break;
+
+          for (const auto &row : rows)
             {
-              auto blob_id = store::BlobFromAny (it->second);
-              if (!blob_id.empty ())
+              const auto position = store::AnyToLongLong (
+                  row.at ("sort_position"));
+              const auto signal_id = store::AnyToLongLong (
+                  row.at ("signal_id"));
+              if (!position || !signal_id)
+                throw std::runtime_error (
+                    "invalid fallback signal ordering row");
+              cursor_position = *position;
+              cursor_signal_id = *signal_id;
+
+              auto it = row.find ("blob_id");
+              if (it != row.end () && it->second.has_value ())
                 {
-                  std::vector<unsigned char> payload;
-                  if (LoadObjectPayload (store, object_store, blob_id, payload))
+                  auto blob_id = store::BlobFromAny (it->second);
+                  if (!blob_id.empty ())
                     {
-                      const std::string signal_modality
-                          = RowString (row, "modality");
-                      const std::string signal_mime = RowString (row, "mime");
-                      if (PayloadMatchesMemorySurface (
-                              memory_modality, memory_mime, signal_modality,
-                              signal_mime, payload))
+                      std::vector<unsigned char> payload;
+                      if (LoadObjectPayload (store, object_store, blob_id,
+                                             payload))
                         {
-                          out.push_back (std::move (payload));
-                          if (loaded_signal_blobs)
+                          const std::string signal_modality
+                              = RowString (row, "modality");
+                          const std::string signal_mime
+                              = RowString (row, "mime");
+                          if (PayloadMatchesMemorySurface (
+                                  memory_modality, memory_mime,
+                                  signal_modality, signal_mime, payload))
                             {
-                              ++*loaded_signal_blobs;
+                              matched_payloads.push_back (
+                                  std::move (payload));
+                              if (static_cast<long long> (
+                                      matched_payloads.size ())
+                                  == limit)
+                                break;
                             }
                         }
                     }
                 }
             }
+          if (static_cast<long long> (rows.size ()) < limit)
+            break;
         }
+      std::reverse (matched_payloads.begin (), matched_payloads.end ());
+      if (loaded_signal_blobs)
+        *loaded_signal_blobs += matched_payloads.size ();
+      out.insert (out.end (),
+                  std::make_move_iterator (matched_payloads.begin ()),
+                  std::make_move_iterator (matched_payloads.end ()));
       return !out.empty ();
     }
   catch (const std::exception &e)
