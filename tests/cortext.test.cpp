@@ -1668,6 +1668,68 @@ TEST_CASE ("Cortext filters mixed signal blobs to the memory surface",
   REQUIRE (TextFromMemory (memory) == source_text);
 }
 
+TEST_CASE ("Fallback hydration applies its bound after surface filtering",
+           "[cortext][objstore][hydration][bounded][aist]")
+{
+  ScopedTempDb temp_db;
+  const auto &db_path = temp_db.path ();
+  auto store = cortext::SQLiteStore::Create (db_path);
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kMemoryId = 702;
+  constexpr int kLimit = 128;
+  std::vector<float> embedding (256, 0.0f);
+  embedding[0] = 1.0f;
+  store->Execute (
+      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
+      "VALUES (?, ?, 0)",
+      { kMemoryId, embedding });
+  store->Execute (
+      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
+      "start_ts, end_ts, n_signals, modality, strength, created_at) "
+      "VALUES (?, ?, 'opaque/mixed', 'LONG_TERM', 0, 300, ?, 'text', 1, 0)",
+      { kMemoryId, kMemoryId, static_cast<long long> (kLimit + 1) });
+
+  const std::string expected = "older matching text payload";
+  const std::vector<unsigned char> text_payload (expected.begin (),
+                                                 expected.end ());
+  const auto text_blob_rows = store->Execute (
+      "SELECT objstore_put(?1) AS id", { text_payload });
+  const auto text_blob_id = BlobFromAny (text_blob_rows[0].at ("id"));
+  store->Execute (
+      "INSERT INTO signals(memory_id, embedding_id, source_id, timestamp, "
+      "modality, mime, blob_id, serial_position, created_at) "
+      "VALUES (?, ?, 'opaque/mixed', 0, 'text', 'text/plain', ?, 0, 0)",
+      { kMemoryId, kMemoryId, text_blob_id });
+
+  const std::vector<unsigned char> invalid_text_payload
+      = { 0, 1, 2, 3, 255 };
+  const auto invalid_blob_rows = store->Execute (
+      "SELECT objstore_put(?1) AS id", { invalid_text_payload });
+  const auto invalid_blob_id = BlobFromAny (invalid_blob_rows[0].at ("id"));
+  for (int serial = 1; serial <= kLimit; ++serial)
+    {
+      store->Execute (
+          "INSERT INTO signals(memory_id, embedding_id, source_id, "
+          "timestamp, modality, mime, blob_id, serial_position, created_at) "
+          "VALUES (?, ?, 'opaque/mixed', ?, 'text', 'text/plain', ?, ?, ?)",
+          { kMemoryId, kMemoryId, static_cast<long long> (serial),
+            invalid_blob_id, static_cast<long long> (serial),
+            static_cast<long long> (serial) });
+    }
+
+  cortext::Cortext::Config cfg;
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
+  REQUIRE (ctx != nullptr);
+  const auto hydrated = ctx->DebugHydrateForTest ({ kMemoryId }, {});
+  REQUIRE (hydrated.retrieved_memory.size () == 1);
+  REQUIRE (hydrated.retrieved_memory[0].content.size () == 1);
+  REQUIRE (TextFromMemory (hydrated.retrieved_memory[0]) == expected);
+  REQUIRE (hydrated.output.operation_ms.at (
+               "Cortext.fallback_hydration_signal_rows")
+           == 1.0);
+}
+
 TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
            "[cortext][hydration][soft_anchor][aist]")
 {

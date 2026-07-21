@@ -399,19 +399,11 @@ LoadHistoricalSupersessionRowsFromCache (
       return std::nullopt;
     }
 
-  // Once the complete current surface is served through the bounded route,
-  // consolidation's current centroid is the active supersession identity.
-  // Historical embeddings remain durable lineage but no longer form a second
-  // competing candidate population for the same memory.
-  if (current_search_proof.bounded_current_surface
-      && state->processor_surface_complete)
-    {
-      if (coverage_proven)
-        *coverage_proven = true;
-      return std::vector<BorrowedSupersessionCandidate>{};
-    }
-
-  if (historical_surface_search_cache_internal::
+  // A bounded sparse result is a candidate set, not an exact coverage proof.
+  // Keep the historical proof path active so an omitted current candidate can
+  // still be recovered before supersession edges are written.
+  if (!current_search_proof.bounded_current_surface
+      && historical_surface_search_cache_internal::
           CurrentPopulationCoversHistorical (*state, memory_id))
     {
       if (coverage_proven)

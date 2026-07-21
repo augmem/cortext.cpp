@@ -284,7 +284,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "failed-end-anchored-plateau-reranked-to-next-independent-exact-candidate",
       "evidence_fingerprints": [
-        "9b091c86c6ecfc37241a26465f06c427ecbbf9866036d90285072fae31c1e54f"
+        "87cc1ab1e16faa29c17a233953194dfdc3e65af4c5ca080fa26321a5985aebbf"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:accepted_tree_natural_plateau_rerank",
@@ -301,7 +301,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "recorded-measurement",
       "evidence_fingerprints": [
-        "a090d13389c441447b71c4633f705e85e8f07e834b76d5b6887a6a644402acb7"
+        "5a4b22ef75b2c249250c6049762db517a7b8435f50295cad83e94dac4dd65046"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:active_epoch_sqlite_evaluation",
@@ -311,14 +311,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "reject-anchor-only-candidate-set-retain-anchors-only-as-bounded-sparse-graph-restart-entry",
       "evidence_fingerprints": [
-        "5db8b893b7b26688ccb67e820f1a40485b8420c7f3d9b91d69d27448579794a7"
+        "f252fa933d0bd3fd1692d232e5685062b7c97b74ec4934bd9ca865f87fdd9096"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:anchor_only_route_feasibility",
@@ -328,14 +328,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "recorded-measurement",
       "evidence_fingerprints": [
-        "c4f44d388da1b64b70384618ef5d09b4b3d256613e825abe394f3f249d2b6c4c"
+        "3ed6fb6e4e06b1382b9f1d70d500992e6374fc66949b0eb534da34cdc5c65f87"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:baseline_results",
@@ -352,7 +352,7 @@
       "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings; 512 deterministic top-16 queries; four opaque sources; text, audio, and image post-encoding labels; two graphs; 16,384 construction and 1,280 retrieval comparisons per graph; 64 reciprocal proposals",
       "decision": "design-direction-approved-production-proof-pending",
       "evidence_fingerprints": [
-        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c"
+        "09d706ac310d63937db9e98a98a96ca55e794da699acb2870185cdc083cba71e"
       ],
       "evidence_kind": "modeled",
       "inventory_id": "state:bounded_route_hybrid_observation",
@@ -362,14 +362,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "35,496 normalized 256-dimensional embeddings; 512 age-stratified top-16 queries; F=S=T=0.5; observation-only private switch",
       "decision": "complete-promising-shadow-candidate-not-ready-for-cutover",
       "evidence_fingerprints": [
-        "fa4230d33022df68ed23c43b290a489d0c55bb086b0ce08c1955da7c33eca152"
+        "acc2412aa992fa9f10eed8b062edebad34d9fa1cf2c7a9ac8a025e10f5af9fe3"
       ],
       "evidence_kind": "observation-only",
       "inventory_id": "state:bounded_sparse_routing_observation",
@@ -379,14 +379,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "rejected-fresh-process-and-rif-regression",
       "evidence_fingerprints": [
-        "6caf42f13c23367491ddf85f40eb5db175a58bf55000b9291a3e64ee93edb637"
+        "61976ff3fdfb96c59b39b234c487eb1a77092fea917198f323433b8017317fbc"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:competition_rif_returning_candidate",
@@ -403,7 +403,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "rejected-fresh-process-wall-and-rif-hard-gate",
       "evidence_fingerprints": [
-        "12723ea9a4a77d7b4ba45313b2be47b48be68bf9b659282eb0ce3a8817b3bb2e"
+        "90a8cbf89c79b127b742ccb6ab60c14d623ccf8a4c7f99c5eb1609ae64ed02bf"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:competition_suppression_state_cache_candidate",
@@ -420,7 +420,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retained-hotspot-improved-plateau-still-failed-reranked",
       "evidence_fingerprints": [
-        "bfcebb61906d51cf52925e1a008bed02859685b1093a9eaa62fc49d3a46a3ef5"
+        "b0e0d57e19cede6145b499b8993b792384d5f32a4f61ebf26adbfdb0565e464b"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:emotional_cascade_fixed_point_full_natural",
@@ -437,7 +437,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retained-local-gates-passed-full-natural-verification-next",
       "evidence_fingerprints": [
-        "cfc22af065c3660f609c10dfb10a31a7a4d93e6ef0d43381d845500db53bfa5e"
+        "4be1087a4355ed77b7a5f1fe309d9506b5bf8ef1975269e9530c02bada607c09"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:emotional_cascade_fixed_point_repair",
@@ -454,7 +454,7 @@
       "corpus_parameter_scope": "rejected knob-derived priority-prefix candidate; 27 F/S/T structural points; exact B and logical B+1 shared-member seams; 15,695-packet fixed-time Natural midpoint against a same-binary control and identical 118-event consolidation schedule; 512 public top-16 queries over four opaque sources; nine-point production matrix intentionally not run after midpoint fail-fast",
       "decision": "reject-before-nine-point-ablation-for-p99-and-public-retrieval-quality",
       "evidence_fingerprints": [
-        "b8e4c4dc7243a094fad16ec82418ff7d3ab0fe022b3b2ed4901747c00225f3ab"
+        "65483a65f6d9d4c587486fb091d0e513eb05985b3a1275894caf47e13cb44523"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:emotional_cascade_fixed_work_candidate",
@@ -474,7 +474,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retained-full-natural-improvement-flatness-failed-reranked",
       "evidence_fingerprints": [
-        "c437d2be35f93e92524f0108695cc90d09ed11c6ef422bb12a60cdfa75e4ffae"
+        "26c10425cd3ac3c63c08d1ab546b8614a80bdd2129bf7378a7c336df285c724b"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:emotional_metadata_cache_repair",
@@ -491,7 +491,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "reject-all-five-single-hierarchy-bounded-link-repairs",
       "evidence_fingerprints": [
-        "ecaa356bb3c43b5af6db667804652f864113fdfe9f9432768923ad6fccd8c726"
+        "b09b6788a47a7f3adba9766f9e31e1282031cc212c35b6efd7fdc127deca1277"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:fixed5c_moved_centroid_reachability",
@@ -501,14 +501,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "recorded-measurement",
       "evidence_fingerprints": [
-        "e180d8cf1c390e364d00164d795b1dd4151a8fd18e70e9ab1e463cacdaebad8b"
+        "0e531753880ffdc2c64df2c0a178341a555588f8131940f52c4b5e96efbe7c80"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:graph_eligibility_db_proof",
@@ -525,7 +525,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retained-local-improvement-full-natural-flatness-gate-failed",
       "evidence_fingerprints": [
-        "65305ad83c3ff1cc3ef273f8ee48c80eef178d405ad96520df57a98f62d4526c"
+        "47bb7dec0b5f4d686a917534e02963ad608c2d17655f4e1a845a5ddc701b38b1"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:graph_eligibility_repair",
@@ -542,7 +542,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "rejected-fresh-and-late-total-process-wall-regression",
       "evidence_fingerprints": [
-        "79861dbdce7c0ced9e148ceddaa784c7c329dc044c4d3b5b02847de4294d2b59"
+        "69d89bf7ca9353c9e00199dc0cde1002bae5de66a34036b6e885986843f4d87c"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:graph_family_precomputed_features_candidate",
@@ -559,7 +559,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "rejected-late-process-graph-and-comparison-regression",
       "evidence_fingerprints": [
-        "e8f2e5e6c8dd1e8de539404e7b531b186e79a4878eebb54692472b23a1594b56"
+        "f097813259dbf7e6ff29619d0c2f04101617c21ab56d6b7fd3ef91ea9cacc434"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:graph_family_projection_bound_candidate",
@@ -576,7 +576,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "rejected-fresh-process-and-graph-regression",
       "evidence_fingerprints": [
-        "683631b85f811294446d98f2e66ec93151c593897d7707f4bff10fa7431a97a0"
+        "6bf28d18c6d21c43e5a7c61eb842530c905c941f634f9633bafdcd10e87db283"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:graph_family_vector_bound_candidate",
@@ -593,7 +593,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retained-local-improvement-full-natural-flatness-gate-failed",
       "evidence_fingerprints": [
-        "54f9c5e9235181e534d48fc68a3828f691ba62015c722bdde8db5f6852750d7f"
+        "c6e3b8b69411677357b05cde5bb632d470a010d8f088ba86bd7ae8d094ef9590"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:graph_partial_distance_evaluation",
@@ -610,7 +610,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retained-local-gates-passed-family-compare-next",
       "evidence_fingerprints": [
-        "0c28a16305eaf9a2af815274e767863ee883f097e85d9635f17135b704452582"
+        "67c426e40a2574fbc16bb8a1de30a9b5dc738add89f18b340f63b69f8d0bb9bc"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:graph_supersession_eligibility_repair",
@@ -627,7 +627,7 @@
       "corpus_parameter_scope": "rejected private fixed-6C envelope; 27 structural F/S/T points and 931 assertions; one additional 15,695-packet Natural production-default pre-screen at F=0.45, S=T=0.5 with 512 public top-16 queries; exact nine-point corpus matrix not started after fail-fast rejection",
       "decision": "rejected-after-production-default-prescreen-hard-gates",
       "evidence_fingerprints": [
-        "4bcece2ce0d609b506e13ce283c069bcb4d5881e67ddb11b8a18a6ef59a69049"
+        "4052b3da40076bd1ee8247d8342ec7c5509e2c8ea2dc2bb2095cac31be2420ba"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:hnsw_fixed_6c_experiment",
@@ -640,15 +640,14 @@
         "the additional production-default pre-screen failed the hard gates",
         "zero of nine exact corpus-matrix points were run after fail-fast rejection",
         "the production fixed-5C default was not changed",
-        "whole-engine boundedness and production cutover are not proven",
-        "production cutover is not proven"
+        "whole-engine boundedness and production cutover are not proven"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retain-incremental-consolidation-seal-within-current-latency-tradeoff-do-not-cut-over-before-bounded-restart-and-full-horizon-close",
       "evidence_fingerprints": [
-        "f18054ed033325c0aea69e2bc189ebaf7c9f783c05dddb77cd2058d8fe282976"
+        "bebafa75b6b3df78b1447d924b19e798c52cd957552e2af88a82f3e283ac4477"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:integrated_hnsw_consolidation_seal_experiment",
@@ -658,14 +657,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "2,500 deterministic Natural packets; four opaque source ids; text, audio, and image post-encoding labels; 128 public top-16 queries; two HNSW graphs; 512-candidate sealed-plus-delta route",
       "decision": "retain-sealed-two-hnsw-plus-exact-delta-reseal-at-512-reject-live-update-and-every-consolidation-rebuild",
       "evidence_fingerprints": [
-        "eceaf32b550a4d511981379db3f7656bab55b44cd4400b2f7b3feded9be10aea"
+        "6035330ee4f44bb8b01214c8d1c72b1aa3e1ac77c1ce9fca593a2b3f7a523d45"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:integrated_hnsw_sparse_route_experiment",
@@ -675,14 +674,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retain-live-two-graph-route-for-cross-modality-restart-cycle-latency-and-engine-integration-proof",
       "evidence_fingerprints": [
-        "197c570cb0209b0b7d63935e1a4a6ebea2f2ca65003a6581a6f079acf82b6d7c"
+        "3db2a5a9bccb7c363bf7d3583a96e33f7fc4276cdca57cd2b5f9eb7ca8b7697c"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:live_surface_mutation_capture_experiment",
@@ -692,14 +691,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings; four SQLite blobs; 1,024 anchors; 512 deterministic top-16 route queries; separate 1,024-embedding fresh-prefix restart",
       "decision": "retain-row-addressed-query-seam-reject-whole-snapshot-rewrite",
       "evidence_fingerprints": [
-        "828851ddb716b6d27a28089951550dbf2d0e51e9d7061fc5f6c62fcc620509f3"
+        "f4da4dfe29d1af557f3774d9ce2335ef8b4474668508923d7a5e1f9dfdbe598b"
       ],
       "evidence_kind": "benchmark-only",
       "inventory_id": "state:packed_route_sqlite_representation_experiment",
@@ -709,14 +708,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "100- and 200-event Natural and Durable instrumentation smoke profiles",
       "decision": "complete",
       "evidence_fingerprints": [
-        "b0f4f9f49236829c7d8dc831675cabe82e04428afccfef8f72983818211c39f6"
+        "78c3dfa21ef557ec13ea96696c4b7060bbc028a75cdfdb00ccbf8ac3f1a374a7"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:plateau_profiler_smoke_proof",
@@ -733,7 +732,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "select-SignalProcessor.publish_rif_active_epoch",
       "evidence_fingerprints": [
-        "35e402a8536dbbea2e5e94991807623901fba097b9cea233da5ea78c319f4f80"
+        "44a024ab227f474ac17ea8a938ca8fd0e6295c6da729b25a4162f5cea8d7f732"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:post_emotional_priority_rejection_rerank",
@@ -743,14 +742,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "select-shared-sqlite-activation-query-distance-materialization",
       "evidence_fingerprints": [
-        "6af1c9dfe8a1550fcaff4e574fec14d0ac74b23a2929206b71c9eb5581309ff6"
+        "3af8e93d86ec5cbb9a426e41839862e9da1c2d8ae4527d9d0aa81806baeaaa21"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:post_hnsw_cost_attribution",
@@ -760,14 +759,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retain-query-local-persisted-distance-reuse",
       "evidence_fingerprints": [
-        "9ef6ad6179fc870657b2bd043ff2000743263255ed90e1320e0152e2f625c61f"
+        "87228cd423346649c0d37434948d75bc7d2df44b62bb4d4d59f878c1409deb4b"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:post_hnsw_query_distance_reuse",
@@ -777,14 +776,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "paired fresh and copied-late 200-event Natural and Durable windows",
       "decision": "recorded-measurement",
       "evidence_fingerprints": [
-        "331c3e8a352a974bd3c5247cb28ca2ab2b17681c79e5fc4e8dc8537f0004e73c"
+        "e29d5d1001669f806d52fac5740a442ac8a35c32c122af349da3402962875a40"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:post_shadow_rerank",
@@ -799,9 +798,9 @@
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
-      "decision": "eleven-review-thread-repair-with-follow-up-p2-proof-active",
+      "decision": "fourteen-review-thread-repair-active",
       "evidence_fingerprints": [
-        "fbba1d0e888bb0cfcb17ea27b39752979c8fcb164afc452b16e5b11331cce753"
+        "728f7517ec8ffc0ee8aed0308b604c64c2d385190a88fb99c48da0dafb658b05"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:pr6_exact_head_ci_repair",
@@ -818,7 +817,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retain-feasibility-only-require-live-surface-mutation-capture-before-candidate-decision",
       "evidence_fingerprints": [
-        "47fa93e666957958f4cec485b4a6afb8fd92f0a1ea28c936dfea9e1f3592f588"
+        "d8d4bfe9f05361fec123da264bae3c6606204d60abe57d30ffeeebb1b0a01304"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:public_hnsw_route_prototype_experiment",
@@ -828,14 +827,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retain-real-GraphRetrieve-control-capture-live-surface-candidate-proof-recorded-separately",
       "evidence_fingerprints": [
-        "79e04b1b383acef5611d76d6128a17f0ed8283ca7317f1728b7309bba431d027"
+        "0ddecf898960dafebcd6e485746a359d4d4eac97e985be45ec988121a410db2b"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:public_retrieval_control_capture_experiment",
@@ -845,14 +844,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "reject-current-recenter-as-retrieval-centroid-reset",
       "evidence_fingerprints": [
-        "29a6a51e91f6e663f59cbacf675465b4c01b0376a0df49657b5f012fa2adcb65"
+        "f88a49e290801f5cd4c269d1a477e29d35fdaa7bcea52ca7efb4981a710f4031"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:recenter_activation_overlap_natural_13000_v2",
@@ -869,7 +868,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "recorded-measurement",
       "evidence_fingerprints": [
-        "f6e20cca3c59ff1f1144496e5e3ca747df4bd31fe0026301845f6a043cad8487"
+        "52912431e4c3323b6b98030f13356da3afa4741c43a210397bbb465cfc48667f"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:repair_results",
@@ -886,7 +885,7 @@
       "corpus_parameter_scope": "correction from 34,456 complete embedding ids to 3,172 current long-term memory identities; 512 top-16 queries; ten 128-memory-node incremental feasibility epochs; 25/50/100-percent restart probes",
       "decision": "retain-router-feasibility-require-exact-public-control-rerun",
       "evidence_fingerprints": [
-        "e5c2c164b8e3a329ec89d05169cf550233e57d48ad7ab858ed596f8a94d31ea8"
+        "c775d4a1bf098049d83f7211e87c8381da2121a0e2fbdf409ca107b3ca3a3c9c"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:retrieval_quality_control_correction",
@@ -896,14 +895,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retain-for-source-health-and-continue-full-horizon-verification",
       "evidence_fingerprints": [
-        "ba8d896958f51050d2ca578c4aa354af9370bb33f4746b2f705e6fb086baa6e1"
+        "be9c897fac8c4f2bad02c5d2d7ed06e4874724dea0a9ff8fd6a638d331235a69"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:rif_active_identity_ledger",
@@ -913,14 +912,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "15,695-packet Natural replay at F=0.45, S=T=0.5; 27 structural F/S/T points; nine production-shaped reset points; B=round(64+64F+32S+32T), with neutral B=128 and 129 used only as the logical B+1 population boundary; text/audio/image labels and two opaque source ids",
       "decision": "local-hotspot-flat-full-natural-overall-gates-failed",
       "evidence_fingerprints": [
-        "6d2ab8e49b315093b8ce0023dae6e07b8b159ed707a89c1e9b40ff30c339d26b"
+        "ea7982f576f1c163f7cb7dba2e67bceb2e1446fec1947d72a44157f5ece355db"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:rif_epoch_consolidation_reset_candidate",
@@ -940,7 +939,7 @@
       "corpus_parameter_scope": "200-event fresh and 34,256-row copied-late SQLite seals; 3,544 reciprocal route-row updates; 1,024 anchors; 512 fixed-route queries",
       "decision": "retain-row-addressed-snapshot-for-production-shaped-engine-evaluation",
       "evidence_fingerprints": [
-        "49561d775e1c06ba04fcf28c2f237d14c2a2d38c21beb3d446247bc9b7f015d5"
+        "5039a6e6eae680cd1d93bcf6007cb79342f8cf6a30c6aef52affe69f25d68fad"
       ],
       "evidence_kind": "benchmark-only",
       "inventory_id": "state:row_addressed_route_sqlite_experiment",
@@ -950,14 +949,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "paired fresh and copied-late 200-event Natural and Durable windows",
       "decision": "rejected-numeric-acceptance-gates-failed",
       "evidence_fingerprints": [
-        "8bf7c3b51be906c312d8a00913970547e4f4c9deb33068cd1edfd5598e263f51"
+        "7e80167b056ae9913689593a0ad308d5ec360f84c132216bc2fbd86a4d583bb4"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:shadow_sqlite_scoped_evaluation",
@@ -967,14 +966,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "paired fresh and copied-late 200-event Natural and Durable windows",
       "decision": "recorded-measurement",
       "evidence_fingerprints": [
-        "c4a5811f138462e381bbad56bb4b577307ef0b84797dfbcbbdcaf237813f25bd"
+        "6636a4c87f426302cff2fe27aa9ac79df8e3c2ace70b6974da647fec4259a1e2"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:shadow_sqlite_seam_proof",
@@ -991,7 +990,7 @@
       "corpus_parameter_scope": "migration 30; 15,695-packet Natural and 2,016-message Durable replays at F=0.45, S=T=0.5; 27 structural F/S/T points; nine 2,000-packet same-knob runs with 512 public queries and four opaque source ids per run; separate text/audio/image label proof",
       "decision": "retain-local-write-surface-repair-whole-goal-continues",
       "evidence_fingerprints": [
-        "19cc8ea4ce28c90b828697bef4a03e70af519be85a95f6d6f75f33b0ac972986"
+        "50324f782e8b33fb7f843adf88b04f1cba8a28d34118fbd0a05bdf473a92c79d"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:signal_centroid_ring_cutover",
@@ -1044,7 +1043,7 @@
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retain-real-hnsw-adjacency-walk-reject-anchor-neighborhood-approximation",
       "evidence_fingerprints": [
-        "9a7b782479af069c49b9b6a805693468651653afe0ec3006e9c2f2d7a02160f6"
+        "eb95c2020ea5ef8dcac8c6e46ecacb243c43c029e15d622dce60800746de7137"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:sqlite_hnsw_sparse_route_integration",
@@ -1054,14 +1053,14 @@
         "path": "docs/paper/sections/11_optimization.qmd"
       },
       "unresolved_limits": [
-        "production cutover is not proven"
+        "the paper claim is limited to the recorded proof scope"
       ]
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "rejected-fresh-process-and-wall-hard-gate",
       "evidence_fingerprints": [
-        "bdefb3bf6651ce390f3b536ae336fd436db4c37e47f7931c70392942369cf3fc"
+        "a2da60acbd26711c481196fbb65ae9761c928fbbc3fcc0dca7dec467455f6f3e"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:supersession_metric_index_candidate",
@@ -1078,7 +1077,7 @@
       "corpus_parameter_scope": "100- and 200-event Natural and Durable instrumentation smoke profiles",
       "decision": "use explicit result activity markers instead of inclusive operation duration for vacuous-zero detection",
       "evidence_fingerprints": [
-        "93bf3719b58b031954d3e1e8d8bb58b422f1d988f0a43083406cd529b98dfd10"
+        "9e6c3186d05fd2ed141f3399e18148205dbdea9aa13715f90a3b2c9c11f1be92"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:work_counter_activity_repair",
@@ -1095,7 +1094,7 @@
       "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
       "decision": "rejected-recall-at-16-0.979858",
       "evidence_fingerprints": [
-        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "09d706ac310d63937db9e98a98a96ca55e794da699acb2870185cdc083cba71e",
         "d30bfc49a82969a56834a87efddd827f5c4eda4987b0dc4084415dde84facf81"
       ],
       "evidence_kind": "modeled",
@@ -1113,7 +1112,7 @@
       "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
       "decision": "rejected-no-recall-gain-at-equal-per-graph-work",
       "evidence_fingerprints": [
-        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "09d706ac310d63937db9e98a98a96ca55e794da699acb2870185cdc083cba71e",
         "31008972639ea1a20a7bdc7ec76d8284a5a943db5b18a702fc5261f9c136f10e"
       ],
       "evidence_kind": "modeled",
@@ -1131,7 +1130,7 @@
       "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
       "decision": "rejected-recall-at-16-0.995972",
       "evidence_fingerprints": [
-        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "09d706ac310d63937db9e98a98a96ca55e794da699acb2870185cdc083cba71e",
         "68ff8dacf45e677f4c8781c1a6a1fe6ccb16af107a424016f72c32954e7694f2"
       ],
       "evidence_kind": "modeled",
@@ -1149,7 +1148,7 @@
       "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
       "decision": "rejected-recall-at-16-0.997803",
       "evidence_fingerprints": [
-        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "09d706ac310d63937db9e98a98a96ca55e794da699acb2870185cdc083cba71e",
         "49a8e8870573f66e98eb48ba0aafa1a1a6f1a5827ee6ada2ac7e6ae1dee45b1b"
       ],
       "evidence_kind": "modeled",
@@ -1167,7 +1166,7 @@
       "corpus_parameter_scope": "34,456 normalized 256-dimensional embeddings and 512 deterministic top-16 queries",
       "decision": "selected-benchmark-design-production-proof-pending",
       "evidence_fingerprints": [
-        "d80d794e27b6979b354692bd7a530e4eff6baf61d9023e85ac37ff8940c0364c",
+        "09d706ac310d63937db9e98a98a96ca55e794da699acb2870185cdc083cba71e",
         "c6d0a84a168058264ebdfdc489c94852c9d1918be430a8b661d2947d03ceb0a0"
       ],
       "evidence_kind": "modeled",

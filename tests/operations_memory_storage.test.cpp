@@ -633,20 +633,30 @@ TEST_CASE ("Active signal embedding ring obeys knob-derived capacities",
            "[operations][memory_storage][embedding_population][knobs]")
 {
   namespace ring = operations::active_signal_embedding_ring_internal;
-  const std::vector<std::tuple<double, double, double>> points = {
-    { 0.5, 0.5, 0.5 }, { 0.0, 0.0, 0.0 }, { 1.0, 1.0, 1.0 },
-    { 0.0, 0.5, 0.5 }, { 1.0, 0.5, 0.5 }, { 0.5, 0.0, 0.5 },
-    { 0.5, 1.0, 0.5 }, { 0.5, 0.5, 0.0 }, { 0.5, 0.5, 1.0 }
-  };
+  std::vector<std::tuple<double, double, double>> points;
+  for (const double focus : { 0.0, 0.5, 1.0 })
+    for (const double sensitivity : { 0.0, 0.5, 1.0 })
+      for (const double stability : { 0.0, 0.5, 1.0 })
+        points.emplace_back (focus, sensitivity, stability);
 
+  REQUIRE (ring::Capacity (0.0, 0.0, 0.0) == 64);
+  REQUIRE (ring::Capacity (0.5, 0.5, 0.5) == 151);
+  REQUIRE (ring::Capacity (1.0, 1.0, 1.0) == 266);
+
+  auto store = SQLiteStore::Create (":memory:");
+  cortext::testing::InitializeCoreSchema (*store);
   for (const auto &[focus, sensitivity, stability] : points)
     {
-      auto store = SQLiteStore::Create (":memory:");
-      cortext::testing::InitializeCoreSchema (*store);
+      store->Execute ("DELETE FROM cortext_active_signal_embeddings");
+      store->Execute ("DELETE FROM signals");
       const int capacity = ring::Capacity (focus, sensitivity, stability);
       REQUIRE (capacity
                == operations::sparse_retrieval_knobs_internal::
-                      BackfillBatchSize (focus, sensitivity, stability));
+                      ActiveSignalEmbeddingCapacity (
+                          focus, sensitivity, stability));
+      REQUIRE (capacity
+               >= static_cast<int> (core::NCtx (stability)
+                                    + core::KCtx (stability)));
 
       auto tx = store->Begin ();
       for (long long signal_id = 1; signal_id <= capacity + 3; ++signal_id)
@@ -684,9 +694,9 @@ TEST_CASE ("Active signal embedding ring obeys knob-derived capacities",
       REQUIRE (AnyToLongLong (rows[0].at ("max_capacity")) == capacity);
     }
 
-  auto resized_store = SQLiteStore::Create (":memory:");
-  cortext::testing::InitializeCoreSchema (*resized_store);
-  auto resized_tx = resized_store->Begin ();
+  store->Execute ("DELETE FROM cortext_active_signal_embeddings");
+  store->Execute ("DELETE FROM signals");
+  auto resized_tx = store->Begin ();
   std::vector<float> embedding (kEmbeddingDim, 0.0f);
   embedding[0] = 1.0f;
   for (long long signal_id = 1; signal_id <= 131; ++signal_id)
@@ -703,7 +713,7 @@ TEST_CASE ("Active signal embedding ring obeys knob-derived capacities",
                       0.0);
     }
   resized_tx->Commit ();
-  const auto resized_rows = resized_store->Execute (
+  const auto resized_rows = store->Execute (
       "SELECT COUNT(*) AS n, MIN(signal_id) AS first_id, "
       "MAX(signal_id) AS last_id, MIN(capacity) AS min_capacity, "
       "MAX(capacity) AS max_capacity "
@@ -1060,10 +1070,13 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
   const auto parameters = sqlite_route::DeriveParameters (
       cfg.focus, cfg.sensitivity, cfg.stability);
-  REQUIRE (parameters.route_capacity == 512);
-  REQUIRE (parameters.backfill_batch_size == 128);
+  REQUIRE (parameters.route_capacity == 256);
+  REQUIRE (parameters.backfill_batch_size == 64);
   const std::size_t population = parameters.route_capacity + 1;
 
   ProcessorContext pctx;
@@ -1164,7 +1177,7 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
                "MemoryStorage.supersession_sparse_route_node_rows"));
   REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_historical_rows_visited")
-           == 0.0);
+           == static_cast<double> (population + 1));
   REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_historical_coverage_proven")
            == 1.0);

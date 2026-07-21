@@ -517,9 +517,9 @@ not consume the fixed node budget or hide an isolated active identity just
 beyond an inactive slice. CMake and Zig compile the same pinned HNSW safety
 patch. The Zig graph copies the header-only dependency into a build-local
 declared output and patches that copy, leaving the content-addressed global
-package cache immutable and safe for concurrent builds. The build-local output
-is normalized to Git's forward-slash path form before `git apply`, so the same
-content check no longer receives host-native backslashes. The patch itself is
+package cache immutable and safe for concurrent builds. The patch is checked
+and applied with the build-local output as the working directory, so no
+host-native output path is passed through Git's path parser. The patch itself is
 also a declared build input, so changing it invalidates the preparation step
 instead of reusing a stale patched output. Local POSIX proof
 passes; replacement Windows CI remains the execution owner. The Zig package
@@ -622,28 +622,43 @@ exact retrieval remains authoritative.
 This gives consolidation a real route-epoch boundary without a store-sized graph
 rewrite.
 
-Application hydration uses the same bounded-surface rule when a memory has no
+Application hydration uses a bounded-output rule when a memory has no
 materialized memory or reconstruction blob. SQLite retains every authoritative
-signal, but the fallback reads only the most recent $B$ signal rows for that
-memory through the `(memory_id, serial_position)` index and returns the selected
-rows in chronological order. Thus neutral knobs hydrate at most 128 fallback
-signal payloads per returned memory, all-low hydrates 64, and all-high hydrates
-192. The bound does not inspect modality or `source_id`; text, audio, and image
-signals follow the same indexed query. The runtime records the derived limit
-and the number of fallback rows actually materialized on each public call.
+signal. The fallback first applies the memory's modality predicate in SQLite,
+then walks newest-first keyset pages and loads payloads until either $B$ rows
+pass the same modality, MIME, and payload-shape predicate used by the public
+surface or that memory's candidates are exhausted. Accepted payloads are
+returned in chronological order. Thus neutral knobs hydrate at most 128
+fallback signal payloads per returned memory, all-low hydrates 64, and all-high
+hydrates 192. The accepted-output bound uses neither modality nor `source_id`
+as a budget input, while filtering prevents a newer run of nonmatching or
+mislabelled payloads from hiding an older matching payload. This correction
+does mean that malformed legacy history can require more than $B$ candidate
+rows to be inspected; bounded output is claimed, but bounded fallback scan work
+is not. The runtime records the derived output limit and the number of fallback
+payloads actually materialized on each public call.
 
 The same bounded activation surface now serves supersession selection after the
 current memory population exceeds $C$. `MemoryStorage` asks the persisted route
 for at most $A$ identities, exactly reranks those current embeddings, and keeps
 its existing timestamp, kind, threshold, duplicate-band, edge-count, and tie
 rules. On this sparse path the latest current embedding is the memory's active
-centroid: an older base embedding remains durable lineage but does not re-enter
-as a second competing candidate after consolidation has moved that memory.
+centroid. A bounded HNSW result is now treated only as a candidate set, never as
+proof that it covers the exact current population. The historical cache's exact
+coverage/ranking proof therefore remains active after sparse routing; when that
+proof cannot be established, the existing SQLite fallback remains enabled.
+This prevents an approximate current result from suppressing a predecessor
+outside the activated subset. It deliberately permits history-sized
+supersession verification work on a write, so the $9C+A$ retrieval-row ceiling
+does not imply flat supersession-write cost. This is the accepted correctness
+side of the write-throughput/retrieval-symmetry tradeoff and keeps
+production-wide boundedness unclaimed.
 Until the route is published, when the dirty delta exceeds $C$, or when route
 validation fails, the operation retains the exact fallback. This is one shared,
 modality- and source-agnostic candidate route for Natural and Durable; it does
 not add a second write API or make the connection-local cache authoritative.
-The 4,000-event knob ablation and its remaining full-horizon limits are reported
+The 4,000-event knob ablation predates this exact-coverage correction and its
+remaining full-horizon limits are reported
 in the optimization section. `TRACE[state:integrated_hnsw_sparse_route_experiment]`
 and `TRACE[state:sqlite_hnsw_knob_ablation]`.
 
@@ -971,38 +986,42 @@ vectors for only the active tail are retained in the internal
 write path, not a second durability system: Natural ingestion appends through
 the common path, and Durable adds the existing flush/checkpoint boundary.
 
-The ring capacity reuses the knob-derived historical batch size
+The exact-vector ring must cover both the historical batch and every signal
+that restart can place in recent context. Its capacity is
 
 $$
-B(F,S,T)=\operatorname{round}(64+64F+32S+32T),
+Q(F,S,T)=\max\!\left(B(F,S,T),N_{ctx}(T)+K_{ctx}(T)\right),
 $$
 
 after independently clamping each knob to $[0,1]$. It therefore contains 64,
-128, and 192 rows at the all-low, midpoint, and all-high corners. The logical
+151, and 266 rows at the all-low, midpoint, and all-high corners. The logical
 rounding rule is C++ `std::lround`, so half-integer ties round away from zero.
 For example, $F=1/128,S=T=0$ yields 65 rather than 64. The logical
 $B+1$ probe remains an overflow/completion check; it is not a fetched or
 processed extra row. Slot selection is
-`(signal_id - 1) mod B`, so each ring upsert replaces at most one prior
+`(signal_id - 1) mod Q`, so each ring upsert replaces at most one prior
 exact-vector row. One accepted pipeline event may persist multiple accumulated
 signal records and therefore perform multiple bounded upserts; the measured
-Natural maximum was 14 ring-table mutations in one event. If knobs change, the
+Natural maximum of 14 ring-table mutations came from the earlier $B$-capacity
+experiment and is not a new $Q$-capacity benchmark. If knobs change, the
 table rehashes only the newest rows that
-fit the newly resolved $B$ and remains bounded by the old or new knob-derived
+fit the newly resolved $Q$ and remains bounded by the old or new knob-derived
 capacity throughout the transition.
 
-Recent-context and working-memory restart hydration first read the exact vector
-from this bounded ring and fall back to the durable centroid reference for an
-older signal or a pre-migration database. The global vector index consequently
+When the ring contains rows, recent-context restart hydration admits only
+signals with an exact ring vector; it does not silently substitute a memory
+centroid for a missing per-signal vector. A pre-ring database with no exact
+rows retains the legacy centroid fallback. This means an older store whose
+prior ring was smaller can temporarily restore a shorter exact context until
+new writes fill $Q$, rather than mixing aggregate vectors into an apparently
+full exact window. The global vector index consequently
 contains memory centroids rather than a growing population of signal-only
 decoys. The schema and routing code contain no modality or `source_id` branch;
 text, audio, image, shared, and opaque sources enter after encoding through the
-same slot formula. Migration tests preserve the legacy fallback, and direct
-regressions cover mixed modality/source labels, knob changes, and the
-64/128/192 capacity corners without widening the public API. The hydration
-implementation reads the exact ring first and then the centroid fallback, but
-this checkpoint does not claim a standalone end-to-end restart regression or
-bounded whole-engine restart.
+same slot formula. Direct regressions cover mixed modality/source labels, knob
+changes, all 27 low/mid/high F/S/T combinations, and a 151-vector neutral
+restart whose restored identities equal the exact signal vectors. This does
+not claim bounded whole-engine restart.
 
 Emotional propagation separately limits enqueued mutation statements to the
 existing activation target $A=2C+2B$. This is a hard bound on writes, not a
