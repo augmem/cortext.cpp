@@ -332,6 +332,7 @@ pub fn build(b: *std.Build) void {
     );
     prepare_hnswlib.addArg("-P");
     prepare_hnswlib.addFileArg(b.path("cmake/PrepareHnswlibForZig.cmake"));
+    prepare_hnswlib.addFileInput(b.path("cmake/hnswlib-prefetch-bounds.patch"));
 
     if (fetch_aist_model) {
         if (!std.mem.eql(u8, aist_model_quant, "q8_0") and

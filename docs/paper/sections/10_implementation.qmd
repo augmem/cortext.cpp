@@ -405,6 +405,12 @@ snapshot through its independent $A$ row budget and uses all valid snapshot
 identities as deterministic level-zero entry points. Neighbor rows discovered
 from those entry points remain charged to the current canonical $8C$--$9C$ budget,
 so consolidation can steer the walk without widening either envelope.
+The internal rebuild of a replacement snapshot deliberately excludes the prior
+snapshot's identities from its frontier seeds; only the canonical route and the
+new consolidation embedding may choose the replacement centroid neighborhood.
+The same identities may still be rediscovered through canonical adjacency or
+the active indexed fill and retained by exact reranking; this rule removes stale
+seeding authority, not otherwise relevant memories.
 The internal search used to construct a recenter snapshot does not advance the
 retrieval-age ramp. If snapshot persistence fails, both queue effort and the
 actual-node budget remain at their pre-attempt values; only a successful
@@ -511,7 +517,15 @@ not consume the fixed node budget or hide an isolated active identity just
 beyond an inactive slice. CMake and Zig compile the same pinned HNSW safety
 patch. The Zig graph copies the header-only dependency into a build-local
 declared output and patches that copy, leaving the content-addressed global
-package cache immutable and safe for concurrent builds.
+package cache immutable and safe for concurrent builds. The build-local output
+is normalized to Git's forward-slash path form before `git apply`, so the same
+content check no longer receives host-native backslashes. The patch itself is
+also a declared build input, so changing it invalidates the preparation step
+instead of reusing a stale patched output. Local POSIX proof
+passes; replacement Windows CI remains the execution owner. The Zig package
+manifest includes the `cmake` directory so downstream package consumers receive
+both the preparation script and its content-checked patch rather than only the
+top-level build graph.
 
 When a sealed removal targets the canonical hierarchy entry, replacement is
 selected by highest level and then lowest memory id through the
@@ -520,6 +534,11 @@ most the staged removal count plus one row: at most that many leading rows can
 be excluded by the same seal. The replacement's level becomes the new
 `max_level`, so restart never begins from an inactive entry or asks a lower
 level node for nonexistent upper adjacency.
+If the removed node later becomes active again without changing its embedding,
+row-addressed sealing preserves its persisted links and level and promotes it
+back to the canonical entry whenever that level exceeds the current active
+maximum. Thus metadata continues to name the highest active hierarchy root
+after both deletion and reactivation.
 If any sealed removal overlaps the persisted consolidation activation snapshot,
 the snapshot entry, generation, centroid, and identity list are cleared in the
 same transaction; in-process and restarted queries then use the canonical

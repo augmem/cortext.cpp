@@ -382,6 +382,24 @@ TEST_CASE ("SQLite sparse route replaces a removed hierarchy entry",
   REQUIRE (result);
   REQUIRE_FALSE (result->empty ());
   REQUIRE (result->front () == 2);
+
+  REQUIRE (route->Upsert (1, UnitVec (1)));
+  REQUIRE (route->StagePendingUpsert (1, UnitVec (1)));
+  REQUIRE (route->Seal ());
+  const auto reactivated = store->Execute (
+      "SELECT entry_memory_id, max_level FROM cortext_sparse_route_meta");
+  REQUIRE (reactivated.size () == 1);
+  REQUIRE (store::AnyToLongLong (
+               reactivated.front ().at ("entry_memory_id"))
+           == 1);
+  REQUIRE (store::AnyToLongLong (reactivated.front ().at ("max_level"))
+           == 3);
+  reopened = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (reopened);
+  const auto restored = reopened->Search (UnitVec (1), 3);
+  REQUIRE (restored);
+  REQUIRE_FALSE (restored->empty ());
+  REQUIRE (restored->front () == 1);
 }
 
 TEST_CASE ("SQLite sparse route invalidates stale links after an active "
@@ -853,15 +871,31 @@ TEST_CASE ("Consolidation rebuilds and restarts a knob-bounded SQLite "
   route = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
   REQUIRE (route);
   REQUIRE (route->ActivationEntryMemoryId () == first_entry);
+  const auto cold_ordinary = route->Search (observer_query, 16);
+  REQUIRE (cold_ordinary);
+  REQUIRE (route->LastActivationSnapshotCacheMissRows () == 0);
+  REQUIRE (route->LastActivationFrontierSeedCount () > 0);
+  REQUIRE (route->LastActivationFrontierSeedCount ()
+           < route->ActivationIdentityIds ().size ());
+  const std::size_t cold_seed_count
+      = route->LastActivationFrontierSeedCount ();
+  route = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
+  REQUIRE (route);
+  REQUIRE (route->Search (observer_query, 16) == cold_ordinary);
+  REQUIRE (route->LastActivationFrontierSeedCount () == cold_seed_count);
   REQUIRE (route->SearchActivated (observer_query) == first_activation);
   REQUIRE (route->LastActivationSnapshotCacheMissRows () > 0);
   REQUIRE (route->LastActivationSnapshotCacheMissRows ()
            <= parameters.activation_identity_target);
   REQUIRE (route->SearchActivated (observer_query) == first_activation);
   REQUIRE (route->LastActivationSnapshotCacheMissRows () == 0);
+  REQUIRE (route->LastActivationFrontierSeedCount () > 0);
+  REQUIRE (route->LastActivationFrontierSeedCount ()
+           <= parameters.activation_identity_target);
   REQUIRE (route->RestartRowsLoaded () == 1);
 
   REQUIRE (route->Recenter (UnitVec (1)));
+  REQUIRE (route->LastActivationFrontierSeedCount () == 0);
   const long long second_entry = route->ActivationEntryMemoryId ();
   REQUIRE (second_entry > 700);
   REQUIRE (second_entry != first_entry);

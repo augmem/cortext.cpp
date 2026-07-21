@@ -925,6 +925,111 @@ TEST_CASE ("ScoreConsolidation fails closed above its active RIF work ceiling",
            == static_cast<double> (active_state_limit));
 }
 
+TEST_CASE ("ScoreConsolidation filters clustered rows before each bounded "
+           "candidate frontier",
+           "[operations][consolidation][bounded][cluster][regression]")
+{
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 1.0;
+  const auto candidate_limit = static_cast<long long> (
+      operations::sparse_retrieval_knobs_internal::
+          ActivationIdentityTarget (
+              cfg.focus, cfg.sensitivity, cfg.stability));
+
+  for (const bool active_frontier : { false, true })
+    {
+      DYNAMIC_SECTION ((active_frontier ? "active RIF frontier"
+                                        : "inactive frontier"))
+        {
+          auto store
+              = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+          cortext::store::ApplyMigrations (*store);
+          store->Execute (
+              "WITH RECURSIVE sequence(value) AS ("
+              "  SELECT 1 UNION ALL SELECT value + 1 FROM sequence "
+              "  WHERE value < ?"
+              ") INSERT INTO memories(memory_id, source_id, kind, start_ts, "
+              "n_signals, modality, strength, stability, redundancy, "
+              "cluster_id, created_at) "
+              "SELECT value, 'opaque/clustered', 'LONG_TERM', value, 1, "
+              "'image', 0.0, 0.0, 0.0, 77, value FROM sequence",
+              { candidate_limit });
+
+          const long long weak_id = candidate_limit + 1;
+          std::vector<float> weak_embedding (256, 0.0f);
+          weak_embedding[0] = 1.0f;
+          store->Execute (
+              "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+              "VALUES(?, ?, ?)",
+              { weak_id, weak_embedding, weak_id });
+          store->Execute (
+              "INSERT INTO memories(memory_id, embedding_id, source_id, "
+              "kind, start_ts, n_signals, modality, strength, stability, "
+              "redundancy, created_at) VALUES(?, ?, 'opaque/unclustered', "
+              "'LONG_TERM', ?, 1, 'audio', 0.01, 0.0, 0.0, ?)",
+              { weak_id, weak_id, weak_id, weak_id });
+
+          if (active_frontier)
+            store->Execute (
+                "INSERT INTO rif_active_state(memory_id, generation, "
+                "anchor_suppression, recovery_total, anchor_log_factor, "
+                "expires_log_factor) "
+                "SELECT memory_id, 1, 0.00000001, "
+                "CASE WHEN memory_id = ? THEN 0.01000001 "
+                "ELSE 0.00000001 END, "
+                "0.0, -20.0 FROM memories",
+                { weak_id });
+          else
+            {
+              const auto plan = store->Execute (
+                  "EXPLAIN QUERY PLAN "
+                  "SELECT m.memory_id FROM memories m INDEXED BY "
+                  "idx_memories_ltm_unclustered_strength_created "
+                  "WHERE m.kind = 'LONG_TERM' "
+                  "AND m.cluster_id IS NULL "
+                  "AND NOT EXISTS(SELECT 1 FROM rif_active_state a "
+                  "WHERE a.memory_id = m.memory_id) "
+                  "ORDER BY m.strength ASC, m.created_at ASC, "
+                  "m.embedding_id ASC LIMIT ?",
+                  { candidate_limit });
+              REQUIRE_FALSE (plan.empty ());
+              REQUIRE (std::any_of (
+                  plan.begin (), plan.end (), [] (const auto &row) {
+                    const auto detail = row.find ("detail");
+                    return detail != row.end ()
+                           && std::any_cast<std::string> (detail->second)
+                                  .find ("idx_memories_ltm_unclustered_"
+                                         "strength_created")
+                                  != std::string::npos;
+                  }));
+            }
+
+          Signal signal;
+          signal.timestamp = 57'000ULL;
+          signal.source_id = "opaque/cluster-prefilter";
+          signal.modality = active_frontier ? "audio" : "image";
+          signal.force_consolidation = true;
+          signal.embedding = Eigen::VectorXf::Zero (4);
+          ProcessorContext p_ctx;
+          OperationContext ctx (signal, p_ctx, cfg, store.get ());
+          auto tx = store->Begin ();
+          ScoreConsolidation{}.Execute (ctx, *tx);
+
+          const auto &candidates = ctx.GetConsolidationCandidates ();
+          REQUIRE (candidates.size () == 1);
+          REQUIRE (candidates.front ().memory_id == weak_id);
+          REQUIRE (candidates.front ().score
+                   == Catch::Approx (0.01).margin (1e-6));
+          REQUIRE (ctx.GetOperationTimings ().at (
+                       "ScoreConsolidation.candidate_input_count")
+                   == 1.0);
+        }
+    }
+}
+
 TEST_CASE ("ScoreConsolidation emits its full F S T derived work envelope",
            "[operations][consolidation][bounded][knobs][ablation]")
 {

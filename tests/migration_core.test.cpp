@@ -534,6 +534,29 @@ TEST_CASE("Migration 31 persists a knob-bounded activation centroid without "
     REQUIRE(names.count("source_id") == 0);
 }
 
+TEST_CASE("Migration 34 indexes only eligible unclustered consolidation rows",
+          "[schema][migration][consolidation][bounded]") {
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 33);
+    REQUIRE(store->Execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND "
+        "name = 'idx_memories_ltm_unclustered_strength_created'").empty());
+
+    cortext::store::ApplyMigrations(*store);
+
+    const auto ids = cortext::store::DebugGetAppliedMigrationIdsForTest(*store);
+    REQUIRE(ids.count(34) == 1);
+    const auto rows = store->Execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND "
+        "name = 'idx_memories_ltm_unclustered_strength_created'");
+    REQUIRE(rows.size() == 1);
+    const auto sql = std::any_cast<std::string>(rows.front().at("sql"));
+    REQUIRE(sql.find("strength, created_at, embedding_id")
+            != std::string::npos);
+    REQUIRE(sql.find("kind = 'LONG_TERM' AND cluster_id IS NULL")
+            != std::string::npos);
+}
+
 TEST_CASE("Migrations preserve 64-bit applied migration ids",
           "[schema][migration]") {
     auto store = SQLiteStore::Create(":memory:");
@@ -608,6 +631,7 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     REQUIRE(has_index("idx_memories_label_created"));
     REQUIRE(has_index("idx_memories_created_desc"));
     REQUIRE(has_index("idx_memories_ltm_strength_created"));
+    REQUIRE(has_index("idx_memories_ltm_unclustered_strength_created"));
     REQUIRE(has_index("idx_memories_pre_activation_embedding_active"));
     REQUIRE(has_index("idx_memories_flashbulb_intensity"));
     REQUIRE_FALSE(has_index("idx_memories_strength"));

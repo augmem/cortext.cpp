@@ -24,6 +24,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "cmake",
         "include",
         "scripts",
         "src",

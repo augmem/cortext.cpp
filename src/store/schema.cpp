@@ -962,6 +962,16 @@ GetCoreMigrations ()
               "AND kind != 'WORKING'",
           },
       },
+      {
+          34,
+          "Index bounded unclustered consolidation candidates",
+          {
+              "CREATE INDEX IF NOT EXISTS "
+              "idx_memories_ltm_unclustered_strength_created "
+              "ON memories(strength, created_at, embedding_id) "
+              "WHERE kind = 'LONG_TERM' AND cluster_id IS NULL",
+          },
+      },
   };
 }
 
