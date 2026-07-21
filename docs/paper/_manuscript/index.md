@@ -5523,6 +5523,14 @@ because aliases, wildcards, views, subqueries, and triggers cannot be
 classified safely from SQL text. A caller mutation also invalidates
 every database-derived processor cache before the statement executes.
 
+On startup from schema 27, migration may anchor active rows that carry
+different historical suppression timestamps to one recovery clock. The
+processor calibrates those rows transactionally and rebuilds the
+disposable active epoch before working-memory hydration reads the
+effective-value view. This ordering prevents restart from seeding a
+working slot with an uncalibrated strength and subsequently persisting
+that stale value.
+
 The authoritative signal mutation still commits once to persistent
 SQLite. After that commit, a separate connection-local in-memory SQLite
 database publishes only the current recovery clock and the identities
@@ -5618,6 +5626,15 @@ edges for each admitted identity. Natural and Durable execute these same
 operations and mutations; Durable adds only the existing post-commit
 flush/checkpoint barrier. None of these bounds branches on modality or
 source identifier.
+
+The pinned HNSW implementation retains its SIMD distance kernels, while
+a content-checked local patch bounds every speculative neighbor prefetch
+by the actual adjacency length. This prevents a sanitizer-visible
+one-past-end read without changing candidate membership or ranking.
+Cache-byte estimation also performs its knob-derived multiplication
+explicitly in `std::size_t`, keeping the same capacity on native and
+WebAssembly targets instead of relying on an implicit 64-to-32-bit
+narrowing conversion.
 
 ### Bounded activation observation shadow
 
@@ -9280,6 +9297,19 @@ ties, and source/modality-label invariance. Natural and Durable share
 the operation path, with Durable adding only its checkpoint;
 whole-engine reset, bounded restart, Durable plateau, release, and
 deployment remain unclaimed.</td>
+</tr>
+<tr>
+<td><code>TRACE[state:pr6_exact_head_ci_repair]</code></td>
+<td>PR-monitor repair record: migrated active RIF rows are calibrated
+before working-memory hydration; pinned HNSW speculative neighbor
+prefetches are adjacency-bounded without disabling SIMD distance
+kernels; and cache-byte arithmetic uses explicit
+<code>std::size_t</code> width for WebAssembly. The full media CTest,
+focused RIF and HNSW regressions, and WebAssembly bundle build pass
+locally. The sandboxed macOS ASAN runtime cannot complete dynamic-shadow
+discovery before <code>main()</code>, so exact-head Linux sanitizer CI
+remains the required owner; the historical 4,608-query quality matrix is
+not relabeled as evidence from the repaired binary.</td>
 </tr>
 <tr>
 <td><code>TRACE[state:hnsw_fixed_6c_experiment]</code></td>

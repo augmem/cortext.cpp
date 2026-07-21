@@ -799,6 +799,23 @@
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
+      "decision": "repair-review-and-exact-head-ci-before-disposition",
+      "evidence_fingerprints": [
+        "271d8f3eece933f293384f6f2f04c7c97f83bb7978e012605443cf2c8809f51c"
+      ],
+      "evidence_kind": "measured",
+      "inventory_id": "state:pr6_exact_head_ci_repair",
+      "proof_level": "source-health",
+      "source_section": {
+        "heading": "Experiment and algorithm traceability inventory",
+        "path": "docs/paper/sections/11_optimization.qmd"
+      },
+      "unresolved_limits": [
+        "the paper claim is limited to the recorded proof scope"
+      ]
+    },
+    {
+      "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
       "decision": "retain-feasibility-only-require-live-surface-mutation-capture-before-candidate-decision",
       "evidence_fingerprints": [
         "47fa93e666957958f4cec485b4a6afb8fd92f0a1ea28c936dfea9e1f3592f588"

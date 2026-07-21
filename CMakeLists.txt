@@ -169,6 +169,15 @@ FetchContent_Declare(
   GIT_TAG d9b3608c83d83b46c96e25088cb1d729b29dcfe9
 )
 FetchContent_MakeAvailable(hnswlib)
+execute_process(
+  COMMAND "${CMAKE_COMMAND}"
+          "-DHNSWLIB_SOURCE_DIR=${hnswlib_SOURCE_DIR}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PatchHnswlibPrefetch.cmake"
+  RESULT_VARIABLE _cortext_hnswlib_patch_result
+)
+if(NOT _cortext_hnswlib_patch_result EQUAL 0)
+  message(FATAL_ERROR "Failed to prepare the pinned hnswlib source")
+endif()
 set(BUILD_TESTING "${_cortext_saved_dependency_build_testing}")
 
 #

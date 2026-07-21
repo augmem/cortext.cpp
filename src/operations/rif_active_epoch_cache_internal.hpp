@@ -43,7 +43,7 @@ DeriveLimits (double focus, double sensitivity, double stability)
   return {
     event_count,
     event_count * 64,
-    event_count * 128ULL * 1024ULL,
+    event_count * static_cast<std::size_t> (128 * 1024),
     row_batch_size,
   };
 }

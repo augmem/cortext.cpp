@@ -116,6 +116,56 @@ EnsureRifActiveEpochCache (Store *store, ProcessorContext &context,
     }
 }
 
+void
+CalibrateRifActiveEpochBeforeHydration (
+    Store &store, ProcessorContext &context,
+    const SignalProcessor::Config &config)
+{
+  EnsureRifActiveEpochCache (&store, context, config);
+  auto sidecar
+      = operations::execution_cache_sidecar_internal::Ensure (context);
+  if (!sidecar->rif_active_epoch.valid
+      || !sidecar->rif_active_epoch.database)
+    {
+      throw std::runtime_error (
+          "Failed to prepare lazy RIF state before hydration");
+    }
+  const auto memory_ids
+      = sidecar->rif_active_epoch.calibration_memory_ids;
+  if (memory_ids.empty ())
+    return;
+
+  auto transaction = store.Begin ();
+  try
+    {
+      operations::rif_state_internal::CalibrateMemoryIdsAtClock (
+          *transaction, memory_ids,
+          core::RetrievalCompetitionRecoverySeconds (config.stability)
+              * 1000.0,
+          sidecar->rif_active_epoch.limits.row_batch_size);
+      transaction->Commit ();
+    }
+  catch (...)
+    {
+      try
+        {
+          transaction->Rollback ();
+        }
+      catch (...)
+        {
+        }
+      throw;
+    }
+
+  // Rebuild the disposable epoch only from the calibrated persistent state.
+  // Startup hydration must never seed working slots from the pre-calibration
+  // effective view left by a schema-27 migration.
+  sidecar->rif_active_epoch.database.reset ();
+  sidecar->rif_active_epoch.valid = false;
+  sidecar->rif_active_epoch.calibration_memory_ids.clear ();
+  EnsureRifActiveEpochCache (&store, context, config);
+}
+
 double
 ElapsedMillis (std::chrono::steady_clock::time_point start,
                std::chrono::steady_clock::time_point end)
@@ -3332,6 +3382,8 @@ SignalProcessor::SignalProcessor (const Config &config,
   if (store_)
     {
       cortext::store::ApplyMigrations (*store_);
+      CalibrateRifActiveEpochBeforeHydration (
+          *store_, *context_, config_);
       if (!object_store_)
         {
           object_store_ = std::make_shared<SqlObjectStore> (store_);
@@ -3352,7 +3404,6 @@ SignalProcessor::SignalProcessor (const Config &config,
       LoadWorkingMemory (*store_, *context_, config_,
                          now_ms);                                  // From MEMORIES
       LoadSoftAnchors (*store_, *context_);
-      EnsureRifActiveEpochCache (store_.get (), *context_, config_);
       operations::bounded_activation_shadow_internal::Initialize (
           *context_, store_.get (), config_.focus, config_.sensitivity,
           config_.stability);
