@@ -114,31 +114,35 @@
     ]
   },
   "pr6_exact_head_ci_repair": {
-    "decision": "repair-review-and-exact-head-ci-before-disposition",
+    "decision": "native-test-and-sanitizer-repair-reviewed-push-pending",
     "prior_exact_head": "5f2e3b38edbc5d582b2a0cbb37d7ec10f8ceb1cb",
+    "current_failing_exact_head": "b7f9e27e019e5e4d4e95019a1e75742583970a86",
     "review_thread": "https://github.com/augmem/cortext/pull/6#discussion_r3609254976",
     "repairs": [
       "calibrate migrated lazy-RIF state transactionally before working-memory hydration and rebuild the disposable epoch from committed persistent authority",
-      "bound pinned hnswlib speculative neighbor prefetches by actual adjacency length without disabling SIMD distance kernels",
+      "bound pinned hnswlib speculative neighbor prefetches by actual adjacency length without disabling SIMD distance kernels and skip its zero-byte empty-adjacency copy whose vector destination may be null",
+      "construct the empty-upper-layer HNSW regression with explicit test-only levels instead of platform-dependent random levels",
       "perform knob-derived cache-byte multiplication explicitly in std::size_t for WebAssembly width portability"
     ],
     "source_sha256": {
       "signal_processor": "7d255a3db0b4e9f0dcedac9fa841d093b1ad39af3c90af43969a17aba481e07b",
       "rif_cache_header": "55985ae0d5d0d69480ae3a3d8204779faec8b23f2051e2e924b8de31e1d130a8",
-      "hnswlib_patch": "442aceca09c022cd2043a08c3d508cb5a608565f94b64e8fa74df6abe71510c4",
+      "hnswlib_patch": "4180985795ccdac233cf7c50e82ec0bb2108fd191aece8951f8cedc12932d54a",
       "hnswlib_patch_driver": "3506b957d155d0994cd975d12d93e3bdb60f0d205b13dc496b474aeb73e8662a",
-      "hnsw_repair_test": "6d0f997e6d398cb056082649073b8ce6deeeaac93c9c43f1c37c9cb0b133d601"
+      "hnsw_route_header": "4996c6575e70c4e74da29d6e289695df250f3316feeaae3724be29c3fda74ad8",
+      "hnsw_route_source": "9582307376d8a8dcb40e85351382142e3a985df6448e7d8ef5a4f52e69268424",
+      "hnsw_repair_test": "ea620a606886e2f9630e7b20882aaa5fe1603ab46de67afdf52bacb1aca7cbe4"
     },
     "local_proof": {
       "full_media_ctest": "39,175 assertions in 690 cases; 1/1 passed in 287.44 seconds",
       "rif_focus": "312 assertions in 19 cases",
-      "hnsw_focus": "19 assertions in 2 cases, including an empty upper-layer adjacency repair",
+      "hnsw_focus": "1,184 assertions in 5 regression cases; the exact explicit-level empty upper-layer repair passes 14 assertions",
       "wasm_bundle": "built successfully with Emscripten 4.0.18",
       "test_binary_sha256": "44e975cffd7d698ee24b2f7c43ffaccd8c86655c617d192224da8b22da992f7c",
       "wasm_sha256": "17d31e0a61327e91d7a53577b73689442583d5f4c84aa76d5844ac309e9791aa"
     },
     "sanitizer_proof": {
-      "local_status": "blocked-before-main-by-sandboxed-macos-asan-dynamic-shadow-discovery",
+    "local_status": "ASAN blocked before main by sandboxed macOS dynamic-shadow discovery; UBSan-only build completes but its runtime library is denied by macOS code-signing policy before main",
       "required_owner": "exact-head GitHub Linux sanitizer check"
     },
     "retrieval_quality_authority": "unchanged historical 4,608-query production matrix; this repair does not rerun or broaden that evidence",

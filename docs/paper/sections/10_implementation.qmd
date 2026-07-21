@@ -207,7 +207,9 @@ modality or source identifier.
 The pinned HNSW implementation retains its SIMD distance kernels, while a
 content-checked local patch bounds every speculative neighbor prefetch by the
 actual adjacency length. This prevents a sanitizer-visible one-past-end read
-without changing candidate membership or ranking. Cache-byte estimation also
+and skips the zero-byte adjacency copy whose empty-vector destination may be
+null, without changing candidate membership, adjacency contents, or ranking.
+Cache-byte estimation also
 performs its knob-derived multiplication explicitly in `std::size_t`, keeping
 the same capacity on native and WebAssembly targets instead of relying on an
 implicit 64-to-32-bit narrowing conversion.

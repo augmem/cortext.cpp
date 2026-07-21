@@ -75,15 +75,16 @@ struct Route::Impl
     second.setEf (parameters.query_effort);
   }
 
-  bool AddSealed (long long memory_id, const Eigen::VectorXf &embedding)
+  bool AddSealed (long long memory_id, const Eigen::VectorXf &embedding,
+                  int level = -1)
   {
     auto normalized = Normalize (embedding, embedding_dim);
     if (!normalized || memory_id <= 0
         || sealed_embeddings.count (memory_id) != 0)
       return false;
     const auto label = static_cast<hnswlib::labeltype> (memory_id);
-    first.addPoint (normalized->data (), label);
-    second.addPoint (normalized->data (), label);
+    first.addPoint (normalized->data (), label, level);
+    second.addPoint (normalized->data (), label, level);
     sealed_embeddings.emplace (memory_id, std::move (*normalized));
     return true;
   }
@@ -146,6 +147,40 @@ Route::Create (
       return nullptr;
     }
 }
+
+#if defined(CORTEXT_TESTING)
+std::shared_ptr<Route>
+Route::CreateWithLevelsForTest (
+    int embedding_dim,
+    const std::vector<std::pair<long long, Eigen::VectorXf>> &entries,
+    const std::vector<int> &levels, Parameters parameters)
+{
+  if (embedding_dim <= 0 || entries.size () != levels.size ()
+      || parameters.minimum_capacity == 0
+      || parameters.graph_neighbor_count == 0
+      || parameters.construction_effort == 0
+      || parameters.query_effort == 0)
+    return nullptr;
+  try
+    {
+      auto route = std::shared_ptr<Route> (new Route (std::make_unique<Impl> (
+          embedding_dim, entries.size () * 2, std::move (parameters))));
+      for (std::size_t index = 0; index < entries.size (); ++index)
+        {
+          const auto &[memory_id, embedding] = entries[index];
+          if (levels[index] <= 0
+              || !route->impl_->AddSealed (memory_id, embedding,
+                                            levels[index]))
+            return nullptr;
+        }
+      return route;
+    }
+  catch (...)
+    {
+      return nullptr;
+    }
+}
+#endif
 
 bool
 Route::Upsert (long long memory_id, const Eigen::VectorXf &embedding)

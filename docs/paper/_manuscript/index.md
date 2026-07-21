@@ -5630,11 +5630,12 @@ source identifier.
 The pinned HNSW implementation retains its SIMD distance kernels, while
 a content-checked local patch bounds every speculative neighbor prefetch
 by the actual adjacency length. This prevents a sanitizer-visible
-one-past-end read without changing candidate membership or ranking.
-Cache-byte estimation also performs its knob-derived multiplication
-explicitly in `std::size_t`, keeping the same capacity on native and
-WebAssembly targets instead of relying on an implicit 64-to-32-bit
-narrowing conversion.
+one-past-end read and skips the zero-byte adjacency copy whose
+empty-vector destination may be null, without changing candidate
+membership, adjacency contents, or ranking. Cache-byte estimation also
+performs its knob-derived multiplication explicitly in `std::size_t`,
+keeping the same capacity on native and WebAssembly targets instead of
+relying on an implicit 64-to-32-bit narrowing conversion.
 
 ### Bounded activation observation shadow
 
@@ -9303,13 +9304,15 @@ deployment remain unclaimed.</td>
 <td>PR-monitor repair record: migrated active RIF rows are calibrated
 before working-memory hydration; pinned HNSW speculative neighbor
 prefetches are adjacency-bounded without disabling SIMD distance
-kernels; and cache-byte arithmetic uses explicit
+kernels; empty adjacency snapshots skip a zero-byte copy whose vector
+destination may be null; and cache-byte arithmetic uses explicit
 <code>std::size_t</code> width for WebAssembly. The full media CTest,
 focused RIF and HNSW regressions, and WebAssembly bundle build pass
-locally. The sandboxed macOS ASAN runtime cannot complete dynamic-shadow
-discovery before <code>main()</code>, so exact-head Linux sanitizer CI
-remains the required owner; the historical 4,608-query quality matrix is
-not relabeled as evidence from the repaired binary.</td>
+locally. The sandboxed macOS ASAN runtime cannot execute because
+dynamic-shadow discovery or sanitizer-runtime code signing fails before
+<code>main()</code>, so exact-head Linux sanitizer CI remains the
+required owner; the historical 4,608-query quality matrix is not
+relabeled as evidence from the repaired binary.</td>
 </tr>
 <tr>
 <td><code>TRACE[state:hnsw_fixed_6c_experiment]</code></td>

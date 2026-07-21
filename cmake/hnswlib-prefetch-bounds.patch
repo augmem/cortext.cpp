@@ -80,3 +80,12 @@ index f516df5..6240b2f 100644
  #endif
                          tableint cand = datal[i];
                          dist_t d = fstdistfunc_(dataPoint, getDataByInternalId(cand), dist_func_param_);
+@@ -1144,6 +1155,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
+         int size = getListCount(data);
+         std::vector<tableint> result(size);
+         tableint *ll = (tableint *) (data + 1);
+-        memcpy(result.data(), ll, size * sizeof(tableint));
++        if (size > 0)
++            memcpy(result.data(), ll, size * sizeof(tableint));
+         return result;
+     }
