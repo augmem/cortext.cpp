@@ -1493,6 +1493,77 @@ TEST_CASE ("SignalProcessor restart restores only exact ring embeddings for "
     }
 }
 
+TEST_CASE ("SignalProcessor backfills the legacy exact context before the "
+           "first post-migration ring write",
+           "[processor][recent_context][restart][migration]")
+{
+  namespace ring = operations::active_signal_embedding_ring_internal;
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  const int capacity = ring::Capacity (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  REQUIRE (capacity == 151);
+
+  for (long long signal_id = 1; signal_id < capacity; ++signal_id)
+    {
+      Eigen::VectorXf exact = Eigen::VectorXf::Zero (256);
+      exact[0] = static_cast<float> (signal_id);
+      cortext::testing::SeedEmbeddingV2 (
+          *store, signal_id, exact, signal_id);
+      store->Execute (
+          "INSERT INTO signals(signal_id, source_id, embedding_id, "
+          "timestamp, modality, created_at) "
+          "VALUES (?, 'opaque/legacy', ?, ?, 'text', ?)",
+          { signal_id, signal_id, signal_id, signal_id });
+    }
+  REQUIRE (store->Execute (
+               "SELECT 1 FROM cortext_active_signal_embeddings LIMIT 1")
+               .empty ());
+
+  Eigen::VectorXf aggregate = Eigen::VectorXf::Constant (256, -1.0f);
+  cortext::testing::SeedEmbeddingV2 (
+      *store, 1000, aggregate, capacity);
+  auto tx = store->Begin ();
+  ring::EnsureCapacity (*tx, capacity);
+  tx->Execute (
+      "INSERT INTO signals(signal_id, source_id, embedding_id, timestamp, "
+      "modality, created_at) VALUES (?, 'opaque/new', 1000, ?, 'image', ?)",
+      { static_cast<long long> (capacity), static_cast<long long> (capacity),
+        static_cast<long long> (capacity) });
+  std::vector<float> newest_exact (256, 0.0f);
+  newest_exact[0] = static_cast<float> (capacity);
+  ring::InsertAtCapacity (*tx, capacity, newest_exact, capacity, capacity);
+  tx->Commit ();
+
+  ProcessorContext *captured = nullptr;
+  auto capture = std::make_unique<SetOrCaptureThroughputOp> ();
+  capture->context_address = &captured;
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.timestamp = static_cast<std::uint64_t> (capacity + 1);
+  signal.source_id = "opaque/observer";
+  signal.modality = "audio";
+  signal.mimetype = "audio/test";
+  SignalProcessor restarted (
+      cfg, store,
+      std::make_unique<DynamicOperationSet> (std::move (capture)));
+  restarted.Process (signal);
+
+  REQUIRE (captured != nullptr);
+  REQUIRE (captured->recent_context_embeddings.size ()
+           == static_cast<std::size_t> (capacity));
+  for (int index = 0; index < capacity; ++index)
+    REQUIRE (captured->recent_context_embeddings[
+                 static_cast<std::size_t> (index)][0]
+             == static_cast<float> (index + 1));
+}
+
 TEST_CASE ("SignalProcessor processes and flushes to SQLite", "[processor]")
 {
   auto uniq = SQLiteStore::Create (":memory:");

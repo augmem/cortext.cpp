@@ -2052,6 +2052,76 @@ TEST_CASE ("Graph retrieval captures same-event exact control for sparse route",
     }
 }
 
+TEST_CASE ("Graph retrieval falls back when associations underfill sparse "
+           "seed eligibility",
+           "[operations][graph][retrieval][hnsw][sqlite][association]"
+           "[regression]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar hnsw_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "0");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kAssociationCount = 650;
+  constexpr long long kEligibleTarget = kAssociationCount + 1;
+  constexpr long long kPopulation = 700;
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (kPopulation);
+  for (long long memory_id = 1; memory_id <= kAssociationCount;
+       ++memory_id)
+    {
+      SeedMemory (*store, memory_id, 1000 + memory_id, UnitVec (0),
+                  memory_id, "association/" + std::to_string (memory_id));
+      store->Execute (
+          "UPDATE memories SET kind = 'ASSOCIATION' WHERE memory_id = ?",
+          { memory_id });
+      route_entries.emplace_back (memory_id, UnitVec (0));
+    }
+  SeedMemory (*store, kEligibleTarget, 1000 + kEligibleTarget,
+              VectorWithCosineToDim0 (0.95f), kEligibleTarget,
+              "eligible/target");
+  route_entries.emplace_back (
+      kEligibleTarget, VectorWithCosineToDim0 (0.95f));
+  for (long long memory_id = kEligibleTarget + 1;
+       memory_id <= kPopulation; ++memory_id)
+    {
+      SeedMemory (*store, memory_id, 1000 + memory_id, UnitVec (2),
+                  memory_id, "eligible/" + std::to_string (memory_id));
+      route_entries.emplace_back (memory_id, UnitVec (2));
+    }
+
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (0.0, 0.0, 0.0);
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      kEmbeddingDim, route_entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto sqlite_route
+      = operations::sparse_retrieval_route_sqlite_internal::Route::Create (
+          *store, kEmbeddingDim, route_entries, *hnsw, parameters);
+  REQUIRE (sqlite_route);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  const auto output = processor.Process (MakeSignal (UnitVec (0), 100000));
+  REQUIRE (std::find (output.candidate_memory_ids.begin (),
+                      output.candidate_memory_ids.end (), kEligibleTarget)
+           != output.candidate_memory_ids.end ());
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+}
+
 TEST_CASE ("Graph retrieval reopens SQLite sparse route on the existing path",
            "[operations][graph][retrieval][hnsw][sqlite][integration]")
 {

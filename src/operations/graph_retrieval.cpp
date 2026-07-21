@@ -862,6 +862,12 @@ LoadCurrentSeedRowsFromCache (
     }
   AddSeedCachePhaseTime (profile, &SeedCacheProfile::eligibility_ms,
                          eligibility_started);
+  // Sparse activation is candidate generation, not an eligibility-complete
+  // seed surface. Ineligible ASSOCIATION rows can consume activated slots;
+  // underfill must therefore fall through to the exact SQL path.
+  if (use_sparse_route
+      && ranked.size () < static_cast<std::size_t> (candidate_limit))
+    return std::nullopt;
   auto by_distance = [&state] (
                          const historical_surface_search_cache_internal::RankedEntry &a,
                          const historical_surface_search_cache_internal::RankedEntry &b) {

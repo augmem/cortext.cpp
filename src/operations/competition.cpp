@@ -179,16 +179,18 @@ ApplyLateralInhibition (const std::vector<Candidate> &winners,
         {
           continue;
         }
-      const auto memory_id = rif_state_internal::ResolveMemoryId (
+      const auto memory_ids = rif_state_internal::ResolveMemoryIds (
           tx, loser.memory_id, loser.embedding_id);
-      if (!memory_id.has_value ())
+      if (memory_ids.empty ())
         continue;
-      if (rif_state_internal::SuppressMemory (
-              tx, *memory_id, total_supp, now_ts))
-        ++active_rows;
-      rif_active_epoch_cache_internal::StageMemory (
-          epoch, *memory_id);
-      ++suppressed_count;
+      for (const long long memory_id : memory_ids)
+        {
+          if (rif_state_internal::SuppressMemory (
+                  tx, memory_id, total_supp, now_ts))
+            ++active_rows;
+          rif_active_epoch_cache_internal::StageMemory (epoch, memory_id);
+          ++suppressed_count;
+        }
     }
 }
 

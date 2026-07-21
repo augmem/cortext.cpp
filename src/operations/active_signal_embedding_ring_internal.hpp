@@ -55,7 +55,33 @@ EnsureCapacity (Transaction &tx, int capacity)
       "SELECT DISTINCT capacity FROM cortext_active_signal_embeddings "
       "ORDER BY capacity LIMIT 2");
   if (capacity_rows.empty ())
-    return;
+    {
+      // Migration 30 starts with an empty ring while pre-migration signal
+      // rows still reference their exact per-signal embeddings. Capture the
+      // newest legacy window before the first post-migration signal switches
+      // signals.embedding_id to the aggregate memory embedding.
+      auto legacy_rows = tx.Execute (
+          "SELECT s.signal_id, e.embedding, "
+          "       COALESCE(s.created_at, s.timestamp) AS created_at "
+          "FROM signals s "
+          "JOIN embeddings e ON e.embedding_id = s.embedding_id "
+          "ORDER BY s.timestamp DESC, s.signal_id DESC LIMIT ?",
+          { static_cast<long long> (capacity) });
+      std::reverse (legacy_rows.begin (), legacy_rows.end ());
+      for (const auto &row : legacy_rows)
+        {
+          const auto signal_id
+              = store::AnyToLongLong (row.at ("signal_id")).value_or (0);
+          const auto created_at
+              = store::AnyToLongLong (row.at ("created_at")).value_or (0);
+          if (signal_id <= 0 || !row.at ("embedding").has_value ())
+            throw std::runtime_error (
+                "invalid legacy active signal embedding row");
+          InsertAtCapacity (tx, signal_id, row.at ("embedding"), created_at,
+                            capacity);
+        }
+      return;
+    }
   if (capacity_rows.size () != 1)
     throw std::runtime_error ("mixed active signal embedding capacities");
   const auto stored_capacity = store::AnyToLongLong (
