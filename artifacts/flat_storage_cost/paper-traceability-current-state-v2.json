@@ -1,9 +1,9 @@
 {
   "schema": "cortext_paper_traceability_state_overlay_v2",
   "supersedes_state_sha256": "f0605f910ed3c10fa7838c2e175c5d0babbe352f7e4fe4e2f92fdf3c70cd1f2d",
-  "phase": "production-cutover-review",
-  "completion": false,
-  "resume_phase": "repair-review-findings",
+  "phase": "monitor-pr",
+  "completion": true,
+  "resume_phase": "refresh-pr-state",
   "sqlite_hnsw_schema_authority": {
     "status": "approved-current-user-through-migration-31",
     "approver_identity": "current-user",
@@ -47,6 +47,8 @@
   "sqlite_hnsw_production_cutover": {
     "decision": "retained-production-default",
     "production_cutover": true,
+    "implementation_head": "6ac1e3121e4be9aa456c7ac93fdb4b09ea34023d",
+    "implementation_review": "Proven at P1 by a fresh round-three cumulative review with no findings or residuals",
     "schema_authority": {
       "migrations": {
         "29": "internal SQLite HNSW route, metadata, build, node, and dirty-journal tables",

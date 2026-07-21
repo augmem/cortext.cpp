@@ -1010,7 +1010,7 @@
       "corpus_parameter_scope": "production-default 8C-to-9C SQLite HNSW route; 15,695-packet Natural replay, 2,016-message Durable replay, 30,380-packet maturity extension, 27 structural F/S/T points, and nine 4,000-packet quality points with 512 controls each",
       "decision": "retained-production-default",
       "evidence_fingerprints": [
-        "0f9f67d4aa7eea6a7ae9a1b64e0ce89aee29a15ea8f5c2c229e00e371ec7b53f"
+        "44abead03df4cc0c1a2b601ada6c9171f2eeaaa780328036faf70f54b5080922"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:sqlite_hnsw_production_cutover",
