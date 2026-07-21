@@ -15,6 +15,7 @@
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/schema.hpp>
 #include "../src/operations/consolidation_throughput_state_internal.hpp"
+#include "../src/operations/rif_active_epoch_cache_internal.hpp"
 #include "../src/operations/sparse_retrieval_knobs_internal.hpp"
 #include <string>
 
@@ -787,6 +788,141 @@ TEST_CASE ("ScoreConsolidation bounds its active candidate frontier from "
   REQUIRE (ctx.GetOperationTimings ().at (
                "ScoreConsolidation.candidate_input_count")
            == static_cast<double> (candidate_limit));
+}
+
+TEST_CASE ("ScoreConsolidation bounds the frontier by effective RIF strength",
+           "[operations][consolidation][bounded][rif_state][regression]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::store::ApplyMigrations (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 1.0;
+  const auto candidate_limit = static_cast<std::size_t> (
+      operations::sparse_retrieval_knobs_internal::
+          ActivationIdentityTarget (
+              cfg.focus, cfg.sensitivity, cfg.stability));
+
+  Signal signal;
+  signal.timestamp = 55'000ULL;
+  signal.source_id = "opaque/effective-rif-frontier";
+  signal.modality = "image";
+  signal.force_consolidation = true;
+  signal.embedding = Eigen::VectorXf::Zero (4);
+  ProcessorContext p_ctx;
+  OperationContext ctx (signal, p_ctx, cfg, store.get ());
+
+  for (std::size_t index = 0; index < candidate_limit; ++index)
+    {
+      const long long id = static_cast<long long> (index + 1);
+      std::vector<float> embedding (256, 0.0f);
+      embedding[index % embedding.size ()] = 1.0f;
+      store->Execute (
+          "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+          "VALUES(?, ?, ?)",
+          { id, embedding, id });
+      store->Execute (
+          "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+          "start_ts, n_signals, modality, strength, stability, redundancy, "
+          "created_at) VALUES(?, ?, 'opaque/recovered', 'LONG_TERM', ?, 1, "
+          "'audio', 0.0, 0.0, 0.0, ?)",
+          { id, id, id, id });
+      store->Execute (
+          "INSERT INTO rif_active_state(memory_id, generation, "
+          "anchor_suppression, recovery_total, anchor_log_factor, "
+          "expires_log_factor) VALUES(?, 1, 0.1, 1.1, 0.0, -20.0)",
+          { id });
+    }
+
+  const long long weak_id = static_cast<long long> (candidate_limit + 1);
+  std::vector<float> weak_embedding (256, 0.0f);
+  weak_embedding[0] = 1.0f;
+  store->Execute (
+      "INSERT INTO embeddings(embedding_id, embedding, created_at) "
+      "VALUES(?, ?, ?)",
+      { weak_id, weak_embedding, weak_id });
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+      "start_ts, n_signals, modality, strength, stability, redundancy, "
+      "created_at) VALUES(?, ?, 'opaque/weak', 'LONG_TERM', ?, 1, 'text', "
+      "0.01, 0.0, 0.0, ?)",
+      { weak_id, weak_id, weak_id, weak_id });
+
+  auto tx = store->Begin ();
+  ScoreConsolidation{}.Execute (ctx, *tx);
+
+  const auto &candidates = ctx.GetConsolidationCandidates ();
+  REQUIRE (candidates.size () == 1);
+  REQUIRE (candidates.front ().memory_id == weak_id);
+  REQUIRE (candidates.front ().score
+           == Catch::Approx (0.01).margin (1e-6));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "ScoreConsolidation.candidate_input_count")
+           == static_cast<double> (candidate_limit));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "ScoreConsolidation.active_state_count")
+           == static_cast<double> (candidate_limit));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "ScoreConsolidation.active_state_limit")
+           == static_cast<double> (
+               operations::rif_active_epoch_cache_internal::DeriveLimits (
+                   cfg.focus, cfg.sensitivity, cfg.stability)
+                   .mutation_count));
+}
+
+TEST_CASE ("ScoreConsolidation fails closed above its active RIF work ceiling",
+           "[operations][consolidation][bounded][rif_state][regression]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::store::ApplyMigrations (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+  const auto active_state_limit
+      = operations::rif_active_epoch_cache_internal::DeriveLimits (
+            cfg.focus, cfg.sensitivity, cfg.stability)
+            .mutation_count;
+  REQUIRE (active_state_limit == 16'384);
+  const long long overflow_count
+      = static_cast<long long> (active_state_limit + 1);
+  store->Execute (
+      "WITH RECURSIVE sequence(value) AS ("
+      "  SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < ?"
+      ") INSERT INTO memories(memory_id, source_id, kind, start_ts, "
+      "n_signals, modality, strength, stability, redundancy, created_at) "
+      "SELECT value, 'opaque/rif-overflow', 'LONG_TERM', value, 1, 'audio', "
+      "0.0, 0.0, 0.0, value FROM sequence",
+      { overflow_count });
+  store->Execute (
+      "INSERT INTO rif_active_state(memory_id, generation, "
+      "anchor_suppression, recovery_total, anchor_log_factor, "
+      "expires_log_factor) "
+      "SELECT memory_id, 1, 0.1, 1.1, 0.0, -20.0 FROM memories",
+      {});
+
+  Signal signal;
+  signal.timestamp = 56'000ULL;
+  signal.source_id = "opaque/rif-overflow";
+  signal.modality = "audio";
+  signal.force_consolidation = true;
+  signal.embedding = Eigen::VectorXf::Zero (4);
+  ProcessorContext p_ctx;
+  OperationContext ctx (signal, p_ctx, cfg, store.get ());
+  auto tx = store->Begin ();
+
+  REQUIRE_THROWS_AS (ScoreConsolidation{}.Execute (ctx, *tx), StoreError);
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "ScoreConsolidation.active_state_count")
+           == static_cast<double> (overflow_count));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "ScoreConsolidation.active_state_limit")
+           == static_cast<double> (active_state_limit));
 }
 
 TEST_CASE ("ScoreConsolidation emits its full F S T derived work envelope",

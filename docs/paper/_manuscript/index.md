@@ -5531,6 +5531,19 @@ effective-value view. This ordering prevents restart from seeding a
 working slot with an uncalibrated strength and subsequently persisting
 that stale value.
 
+Consolidation candidate selection also consumes effective rather than
+stale materialized RIF strength. It merges an indexed, at-most-*A*
+inactive-memory frontier with an at-most-*A* exact active-RIF frontier,
+then retains the lowest *A* combined identities for scoring. Before the
+active branch is evaluated, the implementation counts at most 64*C* + 1
+active rows and fails closed when the existing knob-derived active-epoch
+mutation ceiling 64*C* has been exceeded. Consequently the indexed
+inactive scan can skip at most 64*C* active rows, the active calculation
+examines at most 64*C* rows, and downstream association work still sees
+at most *A* identities. A recovered active row therefore cannot consume
+a low-strength slot merely because its durable `memories.strength` has
+not yet been materialized.
+
 The authoritative signal mutation still commits once to persistent
 SQLite. After that commit, a separate connection-local in-memory SQLite
 database publishes only the current recovery clock and the identities
@@ -5931,6 +5944,35 @@ activation route fixes disconnected-node blindness without introducing a
 second retrieval or write path; HNSW controls locality while the derived
 envelope controls exact coverage and work.
 
+Deterministic envelope completion reads only rows with `active=1`
+through the existing `(generation, active, memory_id)` index. Sealed
+removals therefore do not consume the fixed node budget or hide an
+isolated active identity just beyond an inactive slice. CMake and Zig
+compile the same pinned HNSW safety patch. The Zig graph copies the
+header-only dependency into a build-local declared output and patches
+that copy, leaving the content-addressed global package cache immutable
+and safe for concurrent builds.
+
+When a sealed removal targets the canonical hierarchy entry, replacement
+is selected by highest level and then lowest memory id through the
+`(generation, active, level DESC, memory_id ASC)` index. The query reads
+at most the staged removal count plus one row: at most that many leading
+rows can be excluded by the same seal. The replacement’s level becomes
+the new `max_level`, so restart never begins from an inactive entry or
+asks a lower level node for nonexistent upper adjacency. If any sealed
+removal overlaps the persisted consolidation activation snapshot, the
+snapshot entry, generation, centroid, and identity list are cleared in
+the same transaction; in-process and restarted queries then use the
+canonical route until the next successful recenter builds a new bounded
+snapshot. Restart validates that the metadata entry exists in the same
+generation, is active, and carries the recorded maximum level. A legacy
+route with a dead or mismatched entry fails closed to exact retrieval
+and the same bounded builder, rather than waiting for a future removal
+to repair already-stale metadata. It likewise resolves the at-most-*A*
+persisted activation identities and requires every one to remain active
+in the same generation, covering snapshots written by the prior
+implementation before removal-overlap clearing existed.
+
 Within one activation query, the row-addressed route stores each
 persisted node’s exact query distance beside that query’s local node
 view. Higher-level descent, level-zero expansion, best-set maintenance,
@@ -5994,14 +6036,20 @@ to the durable journal. A successful seal writes changed nodes and
 knob-bounded reciprocal neighbors, advances graph metadata, and clears
 only its staged root identities in the same SQLite transaction. Neighbor
 proposal during this seal uses the *C* + *B* node and 2*B* queue
-construction envelope, not the public 9*C* activation envelope. Existing
-active nodes retain their persisted topology when their current
-embedding changes; the rejected bounded-relink experiment is reported in
-the optimization section. A failed authoritative transaction cannot
-leave a durable route mutation. An interrupted or failed seal leaves the
-identities journaled for restaging, while exact retrieval remains
-authoritative. This gives consolidation a real route-epoch boundary
-without a store-sized graph rewrite.
+construction envelope, not the public 9*C* activation envelope. If an
+existing active node’s normalized embedding moves beyond the fixed
+10<sup>−6</sup> cosine-distance tolerance, the generation is invalidated
+rather than pairing the new vector with stale adjacency. Exact retrieval
+remains authoritative while the existing bounded backfill constructs a
+replacement generation. The rejected incremental-relink experiment is
+reported in the optimization section. A failed authoritative transaction
+cannot leave a durable route mutation. An ordinary interrupted or failed
+seal leaves the identities journaled for restaging. Intentional
+moved-embedding invalidation instead abandons the incoherent generation
+and clears its journal; the authoritative current surface feeds the
+replacement bounded build while exact retrieval remains authoritative.
+This gives consolidation a real route-epoch boundary without a
+store-sized graph rewrite.
 
 Application hydration uses the same bounded-surface rule when a memory
 has no materialized memory or reconstruction blob. SQLite retains every
@@ -6094,14 +6142,23 @@ signal-counter, and rate-observation paths are not maintenance steps.
 
 Emotional cascade metadata is hydrated into a private, rebuildable
 processor cache keyed by memory id and base embedding id. The cache
-preserves the SQL contract for shared embeddings by retaining every
-member row, deriving current intensity and half-life bonus with the same
-per-embedding minima, and retaining only flashbulb rows in recency order
-for source discovery. Emotional consolidation overwrites the affected
-embedding family, cascade propagation applies the existing maxima,
-storage and shallow consolidation append rows, and eviction removes
-them. Journal-aware rollback discards and rehydrates this
-database-derived cache, while arbitrary custom pipelines retain the
+preserves the SQL aggregation contract for shared embeddings by
+retaining every member row and deriving current intensity and half-life
+bonus with the same per-embedding minima. Its global bounded
+flashbulb-source prefix is ordered by descending emotional intensity
+with ascending memory-id ties. A source insertion, removal, or intensity
+mutation marks that prefix dirty; before the next cascade, SQLite
+refreshes exactly the knob-derived prefix through a partial
+intensity/memory-id index and `LIMIT`, so an excluded source can enter
+after a retained source falls without a store-sized cache scan. This
+establishes intensity-before-truncation ordering, not complete selection
+equivalence: the cache bounds the global flashbulb prefix before cascade
+recency/arousal eligibility, while the fallback SQL applies those
+eligibility predicates before `LIMIT`. Emotional consolidation
+overwrites the affected embedding family, cascade propagation applies
+the existing maxima, storage and shallow consolidation append rows, and
+eviction removes them. Journal-aware rollback discards and rehydrates
+this database-derived cache, while arbitrary custom pipelines retain the
 complete snapshot path. This changes execution ownership only; source
 thresholds, tie order, traversal, decay, updates, and persisted rows are
 unchanged. When multiple emotional sources require traversal, the
@@ -6119,6 +6176,9 @@ source’s expansion footprint. A topology rebuild invalidates the
 footprint conservatively. Ordinary unconnected non-source inserts and
 monotone increases to target emotional values likewise preserve the
 fixed point; source changes and target-value decreases still re-arm it.
+A traversal that reaches either its update ceiling or its physical
+edge-visit ceiling is only a partial prefix and never records a fixed
+point, so the next event revisits the unresolved graph tail.
 
 Shallow consolidation is embedding-only. It clusters eligible long-term
 memories, writes an `ASSOCIATION` centroid node for each cluster,
@@ -7863,7 +7923,12 @@ links and remains the nearest result after reopen. The full replay
 rejected it: exact top-1 fell to 0.980469, mean identity recall at 16 to
 0.972794, semantic coverage to 0.964210, and maximum seal time rose to
 140.669 ms. The source change and its regression were removed; the
-result remains as negative evidence.
+result remains as negative evidence. The retained correctness repair
+does not revive that relinker. A changed active embedding invalidates
+the persisted generation, exact retrieval covers the interval, and the
+already-bounded historical builder creates a coherent replacement. Entry
+removal is cheaper: an indexed removal-count-plus-one query promotes the
+highest-level surviving node with deterministic identity ties.
 
 The dual-seed candidate tested activation entry ownership instead. The
 prior recenter operation replaced the canonical maximum-level HNSW entry
@@ -8639,6 +8704,20 @@ cannot hide an expanding graph walk. A 70-source regression now proves
 winner with the same final intensity. Full-horizon performance,
 work-bound, and retrieval results remain required before retention.
 
+The bounded source prefix uses the same intensity-descending, memory-id
+ascending order as the SQL path. Because emotional consolidation can
+lower an existing source and cascade propagation can raise one,
+incremental insertion alone is insufficient: the next-best source may
+currently be outside the prefix. The retained repair marks rank-changing
+mutations dirty and rebuilds only the knob-derived prefix from a partial
+SQLite index. Regressions cover a retained source falling below an
+excluded source and an excluded source rising to the front; query-plan
+proof confirms that refresh uses the index rather than a store scan.
+This proof is specifically intensity-before-truncation. The bounded
+cache still chooses its global flashbulb prefix before recency/arousal
+eligibility, whereas fallback SQL filters eligibility before `LIMIT`;
+complete cache/fallback source-selection equivalence remains unclaimed.
+
 The complete exact-winner replay kept top-1 at 1.0, recall at 16 at
 0.999386, and semantic coverage at 0.999381, but it did not improve the
 full run: wall time was 205,445 ms versus 194,736 ms for snapshot reuse
@@ -8761,24 +8840,35 @@ routing details before changing the algorithm. Commit timing had
 included a profiling-only vector identity lookup; identity resolution
 now occurs when the committed mutation audit is consumed, while the
 independent logical and physical audit streams remain intact. Mature
-deterministic route completion now draws from the indexed generation
-slice and applies active eligibility at ranking, so an inactive row
-cannot make the fixed envelope appear one row short. The RIF changed-row
-counter now records work performed by the current event rather than the
-historical active population. Each correction has a red-then-green
-regression and changes measurement, not public retrieval semantics.
+deterministic route completion now draws from the indexed
+active-generation slice, so an inactive row cannot consume the fixed
+envelope or hide a later active identity. The CMake and Zig build graphs
+apply the same content-checked HNSW bounds patch; Zig patches a
+build-local copy rather than mutating its shared package cache. The RIF
+changed-row counter now records work performed by the current event
+rather than the historical active population. Each correction has a
+red-then-green regression and changes measurement, not public retrieval
+semantics.
 
 The remaining consolidation scan was bounded by the same knobs. Let
 *A* = 2*C* + 2*B* and *N* = max (8, ⌊*B*/2⌋). Score consolidation now
-admits at most *A* low-strength long-term identities from the indexed
-strength/time frontier and counts at most *N* association edges per
-admitted identity. A sentinel row publishes the exact input cardinality
-even when no candidate is selected. The formula, counter, and
-source/modality invariants pass all 27
-*F*, *S*, *T* ∈ {0, 0.5, 1}<sup>3</sup> configurations across text,
-audio, image, and four opaque source labels. At midpoint *C* = 512,
-*B* = 128, *A* = 1280, and *N* = 64; 129 occurs only as the logical
-*B* + 1 completion probe.
+admits at most *A* low-effective-strength long-term identities after
+merging two frontiers: at most *A* inactive identities from the indexed
+materialized strength/time order and at most *A* active identities
+ordered by their exact clock-derived RIF strength. A 64*C* + 1 sentinel
+count fails closed before the active branch when the existing
+active-epoch mutation ceiling would be exceeded. This bounds the
+inactive index scan by *A* + 64*C*, the dynamic active calculation by
+64*C*, and the merged/downstream frontier by *A*, without a
+history-sized sort. It also prevents partially recovered rows with stale
+low materialized strength from excluding a genuinely weak row. The
+scorer counts at most *N* association edges per admitted identity. A
+sentinel row publishes the exact input cardinality even when no
+candidate is selected. The formula, counter, and source/modality
+invariants pass all 27 *F*, *S*, *T* ∈ {0, 0.5, 1}<sup>3</sup>
+configurations across text, audio, image, and four opaque source labels.
+At midpoint *C* = 512, *B* = 128, *A* = 1280, and *N* = 64; 129 occurs
+only as the logical *B* + 1 completion probe.
 
 Four ordinary SQLite-route seal cadences were evaluated. Sealing every
 write raised full-replay wall time to 107,294 ms and did not remove
@@ -9305,14 +9395,26 @@ deployment remain unclaimed.</td>
 before working-memory hydration; pinned HNSW speculative neighbor
 prefetches are adjacency-bounded without disabling SIMD distance
 kernels; empty adjacency snapshots skip a zero-byte copy whose vector
-destination may be null; and cache-byte arithmetic uses explicit
-<code>std::size_t</code> width for WebAssembly. The full media CTest,
-focused RIF and HNSW regressions, and WebAssembly bundle build pass
-locally. The sandboxed macOS ASAN runtime cannot execute because
-dynamic-shadow discovery or sanitizer-runtime code signing fails before
-<code>main()</code>, so exact-head Linux sanitizer CI remains the
-required owner; the historical 4,608-query quality matrix is not
-relabeled as evidence from the repaired binary.</td>
+destination may be null; Zig applies the same patch to a build-local
+copy; deterministic route fill excludes inactive rows; entry removal
+promotes an indexed active hierarchy root, atomically clears overlapping
+activation snapshots, and restart rejects legacy dead canonical or
+snapshot identities; changed active embeddings invalidate stale
+adjacency for bounded rebuild; consolidation merges exact active-RIF and
+indexed inactive frontiers under the existing <span
+class="math inline">64<em>C</em></span>/<span
+class="math inline"><em>A</em></span> ceilings; bounded emotional-source
+discovery preserves SQL intensity order and refreshes rank-changing
+mutations through an indexed knob-sized prefix; partial edge-limited
+cascade traversals do not become fixed points; and cache-byte arithmetic
+uses explicit <code>std::size_t</code> width for WebAssembly. The full
+media CTest baseline, focused RIF/HNSW/consolidation regressions,
+build-local Zig proof, and WebAssembly bundle build pass locally. The
+sandboxed macOS ASAN runtime cannot execute because dynamic-shadow
+discovery or sanitizer-runtime code signing fails before
+<code>main()</code>, so replacement exact-head Linux sanitizer CI
+remains the required owner; the historical 4,608-query quality matrix is
+not relabeled as evidence from the repaired binary.</td>
 </tr>
 <tr>
 <td><code>TRACE[state:hnsw_fixed_6c_experiment]</code></td>

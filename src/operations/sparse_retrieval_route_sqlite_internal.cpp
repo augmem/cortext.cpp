@@ -457,12 +457,19 @@ Route::Open (Store &store, int embedding_dim, Parameters parameters)
   try
     {
       const auto meta = store.Execute (
-          "SELECT schema_version, embedding_dim, entry_memory_id, max_level, "
-          "active_count, generation, activation_entry_memory_id, "
+          "SELECT meta.schema_version, meta.embedding_dim, "
+          "meta.entry_memory_id, meta.max_level, meta.active_count, "
+          "meta.generation, meta.activation_entry_memory_id, "
           "activation_generation, COALESCE(activation_centroid, X'') AS "
           "activation_centroid, COALESCE(activation_identity_ids, X'') AS "
-          "activation_identity_ids FROM cortext_sparse_route_meta "
-          "WHERE singleton = 1");
+          "activation_identity_ids, "
+          "(SELECT active FROM cortext_sparse_route_nodes entry "
+          " WHERE entry.memory_id = meta.entry_memory_id "
+          " AND entry.generation = meta.generation) AS entry_active, "
+          "(SELECT level FROM cortext_sparse_route_nodes entry "
+          " WHERE entry.memory_id = meta.entry_memory_id "
+          " AND entry.generation = meta.generation) AS entry_level "
+          "FROM cortext_sparse_route_meta meta WHERE singleton = 1");
       if (meta.size () != 1
           || Int64 (meta.front (), "schema_version") != kSchemaVersion
           || Int64 (meta.front (), "embedding_dim") != embedding_dim)
@@ -478,6 +485,10 @@ Route::Open (Store &store, int embedding_dim, Parameters parameters)
           = Int64 (meta.front (), "activation_entry_memory_id", -1);
       const long long activation_generation
           = Int64 (meta.front (), "activation_generation", -1);
+      const long long entry_active
+          = Int64 (meta.front (), "entry_active", -1);
+      const long long entry_level
+          = Int64 (meta.front (), "entry_level", -1);
       const auto activation_centroid_bytes
           = store::BlobFromAny (meta.front ().at ("activation_centroid"));
       const auto activation_centroid
@@ -494,7 +505,11 @@ Route::Open (Store &store, int embedding_dim, Parameters parameters)
           || max_level > static_cast<long long> (parameters.maximum_level)
           || active_count < 0 || generation < 0 || activation_entry < 0
           || activation_generation < 0
-          || (active_count > 0 && entry_memory_id == 0))
+          || (active_count == 0
+              && (entry_memory_id != 0 || max_level != 0))
+          || (active_count > 0
+              && (entry_memory_id == 0 || entry_active != 1
+                  || entry_level != max_level)))
         return nullptr;
       const bool has_activation = activation_entry > 0;
       if (has_activation
@@ -512,13 +527,24 @@ Route::Open (Store &store, int embedding_dim, Parameters parameters)
           active_count, generation, std::move (parameters));
       if (has_activation)
         {
-          const auto entry = FetchNodes (
+          const auto activation_rows = FetchNodes (
               store, embedding_dim, impl->parameters, generation,
-              { activation_entry });
-          if (!entry || entry->size () != 1 || !entry->front ().active)
+              *activation_identity_ids);
+          if (!activation_rows
+              || activation_rows->size () != activation_identity_ids->size ()
+              || std::any_of (
+                  activation_rows->begin (), activation_rows->end (),
+                  [] (const NodeRow &row) { return !row.active; }))
+            return nullptr;
+          const auto entry = std::find_if (
+              activation_rows->begin (), activation_rows->end (),
+              [activation_entry] (const NodeRow &row) {
+                return row.memory_id == activation_entry;
+              });
+          if (entry == activation_rows->end ())
             return nullptr;
           impl->activation_entry_memory_id = activation_entry;
-          impl->activation_entry_level = entry->front ().level;
+          impl->activation_entry_level = entry->level;
           impl->activation_centroid = *activation_centroid;
           impl->activation_identity_ids = *activation_identity_ids;
         }
@@ -1077,7 +1103,7 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
         const auto rows = impl_->store->Execute (
             std::string (
                 "SELECT memory_id FROM cortext_sparse_route_nodes "
-                "WHERE generation = ? AND memory_id ")
+                "WHERE generation = ? AND active = 1 AND memory_id ")
                 + comparison
                 + " ? ORDER BY memory_id LIMIT ?",
             { impl_->generation, pivot,
@@ -1351,9 +1377,61 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
           for (auto node : *prior_rows)
             prior_by_id.emplace (node.memory_id, std::move (node));
 
+          // Existing adjacency is derived from the stored embedding. Keeping
+          // those links after an embedding moves can make the row-addressed
+          // route silently miss its exact target. Invalidate the generation
+          // and let the bounded backfill rebuild it instead of publishing a
+          // mixed old-topology/new-vector snapshot.
+          bool topology_requires_rebuild = false;
+          for (const auto &[memory_id, embedding] : impl_->delta_embeddings)
+            {
+              const auto prior = prior_by_id.find (memory_id);
+              if (prior == prior_by_id.end () || !prior->second.active)
+                continue;
+              constexpr float kEmbeddingMovementEpsilon = 1e-6f;
+              topology_requires_rebuild
+                  = prior->second.embedding.size () != embedding.size ()
+                    || Distance (embedding, prior->second.embedding)
+                           > kEmbeddingMovementEpsilon;
+              if (topology_requires_rebuild)
+                break;
+            }
+          if (topology_requires_rebuild)
+            {
+              impl_->last_seal_failure_code = 62;
+              auto tx = impl_->store->Begin ();
+              tx->Execute (
+                  impl_->building
+                      ? "DELETE FROM cortext_sparse_route_build "
+                        "WHERE singleton = 1"
+                      : "DELETE FROM cortext_sparse_route_meta "
+                        "WHERE singleton = 1");
+              tx->Execute ("DELETE FROM cortext_sparse_route_dirty");
+              tx->Commit ();
+              impl_->node_cache.clear ();
+              impl_->node_cache_order.clear ();
+              impl_->delta_embeddings.clear ();
+              impl_->removed.clear ();
+              impl_->entry_memory_id = 0;
+              impl_->max_level = 0;
+              impl_->active_count = 0;
+              return false;
+            }
+
           std::unordered_map<long long, NodeRow> updates;
           updates.reserve (roots.size ()
                            * (impl_->parameters.reciprocal_update_count + 1));
+          const bool clear_activation_snapshot
+              = !impl_->building
+                && (impl_->removed.count (
+                        impl_->activation_entry_memory_id)
+                        != 0
+                    || std::any_of (
+                        impl_->activation_identity_ids.begin (),
+                        impl_->activation_identity_ids.end (),
+                        [&] (long long memory_id) {
+                          return impl_->removed.count (memory_id) != 0;
+                        }));
           long long next_active_count = impl_->active_count;
           long long next_entry_memory_id = impl_->entry_memory_id;
           int next_max_level = impl_->max_level;
@@ -1515,6 +1593,62 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
           if (next_active_count < 0)
             return false;
 
+          if (impl_->removed.count (impl_->entry_memory_id) != 0)
+            {
+              long long replacement_memory_id = 0;
+              int replacement_level = -1;
+              const auto consider_replacement
+                  = [&] (long long memory_id, int level) {
+                      if (memory_id <= 0
+                          || impl_->removed.count (memory_id) != 0)
+                        return;
+                      const auto updated = updates.find (memory_id);
+                      if (updated != updates.end ()
+                          && !updated->second.active)
+                        return;
+                      if (level > replacement_level
+                          || (level == replacement_level
+                              && (replacement_memory_id == 0
+                                  || memory_id < replacement_memory_id)))
+                        {
+                          replacement_memory_id = memory_id;
+                          replacement_level = level;
+                        }
+                    };
+              for (const auto &[memory_id, node] : updates)
+                if (node.active)
+                  consider_replacement (memory_id, node.level);
+
+              // At most |removed| leading rows can be excluded from the
+              // generation-qualified level index, so |removed|+1 finds the
+              // best surviving persisted entry without a store-sized scan.
+              const auto candidates = impl_->store->Execute (
+                  "SELECT memory_id, level "
+                  "FROM cortext_sparse_route_nodes "
+                  "INDEXED BY idx_sparse_route_nodes_entry "
+                  "WHERE generation = ? AND active = 1 "
+                  "ORDER BY level DESC, memory_id ASC LIMIT ?",
+                  { impl_->generation,
+                    static_cast<long long> (impl_->removed.size () + 1) });
+              for (const auto &candidate : candidates)
+                consider_replacement (
+                    Int64 (candidate, "memory_id"),
+                    static_cast<int> (Int64 (candidate, "level")));
+
+              if (next_active_count == 0)
+                {
+                  next_entry_memory_id = 0;
+                  next_max_level = 0;
+                }
+              else if (replacement_memory_id > 0)
+                {
+                  next_entry_memory_id = replacement_memory_id;
+                  next_max_level = replacement_level;
+                }
+              else
+                return false;
+            }
+
           std::vector<long long> update_ids;
           update_ids.reserve (updates.size ());
           for (const auto &[memory_id, node] : updates)
@@ -1569,23 +1703,31 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                   static_cast<long long> (next_max_level),
                   next_active_count, next_generation });
           else
-            tx->Execute (
-                "INSERT INTO cortext_sparse_route_meta("
-                "singleton, schema_version, embedding_dim, entry_memory_id, "
-                "max_level, active_count, generation) "
-                "VALUES(1, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(singleton) DO UPDATE SET "
-                "schema_version = excluded.schema_version, "
-                "embedding_dim = excluded.embedding_dim, "
-                "entry_memory_id = excluded.entry_memory_id, "
-                "max_level = excluded.max_level, "
-                "active_count = excluded.active_count, "
-                "generation = excluded.generation",
-                { static_cast<long long> (kSchemaVersion),
-                  static_cast<long long> (impl_->embedding_dim),
-                  next_entry_memory_id,
-                  static_cast<long long> (next_max_level),
-                  next_active_count, next_generation });
+            {
+              tx->Execute (
+                  "INSERT INTO cortext_sparse_route_meta("
+                  "singleton, schema_version, embedding_dim, "
+                  "entry_memory_id, max_level, active_count, generation) "
+                  "VALUES(1, ?, ?, ?, ?, ?, ?) "
+                  "ON CONFLICT(singleton) DO UPDATE SET "
+                  "schema_version = excluded.schema_version, "
+                  "embedding_dim = excluded.embedding_dim, "
+                  "entry_memory_id = excluded.entry_memory_id, "
+                  "max_level = excluded.max_level, "
+                  "active_count = excluded.active_count, "
+                  "generation = excluded.generation",
+                  { static_cast<long long> (kSchemaVersion),
+                    static_cast<long long> (impl_->embedding_dim),
+                    next_entry_memory_id,
+                    static_cast<long long> (next_max_level),
+                    next_active_count, next_generation });
+              if (clear_activation_snapshot)
+                tx->Execute (
+                    "UPDATE cortext_sparse_route_meta SET "
+                    "activation_entry_memory_id = 0, "
+                    "activation_generation = 0, activation_centroid = NULL, "
+                    "activation_identity_ids = NULL WHERE singleton = 1");
+            }
           for (const long long memory_id : roots)
             tx->Execute (
                 "DELETE FROM cortext_sparse_route_dirty WHERE memory_id = ?",
@@ -1596,6 +1738,13 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
           impl_->max_level = next_max_level;
           impl_->active_count = next_active_count;
           impl_->generation = next_generation;
+          if (clear_activation_snapshot)
+            {
+              impl_->activation_entry_memory_id = 0;
+              impl_->activation_entry_level = 0;
+              impl_->activation_centroid.clear ();
+              impl_->activation_identity_ids.clear ();
+            }
           // A seal can invalidate cached rows out of FIFO order. Clear the
           // bookkeeping with the cache so stale order entries cannot grow
           // across repeated update/search cycles.
@@ -1642,6 +1791,16 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
           impl_->last_seal_failure_code = 4;
           return false;
         }
+
+      const bool clear_activation_snapshot
+          = !impl_->building
+            && (impl_->removed.count (impl_->activation_entry_memory_id) != 0
+                || std::any_of (
+                    impl_->activation_identity_ids.begin (),
+                    impl_->activation_identity_ids.end (),
+                    [&] (long long memory_id) {
+                      return impl_->removed.count (memory_id) != 0;
+                    }));
 
       const long long next_generation = impl_->generation;
       impl_->last_seal_failure_code = 40;
@@ -1701,6 +1860,12 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               "active_count = excluded.active_count, "
               "generation = excluded.generation",
           metadata_params);
+      if (clear_activation_snapshot)
+        tx->Execute (
+            "UPDATE cortext_sparse_route_meta SET "
+            "activation_entry_memory_id = 0, activation_generation = 0, "
+            "activation_centroid = NULL, activation_identity_ids = NULL "
+            "WHERE singleton = 1");
       for (const long long memory_id : roots)
         tx->Execute (
             "DELETE FROM cortext_sparse_route_dirty WHERE memory_id = ?",
@@ -1711,6 +1876,13 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
       impl_->max_level = snapshot->max_level;
       impl_->active_count = next_active_count;
       impl_->generation = next_generation;
+      if (clear_activation_snapshot)
+        {
+          impl_->activation_entry_memory_id = 0;
+          impl_->activation_entry_level = 0;
+          impl_->activation_centroid.clear ();
+          impl_->activation_identity_ids.clear ();
+        }
       // A seal can invalidate cached rows out of FIFO order. Clear the
       // bookkeeping with the cache so stale order entries cannot grow
       // across repeated update/search cycles.

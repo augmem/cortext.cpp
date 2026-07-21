@@ -319,6 +319,20 @@ pub fn build(b: *std.Build) void {
         .version = .{ .major = 1, .minor = 2, .patch = 2 },
     });
 
+    // Keep Zig consumers on the same pinned hnswlib safety contract as the
+    // CMake build without mutating Zig's shared package cache.
+    const prepare_hnswlib = b.addSystemCommand(&.{"cmake"});
+    prepare_hnswlib.addPrefixedDirectoryArg(
+        "-DHNSWLIB_SOURCE_DIR=",
+        hnswlib.path(""),
+    );
+    const patched_hnswlib = prepare_hnswlib.addPrefixedOutputDirectoryArg(
+        "-DHNSWLIB_OUTPUT_DIR=",
+        "hnswlib-patched",
+    );
+    prepare_hnswlib.addArg("-P");
+    prepare_hnswlib.addFileArg(b.path("cmake/PrepareHnswlibForZig.cmake"));
+
     if (fetch_aist_model) {
         if (!std.mem.eql(u8, aist_model_quant, "q8_0") and
             !std.mem.eql(u8, aist_model_quant, "q5_1") and
@@ -343,7 +357,7 @@ pub fn build(b: *std.Build) void {
     mod.addIncludePath(b.path("third_party/sqlite-objstore/include"));
     mod.addIncludePath(b.path("third_party/sqlite-objstore/third_party/blake3"));
     mod.addIncludePath(eigen.path(""));
-    mod.addIncludePath(hnswlib.path(""));
+    mod.addIncludePath(patched_hnswlib);
     mod.addIncludePath(nlohmann_json.path("include"));
 
     const generated = b.addWriteFiles();

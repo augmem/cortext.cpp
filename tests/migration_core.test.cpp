@@ -609,6 +609,7 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     REQUIRE(has_index("idx_memories_created_desc"));
     REQUIRE(has_index("idx_memories_ltm_strength_created"));
     REQUIRE(has_index("idx_memories_pre_activation_embedding_active"));
+    REQUIRE(has_index("idx_memories_flashbulb_intensity"));
     REQUIRE_FALSE(has_index("idx_memories_strength"));
     REQUIRE_FALSE(has_index("idx_memories_working"));
     REQUIRE(has_index("idx_memories_working_active"));

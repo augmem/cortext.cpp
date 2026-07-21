@@ -602,10 +602,14 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
   auto &p_ctx = context.GetProcessorContext ();
   const auto emotional_state
       = emotional_metadata_cache_internal::FindState (p_ctx);
-  const bool use_metadata_cache
+  bool use_metadata_cache
       = emotional_state && emotional_state->emotional_metadata.valid
         && !internal::experimental_env::Flag (
             "CORTEXT_PROFILE_EMOTIONAL_METADATA_SQL");
+  if (use_metadata_cache
+      && !emotional_metadata_cache_internal::RefreshBoundedSourceOrder (
+          p_ctx, tx))
+    use_metadata_cache = false;
   const std::uint64_t emotional_input_generation
       = use_metadata_cache
             ? emotional_state->emotional_metadata.cascade_input_generation
@@ -906,7 +910,7 @@ PropagateEmotionalCascade::Execute (OperationContext &context, Transaction &tx) 
         break;
     }
 
-  if (update_limit_reached)
+  if (update_limit_reached || edge_visit_limit_reached)
     InvalidateCascadeFixedPoint (p_ctx);
   else if (use_metadata_cache && fanout_cache && fanout_cache->valid)
     {
