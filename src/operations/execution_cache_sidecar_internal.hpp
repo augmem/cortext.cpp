@@ -47,6 +47,7 @@ struct EmotionalMetadataCache
   std::size_t source_query_capacity
       = std::numeric_limits<std::size_t>::max ();
   std::vector<long long> source_query_order;
+  bool source_query_order_dirty = false;
 };
 
 struct EmotionalCascadeFixedPoint

@@ -6,6 +6,7 @@
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "rif_active_epoch_cache_internal.hpp"
 #include "sparse_retrieval_knobs_internal.hpp"
 #include <algorithm>
 #include <any>
@@ -58,12 +59,70 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
   const auto association_edge_limit
       = sparse_retrieval_knobs_internal::GraphNeighborCount (
           F_raw, S_raw, T);
+  const auto active_state_limit
+      = rif_active_epoch_cache_internal::DeriveLimits (
+            F_raw, S_raw, T)
+            .mutation_count;
+  const auto active_count_rows = tx.Execute (
+      "SELECT COUNT(*) AS row_count FROM ("
+      "  SELECT 1 FROM rif_active_state LIMIT ?"
+      ")",
+      { static_cast<long long> (active_state_limit + 1) });
+  long long active_state_count = 0;
+  if (!active_count_rows.empty ())
+    {
+      const auto row_count
+          = active_count_rows.front ().find ("row_count");
+      if (row_count != active_count_rows.front ().end ()
+          && row_count->second.type () == typeid (long long))
+        active_state_count = std::any_cast<long long> (row_count->second);
+    }
+  context.AddOperationTiming (
+      "ScoreConsolidation.active_state_limit",
+      static_cast<double> (active_state_limit));
+  context.AddOperationTiming (
+      "ScoreConsolidation.active_state_count",
+      static_cast<double> (active_state_count));
+  if (active_state_count > static_cast<long long> (active_state_limit))
+    throw StoreError (
+        "ScoreConsolidation active RIF frontier exceeds its knob-derived "
+        "work ceiling");
   const std::string query
-      = "WITH candidate_ids AS MATERIALIZED ("
-        "  SELECT memory_id "
-        "  FROM memories INDEXED BY idx_memories_ltm_strength_created "
-        "  WHERE kind = 'LONG_TERM' "
-        "  ORDER BY strength ASC, created_at ASC, embedding_id ASC "
+      = "WITH inactive_candidate_ids AS MATERIALIZED ("
+        "  SELECT m.memory_id, m.strength AS effective_strength, "
+        "         m.created_at, m.embedding_id "
+        "  FROM memories m INDEXED BY idx_memories_ltm_strength_created "
+        "  WHERE m.kind = 'LONG_TERM' "
+        "    AND NOT EXISTS("
+        "      SELECT 1 FROM rif_active_state a "
+        "      WHERE a.memory_id = m.memory_id"
+        "    ) "
+        "  ORDER BY m.strength ASC, m.created_at ASC, "
+        "           m.embedding_id ASC "
+        "  LIMIT ?8"
+        "), active_candidate_ids AS MATERIALIZED ("
+        "  SELECT m.memory_id, "
+        "         CASE WHEN a.generation = c.generation THEN "
+        "           MAX(0.0, a.recovery_total - "
+        "             a.anchor_suppression * "
+        "             exp(c.log_factor - a.anchor_log_factor)) "
+        "         ELSE a.recovery_total END AS effective_strength, "
+        "         m.created_at, m.embedding_id "
+        "  FROM rif_active_state a "
+        "  JOIN memories m ON m.memory_id = a.memory_id "
+        "  CROSS JOIN rif_recovery_clock c "
+        "  WHERE m.kind = 'LONG_TERM' AND c.singleton = 1 "
+        "  ORDER BY effective_strength ASC, m.created_at ASC, "
+        "           m.embedding_id ASC "
+        "  LIMIT ?8"
+        "), candidate_ids AS MATERIALIZED ("
+        "  SELECT memory_id FROM ("
+        "    SELECT * FROM inactive_candidate_ids "
+        "    UNION ALL "
+        "    SELECT * FROM active_candidate_ids"
+        "  ) "
+        "  ORDER BY effective_strength ASC, created_at ASC, "
+        "           embedding_id ASC "
         "  LIMIT ?8"
         "), input_count AS ("
         "  SELECT COUNT(*) AS candidate_input_count FROM candidate_ids"

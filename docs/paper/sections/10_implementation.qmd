@@ -108,6 +108,18 @@ active epoch before working-memory hydration reads the effective-value view.
 This ordering prevents restart from seeding a working slot with an
 uncalibrated strength and subsequently persisting that stale value.
 
+Consolidation candidate selection also consumes effective rather than stale
+materialized RIF strength. It merges an indexed, at-most-$A$ inactive-memory
+frontier with an at-most-$A$ exact active-RIF frontier, then retains the lowest
+$A$ combined identities for scoring. Before the active branch is evaluated,
+the implementation counts at most $64C+1$ active rows and fails closed when the
+existing knob-derived active-epoch mutation ceiling $64C$ has been exceeded.
+Consequently the indexed inactive scan can skip at most $64C$ active rows, the
+active calculation examines at most $64C$ rows, and downstream association work
+still sees at most $A$ identities. A recovered active row therefore cannot
+consume a low-strength slot merely because its durable `memories.strength` has
+not yet been materialized.
+
 The authoritative signal mutation still commits once to persistent SQLite.
 After that commit, a separate connection-local in-memory SQLite database
 publishes only the current recovery clock and the identities touched in the
@@ -493,6 +505,33 @@ route fixes disconnected-node blindness without introducing a second retrieval
 or write path; HNSW controls locality while the derived envelope controls exact
 coverage and work.
 
+Deterministic envelope completion reads only rows with `active=1` through the
+existing `(generation, active, memory_id)` index. Sealed removals therefore do
+not consume the fixed node budget or hide an isolated active identity just
+beyond an inactive slice. CMake and Zig compile the same pinned HNSW safety
+patch. The Zig graph copies the header-only dependency into a build-local
+declared output and patches that copy, leaving the content-addressed global
+package cache immutable and safe for concurrent builds.
+
+When a sealed removal targets the canonical hierarchy entry, replacement is
+selected by highest level and then lowest memory id through the
+`(generation, active, level DESC, memory_id ASC)` index. The query reads at
+most the staged removal count plus one row: at most that many leading rows can
+be excluded by the same seal. The replacement's level becomes the new
+`max_level`, so restart never begins from an inactive entry or asks a lower
+level node for nonexistent upper adjacency.
+If any sealed removal overlaps the persisted consolidation activation snapshot,
+the snapshot entry, generation, centroid, and identity list are cleared in the
+same transaction; in-process and restarted queries then use the canonical
+route until the next successful recenter builds a new bounded snapshot.
+Restart validates that the metadata entry exists in the same generation, is
+active, and carries the recorded maximum level. A legacy route with a dead or
+mismatched entry fails closed to exact retrieval and the same bounded builder,
+rather than waiting for a future removal to repair already-stale metadata.
+It likewise resolves the at-most-$A$ persisted activation identities and
+requires every one to remain active in the same generation, covering snapshots
+written by the prior implementation before removal-overlap clearing existed.
+
 Within one activation query, the row-addressed route stores each persisted
 node's exact query distance beside that query's local node view. Higher-level
 descent, level-zero expansion, best-set maintenance, and the final exact
@@ -550,11 +589,17 @@ durable journal. A successful seal writes changed nodes and knob-bounded
 reciprocal neighbors, advances graph metadata, and clears only its staged root
 identities in the same SQLite transaction. Neighbor proposal during this seal
 uses the $C+B$ node and $2B$ queue construction envelope, not the public $9C$
-activation envelope. Existing active nodes retain their persisted topology when
-their current embedding changes; the rejected bounded-relink experiment is
-reported in the optimization section. A failed authoritative transaction
-cannot leave a durable route mutation. An interrupted or failed seal leaves the
-identities journaled for restaging, while exact retrieval remains authoritative.
+activation envelope. If an existing active node's normalized embedding moves
+beyond the fixed $10^{-6}$ cosine-distance tolerance,
+the generation is invalidated rather than pairing the new vector with stale
+adjacency. Exact retrieval remains authoritative while the existing bounded
+backfill constructs a replacement generation. The rejected incremental-relink
+experiment is reported in the optimization section. A failed authoritative transaction
+cannot leave a durable route mutation. An ordinary interrupted or failed seal
+leaves the identities journaled for restaging. Intentional moved-embedding
+invalidation instead abandons the incoherent generation and clears its journal;
+the authoritative current surface feeds the replacement bounded build while
+exact retrieval remains authoritative.
 This gives consolidation a real route-epoch boundary without a store-sized graph
 rewrite.
 
@@ -645,9 +690,18 @@ steps.
 
 Emotional cascade metadata is hydrated into a private, rebuildable processor
 cache keyed by memory id and base embedding id. The cache preserves the SQL
-contract for shared embeddings by retaining every member row, deriving current
-intensity and half-life bonus with the same per-embedding minima, and retaining
-only flashbulb rows in recency order for source discovery. Emotional
+aggregation contract for shared embeddings by retaining every member row and
+deriving current intensity and half-life bonus with the same per-embedding
+minima. Its global bounded flashbulb-source prefix is ordered by descending
+emotional intensity with ascending memory-id ties. A source insertion, removal,
+or intensity mutation
+marks that prefix dirty; before the next cascade, SQLite refreshes exactly the
+knob-derived prefix through a partial intensity/memory-id index and `LIMIT`, so
+an excluded source can enter after a retained source falls without a
+store-sized cache scan. This establishes intensity-before-truncation ordering,
+not complete selection equivalence: the cache bounds the global flashbulb
+prefix before cascade recency/arousal eligibility, while the fallback SQL
+applies those eligibility predicates before `LIMIT`. Emotional
 consolidation overwrites the affected embedding family, cascade propagation
 applies the existing maxima, storage and shallow consolidation append rows, and
 eviction removes them. Journal-aware rollback discards and rehydrates this
@@ -667,7 +721,10 @@ advance the fixed point without another traversal when neither endpoint lies
 in any source's expansion footprint. A topology rebuild invalidates the
 footprint conservatively. Ordinary unconnected non-source inserts and
 monotone increases to target emotional values likewise preserve the fixed
-point; source changes and target-value decreases still re-arm it.
+point; source changes and target-value decreases still re-arm it. A traversal
+that reaches either its update ceiling or its physical edge-visit ceiling is
+only a partial prefix and never records a fixed point, so the next event
+revisits the unresolved graph tail.
 
 Shallow consolidation is embedding-only. It clusters eligible long-term
 memories, writes an `ASSOCIATION` centroid node for each cluster, assigns source

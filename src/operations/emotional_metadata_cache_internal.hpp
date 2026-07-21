@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cortext/processor/processor_context.hpp"
+#include "cortext/store/store.hpp"
 #include "execution_cache_sidecar_internal.hpp"
 
 #include <algorithm>
@@ -79,6 +80,10 @@ Remove (ProcessorContext &p_ctx, long long memory_id)
   if (row == cache.rows_by_memory.end ())
     return;
   const long long embedding_id = row->second.embedding_id;
+  if (row->second.flashbulb
+      && cache.source_query_capacity
+             != std::numeric_limits<std::size_t>::max ())
+    cache.source_query_order_dirty = true;
   cache.rows_by_memory.erase (row);
   auto members = cache.memory_ids_by_embedding.find (embedding_id);
   if (members != cache.memory_ids_by_embedding.end ())
@@ -101,9 +106,9 @@ BeforeSourceQuery (const Row &left, const Row &right)
 inline bool
 BeforeBoundedSourceQuery (const Row &left, const Row &right)
 {
-  if (left.created_at != right.created_at)
-    return left.created_at > right.created_at;
-  return left.memory_id > right.memory_id;
+  if (left.intensity != right.intensity)
+    return left.intensity > right.intensity;
+  return left.memory_id < right.memory_id;
 }
 
 inline void
@@ -146,6 +151,9 @@ Upsert (ProcessorContext &p_ctx, Row row)
       cache.source_query_order.insert (position, memory_id);
       if (cache.source_query_order.size () > cache.source_query_capacity)
         cache.source_query_order.pop_back ();
+      if (cache.source_query_capacity
+          != std::numeric_limits<std::size_t>::max ())
+        cache.source_query_order_dirty = true;
     }
   RecomputeEmbedding (cache, embedding_id);
   // A newly persisted, unconnected non-source cannot change a completed
@@ -172,6 +180,51 @@ Reset (ProcessorContext &p_ctx, std::vector<Row> rows,
   cache.source_query_order.reserve (rows.size ());
   for (auto &row : rows)
     Upsert (p_ctx, std::move (row));
+  cache.source_query_order_dirty = false;
+}
+
+inline bool
+RefreshBoundedSourceOrder (ProcessorContext &p_ctx, Transaction &tx)
+{
+  const auto state = FindState (p_ctx);
+  if (!state)
+    return false;
+  auto &cache = state->emotional_metadata;
+  if (!cache.valid)
+    return false;
+  if (cache.source_query_capacity
+          == std::numeric_limits<std::size_t>::max ()
+      || !cache.source_query_order_dirty)
+    return true;
+
+  auto rows = tx.Execute (
+      "SELECT memory_id FROM memories "
+      "WHERE flashbulb = 1 AND embedding_id IS NOT NULL "
+      "AND kind != 'WORKING' "
+      "ORDER BY emotional_intensity DESC, memory_id ASC LIMIT ?",
+      { static_cast<long long> (cache.source_query_capacity) });
+  std::vector<long long> order;
+  order.reserve (rows.size ());
+  for (const auto &result : rows)
+    {
+      const auto id = result.find ("memory_id");
+      if (id == result.end () || id->second.type () != typeid (long long))
+        {
+          cache.valid = false;
+          return false;
+        }
+      const long long memory_id = std::any_cast<long long> (id->second);
+      const auto cached = cache.rows_by_memory.find (memory_id);
+      if (cached == cache.rows_by_memory.end () || !cached->second.flashbulb)
+        {
+          cache.valid = false;
+          return false;
+        }
+      order.push_back (memory_id);
+    }
+  cache.source_query_order = std::move (order);
+  cache.source_query_order_dirty = false;
+  return true;
 }
 
 inline void
@@ -202,6 +255,8 @@ OverwriteEmbedding (ProcessorContext &p_ctx, long long embedding_id,
     {
       auto &row = cache.rows_by_memory.at (memory_id);
       const bool became_source = !row.flashbulb && flashbulb;
+      const bool source_rank_changed
+          = (row.flashbulb || flashbulb) && row.intensity != intensity;
       source_input_changed
           = source_input_changed || became_source
             || (row.flashbulb
@@ -231,6 +286,10 @@ OverwriteEmbedding (ProcessorContext &p_ctx, long long embedding_id,
           if (cache.source_query_order.size () > cache.source_query_capacity)
             cache.source_query_order.pop_back ();
         }
+      if (cache.source_query_capacity
+              != std::numeric_limits<std::size_t>::max ()
+          && (became_source || source_rank_changed))
+        cache.source_query_order_dirty = true;
     }
   RecomputeEmbedding (cache, embedding_id);
   const auto current_values = cache.values_by_embedding.find (embedding_id);
@@ -264,6 +323,10 @@ MaxEmbedding (ProcessorContext &p_ctx, long long embedding_id,
             || (row.flashbulb
                 && (intensity > row.intensity
                     || bonus > row.half_life_bonus));
+      if (cache.source_query_capacity
+              != std::numeric_limits<std::size_t>::max ()
+          && row.flashbulb && intensity > row.intensity)
+        cache.source_query_order_dirty = true;
       row.intensity = std::max (row.intensity, intensity);
       row.half_life_bonus = std::max (row.half_life_bonus, bonus);
     }

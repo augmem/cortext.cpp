@@ -3920,8 +3920,8 @@ TEST_CASE ("Invalidated consolidation surface reloads authority and replaces "
   REQUIRE (result->front () == 1);
 }
 
-TEST_CASE ("Restarted SQLite sparse route seals a bounded row-addressed delta "
-           "without reconstructing in-memory HNSW",
+TEST_CASE ("Restarted SQLite sparse route invalidates moved active topology "
+           "before bounded rebuild",
            "[processor][cache][consolidation][hnsw][sqlite][restart]")
 {
   namespace cache
@@ -3987,28 +3987,27 @@ TEST_CASE ("Restarted SQLite sparse route seals a bounded row-addressed delta "
            == 1.0);
   REQUIRE (output.operation_ms.at (
                "SignalProcessor.sqlite_sparse_route_seal_succeeded")
-           == 1.0);
+           == 0.0);
   REQUIRE (output.operation_ms.at (
                "SignalProcessor.sqlite_sparse_route_seal_failure_code")
-           == 0.0);
+           == 62.0);
   REQUIRE (capturing_operation->captured != nullptr);
   const auto state = cache::Find (*capturing_operation->captured);
   REQUIRE (state);
   REQUIRE_FALSE (state->sparse_route);
-  REQUIRE (state->sqlite_sparse_route);
+  REQUIRE_FALSE (state->sqlite_sparse_route);
 
   auto restarted = operations::sparse_retrieval_route_sqlite_internal::Route::
       Open (*store, 256,
             operations::sparse_retrieval_route_sqlite_internal::
                 DefaultParameters ());
-  REQUIRE (restarted);
-  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
-  query[0] = 1.0f;
-  const auto result = restarted->Search (query, 512);
-  REQUIRE (result);
-  REQUIRE_FALSE (result->empty ());
-  REQUIRE (result->front () == 1);
-  REQUIRE (restarted->RestartRowsLoaded () == 1);
+  REQUIRE_FALSE (restarted);
+  REQUIRE (store->Execute (
+               "SELECT singleton FROM cortext_sparse_route_meta")
+               .empty ());
+  REQUIRE (store->Execute (
+               "SELECT memory_id FROM cortext_sparse_route_dirty")
+               .empty ());
 }
 
 TEST_CASE ("Ordinary sparse-route maintenance seals at its knob-derived "

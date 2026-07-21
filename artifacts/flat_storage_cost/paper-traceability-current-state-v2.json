@@ -1,15 +1,15 @@
 {
   "schema": "cortext_paper_traceability_state_overlay_v2",
   "supersedes_state_sha256": "f0605f910ed3c10fa7838c2e175c5d0babbe352f7e4fe4e2f92fdf3c70cd1f2d",
-  "phase": "monitor-pr",
+  "phase": "repair-pr-review-threads",
   "completion": true,
   "resume_phase": "refresh-pr-state",
   "sqlite_hnsw_schema_authority": {
-    "status": "approved-current-user-through-migration-31",
+    "status": "approved-current-user-through-migration-33",
     "approver_identity": "current-user",
     "provenance": "direct user authorization in this task",
-    "schema_migration_numbers": [29, 30, 31],
-    "authority_scope": "private internal SQLite sparse route, exact signal-vector ring, and knob-bounded activation-centroid persistence",
+    "schema_migration_numbers": [29, 30, 31, 32, 33],
+    "authority_scope": "private internal SQLite sparse route, deterministic active-entry replacement index, exact signal-vector ring, knob-bounded activation-centroid persistence, and bounded emotional-source reranking index",
     "public_api_change": false,
     "no_release_or_deployment_grant": true
   },
@@ -52,7 +52,9 @@
     "schema_authority": {
       "migrations": {
         "29": "internal SQLite HNSW route, metadata, build, node, and dirty-journal tables",
-        "31": "knob-bounded activation entry, generation, centroid, and identity snapshot columns"
+        "31": "knob-bounded activation entry, generation, centroid, and identity snapshot columns",
+        "32": "deterministic active sparse-route entry replacement index",
+        "33": "bounded emotional-source intensity reranking index"
       },
       "public_api_change": false,
       "authority": "current user explicitly approved the SQLite shadow-memory schema design and authorized the implementation changes"
@@ -114,14 +116,38 @@
     ]
   },
   "pr6_exact_head_ci_repair": {
-    "decision": "native-test-and-sanitizer-repair-reviewed-push-pending",
+    "decision": "seven-review-thread-repair-proven-at-round-five-p1",
     "prior_exact_head": "5f2e3b38edbc5d582b2a0cbb37d7ec10f8ceb1cb",
-    "current_failing_exact_head": "b7f9e27e019e5e4d4e95019a1e75742583970a86",
-    "review_thread": "https://github.com/augmem/cortext/pull/6#discussion_r3609254976",
+    "current_exact_head": "764e4af202a91120dae85e1d6b0d69e2ce97aa5d",
+    "current_exact_head_ci": "12-of-12-green-before-the-seven-thread-candidate-push",
+    "review": {
+      "baseline_tree": "156dd7bc27b7cda2c661a9467bfddfe72c771e8a",
+      "candidate_tree": "0b4069c73955147da28add9b9eaea480bad48249",
+      "verdict": "Proven at the fresh round-five P1 threshold with no P1 findings; the cache eligibility-before-LIMIT P2 remains expressly unclaimed",
+      "residuals": [
+        "P2: the bounded cache ranks its global flashbulb prefix before applying cascade recency/arousal eligibility, whereas the SQL fallback filters eligibility before LIMIT; this does not regress the public thread's required intensity-before-truncation order, but full cache/fallback selection equivalence remains unclaimed"
+      ]
+    },
+    "review_threads": [
+      "https://github.com/augmem/cortext/pull/6#discussion_r3620394273",
+      "https://github.com/augmem/cortext/pull/6#discussion_r3620394282",
+      "https://github.com/augmem/cortext/pull/6#discussion_r3620394286",
+      "https://github.com/augmem/cortext/pull/6#discussion_r3620632960",
+      "https://github.com/augmem/cortext/pull/6#discussion_r3620632969",
+      "https://github.com/augmem/cortext/pull/6#discussion_r3620632977",
+      "https://github.com/augmem/cortext/pull/6#discussion_r3620632985"
+    ],
     "repairs": [
       "calibrate migrated lazy-RIF state transactionally before working-memory hydration and rebuild the disposable epoch from committed persistent authority",
       "bound pinned hnswlib speculative neighbor prefetches by actual adjacency length without disabling SIMD distance kernels and skip its zero-byte empty-adjacency copy whose vector destination may be null",
       "construct the empty-upper-layer HNSW regression with explicit test-only levels instead of platform-dependent random levels",
+      "apply the same hnswlib patch to a declared build-local Zig copy without mutating the shared package cache",
+      "exclude inactive rows from deterministic route fill through the existing generation-active-memory index",
+      "merge exact active-RIF and indexed inactive consolidation frontiers under the existing knob-derived 64C active-state and A candidate ceilings",
+      "replace a removed canonical hierarchy entry through the indexed highest-level active row, clear any overlapping activation snapshot atomically, and fail closed on legacy dead-entry metadata at restart",
+      "invalidate a route generation when an active normalized embedding moves beyond the fixed cosine tolerance, then use exact retrieval while the existing knob-bounded builder reconstructs coherent adjacency",
+      "retain the bounded emotional-source prefix in the SQL fallback's intensity-descending and memory-id-ascending order, marking rank-changing mutations dirty and refilling exactly the knob-derived prefix through the partial SQLite intensity index",
+      "treat an edge-visit-limited emotional traversal as an incomplete prefix that cannot publish a fixed point",
       "perform knob-derived cache-byte multiplication explicitly in std::size_t for WebAssembly width portability"
     ],
     "source_sha256": {
@@ -129,16 +155,26 @@
       "rif_cache_header": "55985ae0d5d0d69480ae3a3d8204779faec8b23f2051e2e924b8de31e1d130a8",
       "hnswlib_patch": "4180985795ccdac233cf7c50e82ec0bb2108fd191aece8951f8cedc12932d54a",
       "hnswlib_patch_driver": "3506b957d155d0994cd975d12d93e3bdb60f0d205b13dc496b474aeb73e8662a",
+      "zig_build": "7336dcc354cc970fc8fc71e1f40a9f96ac549622a859a19e6dc55a0ed069357c",
+      "zig_hnswlib_prepare": "c4635b5ed46654e19285cee1e2861c1385d214b67d058767c51bfc505d30f33f",
       "hnsw_route_header": "4996c6575e70c4e74da29d6e289695df250f3316feeaae3724be29c3fda74ad8",
       "hnsw_route_source": "9582307376d8a8dcb40e85351382142e3a985df6448e7d8ef5a4f52e69268424",
-      "hnsw_repair_test": "ea620a606886e2f9630e7b20882aaa5fe1603ab46de67afdf52bacb1aca7cbe4"
+      "hnsw_repair_test": "c904515074515cd6c4325318d34a89ae10da4c0b9a3d7b9c34b2ebccbfbe7407",
+      "consolidation_source": "c5b0863f43e1f1080e006d213bc62ed145b3c740a906697327d2c91ba98e7e18",
+      "consolidation_test": "0bca3997b4c0a68ab475355b5c8be962ec06cbcbb19f628a3eb266d6fa4e071d",
+      "emotion_cascade_source": "8135e0f9a07d55a62d6bfdf7f63c83c5b2110237cc208c4fff2ef1ae6e135634",
+      "emotional_metadata_cache": "a8deda12553ffb9c07389f4665645187b85e4dd55f3c055ba230385cfcfbf88a",
+      "emotion_cascade_test": "47b0d780994832bbd36f06fcba4abee9d2935ad0267b4c9bd9e7cb6659df5afe",
+      "schema_source": "c42ac2cac86b6464d3bccdef87c1ddd02731cafccba179e229b16284e0f87cf4"
     },
     "local_proof": {
-      "full_media_ctest": "39,175 assertions in 690 cases; 1/1 passed in 287.44 seconds",
+      "full_media_ctest": "clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 38,730 assertions in 697 cases",
       "rif_focus": "312 assertions in 19 cases",
-      "hnsw_focus": "1,184 assertions in 5 regression cases; the exact explicit-level empty upper-layer repair passes 14 assertions",
+      "hnsw_focus": "complete SQLite-HNSW suite passes 2,614 assertions in 20 cases; focused replacement-entry and activation-snapshot clearing, moved-embedding invalidation with unchanged-vector tolerance, legacy dead-snapshot rejection, legacy dead-entry restart rebuild, active-only fill, and bounded-backfill regressions pass",
+      "consolidation_focus": "4,309 assertions in 32 cases, including exact effective-RIF selection and the 16,384-row all-low active-state ceiling",
+      "zig_build_local_patch": "text-only shared build passed; global hnswlib cache remained unpatched while the declared build-local copy passed reverse patch verification",
       "wasm_bundle": "built successfully with Emscripten 4.0.18",
-      "test_binary_sha256": "44e975cffd7d698ee24b2f7c43ffaccd8c86655c617d192224da8b22da992f7c",
+      "test_binary_sha256": "0fd25b6e322913cb0e76e3aa5a1fbcc6836d8696b6bbd5886224a3144fea1ec8",
       "wasm_sha256": "17d31e0a61327e91d7a53577b73689442583d5f4c84aa76d5844ac309e9791aa"
     },
     "sanitizer_proof": {
@@ -153,7 +189,7 @@
       "modality_branch": false
     },
     "unresolved_limits": [
-      "exact-head Linux sanitizer proof is pending",
+      "record-transition review, push, and replacement exact-head CI for the seven-thread repair remain pending",
       "whole-engine raw process reset is not proven",
       "bounded whole-engine restart is not proven",
       "Durable plateau and production-wide boundedness are not claimed"

@@ -943,6 +943,25 @@ GetCoreMigrations ()
               "activation_identity_ids BLOB",
           },
       },
+      {
+          32,
+          "Index deterministic sparse-route entry replacement",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_entry "
+              "ON cortext_sparse_route_nodes("
+              "generation, active, level DESC, memory_id ASC)",
+          },
+      },
+      {
+          33,
+          "Index bounded emotional source reranking",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_flashbulb_intensity "
+              "ON memories(emotional_intensity DESC, memory_id ASC) "
+              "WHERE flashbulb = 1 AND embedding_id IS NOT NULL "
+              "AND kind != 'WORKING'",
+          },
+      },
   };
 }
 

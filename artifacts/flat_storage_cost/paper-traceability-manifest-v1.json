@@ -799,9 +799,9 @@
     },
     {
       "corpus_parameter_scope": "owner-authorized 15,695-packet Natural replay and focused fresh/copied-late windows where recorded; F=0.45, S=0.5, T=0.5",
-      "decision": "native-test-and-sanitizer-repair-reviewed-push-pending",
+      "decision": "seven-review-thread-repair-proven-at-round-five-p1",
       "evidence_fingerprints": [
-        "05378353dc522ca3bf044fd35b767278af215f967ddb18f825325b3cbbd25c20"
+        "1e4fc54c2a756b4c2237ad32d9cea5cad9c704141736fe3d250a6c1868043377"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:pr6_exact_head_ci_repair",
@@ -1027,7 +1027,7 @@
       "corpus_parameter_scope": "production-default 8C-to-9C SQLite HNSW route; 15,695-packet Natural replay, 2,016-message Durable replay, 30,380-packet maturity extension, 27 structural F/S/T points, and nine 4,000-packet quality points with 512 controls each",
       "decision": "retained-production-default",
       "evidence_fingerprints": [
-        "44abead03df4cc0c1a2b601ada6c9171f2eeaaa780328036faf70f54b5080922"
+        "a75c72875146e28ce9292f50c68289d2bbc5f37911b8cc3947407f9009a5bd64"
       ],
       "evidence_kind": "measured",
       "inventory_id": "state:sqlite_hnsw_production_cutover",

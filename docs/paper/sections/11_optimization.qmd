@@ -974,7 +974,12 @@ restart regression proved a moved centroid changes persisted links and remains
 the nearest result after reopen. The full replay rejected it: exact top-1 fell
 to 0.980469, mean identity recall at 16 to 0.972794, semantic coverage to
 0.964210, and maximum seal time rose to 140.669 ms. The source change and its
-regression were removed; the result remains as negative evidence.
+regression were removed; the result remains as negative evidence. The retained
+correctness repair does not revive that relinker. A changed active embedding
+invalidates the persisted generation, exact retrieval covers the interval, and
+the already-bounded historical builder creates a coherent replacement. Entry
+removal is cheaper: an indexed removal-count-plus-one query promotes the
+highest-level surviving node with deterministic identity ties.
 
 The dual-seed candidate tested activation entry ownership instead. The prior
 recenter operation replaced the canonical maximum-level HNSW entry with the
@@ -1346,6 +1351,19 @@ now proves 70 reachable pairs and 70 physical edge visits collapse to one
 executed winner with the same final intensity. Full-horizon performance,
 work-bound, and retrieval results remain required before retention.
 
+The bounded source prefix uses the same intensity-descending, memory-id
+ascending order as the SQL path. Because emotional consolidation can lower an
+existing source and cascade propagation can raise one, incremental insertion
+alone is insufficient: the next-best source may currently be outside the
+prefix. The retained repair marks rank-changing mutations dirty and rebuilds
+only the knob-derived prefix from a partial SQLite index. Regressions cover a
+retained source falling below an excluded source and an excluded source rising
+to the front; query-plan proof confirms that refresh uses the index rather than
+a store scan. This proof is specifically intensity-before-truncation. The
+bounded cache still chooses its global flashbulb prefix before recency/arousal
+eligibility, whereas fallback SQL filters eligibility before `LIMIT`; complete
+cache/fallback source-selection equivalence remains unclaimed.
+
 The complete exact-winner replay kept top-1 at 1.0, recall at 16 at
 0.999386, and semantic coverage at 0.999381, but it did not improve the full
 run: wall time was 205,445 ms versus 194,736 ms for snapshot reuse alone, and
@@ -1456,17 +1474,27 @@ details before changing the algorithm. Commit timing had included a
 profiling-only vector identity lookup; identity resolution now occurs when the
 committed mutation audit is consumed, while the independent logical and
 physical audit streams remain intact. Mature deterministic route completion
-now draws from the indexed generation slice and applies active eligibility at
-ranking, so an inactive row cannot make the fixed envelope appear one row
-short. The RIF changed-row counter now records work performed by the current
+now draws from the indexed active-generation slice, so an inactive row cannot
+consume the fixed envelope or hide a later active identity. The CMake and Zig
+build graphs apply the same content-checked HNSW bounds patch; Zig patches a
+build-local copy rather than mutating its shared package cache. The RIF
+changed-row counter now records work performed by the current
 event rather than the historical active population. Each correction has a
 red-then-green regression and changes measurement, not public retrieval
 semantics.
 
 The remaining consolidation scan was bounded by the same knobs. Let
 $A=2C+2B$ and $N=\max(8,\lfloor B/2\rfloor)$. Score consolidation now admits
-at most $A$ low-strength long-term identities from the indexed strength/time
-frontier and counts at most $N$ association edges per admitted identity. A
+at most $A$ low-effective-strength long-term identities after merging two
+frontiers: at most $A$ inactive identities from the indexed materialized
+strength/time order and at most $A$ active identities ordered by their exact
+clock-derived RIF strength. A $64C+1$ sentinel count fails closed before the
+active branch when the existing active-epoch mutation ceiling would be
+exceeded. This bounds the inactive index scan by $A+64C$, the dynamic active
+calculation by $64C$, and the merged/downstream frontier by $A$, without a
+history-sized sort. It also prevents partially recovered rows with stale low
+materialized strength from excluding a genuinely weak row. The scorer counts
+at most $N$ association edges per admitted identity. A
 sentinel row publishes the exact input cardinality even when no candidate is
 selected. The formula, counter, and source/modality invariants pass all 27
 $F,S,T\in\{0,0.5,1\}^3$ configurations across text, audio, image, and four
@@ -1633,7 +1661,7 @@ observation-only result is never promoted to production-path proof.
 | `TRACE[state:sqlite_hnsw_sparse_route_integration]` | Retained row-addressed SQLite HNSW query and incremental seal in the existing `GraphRetrieve` and `MemoryStorage` paths; Natural and Durable share the same algorithm, and Durable adds only its checkpoint. Current full-corpus retrieval quality and activation bounds pass, while the Natural whole-engine plateau and Durable horizon gates remain open. |
 | `TRACE[state:sqlite_hnsw_activation_effort_cycle]` | Queue-effort-only, fixed-$5C$, and dynamic $4C$ through $8C$ floor variants were rejected or superseded. The retained candidate resets routing work to $8C$, advances by $R=\max(2,\lfloor B/16\rfloor)$ to $9C$, keeps $A=2C+2B$ downstream activation and $2B/(C+B)$ construction, passes the 30,380-packet mature-cycle gates at 511/512 top-1 and recall@16 0.999265, and passes canonical and nine-point quality without an engine-wide plateau claim. |
 | `TRACE[state:sqlite_hnsw_production_cutover]` | Retained the existing SQLite HNSW route as the production default at an $8C$ post-consolidation floor, $R=\max(2,\lfloor B/16\rfloor)$ step, $9C$ ceiling, separate $A=2C+2B$ snapshot, and $9C+A$ total row ceiling. The nine-point matrix passed 4,608/4,608 top-1 controls, minimum recall@16 and semantic coverage 1.0, deterministic ties, and source/modality-label invariance. Natural and Durable share the operation path, with Durable adding only its checkpoint; whole-engine reset, bounded restart, Durable plateau, release, and deployment remain unclaimed. |
-| `TRACE[state:pr6_exact_head_ci_repair]` | PR-monitor repair record: migrated active RIF rows are calibrated before working-memory hydration; pinned HNSW speculative neighbor prefetches are adjacency-bounded without disabling SIMD distance kernels; empty adjacency snapshots skip a zero-byte copy whose vector destination may be null; and cache-byte arithmetic uses explicit `std::size_t` width for WebAssembly. The full media CTest, focused RIF and HNSW regressions, and WebAssembly bundle build pass locally. The sandboxed macOS ASAN runtime cannot execute because dynamic-shadow discovery or sanitizer-runtime code signing fails before `main()`, so exact-head Linux sanitizer CI remains the required owner; the historical 4,608-query quality matrix is not relabeled as evidence from the repaired binary. |
+| `TRACE[state:pr6_exact_head_ci_repair]` | PR-monitor repair record: migrated active RIF rows are calibrated before working-memory hydration; pinned HNSW speculative neighbor prefetches are adjacency-bounded without disabling SIMD distance kernels; empty adjacency snapshots skip a zero-byte copy whose vector destination may be null; Zig applies the same patch to a build-local copy; deterministic route fill excludes inactive rows; entry removal promotes an indexed active hierarchy root, atomically clears overlapping activation snapshots, and restart rejects legacy dead canonical or snapshot identities; changed active embeddings invalidate stale adjacency for bounded rebuild; consolidation merges exact active-RIF and indexed inactive frontiers under the existing $64C$/$A$ ceilings; bounded emotional-source discovery preserves SQL intensity order and refreshes rank-changing mutations through an indexed knob-sized prefix; partial edge-limited cascade traversals do not become fixed points; and cache-byte arithmetic uses explicit `std::size_t` width for WebAssembly. The full media CTest baseline, focused RIF/HNSW/consolidation regressions, build-local Zig proof, and WebAssembly bundle build pass locally. The sandboxed macOS ASAN runtime cannot execute because dynamic-shadow discovery or sanitizer-runtime code signing fails before `main()`, so replacement exact-head Linux sanitizer CI remains the required owner; the historical 4,608-query quality matrix is not relabeled as evidence from the repaired binary. |
 | `TRACE[state:hnsw_fixed_6c_experiment]` | Rejected knob-derived fixed-$6C$ routing envelope. All 27 structural F/S/T points and 931 assertions passed; neutral $C=512$ produced a 3,072-node envelope while $B=128$ and the 129 boundary remained distinct. An extra production-default F=.45/S=.5/T=.5 pre-screen missed exact top-1, recall@16, plateau, and wall-time gates, so fail-fast rejected the candidate before the exact nine-point corpus matrix started and left production on fixed $5C$. |
 | `TRACE[state:post_rif_empty_fixed_envelope_attribution]` | Repaired proof classification for the retained zero-increment fixed-$5C/5C$ route. Retrieval mode is independent of whole-engine process shape; route-active rows fail closed on missing work, and queue, node ceiling, actual visits, distance work, and activation are checked separately across at least ten mature unchanged-envelope recenters. The production suffix beginning at event 10,195 passes the classifier and work envelope across 12 complete recenters, while activated-identity overlap, process-cycle reset, exact full-horizon retrieval, Durable horizon, and bounded restart remain open. |
 | `TRACE[state:write_gate_incidence_attribution_v2]` | Deterministic range-bound observation-only 15,695-packet production-knob attribution rejected boundary-to-write incidence as the growth source: exact event ranges 0--2,499 and 13,195--15,694 contained 510 and 528 writes, while MemoryStorage time per write rose from 0.4833 to 2.8343 ms as the existing shared SQLite HNSW route warmed toward the fixed $5C=2{,}495$ envelope. Production $C/B/A=499/125/1{,}248$ and construction $C+B/2B=624/250$ remain derived; neutral $C/B/A=512/128/1{,}280$ and 129 is only logical $B+1$. Raw reset remains failed and unwaived; 27 structural and nine production-shaped F/S/T ablations remain required. |

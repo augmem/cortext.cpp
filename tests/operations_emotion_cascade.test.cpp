@@ -335,7 +335,7 @@ TEST_CASE ("Emotional metadata cache preserves shared embedding minima",
            == std::vector<long long>{ 20 });
 }
 
-TEST_CASE ("Emotional source index retains only its newest bounded prefix",
+TEST_CASE ("Emotional source index retains the SQL-ranked bounded prefix",
            "[operations][emotion_cascade][metadata_cache][bounds]")
 {
   ProcessorContext processor_context;
@@ -343,10 +343,11 @@ TEST_CASE ("Emotional source index retains only its newest bounded prefix",
   std::vector<operations::execution_cache_sidecar_internal::
                   EmotionalMemoryMetadata>
       rows;
+  const std::array<double, 5> intensities { 0.7, 0.99, 0.8, 0.95, 0.9 };
   for (long long memory_id = 1; memory_id <= 5; ++memory_id)
-    rows.push_back (
-        { memory_id, memory_id, memory_id, true, 0.8, 0.9, 2.0, 1,
-          0.5 });
+    rows.push_back ({ memory_id, memory_id, memory_id, true,
+                      intensities[static_cast<std::size_t> (memory_id - 1)],
+                      0.9, 2.0, 1, 0.5 });
   operations::emotional_metadata_cache_internal::Reset (
       processor_context, std::move (rows), 3);
   const auto state
@@ -354,7 +355,69 @@ TEST_CASE ("Emotional source index retains only its newest bounded prefix",
           processor_context);
   REQUIRE (state);
   REQUIRE (state->emotional_metadata.source_query_order
-           == std::vector<long long>{ 5, 4, 3 });
+           == std::vector<long long>{ 2, 4, 5 });
+}
+
+TEST_CASE ("Bounded emotional source reranking refills from SQLite",
+           "[operations][emotion_cascade][metadata_cache][bounds][regression]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
+  std::vector<operations::execution_cache_sidecar_internal::
+                  EmotionalMemoryMetadata>
+      rows;
+  const std::array<double, 5> intensities { 0.99, 0.9, 0.8, 0.7, 0.6 };
+  for (long long memory_id = 1; memory_id <= 5; ++memory_id)
+    {
+      SeedCascadeMemory (*store, memory_id, memory_id);
+      const double intensity
+          = intensities[static_cast<std::size_t> (memory_id - 1)];
+      SetCascadeSource (*store, memory_id, intensity, 1, 0.5);
+      rows.push_back ({ memory_id, memory_id, memory_id, true, intensity,
+                        0.9, 2.0, 1, 0.5 });
+    }
+  operations::emotional_metadata_cache_internal::Reset (
+      processor_context, std::move (rows), 3);
+  const auto state
+      = operations::emotional_metadata_cache_internal::FindState (
+          processor_context);
+  REQUIRE (state);
+  auto &cache = state->emotional_metadata;
+  REQUIRE (cache.source_query_order == std::vector<long long>{ 1, 2, 3 });
+  const auto plan = store->Execute (
+      "EXPLAIN QUERY PLAN SELECT memory_id FROM memories "
+      "WHERE flashbulb = 1 AND embedding_id IS NOT NULL "
+      "AND kind != 'WORKING' "
+      "ORDER BY emotional_intensity DESC, memory_id ASC LIMIT 3");
+  REQUIRE (plan.size () == 1);
+  REQUIRE (std::any_cast<std::string> (plan[0].at ("detail"))
+               .find ("idx_memories_flashbulb_intensity")
+           != std::string::npos);
+
+  auto transaction = store->Begin ();
+  transaction->Execute (
+      "UPDATE memories SET emotional_intensity = 0.1 WHERE memory_id = 1");
+  operations::emotional_metadata_cache_internal::OverwriteEmbedding (
+      processor_context, 1, true, 0.1, 2.0, 1, 0.5);
+  REQUIRE (cache.source_query_order_dirty);
+  REQUIRE (
+      operations::emotional_metadata_cache_internal::
+          RefreshBoundedSourceOrder (processor_context, *transaction));
+  REQUIRE (cache.source_query_order == std::vector<long long>{ 2, 3, 4 });
+  REQUIRE_FALSE (cache.source_query_order_dirty);
+
+  transaction->Execute (
+      "UPDATE memories SET emotional_intensity = 1.0 WHERE memory_id = 5");
+  operations::emotional_metadata_cache_internal::MaxEmbedding (
+      processor_context, 5, 1.0, 2.0);
+  REQUIRE (cache.source_query_order_dirty);
+  REQUIRE (
+      operations::emotional_metadata_cache_internal::
+          RefreshBoundedSourceOrder (processor_context, *transaction));
+  REQUIRE (cache.source_query_order == std::vector<long long>{ 5, 2, 3 });
+  transaction->Rollback ();
 }
 
 TEST_CASE ("CascadeRadius and CascadeDecay knob values",
@@ -878,12 +941,46 @@ TEST_CASE ("PropagateEmotionalCascade edge experiment uses the knob-derived "
       AddCascadeEdge (*store, 1, target);
     }
 
-  const auto timings = ExecuteCascade (
-      store, true, kFocus, kSensitivity, kStability);
-  REQUIRE (timings.at ("EmotionalCascade.edge_visit_limit") == limit);
-  REQUIRE (timings.at ("EmotionalCascade.edge_visit_count") == limit);
-  REQUIRE (timings.at ("EmotionalCascade.edge_visit_limit_reached") == 1.0);
-  REQUIRE (timings.at ("EmotionalCascade.neighbor_count") <= limit);
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = kFocus;
+  cfg.sensitivity = kSensitivity;
+  cfg.stability = kStability;
+  ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
+  std::vector<operations::execution_cache_sidecar_internal::
+                  EmotionalMemoryMetadata>
+      metadata;
+  metadata.reserve (static_cast<std::size_t> (limit + 8));
+  metadata.push_back (
+      { 1, 1, 1'000'000, true, 0.9, 0.9, 2.0, 1, 0.9 });
+  for (long long target = 2; target <= limit + 8; ++target)
+    metadata.push_back (
+        { target, target, 1'000'000, false, 0.0, 0.0, 0.0, 0, 0.0 });
+  operations::emotional_metadata_cache_internal::Reset (
+      processor_context, std::move (metadata));
+  auto execute = [&] (uint64_t timestamp) {
+    const Signal signal = MakeSignal (timestamp);
+    OperationContext context (signal, processor_context, cfg, store.get ());
+    auto transaction = store->Begin ();
+    PropagateEmotionalCascade operation;
+    operation.Execute (context, *transaction);
+    transaction->Commit ();
+    return context.GetOperationTimings ();
+  };
+
+  const auto first = execute (1'000'000);
+  REQUIRE (first.at ("EmotionalCascade.edge_visit_limit") == limit);
+  REQUIRE (first.at ("EmotionalCascade.edge_visit_count") == limit);
+  REQUIRE (first.at ("EmotionalCascade.edge_visit_limit_reached") == 1.0);
+  REQUIRE (first.at ("EmotionalCascade.neighbor_count") <= limit);
+
+  // A physically truncated traversal is not a fixed point. The same inputs
+  // must revisit the graph instead of taking the zero-work fast path.
+  const auto resumed = execute (1'000'001);
+  REQUIRE (resumed.at ("EmotionalCascade.source_count") == 1.0);
+  REQUIRE (resumed.at ("EmotionalCascade.edge_visit_count") == limit);
+  REQUIRE (resumed.at ("EmotionalCascade.edge_visit_limit_reached") == 1.0);
 }
 
 TEST_CASE ("PropagateEmotionalCascade bounds source inspection and execution "

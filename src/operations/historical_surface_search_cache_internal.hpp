@@ -332,6 +332,11 @@ AdvanceSQLiteSparseRouteBackfill (State &state, Store &store)
           state.sqlite_sparse_route_backfill_failure_code
               = build->LastSealFailureCode ();
           ++state.sqlite_sparse_route_backfill_failure_count;
+          if (state.sqlite_sparse_route_backfill_failure_code == 62)
+            {
+              build.reset ();
+              return false;
+            }
           (void)build->SetBuildCursor (cursor);
           return false;
         }
