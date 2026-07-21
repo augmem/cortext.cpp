@@ -101,6 +101,16 @@ statement because aliases, wildcards, views, subqueries, and triggers cannot be
 classified safely from SQL text. A caller mutation also invalidates every
 database-derived processor cache before the statement executes.
 
+The engine's structured competition records carry `memory_id`, so ordinary
+retrieval-induced inhibition remains scoped to exactly one losing memory.
+Legacy callers may instead provide only an embedding identity. Because several
+memories may share that embedding, compatibility resolution enumerates every
+matching memory in stable identity order and applies the same suppression to
+each one. This prevents one arbitrary sibling from escaping inhibition, but it
+also means the embedding-only compatibility edge may perform work proportional
+to the shared-embedding membership. It is not included in the fixed
+memory-scoped operation claim.
+
 On startup from schema 27, migration may anchor active rows that carry
 different historical suppression timestamps to one recovery clock. The
 processor calibrates those rows transactionally and rebuilds the disposable
@@ -431,6 +441,15 @@ identity list live in the single SQLite route-metadata row and survive reopen;
 malformed, stale, duplicate, or over-capacity metadata invalidates the route.
 Graph and memory rows remain authoritative in SQLite.
 
+Sparse HNSW activation is candidate generation rather than an
+eligibility-complete seed surface. Routing nodes such as `ASSOCIATION` memories
+may consume activated slots and are then removed by the public long-term seed
+predicate. If that filtering leaves fewer than the requested candidate limit,
+the operation discards the underfilled sparse proposal and executes the
+existing exact SQL seed path. Consequently the fixed sparse envelope is not
+misrepresented as complete after operation-specific filtering; the fallback
+may still perform store-sized exact work.
+
 Decoded activation-snapshot rows reuse the route's existing generation-qualified
 shadow-node cache rather than being selected and decoded again for every query.
 The first query after reopen loads only snapshot identities absent from that
@@ -519,10 +538,16 @@ patch. The Zig graph copies the header-only dependency into a build-local
 declared output and patches that copy, leaving the content-addressed global
 package cache immutable and safe for concurrent builds. The patch is checked
 and applied with the build-local output as the working directory, so no
-host-native output path is passed through Git's path parser. The patch itself is
-also a declared build input, so changing it invalidates the preparation step
-instead of reusing a stale patched output. Local POSIX proof
-passes; replacement Windows CI remains the execution owner. The Zig package
+host-native output path is passed through Git's path parser. The first
+replacement Windows run still rejected the patch content check: Windows
+checkout had converted the unified diff to CRLF, which reproduces locally as a
+corrupt patch even though the same bytes with LF apply cleanly. The repository
+therefore marks this exact patch `text eol=lf`; this is a checkout invariant,
+not a platform-specific algorithm branch. The patch itself is also a declared
+build input, so either content or checkout-contract changes invalidate the
+preparation step instead of reusing a stale patched output. Local POSIX and
+CRLF-adversarial proof pass; replacement Windows CI remains the execution
+owner. The Zig package
 manifest includes the `cmake` directory so downstream package consumers receive
 both the preparation script and its content-checked patch rather than only the
 top-level build graph.
@@ -1010,18 +1035,26 @@ capacity throughout the transition.
 
 When the ring contains rows, recent-context restart hydration admits only
 signals with an exact ring vector; it does not silently substitute a memory
-centroid for a missing per-signal vector. A pre-ring database with no exact
-rows retains the legacy centroid fallback. This means an older store whose
-prior ring was smaller can temporarily restore a shorter exact context until
-new writes fill $Q$, rather than mixing aggregate vectors into an apparently
-full exact window. The global vector index consequently
+centroid for a missing per-signal vector. Migration 30 itself creates an empty
+ring, so the first capacity check copies the newest $Q$ signal vectors from
+their `signals.embedding_id` references. The main MemoryStorage path performs
+that check before it inserts aggregate-linked rows. The auxiliary
+working-memory persistence path may insert its new aggregate-linked row first,
+but the same `Upsert` immediately replaces that row's ring slot with the exact
+event vector, leaving the newest $Q$ slots exact in either ordering. A truly
+empty legacy database remains empty. Once any exact ring row exists, an
+older store whose prior ring was smaller can temporarily restore a shorter
+exact context until new writes fill $Q$, rather than mixing aggregate vectors
+into an apparently full exact window. The global vector index consequently
 contains memory centroids rather than a growing population of signal-only
 decoys. The schema and routing code contain no modality or `source_id` branch;
 text, audio, image, shared, and opaque sources enter after encoding through the
 same slot formula. Direct regressions cover mixed modality/source labels, knob
 changes, all 27 low/mid/high F/S/T combinations, and a 151-vector neutral
-restart whose restored identities equal the exact signal vectors. This does
-not claim bounded whole-engine restart.
+restart whose restored identities equal the exact signal vectors. A separate
+upgrade regression starts from 150 legacy exact signals, performs the first
+post-migration aggregate-linked write, and restores all 151 exact vectors; it
+passes 155 assertions. This does not claim bounded whole-engine restart.
 
 Emotional propagation separately limits enqueued mutation statements to the
 existing activation target $A=2C+2B$. This is a hard bound on writes, not a

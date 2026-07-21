@@ -117,19 +117,20 @@
     ]
   },
   "pr6_exact_head_ci_repair": {
-    "decision": "fourteen-review-thread-repair-active",
+    "decision": "seventeen-review-thread-repair-active",
     "prior_exact_head": "764e4af202a91120dae85e1d6b0d69e2ce97aa5d",
     "implementation_repair_commit": "89a06084dd05710f90572c1b7bac7e17fab79122",
     "followup_repair_commit": "25cf7b130e87837d0ed813b0e0ffda5a50701651",
     "monitor_head_binding": "resolve the live GitHub PR head at every re-entry because a repository record cannot content-address its own containing record-only commit",
-    "current_exact_head_ci": "Windows zig-cli-install on follow-up head 25cf7b13 still rejected the build-local HNSW patch through git apply --directory after slash normalization; the active candidate runs git apply from inside the build-local output and all other check conclusions must be resolved live from GitHub at every re-entry",
+    "current_exact_head_ci": "implementation and record repair head cca844d758bc9ad7ddd12048932c274da514d8a6 is synchronized with current main; eleven checks are green, including Linux sanitizer, and Windows job 88675883348 is the only failure because checkout converted the unified HNSW patch to CRLF before git apply --check",
     "windows_zig_path_repair": {
       "failing_job": "zig-cli-install (windows-latest, cortext_cli.exe)",
       "failing_head": "25cf7b130e87837d0ed813b0e0ffda5a50701651",
       "cause": "normalizing the relative --directory path was insufficient on the Windows Zig/Git/CMake runtime; git apply still rejected the copied pinned source before compilation",
-      "repair": "run both git apply content check and application with the build-local output as the working directory, passing no host-native output path through Git path parsing",
-      "local_proof": "Zig text-only passes 12/12 and a space-bearing build-local output passes patch application plus complete reverse verification",
-      "review": "fresh round-one all-findings and separately fresh final cumulative P1 reviews are Proven with no P1 finding; the repair is retained inside the current three-thread candidate",
+      "repair": "run both git apply content check and application with the build-local output as the working directory, passing no host-native output path through Git path parsing; preserve the unified diff as LF through an exact .gitattributes text eol=lf checkout rule",
+      "local_proof": "fresh Zig text-only check passes 12/12; core.autocrlf=true checkout preserves zero carriage returns; the LF patch applies cleanly and an otherwise identical CRLF stream reproduces corrupt-patch rejection",
+      "working_directory_review": "the earlier working-directory-only repair received a fresh clean all-findings round one and separately fresh clean P1 final cumulative review before it was retained in the three-thread candidate",
+      "eol_repair_review": "fresh round one independently passed the LF checkout and Zig 12/12 proof and found no implementation/config defect; its two P2 record defects were repaired; a different fresh round two is Proven at P1/P2 and a separately fresh final cumulative review is Proven at P1",
       "proof_not_claimed": "Windows validation remains owned by replacement exact-head CI"
     },
     "review": {
@@ -152,7 +153,11 @@
       "final_cumulative_verdict": "Proven at the separately fresh P1 threshold with no P1 finding",
       "review_boundary": "an old smaller exact-signal ring can temporarily restore fewer than Q vectors after a knob increase, but missing vectors are never replaced by aggregate memory centroids",
       "record_review": "the exactly-one fresh non-code review found one P2 executable-handoff defect; it is directly corrected without rereview and all other record surfaces were verified clean",
-      "next_gate": "final validation, non-force push, proof-backed thread replies and resolution, and replacement exact-head CI"
+      "implementation_commit": "cca844d758bc9ad7ddd12048932c274da514d8a6",
+      "thread_disposition": "all three repaired threads received exact proof replies and are resolved",
+      "post_push_record_review": "the exactly-one review found the live Windows failure plus noncanonical review ownership; both records are directly corrected without rereview and the lane returns to CI repair",
+      "active_ci_repair": "pin cmake/hnswlib-prefetch-bounds.patch to text eol=lf so Windows checkout preserves valid unified-diff bytes without platform-specific algorithm behavior",
+      "next_gate": "local proof, fresh recursive code review, final record review, non-force push, and resulting exact-head CI"
     },
     "review_threads": [
       "https://github.com/augmem/cortext/pull/6#discussion_r3620394273",
@@ -168,7 +173,10 @@
       "PRRT_kwDOR3IQMM6SjHe1",
       "PRRT_kwDOR3IQMM6SlrZb",
       "PRRT_kwDOR3IQMM6SlrZd",
-      "PRRT_kwDOR3IQMM6SlrZg"
+      "PRRT_kwDOR3IQMM6SlrZg",
+      "PRRT_kwDOR3IQMM6SopGj",
+      "PRRT_kwDOR3IQMM6SopGm",
+      "PRRT_kwDOR3IQMM6SopGo"
     ],
     "repairs": [
       "calibrate migrated lazy-RIF state transactionally before working-memory hydration and rebuild the disposable epoch from committed persistent authority",
@@ -188,12 +196,16 @@
       "include the CMake HNSW preparation and patch assets in the Zig package allowlist",
       "size the exact active-signal embedding ring as max(B, NCtx+KCtx), covering all 27 low/mid/high F/S/T points and the full restart context window",
       "apply the B fallback hydration limit after modality, MIME, and payload-shape acceptance by walking newest-first keyset pages, preserving chronological output while explicitly giving up a bounded scan claim for malformed legacy history",
-      "treat sparse supersession activation as candidates rather than an exact coverage certificate, retaining exact historical proof or SQLite fallback even though this can restore history-sized write work"
+      "treat sparse supersession activation as candidates rather than an exact coverage certificate, retaining exact historical proof or SQLite fallback even though this can restore history-sized write work",
+      "backfill the migration-30 empty active-signal ring with the newest knob-derived legacy exact-vector window before the first post-migration aggregate-linked write",
+      "resolve legacy embedding-only RIF candidates to every memory sharing the embedding while retaining the ordinary structured memory-scoped path",
+      "fall back to exact SQL seed discovery when ASSOCIATION filtering underfills a sparse HNSW proposal"
     ],
     "source_sha256": {
       "signal_processor": "0fb2b4d064531bbbfd86c270072e4f60b454b8db7059d9274603e3de7c784306",
       "rif_cache_header": "55985ae0d5d0d69480ae3a3d8204779faec8b23f2051e2e924b8de31e1d130a8",
       "hnswlib_patch": "4180985795ccdac233cf7c50e82ec0bb2108fd191aece8951f8cedc12932d54a",
+      "gitattributes": "d02282fbe47c88f47aa402c0a1e37acebc87cad5a7a907aca8d958810c84b3e3",
       "hnswlib_patch_driver": "206cb0646480afa8237758a83d47a7778e56e1eed011474f714a73cb0f0e984b",
       "zig_build": "f4a36709d3eeab3be92bd5300e7d071621290189b24d13fdc4976e6c04d9d8ce",
       "zig_hnswlib_prepare": "f2ea37b7bfaca95edcb3b6486120b0d0c6c33060b32d96a40f46fafdd53e2773",
@@ -208,26 +220,32 @@
       "emotion_cascade_test": "47b0d780994832bbd36f06fcba4abee9d2935ad0267b4c9bd9e7cb6659df5afe",
       "schema_source": "b4c3b0c873fd225781d1eab856a82b3fc2868909f131f867031c71c792f9fbe3",
       "migration_test": "4e76c44cc7ec9d5a1ec26fb963c1291c7f98e47b65050bac8ff4ff0df09b64cc"
-      ,"active_signal_embedding_ring": "9d0e575cecad9159b15b02c0e75c3349ba5931e83c9acadeabc5aee2868e498d"
+      ,"active_signal_embedding_ring": "01a6d8cdab4dc973a634d499785993427fbc7c83fceb5c78669c78dc3ad1f6af"
       ,"sparse_retrieval_knobs": "d99e020e322c5d28dc1dacbd72c6a650f0eaa4f3561758c379cc62b1d58793ef"
       ,"cortext_hydration": "0ba377e833452cd13520d34c1bf57eaf3a8df5da3607780845a0e6931aa291eb"
       ,"memory_storage": "2c662b5bdbe22dba92a39335ea5959cf22f38dcaa0cc78e19f19a3aa352f182f"
       ,"memory_storage_test": "7f8eade4e9b0124551296f6cad3d0a183db07785749fc38dd082665261b154f7"
       ,"cortext_test": "52d2e143f793a3446616bd5d22a4798dddd609b56d9504ac2a9ea2d317e442dd"
-      ,"signal_processor_test": "af1b6a1dbffed60755b5488e37b9450a1b3b6a48892587a1f9ef02694746dfbd"
+      ,"signal_processor_test": "ae69155678e8daa057d02ff11de9f7c04e2836117d6966a6b1f0eb06ca96ac62"
+      ,"rif_state_internal": "5e0a58aedfc0db22317bf613fc25297820d138feb6da8621942b1bf23f555ae1"
+      ,"competition_source": "8310f808cda958c6ec09213608deb994f1c74864cb4a77a49f516b7874af143e"
+      ,"competition_test": "3751cb6fea2ad83962a264fc8be3f496bf623835d804b2d5f0979e89cd3aee06"
+      ,"graph_retrieval_source": "a7e1c1f92b91d18164167fffa0550797f72b4b0a167430d4acc703673082985d"
+      ,"graph_retrieval_test": "fa60d62e9141b92c9096634ecfdd7ce06d472b3ff7a1e43791b476080d3174b2"
     },
     "local_proof": {
       "preceding_full_media_ctest": "preceding exact candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 38,730 assertions in 697 cases",
       "preceding_full_media_test_binary_sha256": "0fd25b6e322913cb0e76e3aa5a1fbcc6836d8696b6bbd5886224a3144fea1ec8",
-      "current_full_media_ctest": "exact three-thread repaired candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 39,081 assertions in 701 cases",
-      "current_full_media_test_binary_sha256": "53191a9bf94bcbf19537a66acba4b41ef8e4d349f10c37a878d84df79adc2bc1",
+      "current_full_media_ctest": "exact cumulative LF-checkout and seventeen-thread repaired candidate: clean Debug LLVM 21 media-enabled suite with experiment hooks enabled: 39,245 assertions in 704 cases",
+      "current_full_media_test_binary_sha256": "c5508e7b083d77cac768b717c04af0862cf64d7c48d339e5a3aa1c0f6b00f068",
       "rif_focus": "312 assertions in 19 cases",
       "hnsw_focus": "the exact canonical-entry reactivation, missing-snapshot ordinary-search restart, and prior-snapshot-free recenter rebuild regressions pass in the four-case 107-assertion follow-up set",
       "consolidation_focus": "the four-case follow-up set passes 107 assertions, including both clustered-row prefilter arms, the eligible-only inactive query plan, and migration 34 structure",
-      "zig_build_local_patch": "Zig text-only passes 12/12 after removing the host-path argument; a space-bearing build-local output passes patch application and complete reverse verification; the global hnswlib cache remains unpatched and the patch file is an explicit build input",
+      "zig_build_local_patch": "fresh Zig text-only check passes 12/12; a core.autocrlf=true checkout retains an LF-only patch that applies cleanly, while the CRLF-adversarial stream is rejected as corrupt; the build-local patch remains an explicit input and the global hnswlib cache remains unpatched",
       "new_review_thread_focus": "27-point active-signal ring proof passes 225 assertions; a neutral exact restart passes 154 assertions; adversarial fallback hydration passes 5 assertions; sparse supersession exact-coverage regression passes 15 assertions; broader MemoryStorage passes 451 assertions in 20 cases and hydration passes 173 assertions in 13 cases",
+      "latest_review_thread_focus": "migration-30 exact-ring upgrade passes 155 assertions; embedding-only shared-memory RIF passes 5 assertions; sparse ASSOCIATION underfill fallback passes 4 assertions; broader recent-context passes 309 assertions in 2 cases, competition passes 331 assertions in 17 cases, and SQLite HNSW retrieval passes 2,638 assertions in 21 cases",
       "wasm_bundle": "built successfully with Emscripten 4.0.18",
-      "focused_test_binary_sha256": "53191a9bf94bcbf19537a66acba4b41ef8e4d349f10c37a878d84df79adc2bc1",
+      "focused_test_binary_sha256": "c5508e7b083d77cac768b717c04af0862cf64d7c48d339e5a3aa1c0f6b00f068",
       "wasm_sha256": "17d31e0a61327e91d7a53577b73689442583d5f4c84aa76d5844ac309e9791aa"
     },
     "sanitizer_proof": {
@@ -242,8 +260,11 @@
       "modality_branch": false
     },
     "unresolved_limits": [
-      "Windows execution and replacement exact-head CI for the Zig working-directory repair remain pending",
-      "the three newest P2 thread repairs have full applicable proof and completed recursive review; final record review, push, proof-backed replies, resolution, and replacement exact-head CI remain pending",
+      "Windows execution and replacement exact-head CI for the LF checkout repair remain pending",
+      "the three newest P2 review-thread repairs have focused, broader, and full-suite deterministic proof; the current user waived the local recursive blind-review loop for bot-comment repairs, so the replacement-head PR bot rereview, non-force push, proof-backed replies, and exact-head CI remain",
+      "legacy embedding-only RIF compatibility may perform work proportional to shared-embedding membership; ordinary structured competition remains memory-scoped",
+      "sparse graph retrieval falls back to the exact SQL seed path when operation-specific eligibility filtering underfills, so store-sized fallback work remains possible",
+      "the three newest P2 thread repairs have full applicable proof and completed recursive review, are pushed at cca844d758bc9ad7ddd12048932c274da514d8a6, and their proof-backed threads are resolved; resulting exact-head CI remains pending",
       "an old smaller exact-signal ring can temporarily restore fewer than Q exact vectors after a knob increase until new writes refill it; aggregate memory centroids are not substituted",
       "fallback hydration output remains capped at B, but malformed or nonmatching legacy history can require more than B candidate rows to be inspected",
       "exact supersession verification can remain history-sized after bounded sparse current-candidate selection, so flat write cost is not claimed",

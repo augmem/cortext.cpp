@@ -1,3 +1,4 @@
 data/surnames/surnames.csv filter=lfs diff=lfs merge=lfs -text
 data/surnames/forenames.csv filter=lfs diff=lfs merge=lfs -text
 data/raw/personachat/personachat.tgz filter=lfs diff=lfs merge=lfs -text
+cmake/hnswlib-prefetch-bounds.patch text eol=lf

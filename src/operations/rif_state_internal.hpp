@@ -436,20 +436,26 @@ AdvanceRecovery (Transaction &tx, long long now_ts, double recovery_time,
   return result;
 }
 
-inline std::optional<long long>
-ResolveMemoryId (Transaction &tx, long long memory_id, long long embedding_id)
+inline std::vector<long long>
+ResolveMemoryIds (Transaction &tx, long long memory_id, long long embedding_id)
 {
   if (memory_id > 0)
-    return memory_id;
+    return { memory_id };
   if (embedding_id <= 0)
-    return std::nullopt;
+    return {};
   const auto rows = tx.Execute (
-      "SELECT memory_id FROM memories WHERE embedding_id = ? LIMIT 1",
+      "SELECT memory_id FROM memories WHERE embedding_id = ? "
+      "ORDER BY memory_id",
       { embedding_id });
-  if (rows.empty ())
-    return std::nullopt;
-  const long long resolved = GetInt64 (rows[0], "memory_id", 0);
-  return resolved > 0 ? std::optional<long long> (resolved) : std::nullopt;
+  std::vector<long long> resolved;
+  resolved.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      const long long resolved_id = GetInt64 (row, "memory_id", 0);
+      if (resolved_id > 0)
+        resolved.push_back (resolved_id);
+    }
+  return resolved;
 }
 
 inline bool

@@ -277,6 +277,63 @@ TEST_CASE ("Alg21 structured retrieval suppresses shared embedding loser by memo
   REQUIRE (std::any_cast<double> (rows[1].at ("suppression")) == 0.0);
 }
 
+TEST_CASE ("Alg21 embedding-only compatibility suppresses every shared "
+           "memory row",
+           "[operations][competition][shared-embedding][compatibility]")
+{
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 0.0;
+
+  const Eigen::VectorXf ctx_vec = Make256DEmb ({ { 0, 1.0f } });
+  const Eigen::VectorXf w1 = Make256DEmb ({ { 0, 0.99f }, { 1, 0.05f } });
+  const Eigen::VectorXf w2 = Make256DEmb ({ { 0, 0.98f }, { 1, 0.06f } });
+  const Eigen::VectorXf w3 = Make256DEmb ({ { 0, 0.95f }, { 1, 0.10f } });
+  const Eigen::VectorXf loser
+      = Make256DEmb ({ { 0, 0.88f }, { 1, 0.47f } });
+
+  SeedEmbeddingsOp seed (
+      { { 1LL, w1 }, { 2LL, w2 }, { 3LL, w3 }, { 420LL, loser } });
+  Signal signal = MakeSignal (ctx_vec, 100);
+  ProcessorContext pctx;
+  OperationContext ctx (signal, pctx, cfg, store.get ());
+  seed.Execute (ctx, cortext::testing::GetNullTransaction ());
+  cortext::testing::SeedMemoryV2 (
+      *store, 100LL, 420LL, "loser/a", "LONG_TERM", 1.0, 1);
+  cortext::testing::SeedMemoryV2 (
+      *store, 101LL, 420LL, "loser/b", "LONG_TERM", 1.0, 1);
+
+  pctx.recent_context_embeddings.push_back (ctx_vec);
+  ctx.SetRetrievedMemoryEmbeddings (
+      std::unordered_map<long long, Eigen::VectorXf>{ { 1LL, w1 },
+                                                      { 2LL, w2 },
+                                                      { 3LL, w3 },
+                                                      { 420LL, loser } });
+
+  ApplyRetrievalCompetition op;
+  auto tx = store->Begin ();
+  op.Execute (ctx, *tx);
+  tx->Commit ();
+
+  const auto rows = store->Execute (
+      "SELECT memory_id, suppression FROM memories "
+      "WHERE memory_id IN (100, 101) ORDER BY memory_id");
+  REQUIRE (rows.size () == 2);
+  REQUIRE (std::any_cast<double> (rows[0].at ("suppression")) > 0.0);
+  REQUIRE (std::any_cast<double> (rows[1].at ("suppression")) > 0.0);
+  const auto active_rows = store->Execute (
+      "SELECT COUNT(*) AS n FROM rif_active_state "
+      "WHERE memory_id IN (100, 101)");
+  REQUIRE (active_rows.size () == 1);
+  REQUIRE (std::any_cast<long long> (active_rows[0].at ("n")) == 2);
+}
+
 TEST_CASE ("Alg21 memory-scoped RIF recovery survives embedding fork",
            "[operations][competition][recovery]")
 {
