@@ -5,13 +5,13 @@ owner_role: implementer
 lane_id: consolidation-drift-retrigger
 status: monitoring
 implementation_status: complete
-monitor_status: activating
+monitor_status: repair-reviewed-push-pending
 source_of_truth: current repository, current user corrections, this goal, task comments, exact private profiles and audits, and GitHub PR 6 only after implementation completion
 model: gpt-5.6-terra
 reasoning: high
 model_selection_basis: cross-cutting C++ and SQLite implementation, deterministic bounded-work proof, research traceability, and PR ownership
 canonical_monitor_entry: true
-updated_at: 20260721T051726Z
+updated_at: 20260721T072347Z
 ---
 <!-- mdscript: use the mdscript-exec skill -->
 
@@ -36,15 +36,15 @@ updated_at: 20260721T051726Z
 * the mature extended suffix shows store growth without continuing per-store work growth: non-overlapping late-half mean process fell 8.918 to 7.858 ms, graph seed-cache time fell 2.914 to 2.397 ms with per-node unit ratio 0.789, and supersession loading fell 1.860 to 1.520 ms with per-candidate unit ratio 0.855
 * the no-selector 2,016-message Durable run processed four consolidations in 79,481 ms with mean process 10.709666 ms and mean total 39.024183 ms; all 512 controls passed top-1, recall@16, semantic coverage, and ties at 1.0 with four opaque sources; its horizon is insufficient for ten post-warmup 500-event windows and therefore does not prove Durable plateau
 * focused production-default derivation, route work, active-epoch reset, shared Natural/Durable path, Durable-barrier non-replay, source/modality, Python audit, and evidence-builder tests pass on the current release build
-* all algorithm and experiment changes, accepted adverse timing, maturity boundary, failed-recenter rollback repair, and nonclaims are recorded in `docs/paper/sections/10_implementation.qmd` and `docs/paper/sections/11_optimization.qmd`; the regenerated manuscript SHA-256 is `f7ed5d59cadeb0cc3194da92ea4f574e20f0a030e5aa28e6ff54cefdd44a43de`
-* the full media-enabled CTest suite passes 39,151 assertions in 688 cases, including failure injection proving a failed recenter preserves the existing effort and node budget; the complete Python tool suite passes 159 tests; `git diff --check` passes
-* the current-state overlay, rebuilt 69-record manifest, and fail-closed audit have SHA-256 values `89b32a782b0164e82c1b76e230baabdd47827aab00355ec817aaab40e18eb354`, `18f544b6b4cd0d0e7337d99e2381fa7c346d304bf083f265a5b5151beb275ae0`, and `53a648cd6e3c6079c6ade1cd175a1617caf180714e72152c7f37d6ca14a7443f`; the audit passes with 69/69 inventory records and no uncovered inventory, claim mismatch, proof-level violation, or ownership violation
-* the recursive blind-review loop is complete: round-one and round-two findings were repaired, and the fresh round-three cumulative reviewer proved the scoped implementation/source-health claim at P1 with no findings or residuals
-* the verified tree was committed and pushed without force as `6ac1e3121e4be9aa456c7ac93fdb4b09ea34023d`; PR 6 was updated with the current contract, proof, review trail, and nonclaims; exact-head CI is in progress
+* all algorithm and experiment changes, accepted adverse timing, maturity boundary, failed-recenter rollback repair, exact-head CI repairs, and nonclaims are recorded in `docs/paper/sections/10_implementation.qmd` and `docs/paper/sections/11_optimization.qmd`; the regenerated manuscript SHA-256 is `57fd68f04ee13753c0d7c847ccf79967d9cbe58efef4ac80df4c212a310e9362`
+* the current full media-enabled CTest suite passes 39,175 assertions in 690 cases in 287.44 seconds; focused RIF passes 312 assertions in 19 cases; the two HNSW CI regressions pass 19 assertions; WebAssembly rebuilds successfully with Emscripten 4.0.18; the complete Python tool suite passes 159 tests; patch removal/reapplication and `git diff --check` pass
+* the current-state overlay, rebuilt 70-record manifest, and fail-closed audit have raw-file SHA-256 values `39f5f41a7b126c46c859abb8bb2a67b14a2b14e8644a6f78355f4f86c6b46a1e`, `ebc47507bea5ed41311c6f52a4567b2a5ad610d0334d0bba83dc86c7aafd0b66`, and `cea9dfdca7aa8a4db57b82704963e9314386c9bd6ef2f07327c9b7f0b478bacf`; the audit passes with 70/70 inventory records and no uncovered inventory, claim mismatch, proof-level violation, or ownership violation
+* the original recursive cutover review remains complete. The exact-head CI repair then received a fresh round one that found one P2 unguarded empty-adjacency HNSW prefetch; repair tree `d3ce8c1ada4ab13023cbcd40959c8a8a878b5307` guards it and adds deterministic update/reseal coverage. A different fresh round-two reviewer proved the complete repair at the P1/P2 threshold with no blocking finding. Its sole P3 control-record hygiene residual was corrected directly; because that correction rewrote an existing continuation record and violated append-only provenance, the later single-pass record-transition review rejected the record transition and `~/.agents/projects/cortext/comments/consolidation-drift-retrigger/20260721T072347Z-implementer-pr6-record-transition-correction.mdscript.md` now discloses the mutation, supersedes the compromised continuation, synchronizes the task, and restores the missing lane-ledger history without changing code or proof
+* current PR head `5f2e3b38edbc5d582b2a0cbb37d7ec10f8ceb1cb` remains OPEN, non-draft, MERGEABLE/UNSTABLE on base `1bf3f1c5f6470bb8c4d458a0389c19c5123f9b81` with ten green checks, failed Linux sanitizer and WebAssembly checks, no review requests, and one unresolved RIF startup-order thread. Repair tree `d3ce8c1ada4ab13023cbcd40959c8a8a878b5307` is reviewed and locally proven but not yet committed or pushed; repaired-tree Linux sanitizer proof remains owned by replacement exact-head CI because sandboxed macOS ASAN cannot complete dynamic-shadow discovery before `main()`
 
 ## PR Monitor Hot Path
 
-* implementation, proof, paper, recursive review, branch push, and PR update are complete; do not reopen implementation without changed CI, review, discussion, conflict, or base-drift evidence
+* changed exact-head CI and review evidence reopened only the RIF startup-order, HNSW speculative-prefetch, and WebAssembly width slice. That repair is locally proven and recursively reviewed; next validate this record once, commit and push without force, reply to and resolve the owning thread, then monitor replacement exact-head CI
 * every ten minutes in this current task, refresh PR 6 exact head, checks, mergeability, reviews, review requests, comments, and unresolved threads; compare with the prior state and report only changes
 * repair only in-scope failures or review findings with proportionate proof and the required fresh review; push without force and update this goal to the new exact head
 * stop and deactivate the heartbeat when the PR merges or closes externally, repair exceeds scope, target drift is unrecoverable, or authority is explicitly denied

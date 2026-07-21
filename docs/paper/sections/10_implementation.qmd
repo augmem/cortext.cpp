@@ -101,6 +101,13 @@ statement because aliases, wildcards, views, subqueries, and triggers cannot be
 classified safely from SQL text. A caller mutation also invalidates every
 database-derived processor cache before the statement executes.
 
+On startup from schema 27, migration may anchor active rows that carry
+different historical suppression timestamps to one recovery clock. The
+processor calibrates those rows transactionally and rebuilds the disposable
+active epoch before working-memory hydration reads the effective-value view.
+This ordering prevents restart from seeding a working slot with an
+uncalibrated strength and subsequently persisting that stale value.
+
 The authoritative signal mutation still commits once to persistent SQLite.
 After that commit, a separate connection-local in-memory SQLite database
 publishes only the current recovery clock and the identities touched in the
@@ -196,6 +203,14 @@ most $N$ association edges for each admitted identity. Natural and Durable
 execute these same operations and mutations; Durable adds only the existing
 post-commit flush/checkpoint barrier. None of these bounds branches on
 modality or source identifier.
+
+The pinned HNSW implementation retains its SIMD distance kernels, while a
+content-checked local patch bounds every speculative neighbor prefetch by the
+actual adjacency length. This prevents a sanitizer-visible one-past-end read
+without changing candidate membership or ranking. Cache-byte estimation also
+performs its knob-derived multiplication explicitly in `std::size_t`, keeping
+the same capacity on native and WebAssembly targets instead of relying on an
+implicit 64-to-32-bit narrowing conversion.
 
 ### Bounded activation observation shadow
 

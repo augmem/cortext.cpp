@@ -129,13 +129,19 @@ MakeBoundedShadowSignal (std::uint64_t event_index,
 
 struct AdvanceRifEpochOp : IOperation
 {
+  explicit AdvanceRifEpochOp (double recovery_time_ms = 10000.0)
+      : recovery_time_ms (recovery_time_ms)
+  {
+  }
+
   void
   Execute (OperationContext &ctx, Transaction &tx) const override
   {
     auto sidecar = operations::execution_cache_sidecar_internal::Ensure (
         ctx.GetProcessorContext ());
     const auto result = operations::rif_state_internal::AdvanceRecovery (
-        tx, static_cast<long long> (ctx.GetSignal ().timestamp), 10000.0,
+        tx, static_cast<long long> (ctx.GetSignal ().timestamp),
+        recovery_time_ms,
         sidecar->rif_active_epoch.calibration_memory_ids,
         sidecar->rif_active_epoch.limits.row_batch_size);
     sidecar->rif_active_epoch.calibration_memory_ids.clear ();
@@ -145,6 +151,8 @@ struct AdvanceRifEpochOp : IOperation
     operations::rif_active_epoch_cache_internal::StageMemories (
         sidecar->rif_active_epoch, result.changed_memory_ids);
   }
+
+  double recovery_time_ms;
 };
 
 struct AdvanceRifAndFailCommitOnceOp : IOperation
@@ -2337,8 +2345,10 @@ TEST_CASE ("Processor calibrates staggered lazy RIF migration timestamps",
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
+  const double recovery_time_ms
+      = core::RetrievalCompetitionRecoverySeconds (cfg.stability) * 1000.0;
   auto root = std::make_unique<DynamicOperationSet> (
-      std::make_unique<AdvanceRifEpochOp> ());
+      std::make_unique<AdvanceRifEpochOp> (recovery_time_ms));
   SignalProcessor processor (
       cfg, store,
       operations::signal_record_rollback_internal::
@@ -2354,14 +2364,21 @@ TEST_CASE ("Processor calibrates staggered lazy RIF migration timestamps",
       "SELECT memory_id, strength, suppression FROM rif_effective_memories "
       "ORDER BY memory_id");
   REQUIRE (rows.size () == 2);
+  const auto expected_strength = [recovery_time_ms] (
+                                     long long now_ts,
+                                     long long suppression_ts) {
+    return 0.5
+           + 0.5 * static_cast<double> (now_ts - suppression_ts)
+                     / recovery_time_ms;
+  };
   REQUIRE (std::any_cast<double> (rows[0].at ("strength"))
-           == Catch::Approx (0.55));
+           == Catch::Approx (expected_strength (2000, 1000)));
   REQUIRE (std::any_cast<double> (rows[0].at ("suppression"))
-           == Catch::Approx (0.45));
+           == Catch::Approx (1.0 - expected_strength (2000, 1000)));
   REQUIRE (std::any_cast<double> (rows[1].at ("strength"))
-           == Catch::Approx (0.525));
+           == Catch::Approx (expected_strength (2000, 1500)));
   REQUIRE (std::any_cast<double> (rows[1].at ("suppression"))
-           == Catch::Approx (0.475));
+           == Catch::Approx (1.0 - expected_strength (2000, 1500)));
 
   signal.timestamp = 3000;
   processor.Process (signal);
@@ -2370,13 +2387,83 @@ TEST_CASE ("Processor calibrates staggered lazy RIF migration timestamps",
       "ORDER BY memory_id");
   REQUIRE (continued_rows.size () == 2);
   REQUIRE (std::any_cast<double> (continued_rows[0].at ("strength"))
-           == Catch::Approx (0.595));
+           == Catch::Approx (expected_strength (3000, 1000)));
   REQUIRE (std::any_cast<double> (continued_rows[0].at ("suppression"))
-           == Catch::Approx (0.405));
+           == Catch::Approx (1.0 - expected_strength (3000, 1000)));
   REQUIRE (std::any_cast<double> (continued_rows[1].at ("strength"))
-           == Catch::Approx (0.5725));
+           == Catch::Approx (expected_strength (3000, 1500)));
   REQUIRE (std::any_cast<double> (continued_rows[1].at ("suppression"))
-           == Catch::Approx (0.4275));
+           == Catch::Approx (1.0 - expected_strength (3000, 1500)));
+}
+
+TEST_CASE ("Processor calibrates migrated RIF before hydrating working slots",
+           "[processor][rif][migration][working_memory][restart]")
+{
+  constexpr long long kEarlySuppressionTs = 1'000;
+  constexpr long long kMigrationClockTs = 1'001'000;
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::store::DebugApplyCoreMigrationsThroughForTest (*store, 27);
+  cortext::testing::SeedEmbeddingV2 (
+      *store, 100, std::vector<float> (256, 0.125f), kMigrationClockTs);
+  cortext::testing::SeedEmbeddingV2 (
+      *store, 101, std::vector<float> (256, 0.25f), kMigrationClockTs);
+  store->Execute (
+      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, "
+      "modality, start_ts, n_signals, strength, last_access, "
+      "strength_updated_at, suppression, suppression_ts, created_at) VALUES"
+      "(1, 100, 'working/early', 'WORKING', 'text', 1000, 1, 0.5, ?, ?, "
+      "0.5, ?, 1000),"
+      "(2, 101, 'working/clock', 'WORKING', 'image', 2000, 1, 0.5, ?, ?, "
+      "0.5, ?, 2000)",
+      { kMigrationClockTs, kMigrationClockTs, kEarlySuppressionTs,
+        kMigrationClockTs, kMigrationClockTs, kMigrationClockTs });
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.5;
+  cfg.sensitivity = 0.5;
+  cfg.stability = 0.5;
+  cfg.clock = std::make_shared<FixedClock> (kMigrationClockTs);
+  ProcessorContext *captured = nullptr;
+  auto capture = std::make_unique<SetOrCaptureThroughputOp> ();
+  capture->context_address = &captured;
+  auto root = std::make_unique<DynamicOperationSet> (std::move (capture));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (root)));
+
+  Signal signal;
+  signal.embedding = Eigen::VectorXf::Zero (256);
+  signal.source_id = "working/probe";
+  signal.timestamp = kMigrationClockTs;
+  processor.Process (signal);
+
+  REQUIRE (captured);
+  REQUIRE (captured->wm_slots.size () == 2);
+  const double recovery_time_ms
+      = core::RetrievalCompetitionRecoverySeconds (cfg.stability) * 1000.0;
+  const double recovered_fraction
+      = static_cast<double> (kMigrationClockTs - kEarlySuppressionTs)
+        / recovery_time_ms;
+  REQUIRE (captured->wm_slots[0].memory_id == 1);
+  REQUIRE (captured->wm_slots[0].strength
+           == Catch::Approx (0.5 + 0.5 * recovered_fraction));
+  REQUIRE (captured->wm_slots[1].memory_id == 2);
+  REQUIRE (captured->wm_slots[1].strength == Catch::Approx (0.5));
+  const auto sidecar = ExecutionCacheState (*captured);
+  REQUIRE (sidecar);
+  REQUIRE (sidecar->rif_active_epoch.valid);
+  REQUIRE (sidecar->rif_active_epoch.calibration_memory_ids.empty ());
+
+  const auto effective = store->Execute (
+      "SELECT memory_id, strength FROM rif_effective_memories "
+      "ORDER BY memory_id");
+  REQUIRE (effective.size () == 2);
+  REQUIRE (std::any_cast<double> (effective[0].at ("strength"))
+           == Catch::Approx (0.5 + 0.5 * recovered_fraction));
+  REQUIRE (std::any_cast<double> (effective[1].at ("strength"))
+           == Catch::Approx (0.5));
 }
 
 TEST_CASE ("Migrated active working slots reanchor persisted strength",

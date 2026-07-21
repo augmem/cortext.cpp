@@ -114,6 +114,51 @@ TEST_CASE ("Sparse retrieval route is deterministic across upsert and remove",
   REQUIRE (first->Search (UnitVec (0), 3)->front () == 10);
 }
 
+TEST_CASE ("Sparse retrieval route repairs below an empty upper-layer entry",
+           "[operations][graph][retrieval][hnsw][regression]")
+{
+  using operations::sparse_retrieval_route_internal::NodeSnapshot;
+  using operations::sparse_retrieval_route_internal::Route;
+  std::vector<std::pair<long long, Eigen::VectorXf>> entries;
+  entries.reserve (72);
+  for (long long memory_id = 1; memory_id <= 72; ++memory_id)
+    entries.emplace_back (
+        memory_id, UnitVec (static_cast<int> (memory_id % kEmbeddingDim)));
+
+  auto route = Route::Create (
+      kEmbeddingDim, entries,
+      operations::sparse_retrieval_route_internal::DeriveParameters (
+          0.0, 0.0, 0.0));
+  REQUIRE (route);
+  const auto snapshot = route->Snapshot ({});
+  REQUIRE (snapshot);
+  REQUIRE (snapshot->max_level > 0);
+  const auto entry = std::find_if (
+      snapshot->nodes.begin (), snapshot->nodes.end (),
+      [&] (const NodeSnapshot &node) {
+        return node.memory_id == snapshot->entry_memory_id;
+      });
+  REQUIRE (entry != snapshot->nodes.end ());
+  REQUIRE (entry->links.size ()
+           > static_cast<std::size_t> (snapshot->max_level));
+  REQUIRE (entry->links[static_cast<std::size_t> (snapshot->max_level)]
+               .empty ());
+  const auto target = std::find_if (
+      snapshot->nodes.begin (), snapshot->nodes.end (),
+      [&] (const NodeSnapshot &node) {
+        return node.level < snapshot->max_level;
+      });
+  REQUIRE (target != snapshot->nodes.end ());
+
+  const long long target_memory_id = target->memory_id;
+  REQUIRE (route->Upsert (target_memory_id, UnitVec (200)));
+  REQUIRE (route->SealDelta ());
+  const auto result = route->Search (UnitVec (200), 1);
+  REQUIRE (result);
+  REQUIRE (result->size () == 1);
+  REQUIRE (result->front () == target_memory_id);
+}
+
 TEST_CASE ("SQLite sparse route restart and query work stay row bounded",
            "[operations][graph][retrieval][hnsw][sqlite]")
 {
