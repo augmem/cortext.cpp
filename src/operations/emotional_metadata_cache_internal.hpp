@@ -184,7 +184,9 @@ Reset (ProcessorContext &p_ctx, std::vector<Row> rows,
 }
 
 inline bool
-RefreshBoundedSourceOrder (ProcessorContext &p_ctx, Transaction &tx)
+RefreshBoundedSourceOrder (ProcessorContext &p_ctx, Transaction &tx,
+                           long long recent_window_ts,
+                           double theta_intensity, double theta_arousal)
 {
   const auto state = FindState (p_ctx);
   if (!state)
@@ -193,16 +195,19 @@ RefreshBoundedSourceOrder (ProcessorContext &p_ctx, Transaction &tx)
   if (!cache.valid)
     return false;
   if (cache.source_query_capacity
-          == std::numeric_limits<std::size_t>::max ()
-      || !cache.source_query_order_dirty)
+      == std::numeric_limits<std::size_t>::max ())
     return true;
 
   auto rows = tx.Execute (
       "SELECT memory_id FROM memories "
       "WHERE flashbulb = 1 AND embedding_id IS NOT NULL "
       "AND kind != 'WORKING' "
+      "AND emotional_intensity >= ? "
+      "AND s_arousal_avg >= ? "
+      "AND created_at >= ? "
       "ORDER BY emotional_intensity DESC, memory_id ASC LIMIT ?",
-      { static_cast<long long> (cache.source_query_capacity) });
+      { theta_intensity, theta_arousal, recent_window_ts,
+        static_cast<long long> (cache.source_query_capacity) });
   std::vector<long long> order;
   order.reserve (rows.size ());
   for (const auto &result : rows)

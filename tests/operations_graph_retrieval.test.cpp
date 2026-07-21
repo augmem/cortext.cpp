@@ -2122,6 +2122,80 @@ TEST_CASE ("Graph retrieval falls back when associations underfill sparse "
   REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
 }
 
+TEST_CASE ("Graph retrieval falls back when sparse candidates collapse below "
+           "the requested family count",
+           "[operations][graph][retrieval][hnsw][sqlite][family]"
+           "[regression]")
+{
+  cortext::testing::ScopedEnvVar disable_constructive_recall (
+      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
+  cortext::testing::ScopedEnvVar hnsw_route_flag (
+      "CORTEXT_HNSW_SPARSE_ROUTE", "0");
+  cortext::testing::ScopedEnvVar sqlite_route_flag (
+      "CORTEXT_SQLITE_SPARSE_ROUTE", "1");
+  cortext::testing::ScopedEnvVar profile_graph (
+      "CORTEXT_PROFILE_GRAPH_RETRIEVAL", "1");
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  constexpr long long kPopulation = 769;
+  std::vector<std::pair<long long, Eigen::VectorXf>> route_entries;
+  route_entries.reserve (kPopulation);
+  for (long long memory_id = 1; memory_id <= kPopulation; ++memory_id)
+    {
+      SeedMemory (*store, memory_id, 1000 + memory_id, UnitVec (0),
+                  memory_id, "opaque/family");
+      // Keep HNSW construction well-conditioned while the authoritative
+      // processor surface deliberately presents one duplicate family.
+      route_entries.emplace_back (
+          memory_id,
+          VectorWithCosineAndDiverseResidual (
+              0.999f, static_cast<std::uint64_t> (memory_id)));
+    }
+
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DeriveParameters (1.0, 1.0, 1.0);
+  auto hnsw = operations::sparse_retrieval_route_internal::Route::Create (
+      kEmbeddingDim, route_entries, parameters.hnsw);
+  REQUIRE (hnsw);
+  auto sqlite_route
+      = operations::sparse_retrieval_route_sqlite_internal::Route::Create (
+          *store, kEmbeddingDim, route_entries, *hnsw, parameters);
+  REQUIRE (sqlite_route);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 1.0;
+  cfg.stability = 1.0;
+  auto ops = std::make_unique<DynamicOperationSet> (
+      std::make_unique<ForceRetrievalGateOp> (),
+      std::make_unique<GraphAugmentedRetrieveCandidates> ());
+  SignalProcessor processor (cfg, store, std::move (ops));
+
+  const auto output = processor.Process (MakeSignal (UnitVec (0), 100000));
+  const int seed_limit = std::max (1, core::RetrievalMaxResults (cfg.focus));
+  const int seed_search_limit = core::RetrievalSeedSearchK (
+      cfg.focus, cfg.sensitivity, cfg.stability, seed_limit);
+  INFO ("ranked="
+        << output.operation_ms.at ("GraphRetrieve.seed_cache_ranked_rows")
+        << " selected="
+        << output.operation_ms.at ("GraphRetrieve.seed_cache_selected_rows")
+        << " requested=" << seed_search_limit);
+  REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_sparse_route_active")
+           == 1.0);
+  REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_cache_ranked_rows")
+           >= static_cast<double> (seed_search_limit));
+  REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_cache_selected_rows")
+           == 0.0);
+  const auto exact_fallback
+      = operations::retrieval_trace::GetLastSeedCandidates ();
+  REQUIRE_FALSE (exact_fallback.empty ());
+  REQUIRE (exact_fallback.size ()
+           <= static_cast<std::size_t> (seed_limit));
+}
+
 TEST_CASE ("Graph retrieval reopens SQLite sparse route on the existing path",
            "[operations][graph][retrieval][hnsw][sqlite][integration]")
 {

@@ -65,7 +65,9 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
             .mutation_count;
   const auto active_count_rows = tx.Execute (
       "SELECT COUNT(*) AS row_count FROM ("
-      "  SELECT 1 FROM rif_active_state LIMIT ?"
+      "  SELECT 1 FROM rif_active_state a "
+      "  JOIN rif_recovery_clock c ON c.generation = a.generation "
+      "  WHERE c.singleton = 1 LIMIT ?"
       ")",
       { static_cast<long long> (active_state_limit + 1) });
   long long active_state_count = 0;
@@ -97,7 +99,8 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
         "    AND m.cluster_id IS NULL "
         "    AND NOT EXISTS("
         "      SELECT 1 FROM rif_active_state a "
-        "      WHERE a.memory_id = m.memory_id"
+        "      JOIN rif_recovery_clock c ON c.generation = a.generation "
+        "      WHERE c.singleton = 1 AND a.memory_id = m.memory_id"
         "    ) "
         "  ORDER BY m.strength ASC, m.created_at ASC, "
         "           m.embedding_id ASC "
@@ -114,7 +117,7 @@ ScoreConsolidation::Execute (OperationContext &context, Transaction &tx) const
         "  JOIN memories m ON m.memory_id = a.memory_id "
         "  CROSS JOIN rif_recovery_clock c "
         "  WHERE m.kind = 'LONG_TERM' AND m.cluster_id IS NULL "
-        "    AND c.singleton = 1 "
+        "    AND c.singleton = 1 AND a.generation = c.generation "
         "  ORDER BY effective_strength ASC, m.created_at ASC, "
         "           m.embedding_id ASC "
         "  LIMIT ?8"

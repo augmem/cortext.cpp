@@ -404,7 +404,8 @@ TEST_CASE ("Bounded emotional source reranking refills from SQLite",
   REQUIRE (cache.source_query_order_dirty);
   REQUIRE (
       operations::emotional_metadata_cache_internal::
-          RefreshBoundedSourceOrder (processor_context, *transaction));
+          RefreshBoundedSourceOrder (processor_context, *transaction, 0,
+                                     0.0, 0.0));
   REQUIRE (cache.source_query_order == std::vector<long long>{ 2, 3, 4 });
   REQUIRE_FALSE (cache.source_query_order_dirty);
 
@@ -415,8 +416,49 @@ TEST_CASE ("Bounded emotional source reranking refills from SQLite",
   REQUIRE (cache.source_query_order_dirty);
   REQUIRE (
       operations::emotional_metadata_cache_internal::
-          RefreshBoundedSourceOrder (processor_context, *transaction));
+          RefreshBoundedSourceOrder (processor_context, *transaction, 0,
+                                     0.0, 0.0));
   REQUIRE (cache.source_query_order == std::vector<long long>{ 5, 2, 3 });
+  transaction->Rollback ();
+}
+
+TEST_CASE ("Bounded emotional source reranking filters runtime eligibility "
+           "before truncation",
+           "[operations][emotion_cascade][metadata_cache][bounds]"
+           "[eligibility][regression]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  ProcessorContext processor_context;
+  ScopedExecutionCacheSidecar sidecar_scope (processor_context);
+  std::vector<operations::execution_cache_sidecar_internal::
+                  EmotionalMemoryMetadata>
+      rows;
+  for (long long memory_id = 1; memory_id <= 5; ++memory_id)
+    {
+      SeedCascadeMemory (*store, memory_id, memory_id, 2000 + memory_id);
+      SetCascadeSource (*store, memory_id, 1.0 - 0.05 * memory_id, 1,
+                        0.5);
+      rows.push_back ({ memory_id, memory_id, 2000 + memory_id, true,
+                        1.0 - 0.05 * memory_id, 0.9, 2.0, 1, 0.5 });
+    }
+  operations::emotional_metadata_cache_internal::Reset (
+      processor_context, std::move (rows), 3);
+  const auto state
+      = operations::emotional_metadata_cache_internal::FindState (
+          processor_context);
+  REQUIRE (state);
+  auto &cache = state->emotional_metadata;
+  REQUIRE (cache.source_query_order == std::vector<long long>{ 1, 2, 3 });
+
+  store->Execute ("UPDATE memories SET created_at = 100 WHERE memory_id = 1");
+  store->Execute ("UPDATE memories SET s_arousal_avg = 0.1 WHERE memory_id = 2");
+  auto transaction = store->Begin ();
+  REQUIRE (
+      operations::emotional_metadata_cache_internal::
+          RefreshBoundedSourceOrder (processor_context, *transaction, 1000,
+                                     0.5, 0.5));
+  REQUIRE (cache.source_query_order == std::vector<long long>{ 3, 4, 5 });
   transaction->Rollback ();
 }
 

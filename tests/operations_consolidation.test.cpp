@@ -925,6 +925,68 @@ TEST_CASE ("ScoreConsolidation fails closed above its active RIF work ceiling",
            == static_cast<double> (active_state_limit));
 }
 
+TEST_CASE ("ScoreConsolidation ignores retired RIF generations at the active "
+           "work ceiling",
+           "[operations][consolidation][bounded][rif_state][generation]"
+           "[regression]")
+{
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::store::ApplyMigrations (*store);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+  const auto active_state_limit
+      = operations::rif_active_epoch_cache_internal::DeriveLimits (
+            cfg.focus, cfg.sensitivity, cfg.stability)
+            .mutation_count;
+  const long long retired_count
+      = static_cast<long long> (active_state_limit + 1);
+  store->Execute (
+      "WITH RECURSIVE sequence(value) AS ("
+      "  SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < ?"
+      ") INSERT INTO memories(memory_id, source_id, kind, start_ts, "
+      "n_signals, modality, strength, stability, redundancy, created_at) "
+      "SELECT value, 'opaque/retired-rif', 'WORKING', value, 1, 'audio', "
+      "0.0, 0.0, 0.0, value FROM sequence",
+      { retired_count });
+  store->Execute (
+      "INSERT INTO rif_active_state(memory_id, generation, "
+      "anchor_suppression, recovery_total, anchor_log_factor, "
+      "expires_log_factor) "
+      "SELECT memory_id, 1, 0.1, 1.1, 0.0, -20.0 FROM memories");
+  store->Execute (
+      "UPDATE rif_recovery_clock SET generation = 2 WHERE singleton = 1");
+  const long long current_id = retired_count + 1;
+  store->Execute (
+      "INSERT INTO memories(memory_id, source_id, kind, start_ts, n_signals, "
+      "modality, strength, stability, redundancy, created_at) "
+      "VALUES(?, 'opaque/current-rif', 'WORKING', ?, 1, 'text', 0.0, 0.0, "
+      "0.0, ?)",
+      { current_id, current_id, current_id });
+  store->Execute (
+      "INSERT INTO rif_active_state(memory_id, generation, "
+      "anchor_suppression, recovery_total, anchor_log_factor, "
+      "expires_log_factor) VALUES(?, 2, 0.1, 1.1, 0.0, -20.0)",
+      { current_id });
+
+  Signal signal;
+  signal.timestamp = 56'000ULL;
+  signal.source_id = "opaque/current-rif";
+  signal.modality = "text";
+  signal.force_consolidation = true;
+  signal.embedding = Eigen::VectorXf::Zero (4);
+  ProcessorContext p_ctx;
+  OperationContext ctx (signal, p_ctx, cfg, store.get ());
+  auto tx = store->Begin ();
+  REQUIRE_NOTHROW (ScoreConsolidation{}.Execute (ctx, *tx));
+  REQUIRE (ctx.GetOperationTimings ().at (
+               "ScoreConsolidation.active_state_count")
+           == 1.0);
+}
+
 TEST_CASE ("ScoreConsolidation filters clustered rows before each bounded "
            "candidate frontier",
            "[operations][consolidation][bounded][cluster][regression]")

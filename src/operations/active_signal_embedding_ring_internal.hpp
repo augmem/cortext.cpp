@@ -20,18 +20,9 @@ Capacity (double focus, double sensitivity, double stability)
       focus, sensitivity, stability);
 }
 
-inline long long
-SlotFor (long long signal_id, int capacity)
-{
-  if (signal_id <= 0 || capacity <= 0)
-    throw std::invalid_argument ("invalid active signal embedding ring key");
-  return (signal_id - 1) % static_cast<long long> (capacity);
-}
-
 inline void
-InsertAtCapacity (Transaction &tx, long long signal_id,
-                  const std::any &embedding, long long created_at,
-                  int capacity)
+InsertIntoSlot (Transaction &tx, long long slot, long long signal_id,
+                const std::any &embedding, long long created_at, int capacity)
 {
   tx.Execute (
       "INSERT INTO cortext_active_signal_embeddings("
@@ -42,8 +33,86 @@ InsertAtCapacity (Transaction &tx, long long signal_id,
       "embedding = excluded.embedding, "
       "created_at = excluded.created_at, "
       "capacity = excluded.capacity",
-      { SlotFor (signal_id, capacity), signal_id, embedding, created_at,
+      { slot, signal_id, embedding, created_at,
         static_cast<long long> (capacity) });
+}
+
+inline void
+InsertAtCapacity (Transaction &tx, long long signal_id,
+                  const std::any &embedding, long long created_at,
+                  int capacity)
+{
+  if (signal_id <= 0 || capacity <= 0)
+    throw std::invalid_argument ("invalid active signal embedding ring key");
+
+  const auto existing = tx.Execute (
+      "SELECT slot FROM cortext_active_signal_embeddings "
+      "WHERE signal_id = ? LIMIT 1",
+      { signal_id });
+  if (!existing.empty ())
+    {
+      const auto slot
+          = store::AnyToLongLong (existing.front ().at ("slot")).value_or (-1);
+      if (slot < 0)
+        throw std::runtime_error ("invalid active signal embedding slot");
+      InsertIntoSlot (tx, slot, signal_id, embedding, created_at, capacity);
+      return;
+    }
+
+  const auto count_rows = tx.Execute (
+      "SELECT COUNT(*) AS row_count "
+      "FROM cortext_active_signal_embeddings");
+  const auto row_count
+      = count_rows.empty ()
+            ? 0
+            : store::AnyToLongLong (
+                  count_rows.front ().at ("row_count")).value_or (-1);
+  if (row_count < 0 || row_count > capacity)
+    throw std::runtime_error ("invalid active signal embedding row count");
+
+  if (row_count < capacity)
+    {
+      // A signal deletion can leave a physical slot gap. Fill it with the
+      // next exact vector presented to this bounded ring; once full, the
+      // timestamp frontier below—not row identity—owns replacement order.
+      const auto free_rows = tx.Execute (
+          "WITH RECURSIVE slots(slot) AS ("
+          "  SELECT 0 UNION ALL "
+          "  SELECT slot + 1 FROM slots WHERE slot + 1 < ?"
+          ") "
+          "SELECT slots.slot FROM slots "
+          "LEFT JOIN cortext_active_signal_embeddings a "
+          "ON a.slot = slots.slot "
+          "WHERE a.slot IS NULL ORDER BY slots.slot LIMIT 1",
+          { static_cast<long long> (capacity) });
+      if (free_rows.empty ())
+        throw std::runtime_error ("active signal embedding slot unavailable");
+      const auto slot = store::AnyToLongLong (
+          free_rows.front ().at ("slot")).value_or (-1);
+      if (slot < 0)
+        throw std::runtime_error ("invalid active signal embedding slot");
+      InsertIntoSlot (tx, slot, signal_id, embedding, created_at, capacity);
+      return;
+    }
+
+  const auto oldest_rows = tx.Execute (
+      "SELECT slot, signal_id, created_at "
+      "FROM cortext_active_signal_embeddings "
+      "ORDER BY created_at ASC, signal_id ASC LIMIT 1");
+  if (oldest_rows.empty ())
+    throw std::runtime_error ("active signal embedding frontier unavailable");
+  const auto oldest_slot
+      = store::AnyToLongLong (oldest_rows.front ().at ("slot")).value_or (-1);
+  const auto oldest_signal_id = store::AnyToLongLong (
+      oldest_rows.front ().at ("signal_id")).value_or (0);
+  const auto oldest_created_at = store::AnyToLongLong (
+      oldest_rows.front ().at ("created_at")).value_or (0);
+  if (oldest_slot < 0 || oldest_signal_id <= 0)
+    throw std::runtime_error ("invalid active signal embedding frontier");
+  if (created_at < oldest_created_at
+      || (created_at == oldest_created_at && signal_id <= oldest_signal_id))
+    return;
+  InsertIntoSlot (tx, oldest_slot, signal_id, embedding, created_at, capacity);
 }
 
 inline void
@@ -61,8 +130,7 @@ EnsureCapacity (Transaction &tx, int capacity)
       // newest legacy window before the first post-migration signal switches
       // signals.embedding_id to the aggregate memory embedding.
       auto legacy_rows = tx.Execute (
-          "SELECT s.signal_id, e.embedding, "
-          "       COALESCE(s.created_at, s.timestamp) AS created_at "
+          "SELECT s.signal_id, e.embedding, s.timestamp AS created_at "
           "FROM signals s "
           "JOIN embeddings e ON e.embedding_id = s.embedding_id "
           "ORDER BY s.timestamp DESC, s.signal_id DESC LIMIT ?",
@@ -96,7 +164,7 @@ EnsureCapacity (Transaction &tx, int capacity)
   auto rows = tx.Execute (
       "SELECT signal_id, embedding, created_at "
       "FROM cortext_active_signal_embeddings "
-      "ORDER BY signal_id DESC LIMIT ?",
+      "ORDER BY created_at DESC, signal_id DESC LIMIT ?",
       { static_cast<long long> (capacity) });
   tx.Execute ("DELETE FROM cortext_active_signal_embeddings");
   std::reverse (rows.begin (), rows.end ());

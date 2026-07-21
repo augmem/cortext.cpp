@@ -888,6 +888,13 @@ LoadCurrentSeedRowsFromCache (
         return state->current_entries[candidate_index];
       },
       profile);
+  // Sparse activation is not family-complete either. Multiple activated rows
+  // can collapse to one semantic family, so re-check completeness after the
+  // exact family filter before certifying the cache result. Returning no
+  // cache result reopens the complete processor-surface or SQL seed path.
+  if (use_sparse_route
+      && ranked.size () < static_cast<std::size_t> (candidate_limit))
+    return std::nullopt;
   if (profile)
     profile->selected_rows += ranked.size ();
   AddSeedCachePhaseTime (profile, &SeedCacheProfile::family_ms,
