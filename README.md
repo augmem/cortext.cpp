@@ -336,6 +336,51 @@ checksum-verify q8_0 into the user cache on first engine creation. Native C++
 and CLI users should keep the model under `models/` or set
 `CORTEXT_AIST_MODEL_PATH`.
 
+### Shared release assets (for language bindings)
+
+Multi-arch shared libraries and Git-friendly AIST model shards are published
+on each GitHub Release so binding repos (`cortext.py`, `cortext.go`, plugins)
+do not re-vendor the same binaries:
+
+```bash
+# Build locally (Zig cross-compile all six platform tags + shard model)
+python3 scripts/build_release_assets.py
+
+# Outputs:
+#   dist/release-assets/native/<tag>/…
+#   dist/release-assets/models/…   (chunks + vocab + manifest)
+#   dist/cortext-assets-<version>.tar.gz
+#   dist/cortext-assets-<version>.tar.gz.sha256
+```
+
+On `v*` tags (and published releases), `.github/workflows/release-assets.yml`
+builds that tree and uploads `cortext-assets-<version>.tar.gz` to the release.
+
+Unpacked layout expected by thin bindings (`CORTEXT_ASSETS_DIR`):
+
+```text
+native/manifest.json
+native/linux-x86_64/libcortext.so
+native/linux-aarch64/libcortext.so
+native/macos-x86_64/libcortext.dylib
+native/macos-aarch64/libcortext.dylib
+native/windows-x86_64/cortext.dll
+native/windows-aarch64/cortext.dll
+models/manifest.json
+models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
+models/mdbr-leaf-ir/vocab.txt
+```
+
+Install for a binding:
+
+```bash
+curl -fsSL -o cortext-assets.tgz \
+  "https://github.com/augmem/cortext/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
+mkdir -p "$HOME/.cache/augmem/cortext/assets"
+tar -xzf cortext-assets.tgz -C "$HOME/.cache/augmem/cortext/assets"
+export CORTEXT_ASSETS_DIR="$HOME/.cache/augmem/cortext/assets"
+```
+
 ## Runtime Model
 
 Cortext requires the AIST-87M GGUF encoder. The runtime searches:
