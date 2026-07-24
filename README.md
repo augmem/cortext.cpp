@@ -387,7 +387,9 @@ python3 scripts/build_release_assets.py
 On `v*` tags (and published releases), `.github/workflows/release-assets.yml`
 builds that tree and uploads `cortext-assets-<version>.tar.gz` to the release.
 
-Unpacked layout expected by thin bindings (`CORTEXT_ASSETS_DIR`):
+Unpacked layout for binding installers (natives may already embed AIST when
+built with `-Dembed-aist-model=true`; the `models/` tree is still published so
+thin/embed-off consumers can reassemble or vendor shards):
 
 ```text
 native/manifest.json
@@ -402,14 +404,19 @@ models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
 models/mdbr-leaf-ir/vocab.txt
 ```
 
-Install for a binding:
+Install assets for a binding package (example paths — wire these through your
+binding’s native loader / model materialize, not a magic env the C++ core
+reads):
 
 ```bash
 curl -fsSL -o cortext-assets.tgz \
   "https://github.com/augmem/cortext/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
 mkdir -p "$HOME/.cache/augmem/cortext/assets"
 tar -xzf cortext-assets.tgz -C "$HOME/.cache/augmem/cortext/assets"
-export CORTEXT_ASSETS_DIR="$HOME/.cache/augmem/cortext/assets"
+# Prefer an embedded native when present. Otherwise:
+#  - point the binding at native/<platform-tag>/libcortext.*
+#  - reassemble models/ chunks → full GGUF, then set CORTEXT_AIST_MODEL_PATH
+export CORTEXT_AIST_MODEL_PATH="$HOME/.cache/augmem/cortext/models/AIST-87M-GGUF/AIST-87M_q8_0.gguf"
 ```
 
 ## Runtime Model

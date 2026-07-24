@@ -84,11 +84,36 @@ def detect_version(explicit: str | None) -> str:
     return "0.0.0-dev"
 
 
+def verify_shipping_assets(model: Path, vocab: Path) -> None:
+    """Reject stale/corrupt cache before sharding into release assets."""
+    if not model.is_file():
+        raise SystemExit(f"model missing: {model}")
+    if not vocab.is_file():
+        raise SystemExit(f"vocab missing: {vocab}")
+    size = model.stat().st_size
+    sha = digest_file(model)
+    if size != EXPECTED_MODEL_SIZE or sha != EXPECTED_MODEL_SHA256:
+        raise SystemExit(
+            f"model digest/size mismatch before shard: path={model} "
+            f"size={size} sha256={sha} "
+            f"(expected {EXPECTED_MODEL_SIZE} / {EXPECTED_MODEL_SHA256})"
+        )
+    vocab_sha = digest_file(vocab)
+    if vocab_sha != EXPECTED_VOCAB_SHA256:
+        raise SystemExit(
+            f"vocab digest mismatch before shard: path={vocab} sha256={vocab_sha} "
+            f"(expected {EXPECTED_VOCAB_SHA256})"
+        )
+
+
 def ensure_source(source: Path | None, quant: str = "q8_0") -> tuple[Path, Path]:
     model = source if source is not None else DEFAULT_SOURCE
     model = model.expanduser().resolve()
     vocab = DEFAULT_VOCAB
     if model.is_file() and vocab.is_file():
+        # Always verify known shipping digests — do not trust cache/early return.
+        if quant == "q8_0" and model.name == "AIST-87M_q8_0.gguf":
+            verify_shipping_assets(model, vocab)
         return model, vocab
     # Download into the default models tree; if --source pointed elsewhere and is
     # missing, still fall back to the standard location after download.
@@ -111,6 +136,8 @@ def ensure_source(source: Path | None, quant: str = "q8_0") -> tuple[Path, Path]
         raise SystemExit(f"model missing after download: {model}")
     if not vocab.is_file():
         raise SystemExit(f"vocab missing after download: {vocab}")
+    if quant == "q8_0" and model.name == "AIST-87M_q8_0.gguf":
+        verify_shipping_assets(model, vocab)
     return model, vocab
 
 
@@ -280,7 +307,7 @@ def parse_args() -> argparse.Namespace:
         "--chunk-size",
         type=int,
         default=DEFAULT_CHUNK,
-        help=f"Bytes per part (default {DEFAULT_CHUNK}).",
+        help=f"Bytes per part (default {DEFAULT_CHUNK}; must be > 0).",
     )
     parser.add_argument(
         "--version",
@@ -297,6 +324,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.chunk_size <= 0:
+        raise SystemExit(f"--chunk-size must be a positive integer (got {args.chunk_size})")
     version = detect_version(args.version)
     shard_models(
         output=args.output,

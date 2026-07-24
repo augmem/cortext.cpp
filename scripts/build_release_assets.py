@@ -296,6 +296,8 @@ def install_natives(
 
 def shard_models(output: Path, version: str, chunk_size: int) -> None:
     """Delegate to scripts/shard_model.py (single ownership for binding layout)."""
+    if chunk_size <= 0:
+        raise SystemExit(f"--chunk-size must be a positive integer (got {chunk_size})")
     models_root = output / "models"
     if models_root.exists():
         shutil.rmtree(models_root)
@@ -311,6 +313,21 @@ def shard_models(output: Path, version: str, chunk_size: int) -> None:
             str(chunk_size),
         ]
     )
+
+
+def native_optimize_from_tree(output: Path, fallback: str) -> str:
+    """Prefer optimize recorded in an existing native/manifest.json."""
+    path = output / "native" / "manifest.json"
+    if not path.is_file():
+        return fallback
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return fallback
+    recorded = payload.get("optimize")
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    return fallback
 
 
 def write_top_manifest(output: Path, version: str, optimize: str) -> None:
@@ -333,14 +350,19 @@ def write_top_manifest(output: Path, version: str, optimize: str) -> None:
 
 
 def write_tarball(output: Path, version: str, tarball: Path) -> None:
+    tarball = tarball.expanduser().resolve()
     tarball.parent.mkdir(parents=True, exist_ok=True)
     if tarball.exists():
         tarball.unlink()
     # Archive contents are rooted at native/ and models/ (plus top manifest).
+    # Never pack the destination tarball itself if it lives under --output.
     with tarfile.open(tarball, "w:gz") as tar:
         for path in sorted(output.rglob("*")):
-            if path.is_file():
-                tar.add(path, arcname=path.relative_to(output).as_posix())
+            if not path.is_file():
+                continue
+            if path.resolve() == tarball:
+                continue
+            tar.add(path, arcname=path.relative_to(output).as_posix())
     print(f"wrote {tarball} ({tarball.stat().st_size / (1024 * 1024):.2f} MiB)", flush=True)
 
 
@@ -393,7 +415,7 @@ def parse_args() -> argparse.Namespace:
         "--chunk-size",
         type=int,
         default=DEFAULT_CHUNK,
-        help=f"Model part size in bytes (default {DEFAULT_CHUNK}).",
+        help=f"Model part size in bytes (default {DEFAULT_CHUNK}; must be > 0).",
     )
     parser.add_argument(
         "--skip-tarball",
@@ -419,6 +441,8 @@ def main() -> int:
 
     targets = select_targets(args.target)
     optimize = args.optimize
+    if args.chunk_size <= 0:
+        raise SystemExit(f"--chunk-size must be a positive integer (got {args.chunk_size})")
 
     if not args.skip_natives:
         if args.from_python_natives:
@@ -426,6 +450,7 @@ def main() -> int:
             # Strip is already applied in package natives.
             for entry in entries:
                 entry["source"] = Path(str(entry["source"]))
+            optimize = "ReleaseSmall"
         else:
             if not shutil.which(args.zig) and not args.skip_zig_build:
                 raise SystemExit(f"zig not found: {args.zig}")
@@ -442,16 +467,19 @@ def main() -> int:
             for entry, target in zip(entries, targets):
                 # Strip on a temp copy path after install — strip source if strip tools exist
                 maybe_strip(Path(str(entry["source"])), target)
-        install_natives(output, entries, optimize if not args.from_python_natives else "ReleaseSmall")
+        install_natives(output, entries, optimize)
     elif not (output / "native" / "manifest.json").is_file():
         raise SystemExit("--skip-natives requires an existing native tree under --output")
+    else:
+        # Reuse existing natives; keep top-level optimize consistent with them.
+        optimize = native_optimize_from_tree(output, optimize)
 
     if not args.skip_models:
         shard_models(output, version, args.chunk_size)
     elif not (output / "models" / "manifest.json").is_file():
         raise SystemExit("--skip-models requires an existing models tree under --output")
 
-    write_top_manifest(output, version, optimize if not args.from_python_natives else "ReleaseSmall")
+    write_top_manifest(output, version, optimize)
 
     if not args.skip_tarball:
         tarball = args.tarball
