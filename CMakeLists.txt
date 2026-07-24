@@ -51,10 +51,16 @@ endif()
 option(CORTEXT_EMBED_AIST_MODEL
        "Link AIST model shards into libcortext (default ON; set OFF to opt out)"
        ${_cortext_embed_aist_default})
-# Network fetch is only a build-time bootstrap when shards are missing.
+# Network fetch is a build-time bootstrap when shards/embed are unavailable.
+# MSVC cannot .incbin, so default fetch ON there so a stock MSVC configure can
+# still obtain a full GGUF for runtime discovery.
+set(_cortext_fetch_aist_default OFF)
+if(MSVC)
+  set(_cortext_fetch_aist_default ON)
+endif()
 option(CORTEXT_FETCH_AIST_MODEL
        "Download the AIST GGUF model during the build when local assets are missing"
-       OFF)
+       ${_cortext_fetch_aist_default})
 option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
 option(CORTEXT_OPENTELEMETRY_EXPORTERS
        "Build optional OpenTelemetry exporter dependencies" OFF)
