@@ -348,7 +348,10 @@ UniqueTempPath (const std::filesystem::path &dest)
 }
 
 void
-ReplaceFile (const std::filesystem::path &tmp, const std::filesystem::path &dest)
+ReplaceFile (const std::filesystem::path &tmp,
+             const std::filesystem::path &dest,
+             const std::string &expected_sha,
+             std::uint64_t expected_size)
 {
   std::error_code ec;
   std::filesystem::rename (tmp, dest, ec);
@@ -356,14 +359,22 @@ ReplaceFile (const std::filesystem::path &tmp, const std::filesystem::path &dest
     {
       return;
     }
-  // Another writer may have materialized dest first — prefer a good dest.
-  if (std::filesystem::is_regular_file (dest, ec))
+  // On Windows (and some POSIX races) rename fails if dest exists. Only drop
+  // our temp if dest is already the correct payload; otherwise replace the
+  // stale/corrupt dest. Never promote a bad dest by writing a fresh sidecar.
+  if (FileMatchesStreaming (dest, expected_sha, expected_size))
     {
       std::filesystem::remove (tmp, ec);
       return;
     }
   std::filesystem::remove (dest, ec);
-  std::filesystem::rename (tmp, dest);
+  std::filesystem::rename (tmp, dest, ec);
+  if (ec)
+    {
+      std::filesystem::remove (tmp, ec);
+      throw std::runtime_error ("failed to replace embedded AIST cache file: "
+                                + dest.string () + " (" + ec.message () + ")");
+    }
 }
 
 void
@@ -395,7 +406,7 @@ WriteAtomically (const std::filesystem::path &dest, const unsigned char *data,
                                   + tmp.string ());
       }
   }
-  ReplaceFile (tmp, dest);
+  ReplaceFile (tmp, dest, expected_sha, static_cast<std::uint64_t> (size));
   WriteSidecarSha (dest, expected_sha);
 }
 
@@ -456,7 +467,8 @@ AssembleShardsAtomically (const std::filesystem::path &dest)
       throw std::runtime_error (
           "assembled embedded AIST model digest/size mismatch");
     }
-  ReplaceFile (tmp, dest);
+  ReplaceFile (tmp, dest, CORTEXT_EMBEDDED_AIST_GGUF_SHA256,
+               CORTEXT_EMBEDDED_AIST_GGUF_SIZE);
   WriteSidecarSha (dest, CORTEXT_EMBEDDED_AIST_GGUF_SHA256);
 }
 

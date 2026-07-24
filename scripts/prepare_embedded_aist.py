@@ -163,6 +163,23 @@ def ensure_shards() -> tuple[list[tuple[Path, str, int]], str, int, Path, str]:
     return shards, whole_sha, whole_size, DEFAULT_VOCAB, vocab_sha
 
 
+def _asm_symbol_block(symbol: str, path_s: str) -> list[str]:
+    """Emit a .globl blob symbol with target-appropriate section visibility."""
+    return [
+        f"  .globl CORTEXT_SYM({symbol})",
+        # Keep linkable inside the library but out of the shared-object ABI.
+        "#if defined(__APPLE__)",
+        f"  .private_extern CORTEXT_SYM({symbol})",
+        "#elif !defined(_WIN32) && !defined(__CYGWIN__)",
+        f"  .hidden CORTEXT_SYM({symbol})",
+        "#endif",
+        "  .p2align 4",
+        f"CORTEXT_SYM({symbol}):",
+        f'  .incbin "{path_s}"',
+        "",
+    ]
+
+
 def write_asm(
     out_s: Path,
     shards: list[tuple[Path, str, int]],
@@ -174,6 +191,10 @@ def write_asm(
         "#if defined(__APPLE__)",
         "#define CORTEXT_SYM(name) _##name",
         "  .section __TEXT,__const",
+        "#elif defined(_WIN32) || defined(__CYGWIN__)",
+        # COFF / PE (MinGW, windows-gnu Zig): ELF @progbits syntax is invalid.
+        "#define CORTEXT_SYM(name) name",
+        '  .section .rdata,"dr"',
         "#else",
         "#define CORTEXT_SYM(name) name",
         '  .section .rodata,"a",@progbits',
@@ -183,25 +204,16 @@ def write_asm(
     for index, (path, _, _) in enumerate(shards):
         path_s = path.resolve().as_posix().replace('"', '\\"')
         lines.extend(
-            [
-                f"  .globl CORTEXT_SYM(cortext_embedded_aist_shard{index}_start)",
-                "  .p2align 4",
-                f"CORTEXT_SYM(cortext_embedded_aist_shard{index}_start):",
-                f'  .incbin "{path_s}"',
-                "",
-            ]
+            _asm_symbol_block(f"cortext_embedded_aist_shard{index}_start", path_s)
         )
     vocab_s = vocab.resolve().as_posix().replace('"', '\\"')
     lines.extend(
+        _asm_symbol_block("cortext_embedded_aist_vocab_start", vocab_s)
+    )
+    lines.extend(
         [
-            "  .globl CORTEXT_SYM(cortext_embedded_aist_vocab_start)",
-            "  .p2align 4",
-            "CORTEXT_SYM(cortext_embedded_aist_vocab_start):",
-            f'  .incbin "{vocab_s}"',
-            "",
-            # Mark the object non-executable-stack on ELF so linking model
-            # bytes does not force an executable process stack.
-            "#if !defined(__APPLE__)",
+            # ELF only: mark non-executable stack (not COFF/Mach-O).
+            "#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__CYGWIN__)",
             '  .section .note.GNU-stack,"",@progbits',
             "#endif",
             "",

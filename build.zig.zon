@@ -26,6 +26,8 @@
         "build.zig.zon",
         "cmake",
         "include",
+        // Default -Dembed-aist-model=true links tracked AIST shards + vocab.
+        "models",
         "scripts",
         "src",
         "tools/cli",
