@@ -350,17 +350,20 @@ def write_top_manifest(output: Path, version: str, optimize: str) -> None:
 
 
 def write_tarball(output: Path, version: str, tarball: Path) -> None:
+    del version  # encoded in the tarball filename by the caller
     tarball = tarball.expanduser().resolve()
     tarball.parent.mkdir(parents=True, exist_ok=True)
     if tarball.exists():
         tarball.unlink()
     # Archive contents are rooted at native/ and models/ (plus top manifest).
-    # Never pack the destination tarball itself if it lives under --output.
+    # Never pack the destination tarball (or its .sha256 sibling) if either
+    # path lives under --output.
+    skip_paths = {tarball, Path(str(tarball) + ".sha256")}
     with tarfile.open(tarball, "w:gz") as tar:
         for path in sorted(output.rglob("*")):
             if not path.is_file():
                 continue
-            if path.resolve() == tarball:
+            if path.resolve() in skip_paths:
                 continue
             tar.add(path, arcname=path.relative_to(output).as_posix())
     print(f"wrote {tarball} ({tarball.stat().st_size / (1024 * 1024):.2f} MiB)", flush=True)
@@ -489,7 +492,8 @@ def main() -> int:
             tarball = tarball.expanduser().resolve()
         write_tarball(output, version, tarball)
         # Convenience checksum file for release notes / installers.
-        sums = tarball.with_suffix(tarball.suffix + ".sha256")
+        # Always append ".sha256" (foo.tar.gz → foo.tar.gz.sha256).
+        sums = Path(str(tarball) + ".sha256")
         sums.write_text(f"{digest_file(tarball)}  {tarball.name}\n", encoding="utf-8")
         print(f"wrote {sums}", flush=True)
 
