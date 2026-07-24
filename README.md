@@ -69,11 +69,12 @@ cmake --build build -j --target cortext_cli
 ./build/tools/cli/cortext_cli --help
 ```
 
-The default CMake build downloads the required AIST model into `models/`.
-For offline setup, prefetch it explicitly:
+Default CMake/Zig builds **link Git AIST shards into `libcortext`** and
+assemble the full GGUF on first load (no LFS, no runtime download, no
+`CORTEXT_AIST_MODEL_PATH`). Refresh tracked shards with:
 
 ```bash
-python3 scripts/download_aist_model.py --output-dir models --quant q8_0
+python3 scripts/shard_model.py
 ```
 
 ## Try It
@@ -187,8 +188,9 @@ Important CMake options:
 
 - `CORTEXT_BUILD_TOOLS=ON`: build command-line tools.
 - `CORTEXT_BUILD_EXAMPLES=ON`: build examples and benchmark demos.
-- `CORTEXT_FETCH_AIST_MODEL=ON`: download AIST during build.
-- `CORTEXT_AIST_MODEL_QUANT=q8_0`: choose `q8_0`, `q5_1`, or `all`.
+- `CORTEXT_EMBED_AIST_MODEL=ON` **(default)**: link AIST shards into `libcortext` and assemble at load. Opt out with `=OFF` / `-Dembed-aist-model=false`.
+- `CORTEXT_FETCH_AIST_MODEL=ON`: only used when bootstrapping missing shards at build time (default off).
+- `CORTEXT_AIST_MODEL_QUANT=q8_0`: choose `q8_0`, `q5_1`, or `all` when fetching a full model to re-shard.
 - `CORTEXT_FETCH_GGML=ON`: fetch and build bundled GGML.
 - `CORTEXT_USE_SYSTEM_GGML=ON`: use a preinstalled GGML for packagers.
 - `CORTEXT_EXPERIMENT_HOOKS=OFF`: compile out eval-only ablation hooks.
@@ -336,11 +338,40 @@ checksum-verify q8_0 into the user cache on first engine creation. Native C++
 and CLI users should keep the model under `models/` or set
 `CORTEXT_AIST_MODEL_PATH`.
 
-### Shared release assets (for language bindings)
+### Git-friendly AIST model shards (for language bindings)
 
-Multi-arch shared libraries and Git-friendly AIST model shards are published
-on each GitHub Release so binding repos (`cortext.py`, `cortext.go`, plugins)
-do not re-vendor the same binaries:
+This repo owns the AIST q8_0 GGUF **shards**. Binding packages (`cortext.go`,
+plugins, …) should **copy** the tree — they must not re-implement sharding.
+
+```bash
+# After download_aist_model / a local full GGUF under models/:
+python3 scripts/shard_model.py
+```
+
+Tracked layout (full `.gguf` stays gitignored):
+
+```text
+models/manifest.json
+models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
+models/mdbr-leaf-ir/vocab.txt
+```
+
+Bindings reassemble parts on first use (verify per-chunk and whole-file SHA-256
+from `models/manifest.json`), then set `CORTEXT_AIST_MODEL_PATH`. Example vendor
+step for a sibling checkout:
+
+```bash
+# Preserve relative paths under models/ (manifest + chunks + vocab).
+mkdir -p ../cortext.go/models/AIST-87M-GGUF ../cortext.go/models/mdbr-leaf-ir
+cp models/manifest.json ../cortext.go/models/
+cp -R models/AIST-87M-GGUF/chunks ../cortext.go/models/AIST-87M-GGUF/
+cp models/mdbr-leaf-ir/vocab.txt ../cortext.go/models/mdbr-leaf-ir/
+```
+
+### Shared release assets (natives + model shards)
+
+Multi-arch shared libraries and the same model shard tree are also published
+on each GitHub Release so thin installers can pull one tarball:
 
 ```bash
 # Build locally (Zig cross-compile all six platform tags + shard model)
@@ -383,13 +414,25 @@ export CORTEXT_ASSETS_DIR="$HOME/.cache/augmem/cortext/assets"
 
 ## Runtime Model
 
-Cortext requires the AIST-87M GGUF encoder. The runtime searches:
+Cortext requires the AIST-87M GGUF encoder. Default shared-library builds
+behave **as if the model lives inside `libcortext`**:
 
-1. `CORTEXT_AIST_MODEL_PATH`
-2. `models/AIST-87M-GGUF/AIST-87M_q8_0.gguf`
-3. `models/AIST-87M-GGUF/AIST-87M_q5_1.gguf`
+1. Git stores only under-100 MiB **shards** (no LFS) under
+   `models/AIST-87M-GGUF/chunks/` plus `models/manifest.json` and vocab.
+2. The build **links those shards** (and vocab) into the shared library via
+   `.incbin` (`CORTEXT_EMBED_AIST_MODEL=ON`).
+3. On first engine create, `MaterializeEmbeddedAistModel()` **assembles** the
+   full GGUF in the process cache, verifies per-shard and whole-file SHA-256,
+   and opens that path. No network download and no `CORTEXT_AIST_MODEL_PATH`.
 
-The tokenizer vocab is expected under `models/mdbr-leaf-ir/vocab.txt`.
+Resolution order:
+
+1. `CORTEXT_AIST_MODEL_PATH` (explicit full `.gguf`)
+2. On-disk search under `models/` (checkout layout)
+3. Linked shards → assemble-at-load cache
+
+Disable with `-DCORTEXT_EMBED_AIST_MODEL=OFF` / `-Dembed-aist-model=false` if you
+intentionally want an external model only.
 
 AIST maps text, audio, and images into one retrieval space. Audio inputs are
 16 kHz mono float32 PCM. Image inputs are row-major RGB/RGBA bytes with

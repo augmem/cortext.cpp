@@ -195,6 +195,7 @@ def build_native(target: Target, zig: str, optimize: str, include_dir: Path, ski
             "-Dcli=false",
             "-Dnode-addon=true",
             f"-Dnode-include={include_dir}",
+            "-Dembed-aist-model=true",
             "-Dfetch-aist-model=false",
         ]
         if node_lib is not None:

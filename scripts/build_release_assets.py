@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Build the shared Cortext release asset tree for language bindings.
 
-Ownership: multi-arch shared libraries and the AIST model shards belong to the
-**cortext** GitHub Release, not to each binding repository (cortext.py,
-cortext.go, hermes plugins, …).
+Ownership: multi-arch shared libraries and the AIST model shards belong to
+**this repo**. Model sharding is implemented only in ``scripts/shard_model.py``
+(also checked in under ``models/``). Binding repositories (cortext.go, plugins,
+…) should copy the shard tree or unpack the release tarball — they must not
+re-shard the GGUF themselves.
 
 Layout written under --output (default dist/release-assets):
 
@@ -47,12 +49,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = REPO_ROOT / "dist" / "release-assets"
 DEFAULT_BUILD_ROOT = REPO_ROOT / "build" / "release-assets" / "native"
 GLOBAL_CACHE = REPO_ROOT / "build" / "release-assets" / "zig-global-cache"
-SOURCE_MODELS = REPO_ROOT / "models"
 DEFAULT_CHUNK = 48 * 1024 * 1024  # Git-friendly; matches cortext.go / hermes
-MODEL_REL = "AIST-87M-GGUF/AIST-87M_q8_0.gguf"
-VOCAB_REL = "mdbr-leaf-ir/vocab.txt"
 SCHEMA_NATIVE = "augmem.cortext.native.v1"
-SCHEMA_MODELS = "augmem.cortext.models.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +217,7 @@ def build_native(
                 f"-Doptimize={optimize}",
                 "-Dshared=true",
                 "-Dcli=false",
+                "-Dembed-aist-model=true",
                 "-Dfetch-aist-model=false",
             ]
         )
@@ -295,85 +294,23 @@ def install_natives(
     )
 
 
-def ensure_source_model(quant: str = "q8_0") -> Path:
-    model = SOURCE_MODELS / "AIST-87M-GGUF" / f"AIST-87M_{quant}.gguf"
-    vocab = SOURCE_MODELS / "mdbr-leaf-ir" / "vocab.txt"
-    if model.is_file() and vocab.is_file():
-        return model
-    run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "download_aist_model.py"),
-            "--output-dir",
-            str(SOURCE_MODELS),
-            "--quant",
-            quant,
-        ]
-    )
-    if not model.is_file():
-        raise FileNotFoundError(f"model missing after download: {model}")
-    if not vocab.is_file():
-        raise FileNotFoundError(f"vocab missing after download: {vocab}")
-    return model
-
-
 def shard_models(output: Path, version: str, chunk_size: int) -> None:
-    model_src = ensure_source_model("q8_0")
-    vocab_src = SOURCE_MODELS / "mdbr-leaf-ir" / "vocab.txt"
-
+    """Delegate to scripts/shard_model.py (single ownership for binding layout)."""
     models_root = output / "models"
     if models_root.exists():
         shutil.rmtree(models_root)
-    chunk_dir = models_root / "AIST-87M-GGUF" / "chunks"
-    chunk_dir.mkdir(parents=True, exist_ok=True)
-
-    whole = hashlib.sha256()
-    chunks: list[dict[str, object]] = []
-    index = 0
-    total = 0
-    with model_src.open("rb") as handle:
-        while True:
-            data = handle.read(chunk_size)
-            if not data:
-                break
-            name = f"AIST-87M_q8_0.gguf.part-{index:03d}"
-            rel = f"AIST-87M-GGUF/chunks/{name}"
-            path = models_root / rel
-            path.write_bytes(data)
-            part_hash = hashlib.sha256(data).hexdigest()
-            whole.update(data)
-            chunks.append({"filename": rel, "sha256": part_hash})
-            total += len(data)
-            print(f"model chunk {rel} ({len(data) / (1024 * 1024):.2f} MiB) {part_hash}", flush=True)
-            index += 1
-
-    vocab_dest = models_root / VOCAB_REL
-    vocab_dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(vocab_src, vocab_dest)
-    vocab_sha = digest_file(vocab_dest)
-
-    manifest = {
-        "schema": SCHEMA_MODELS,
-        "cortext_version": version,
-        "note": (
-            "AIST model is Git/release-chunked under 100 MiB so ordinary Git and "
-            "release assets stay within size limits. Reassembled and checksummed "
-            "on first use by language bindings."
-        ),
-        "assets": [
-            {
-                "filename": MODEL_REL,
-                "sha256": whole.hexdigest(),
-                "size": total,
-                "chunks": chunks,
-            },
-            {"filename": VOCAB_REL, "sha256": vocab_sha},
-        ],
-    }
-    (models_root / "manifest.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "shard_model.py"),
+            "--output",
+            str(models_root),
+            "--version",
+            version,
+            "--chunk-size",
+            str(chunk_size),
+        ]
     )
-    print(f"model sha256={whole.hexdigest()} size={total}", flush=True)
 
 
 def write_top_manifest(output: Path, version: str, optimize: str) -> None:

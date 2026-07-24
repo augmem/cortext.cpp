@@ -1,0 +1,30 @@
+{
+  "schema": "augmem.cortext.models.v1",
+  "cortext_version": "1.2.3",
+  "note": "AIST model is Git-chunked under 100 MiB so it can live in ordinary Git without LFS. Language bindings reassemble and checksum on first use; do not re-shard in binding repos \u2014 copy this tree from cortext.",
+  "assets": [
+    {
+      "filename": "AIST-87M-GGUF/AIST-87M_q8_0.gguf",
+      "sha256": "bf4c49954eccc65183f1a97e44606e86c7ee5a4fea500457124b687a3ec97898",
+      "size": 141491936,
+      "chunks": [
+        {
+          "filename": "AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-000",
+          "sha256": "7f23effe470c0dbaf425457089877f060b7dcf0c5e7aa2be1d5422c5e3584a99"
+        },
+        {
+          "filename": "AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-001",
+          "sha256": "bcd66bfc6a376a86997a3ac801456c7441aca2f964876d594d5e44c515cde759"
+        },
+        {
+          "filename": "AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-002",
+          "sha256": "e91b751509f1a1901cb3b9922233e6a4aaf241b224ce522f5de709c7d01a4124"
+        }
+      ]
+    },
+    {
+      "filename": "mdbr-leaf-ir/vocab.txt",
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  ]
+}
