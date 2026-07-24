@@ -28,6 +28,10 @@ namespace cortext
 namespace
 {
 
+// Helpers below only run when Git AIST shards are linked into the library.
+// Keep them out of embed-off builds so -Werror=unused-function stays clean.
+#if defined(CORTEXT_HAS_EMBEDDED_AIST_MODEL) && CORTEXT_HAS_EMBEDDED_AIST_MODEL
+
 class Sha256
 {
 public:
@@ -366,8 +370,6 @@ WriteAtomically (const std::filesystem::path &dest, const unsigned char *data,
     }
   WriteSidecarSha (dest, expected_sha);
 }
-
-#if defined(CORTEXT_HAS_EMBEDDED_AIST_MODEL) && CORTEXT_HAS_EMBEDDED_AIST_MODEL
 
 /// Concatenate linked shards into dest; verify per-shard and whole digests.
 void
