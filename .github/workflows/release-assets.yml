@@ -1,7 +1,7 @@
 name: Release assets
 
 # Publishes multi-arch shared libraries + AIST model shards as GitHub Release
-# assets so language bindings (cortext.py, cortext.go, plugins) do not each
+# assets so language packages (cortext.py, cortext.go, plugins) do not each
 # vendor the same ~160 MiB of natives/model data.
 #
 # Artifact names:
@@ -91,7 +91,7 @@ jobs:
           if [[ -n "$TAG" ]]; then
             VERSION="${TAG#v}"
           else
-            VERSION="$(python3 -c "import re,pathlib; t=pathlib.Path('bindings/python/pyproject.toml').read_text(); m=re.search(r'version\s*=\s*\"([^\"]+)\"', t); print(m.group(1) if m else '0.0.0-dev')")"
+            VERSION="$(python3 -c "import re,pathlib; t=pathlib.Path('CMakeLists.txt').read_text(); m=re.search(r'project\s*\(\s*cortext[^)]*VERSION\s+([0-9.]+)', t, re.I|re.S); print(m.group(1) if m else '0.0.0-dev')")"
             TAG="v${VERSION}"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"

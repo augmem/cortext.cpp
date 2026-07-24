@@ -628,7 +628,7 @@ pub fn build(b: *std.Build) void {
         addon_mod.addIncludePath(.{ .cwd_relative = node_include_dir });
         addon_mod.addCMacro("NAPI_VERSION", "8");
         addon_mod.addCSourceFile(.{
-            .file = b.path("bindings/javascript/src/addon.cpp"),
+            .file = b.path("ffi/node/addon.cpp"),
             .flags = cxx_flags,
         });
         if (target.result.os.tag == .windows) {
