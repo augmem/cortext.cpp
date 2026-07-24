@@ -199,6 +199,12 @@ def write_asm(
             "CORTEXT_SYM(cortext_embedded_aist_vocab_start):",
             f'  .incbin "{vocab_s}"',
             "",
+            # Mark the object non-executable-stack on ELF so linking model
+            # bytes does not force an executable process stack.
+            "#if !defined(__APPLE__)",
+            '  .section .note.GNU-stack,"",@progbits',
+            "#endif",
+            "",
         ]
     )
     out_s.parent.mkdir(parents=True, exist_ok=True)
