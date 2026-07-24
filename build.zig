@@ -75,6 +75,7 @@ const cortext_cpp_sources = &.{
     "src/operations/accumulator_reset.cpp",
     "src/operations/spike_bypass.cpp",
     "src/models/embedding_model_pin.cpp",
+    "src/models/aist_embedded_model.cpp",
     "src/models/aist_gguf_encoder.cpp",
 };
 
@@ -292,7 +293,10 @@ pub fn build(b: *std.Build) void {
     const node_lib = b.option([]const u8, "node-lib", "Windows node.exe import library for Node-API addon builds");
     const unsupported_text_only = b.option(bool, "unsupported-text-only", "Allow unsupported builds without audio/image GGML kernel support") orelse false;
     const enable_ggml = b.option(bool, "ggml", "Enable GGML audio/image kernel support") orelse !unsupported_text_only;
-    const fetch_aist_model = b.option(bool, "fetch-aist-model", "Download the required AIST GGUF model during the default build") orelse true;
+    // Default ON: link Git AIST shards into libcortext; assemble at load.
+    // Opt out with -Dembed-aist-model=false.
+    const embed_aist_model = b.option(bool, "embed-aist-model", "Link AIST model shards into libcortext (default true; set false to opt out)") orelse true;
+    const fetch_aist_model = b.option(bool, "fetch-aist-model", "Download the AIST GGUF model during the build when local assets are missing") orelse false;
     const aist_model_quant = b.option([]const u8, "aist-model-quant", "AIST quantization to download: q8_0, q5_1, or all") orelse "q8_0";
     const model_assets_dir = b.option([]const u8, "model-assets-dir", "Directory where Cortext build-time model assets are stored") orelse "models";
     const ggml_include = b.option([]const u8, "ggml_include", "Directory containing ggml.h and ggml-backend.h");
@@ -334,22 +338,38 @@ pub fn build(b: *std.Build) void {
     prepare_hnswlib.addFileArg(b.path("cmake/PrepareHnswlibForZig.cmake"));
     prepare_hnswlib.addFileInput(b.path("cmake/hnswlib-prefetch-bounds.patch"));
 
-    if (fetch_aist_model) {
-        if (!std.mem.eql(u8, aist_model_quant, "q8_0") and
-            !std.mem.eql(u8, aist_model_quant, "q5_1") and
-            !std.mem.eql(u8, aist_model_quant, "all"))
-        {
-            fail(b, "-Daist-model-quant must be one of: q8_0, q5_1, all");
+    if (embed_aist_model) {
+        // Link Git AIST shards (.part-*) into the library; assemble full GGUF at load.
+        const prepare_embed = b.addSystemCommand(&.{"python3"});
+        prepare_embed.addFileArg(b.path("scripts/prepare_embedded_aist.py"));
+        prepare_embed.addArg("--out-dir");
+        const embed_dir = prepare_embed.addOutputDirectoryArg("aist_embed");
+        prepare_embed.addFileInput(b.path("scripts/prepare_embedded_aist.py"));
+        prepare_embed.addFileInput(b.path("models/manifest.json"));
+        prepare_embed.addFileInput(b.path("models/mdbr-leaf-ir/vocab.txt"));
+        lib.step.dependOn(&prepare_embed.step);
+        mod.addIncludePath(embed_dir);
+        mod.addCMacro("CORTEXT_HAS_EMBEDDED_AIST_MODEL", "1");
+        mod.addAssemblyFile(embed_dir.path(b, "aist_embedded_blobs.S"));
+    } else {
+        mod.addCMacro("CORTEXT_HAS_EMBEDDED_AIST_MODEL", "0");
+        if (fetch_aist_model) {
+            if (!std.mem.eql(u8, aist_model_quant, "q8_0") and
+                !std.mem.eql(u8, aist_model_quant, "q5_1") and
+                !std.mem.eql(u8, aist_model_quant, "all"))
+            {
+                fail(b, "-Daist-model-quant must be one of: q8_0, q5_1, all");
+            }
+            const aist_model = b.addSystemCommand(&.{
+                "python3",
+                "scripts/download_aist_model.py",
+                "--output-dir",
+                model_assets_dir,
+                "--quant",
+                aist_model_quant,
+            });
+            lib.step.dependOn(&aist_model.step);
         }
-        const aist_model = b.addSystemCommand(&.{
-            "python3",
-            "scripts/download_aist_model.py",
-            "--output-dir",
-            model_assets_dir,
-            "--quant",
-            aist_model_quant,
-        });
-        lib.step.dependOn(&aist_model.step);
     }
 
     mod.addIncludePath(b.path("include"));

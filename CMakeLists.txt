@@ -40,8 +40,21 @@ option(CORTEXT_FETCH_GGML
        "Fetch and build bundled ggml when CORTEXT_GGML_SOURCE_DIR is unset" ON)
 option(CORTEXT_USE_SYSTEM_GGML
        "Use preinstalled ggml headers/libraries instead of bundled ggml" OFF)
+# Default ON: link Git AIST shards into libcortext; assemble full GGUF at load.
+# Opt out with -DCORTEXT_EMBED_AIST_MODEL=OFF (thin native + external model path).
+# MSVC cannot .incbin shards — configure fails unless you opt out.
+set(_cortext_embed_aist_default ON)
+if(MSVC OR EMSCRIPTEN OR BUILD_WASM)
+  # WASM uses CORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR; MSVC needs Clang or OFF.
+  set(_cortext_embed_aist_default OFF)
+endif()
+option(CORTEXT_EMBED_AIST_MODEL
+       "Link AIST model shards into libcortext (default ON; set OFF to opt out)"
+       ${_cortext_embed_aist_default})
+# Network fetch is only a build-time bootstrap when shards are missing.
 option(CORTEXT_FETCH_AIST_MODEL
-       "Download the required AIST GGUF runtime model during the default build" ON)
+       "Download the AIST GGUF model during the build when local assets are missing"
+       OFF)
 option(CORTEXT_DISABLE_OPENTELEMETRY "Disable OpenTelemetry integration" OFF)
 option(CORTEXT_OPENTELEMETRY_EXPORTERS
        "Build optional OpenTelemetry exporter dependencies" OFF)
@@ -116,14 +129,52 @@ if(NOT CORTEXT_AIST_MODEL_QUANT MATCHES "^(q8_0|q5_1|all)$")
     "CORTEXT_AIST_MODEL_QUANT must be one of: q8_0, q5_1, all")
 endif()
 
-if(CORTEXT_FETCH_AIST_MODEL)
+set(CORTEXT_EMBEDDED_AIST_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/aist_embed")
+if(CORTEXT_EMBED_AIST_MODEL)
+  if(MSVC)
+    message(FATAL_ERROR
+      "CORTEXT_EMBED_AIST_MODEL is not supported with MSVC (.incbin). "
+      "Use Clang/GCC, or set -DCORTEXT_EMBED_AIST_MODEL=OFF and provide "
+      "CORTEXT_AIST_MODEL_PATH / models/ at runtime.")
+  endif()
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  enable_language(ASM)
+  set(_cortext_embed_stamp "${CORTEXT_EMBEDDED_AIST_GEN_DIR}/cortext_embed_aist.enabled")
+  set(_cortext_embed_asm "${CORTEXT_EMBEDDED_AIST_GEN_DIR}/aist_embedded_blobs.S")
+  set(_cortext_embed_meta "${CORTEXT_EMBEDDED_AIST_GEN_DIR}/aist_embedded_meta.h")
+  set(_cortext_embed_table "${CORTEXT_EMBEDDED_AIST_GEN_DIR}/aist_embedded_table.inc")
+  # Prefer tracked Git shards (no LFS). Full .gguf is never required in the tree.
+  file(GLOB _cortext_aist_shard_files
+       "${CMAKE_CURRENT_SOURCE_DIR}/models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*")
+  add_custom_command(
+    OUTPUT
+      "${_cortext_embed_stamp}"
+      "${_cortext_embed_asm}"
+      "${_cortext_embed_meta}"
+      "${_cortext_embed_table}"
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/prepare_embedded_aist.py"
+            --out-dir "${CORTEXT_EMBEDDED_AIST_GEN_DIR}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/scripts/prepare_embedded_aist.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}/scripts/shard_model.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}/models/manifest.json"
+      "${CMAKE_CURRENT_SOURCE_DIR}/models/mdbr-leaf-ir/vocab.txt"
+      ${_cortext_aist_shard_files}
+    COMMENT "Linking Git AIST shards into libcortext (assemble at load)"
+    VERBATIM
+  )
+  add_custom_target(cortext_aist_embedded_assets
+    DEPENDS "${_cortext_embed_stamp}" "${_cortext_embed_asm}" "${_cortext_embed_meta}")
+elseif(CORTEXT_FETCH_AIST_MODEL)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_custom_target(cortext_aist_model ALL
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/scripts/download_aist_model.py"
             --output-dir "${CORTEXT_MODEL_ASSETS_DIR}"
             --quant "${CORTEXT_AIST_MODEL_QUANT}"
-    COMMENT "Ensuring Cortext AIST GGUF model is present"
+    COMMENT "Ensuring Cortext AIST GGUF model is present on disk"
     VERBATIM
   )
 endif()
@@ -298,10 +349,30 @@ add_library(cortext
     src/operations/spike_bypass.cpp
     # Embedding-model pin (precomputed vectors hard-fail on encoder mismatch)
     src/models/embedding_model_pin.cpp
+    # Baked-in AIST model materialization (payload optional via CORTEXT_EMBED_AIST_MODEL)
+    src/models/aist_embedded_model.cpp
 )
+
+if(CORTEXT_EMBED_AIST_MODEL)
+  target_sources(cortext PRIVATE "${_cortext_embed_asm}")
+  target_include_directories(cortext PRIVATE "${CORTEXT_EMBEDDED_AIST_GEN_DIR}")
+  target_compile_definitions(cortext PRIVATE CORTEXT_HAS_EMBEDDED_AIST_MODEL=1)
+  add_dependencies(cortext cortext_aist_embedded_assets)
+  set_source_files_properties("${_cortext_embed_asm}" PROPERTIES
+    LANGUAGE ASM
+    COMPILE_FLAGS "-x assembler-with-cpp")
+  message(STATUS "Cortext: AIST shards linked into libcortext (assemble at load; default ON)")
+else()
+  target_compile_definitions(cortext PRIVATE CORTEXT_HAS_EMBEDDED_AIST_MODEL=0)
+  message(STATUS "Cortext: AIST embed opted out (CORTEXT_EMBED_AIST_MODEL=OFF)")
+endif()
 
 if(TARGET cortext_aist_model)
   add_dependencies(cortext cortext_aist_model)
+endif()
+
+if(WIN32)
+  target_link_libraries(cortext PRIVATE shell32)
 endif()
 
 function(cortext_resolve_ggml_source_dir input_dir output_dir)

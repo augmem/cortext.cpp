@@ -136,15 +136,18 @@ data/raw/
 data/memory_evals/
 data/emotion/
 data/ravdess/
-models/
-!include/cortext/models/
-!include/cortext/models/**
-!src/models/
-!src/models/**
-!bindings/python/augmem/cortext/models/
-!bindings/python/augmem/cortext/models/.gitkeep
-!bindings/javascript/models/
-!bindings/javascript/models/.gitkeep
+# Full GGUF payloads stay local/build-time only. Git-friendly AIST shards +
+# vocab + manifest are tracked so binding repos can vendor without re-sharding.
+/models/*
+!/models/manifest.json
+!/models/AIST-87M-GGUF/
+/models/AIST-87M-GGUF/*
+!/models/AIST-87M-GGUF/chunks/
+/models/AIST-87M-GGUF/chunks/*
+!/models/AIST-87M-GGUF/chunks/*.part-*
+!/models/mdbr-leaf-ir/
+/models/mdbr-leaf-ir/*
+!/models/mdbr-leaf-ir/vocab.txt
 *.dat
 *.npy
 
