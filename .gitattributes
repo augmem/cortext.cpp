@@ -2,3 +2,9 @@ data/surnames/surnames.csv filter=lfs diff=lfs merge=lfs -text
 data/surnames/forenames.csv filter=lfs diff=lfs merge=lfs -text
 data/raw/personachat/personachat.tgz filter=lfs diff=lfs merge=lfs -text
 cmake/hnswlib-prefetch-bounds.patch text eol=lf
+
+# AIST model shards + tokenizer vocab must stay byte-identical (SHA-256 on reassembly).
+models/** -text
+models/**/*.part-* binary
+models/mdbr-leaf-ir/vocab.txt binary
+models/manifest.json text eol=lf

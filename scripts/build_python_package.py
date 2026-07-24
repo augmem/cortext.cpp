@@ -204,6 +204,7 @@ def build_native(target: Target, zig: str, optimize: str, skip_zig_build: bool) 
                 f"-Doptimize={optimize}",
                 "-Dshared=true",
                 "-Dcli=false",
+                "-Dembed-aist-model=true",
                 "-Dfetch-aist-model=false",
             ]
         )
