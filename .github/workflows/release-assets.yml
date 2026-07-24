@@ -1,0 +1,172 @@
+name: Release assets
+
+# Publishes multi-arch shared libraries + AIST model shards as GitHub Release
+# assets so language bindings (cortext.py, cortext.go, plugins) do not each
+# vendor the same ~160 MiB of natives/model data.
+#
+# Artifact names:
+#   cortext-assets-<version>.tar.gz
+#   cortext-assets-<version>.tar.gz.sha256
+#
+# Unpacked layout (also documented in scripts/build_release_assets.py):
+#   native/<platform-tag>/libcortext.* | cortext.dll
+#   models/manifest.json + chunked AIST + vocab
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to attach assets to (e.g. v1.2.3). Empty = build only."
+        required: false
+        default: ""
+      upload:
+        description: "Upload tarball to the GitHub release for the tag"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      # Resolve the git ref before checkout so workflow_dispatch with inputs.tag
+      # builds the same revision that the release will receive.
+      - name: Resolve checkout ref
+        id: checkout_ref
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            REF="${{ inputs.tag }}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            REF="${{ github.event.release.tag_name }}"
+          else
+            # Tag push (or any other trigger): use the event ref.
+            REF="${{ github.ref }}"
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Checkout ref=$REF"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.checkout_ref.outputs.ref }}
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install host deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
+      - name: Cache AIST q8_0 model
+        uses: actions/cache@v4
+        with:
+          path: |
+            models/AIST-87M-GGUF/AIST-87M_q8_0.gguf
+            models/mdbr-leaf-ir/vocab.txt
+          key: aist-q8_0-bf4c49954eccc65183f1a97e44606e86c7ee5a4fea500457124b687a3ec97898-bert-vocab-07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG=""
+          fi
+          if [[ -n "$TAG" ]]; then
+            VERSION="${TAG#v}"
+          else
+            VERSION="$(python3 -c "import re,pathlib; t=pathlib.Path('bindings/python/pyproject.toml').read_text(); m=re.search(r'version\s*=\s*\"([^\"]+)\"', t); print(m.group(1) if m else '0.0.0-dev')")"
+            TAG="v${VERSION}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=$VERSION"
+
+      - name: Build release asset tree + tarball
+        run: |
+          python3 scripts/build_release_assets.py \
+            --version "${{ steps.ver.outputs.version }}" \
+            --optimize ReleaseSmall
+
+      - name: Inventory assets
+        run: |
+          echo "== tree =="
+          find dist/release-assets -type f | sort
+          echo "== tarball =="
+          ls -lh dist/cortext-assets-*.tar.gz*
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("dist/release-assets")
+          native = json.loads((root / "native" / "manifest.json").read_text())
+          models = json.loads((root / "models" / "manifest.json").read_text())
+          tags = [t["package_tag"] for t in native["targets"]]
+          assert len(tags) == 6, tags
+          for tag in tags:
+              art = next(t["artifact"] for t in native["targets"] if t["package_tag"] == tag)
+              path = root / "native" / tag / art
+              assert path.is_file() and path.stat().st_size > 100_000, path
+          chunks = models["assets"][0]["chunks"]
+          assert len(chunks) >= 2, chunks
+          for c in chunks:
+              p = root / "models" / c["filename"]
+              assert p.is_file(), p
+          print("inventory ok:", tags, "chunks", len(chunks))
+          PY
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cortext-assets-${{ steps.ver.outputs.version }}
+          path: |
+            dist/cortext-assets-${{ steps.ver.outputs.version }}.tar.gz
+            dist/cortext-assets-${{ steps.ver.outputs.version }}.tar.gz.sha256
+            dist/release-assets/manifest.json
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: |
+          (github.event_name == 'push' && github.ref_type == 'tag') ||
+          github.event_name == 'release' ||
+          (github.event_name == 'workflow_dispatch' && inputs.upload && inputs.tag != '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          TGZ="dist/cortext-assets-${VERSION}.tar.gz"
+          SUM="dist/cortext-assets-${VERSION}.tar.gz.sha256"
+          test -s "$TGZ"
+          test -s "$SUM"
+
+          # Create a draft release if the tag exists but no release yet, so
+          # maintainers can edit notes before publishing.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Creating draft release $TAG"
+            gh release create "$TAG" \
+              --title "Cortext v${VERSION}" \
+              --notes "Automated release assets for language bindings (natives + AIST model shards)." \
+              --draft \
+              --verify-tag
+          fi
+
+          gh release upload "$TAG" "$TGZ" "$SUM" --clobber
+          echo "Uploaded $TGZ and $SUM to $TAG"
