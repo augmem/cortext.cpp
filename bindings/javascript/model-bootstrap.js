@@ -204,31 +204,11 @@ async function ensureDefaultAssets() {
 }
 
 function ensureDefaultAistModelPathSync() {
-  const existing = defaultAistModelPath();
-  if (existing) {
-    return existing;
-  }
-
-  const result = spawnSync(process.execPath, [__filename, "--download-default"], {
-    encoding: "utf8",
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (result.status !== 0) {
-    const stderr = (result.stderr || "").trim();
-    const detail = stderr ? ` ${stderr}` : "";
-    throw new Error(
-      "Could not download the Cortext AIST q8_0 model asset." +
-        detail +
-        " Set CORTEXT_AIST_MODEL_PATH to an existing AIST GGUF file or retry later."
-    );
-  }
-
-  const cached = cachedDefaultAistModelPath();
-  if (!cached) {
-    throw new Error("Downloaded Cortext AIST q8_0 model did not verify.");
-  }
-  return cached;
+  // Prefer package/repo/cache models when present. Do not force a download:
+  // default release natives embed AIST and assemble at load; setting
+  // CORTEXT_AIST_MODEL_PATH to a freshly downloaded file would shadow that.
+  // Explicit downloads remain available via `node model-bootstrap.js --download-default`.
+  return defaultAistModelPath();
 }
 
 if (require.main === module && process.argv[2] === "--download-default") {

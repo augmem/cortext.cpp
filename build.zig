@@ -575,6 +575,10 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag != .windows) {
         mod.linkSystemLibrary("m", .{});
         mod.linkSystemLibrary("pthread", .{});
+    } else {
+        // aist_embedded_model.cpp uses SHGetFolderPathA for the model cache root
+        // (same as CMake's WIN32 shell32 link). Required when embed is on.
+        mod.linkSystemLibrary("shell32", .{});
     }
     if (target.result.os.tag == .linux) {
         mod.linkSystemLibrary("dl", .{});

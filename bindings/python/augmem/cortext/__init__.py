@@ -524,6 +524,14 @@ def _ensure_cached_default_aist_model_path() -> Path:
 
 
 def _default_aist_model_path() -> str | None:
+    """Resolve an on-disk GGUF without forcing a download.
+
+    Packaged/repo models win when present. A verified user cache is reused.
+    Default release natives embed AIST and assemble at load; downloading a
+    full GGUF here would set CORTEXT_AIST_MODEL_PATH and shadow that path.
+    Callers that need an offline network fetch can still use
+    `_ensure_cached_default_aist_model_path()` explicitly.
+    """
     package_models = _package_dir() / "models"
     if model_path := _aist_model_path(package_models):
         return os.fspath(model_path)
@@ -534,7 +542,10 @@ def _default_aist_model_path() -> str | None:
         if model_path := _aist_model_path(repo_models):
             return os.fspath(model_path)
 
-    return os.fspath(_ensure_cached_default_aist_model_path())
+    cache_root = _model_cache_dir()
+    if cached := _cached_default_aist_model_path(cache_root):
+        return os.fspath(cached)
+    return None
 
 
 

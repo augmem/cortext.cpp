@@ -1,5 +1,6 @@
-#include <cortext/models/aist_embedded_model.hpp>
+#include "aist_embedded_model.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -331,6 +333,39 @@ FileMatchesStreaming (const std::filesystem::path &path,
   return true;
 }
 
+std::filesystem::path
+UniqueTempPath (const std::filesystem::path &dest)
+{
+  // Per-process/thread temp so concurrent first-use materialize cannot
+  // race on a shared deterministic `.tmp` name.
+  const auto stamp
+      = std::chrono::high_resolution_clock::now ().time_since_epoch ().count ();
+  const auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id ());
+  return dest.parent_path ()
+         / (std::string (".") + dest.filename ().string () + ".tmp."
+            + std::to_string (static_cast<unsigned long long> (stamp)) + "."
+            + std::to_string (static_cast<unsigned long long> (tid)));
+}
+
+void
+ReplaceFile (const std::filesystem::path &tmp, const std::filesystem::path &dest)
+{
+  std::error_code ec;
+  std::filesystem::rename (tmp, dest, ec);
+  if (!ec)
+    {
+      return;
+    }
+  // Another writer may have materialized dest first — prefer a good dest.
+  if (std::filesystem::is_regular_file (dest, ec))
+    {
+      std::filesystem::remove (tmp, ec);
+      return;
+    }
+  std::filesystem::remove (dest, ec);
+  std::filesystem::rename (tmp, dest);
+}
+
 void
 WriteAtomically (const std::filesystem::path &dest, const unsigned char *data,
                  std::size_t size, const std::string &expected_sha)
@@ -341,8 +376,7 @@ WriteAtomically (const std::filesystem::path &dest, const unsigned char *data,
           "embedded AIST asset digest mismatch before materialize");
     }
   std::filesystem::create_directories (dest.parent_path ());
-  const auto tmp = dest.parent_path ()
-                   / (std::string (".") + dest.filename ().string () + ".tmp");
+  const auto tmp = UniqueTempPath (dest);
   {
     std::ofstream out (tmp, std::ios::binary | std::ios::trunc);
     if (!out)
@@ -361,13 +395,7 @@ WriteAtomically (const std::filesystem::path &dest, const unsigned char *data,
                                   + tmp.string ());
       }
   }
-  std::error_code ec;
-  std::filesystem::rename (tmp, dest, ec);
-  if (ec)
-    {
-      std::filesystem::remove (dest, ec);
-      std::filesystem::rename (tmp, dest);
-    }
+  ReplaceFile (tmp, dest);
   WriteSidecarSha (dest, expected_sha);
 }
 
@@ -376,8 +404,7 @@ void
 AssembleShardsAtomically (const std::filesystem::path &dest)
 {
   std::filesystem::create_directories (dest.parent_path ());
-  const auto tmp = dest.parent_path ()
-                   / (std::string (".") + dest.filename ().string () + ".tmp");
+  const auto tmp = UniqueTempPath (dest);
   Sha256 whole;
   std::uint64_t total = 0;
   {
@@ -429,13 +456,7 @@ AssembleShardsAtomically (const std::filesystem::path &dest)
       throw std::runtime_error (
           "assembled embedded AIST model digest/size mismatch");
     }
-  std::error_code ec;
-  std::filesystem::rename (tmp, dest, ec);
-  if (ec)
-    {
-      std::filesystem::remove (dest, ec);
-      std::filesystem::rename (tmp, dest);
-    }
+  ReplaceFile (tmp, dest);
   WriteSidecarSha (dest, CORTEXT_EMBEDDED_AIST_GGUF_SHA256);
 }
 

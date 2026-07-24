@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cortext/models/aist_embedded_model.hpp"
+#include "models/aist_embedded_model.hpp"
 #include "cortext/models/aist_gguf_encoder.hpp"
 
 #include <filesystem>
