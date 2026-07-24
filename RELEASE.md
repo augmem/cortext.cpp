@@ -1,12 +1,13 @@
-# Cortext v1.2.3 Release Artifact
+# Cortext v1.2.4 Release Artifact
 
-This tracked artifact accompanies the `v1.2.3` tag.
+This tracked artifact accompanies the `v1.2.4` tag.
 
 ## Release State
 
-- Version: `1.2.3`
-- Merged feature baseline before release metadata: `2353640ed3b71b1d57074a54ee348d018cb2bacf`
-- Release source: the integrated commit addressed by the annotated `v1.2.3`
+- Version: `1.2.4`
+- Merged feature baseline before release metadata: `170d866a57665b6e48f1bb446276f01ca653fcc2`
+  (PR #8 — shared release assets + AIST model embed)
+- Release source: the integrated commit addressed by the annotated `v1.2.4`
   tag; the GitHub release and registry artifacts are rebuilt from that exact
   commit.
 - Product surface: C++ facade, C ABI, Python, JavaScript/TypeScript, Dart,
@@ -14,48 +15,33 @@ This tracked artifact accompanies the `v1.2.3` tag.
 
 ## Highlights
 
-- Keeps Natural and Durable ingestion on one SQLite-authoritative operation
-  path; Durable adds only its post-commit flush/checkpoint barrier.
-- Cuts the existing SQLite HNSW route over to an F/S/T-derived bounded
-  retrieval sawtooth with a separately bounded consolidation activation
-  snapshot.
-- Rearms consolidation hints after material cumulative throughput drawdown
-  while keeping stable jitter quiet.
-- Preserves exact SQL fallback when sparse candidate generation underfills
-  after eligibility or family filtering, and repairs restart, eviction,
-  suppression, supersession, and canonical-entry edge cases.
-- Keeps all routing and work-budget behavior modality- and opaque
-  `source_id`-agnostic without changing the public API or C API.
+- Publishes multi-arch shared libraries and Git-friendly AIST model shards as
+  GitHub Release assets (`cortext-assets-<version>.tar.gz`) so language
+  bindings can consume one canonical bundle.
+- Default builds link AIST model shards into `libcortext` (assemble at load)
+  so shared libraries work without a separate download or
+  `CORTEXT_AIST_MODEL_PATH`; opt out with `-DCORTEXT_EMBED_AIST_MODEL=OFF`.
+- Tracks under-100 MiB model parts in-repo (no LFS) under
+  `models/AIST-87M-GGUF/chunks/` with manifest checksums.
+- Documents binding install layout and keeps thin/embed-off paths supported.
 
 ## Verification
 
-- Pull request [#6](https://github.com/augmem/cortext/pull/6) merged at
-  `2353640ed3b71b1d57074a54ee348d018cb2bacf` with all review discussions
-  resolved and cross-platform native, AIST, WASM, Zig, Windows CLI, and
-  Linux sanitizer validation owned by exact-head GitHub checks.
-- The exact Debug LLVM 21 media-enabled suite passed 39,305 assertions in 712
-  cases across four disjoint shards at fixed seed 424242; Python passed 159
-  tests plus 55 subtests.
-- The production-shaped nine-point matrix passed 4,608/4,608 exact top-1
-  controls with recall@16 and semantic coverage of 1.0, deterministic ties,
-  zero clustered misses, and source/modality invariance.
-- The 30,380-packet mature run passed 511/512 exact top-1, recall@16
-  0.999265, semantic coverage 0.998571, deterministic ties, 19/20 material
-  cycle resets, and no retrieval work-bound violations.
-- Paper traceability passed 70/70 and the manuscript records every algorithm
-  and experiment change.
-- These results do not claim whole-engine raw-time reset, bounded whole-engine
-  restart, Durable plateau, or production-wide boundedness.
+- Pull request [#8](https://github.com/augmem/cortext/pull/8) merged at
+  `170d866a57665b6e48f1bb446276f01ca653fcc2` with review threads resolved and
+  exact-head CI green (native, AIST embed job, WASM, Zig matrix including
+  Windows, sanitizers).
 
 ## Packaging
 
-- PyPI and npm artifacts contain six native targets each.
-- Registry packages retain on-demand model bootstrap and do not embed the
-  AIST model payload.
+- GitHub Release includes `cortext-assets-<version>.tar.gz` (+ sha256) built by
+  `.github/workflows/release-assets.yml` (natives + model shards).
+- Default native libraries embed the shipping AIST q8_0 shards.
+- PyPI and npm artifacts remain optional publish targets for this tag.
 
 ## Version Surfaces
 
-The release surfaces report `1.2.3`:
+The release surfaces report `1.2.4`:
 
 - `CMakeLists.txt`
 - `build.zig` and `build.zig.zon`
@@ -65,6 +51,7 @@ The release surfaces report `1.2.3`:
 
 ## Publish Targets
 
-- GitHub release: `v1.2.3`
-- PyPI: `augmem.cortext==1.2.3`
-- npm: `@augmem/cortext@1.2.3`
+- GitHub release: `v1.2.4`
+- Shared assets: `cortext-assets-1.2.4.tar.gz` / `.tar.gz.sha256`
+- PyPI: `augmem.cortext==1.2.4` (when published)
+- npm: `@augmem/cortext@1.2.4` (when published)
