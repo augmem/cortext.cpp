@@ -37,7 +37,26 @@ jobs:
   build-and-upload:
     runs-on: ubuntu-latest
     steps:
+      # Resolve the git ref before checkout so workflow_dispatch with inputs.tag
+      # builds the same revision that the release will receive.
+      - name: Resolve checkout ref
+        id: checkout_ref
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            REF="${{ inputs.tag }}"
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            REF="${{ github.event.release.tag_name }}"
+          else
+            # Tag push (or any other trigger): use the event ref.
+            REF="${{ github.ref }}"
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Checkout ref=$REF"
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.checkout_ref.outputs.ref }}
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -138,12 +157,14 @@ jobs:
           test -s "$TGZ"
           test -s "$SUM"
 
-          # Create a draft release if the tag exists but no release yet.
+          # Create a draft release if the tag exists but no release yet, so
+          # maintainers can edit notes before publishing.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Creating release $TAG"
+            echo "Creating draft release $TAG"
             gh release create "$TAG" \
               --title "Cortext v${VERSION}" \
               --notes "Automated release assets for language bindings (natives + AIST model shards)." \
+              --draft \
               --verify-tag
           fi
 
