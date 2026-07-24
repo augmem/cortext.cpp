@@ -404,19 +404,28 @@ models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
 models/mdbr-leaf-ir/vocab.txt
 ```
 
-Install assets for a binding package (example paths — wire these through your
-binding’s native loader / model materialize, not a magic env the C++ core
-reads):
+Install assets for a binding package. There is **no** core `CORTEXT_ASSETS_DIR`
+env var — use the paths the runtime and bindings already read
+(`CORTEXT_LIBRARY_PATH`, `CORTEXT_AIST_MODEL_PATH`):
 
 ```bash
+VERSION=1.2.3   # or the release you want
+ASSETS="$HOME/.cache/augmem/cortext/assets"
 curl -fsSL -o cortext-assets.tgz \
   "https://github.com/augmem/cortext/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
-mkdir -p "$HOME/.cache/augmem/cortext/assets"
-tar -xzf cortext-assets.tgz -C "$HOME/.cache/augmem/cortext/assets"
-# Prefer an embedded native when present. Otherwise:
-#  - point the binding at native/<platform-tag>/libcortext.*
-#  - reassemble models/ chunks → full GGUF, then set CORTEXT_AIST_MODEL_PATH
-export CORTEXT_AIST_MODEL_PATH="$HOME/.cache/augmem/cortext/models/AIST-87M-GGUF/AIST-87M_q8_0.gguf"
+mkdir -p "$ASSETS"
+tar -xzf cortext-assets.tgz -C "$ASSETS"
+
+# Shared library (pick the host platform tag):
+#   linux-x86_64 | linux-aarch64 | macos-x86_64 | macos-aarch64 | windows-x86_64 | windows-aarch64
+export CORTEXT_LIBRARY_PATH="$ASSETS/native/linux-x86_64/libcortext.so"
+
+# Default release natives embed AIST (assemble-at-load). Only if you need an
+# external GGUF (embed-off build, or tools that require a file path):
+mkdir -p "$ASSETS/models/AIST-87M-GGUF"
+cat "$ASSETS"/models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-* \
+  > "$ASSETS/models/AIST-87M-GGUF/AIST-87M_q8_0.gguf"
+export CORTEXT_AIST_MODEL_PATH="$ASSETS/models/AIST-87M-GGUF/AIST-87M_q8_0.gguf"
 ```
 
 ## Runtime Model
