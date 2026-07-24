@@ -10,8 +10,9 @@ This tracked artifact accompanies the `v1.2.4` tag.
 - Release source: the integrated commit addressed by the annotated `v1.2.4`
   tag; the GitHub release and registry artifacts are rebuilt from that exact
   commit.
-- Product surface: C++ facade, C ABI, Python, JavaScript/TypeScript, Dart,
-  Go, WASM, CLI, and Hermes provider integration.
+- Product surface: C++ facade, C ABI, optional N-API/`ffi/node` addon, WASM
+  build, CLI. Language packages are published from sibling repositories
+  (`cortext.py`, `cortext.ts`, `cortext.go`, `cortext.dart`, `cortext.wasm`).
 
 ## Highlights
 
@@ -23,7 +24,6 @@ This tracked artifact accompanies the `v1.2.4` tag.
   `CORTEXT_AIST_MODEL_PATH`; opt out with `-DCORTEXT_EMBED_AIST_MODEL=OFF`.
 - Tracks under-100 MiB model parts in-repo (no LFS) under
   `models/AIST-87M-GGUF/chunks/` with manifest checksums.
-- Documents binding install layout and keeps thin/embed-off paths supported.
 
 ## Verification
 
@@ -37,21 +37,18 @@ This tracked artifact accompanies the `v1.2.4` tag.
 - GitHub Release includes `cortext-assets-<version>.tar.gz` (+ sha256) built by
   `.github/workflows/release-assets.yml` (natives + model shards).
 - Default native libraries embed the shipping AIST q8_0 shards.
-- PyPI and npm artifacts remain optional publish targets for this tag.
+- Language registry packages are published from standalone repos, not this tree.
 
 ## Version Surfaces
 
-The release surfaces report `1.2.4`:
+The engine release surfaces report `1.2.4`:
 
 - `CMakeLists.txt`
 - `build.zig` and `build.zig.zon`
-- `bindings/python/pyproject.toml`
-- `bindings/javascript/package.json`
-- `bindings/dart/pubspec.yaml`
+
+Language package versions are owned by their standalone repositories.
 
 ## Publish Targets
 
-- GitHub release: `v1.2.4`
-- Shared assets: `cortext-assets-1.2.4.tar.gz` / `.tar.gz.sha256`
-- PyPI: `augmem.cortext==1.2.4` (when published)
-- npm: `@augmem/cortext@1.2.4` (when published)
+- GitHub release: `v1.2.4` (engine + `cortext-assets-1.2.4.tar.gz`)
+- Language packages: see sibling `augmem/cortext.*` repositories

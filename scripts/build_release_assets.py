@@ -28,8 +28,7 @@ Also writes a versioned tarball next to the tree (unless --skip-tarball):
 
 Examples:
   python3 scripts/build_release_assets.py
-  python3 scripts/build_release_assets.py --skip-zig-build --from-python-natives
-  python3 scripts/build_release_assets.py --version 1.2.3 --target macos-aarch64
+  python3 scripts/build_release_assets.py --version 1.2.4 --target macos-aarch64
 """
 from __future__ import annotations
 
@@ -134,13 +133,7 @@ def select_targets(names: list[str]) -> list[Target]:
 def detect_version(explicit: str | None) -> str:
     if explicit:
         return explicit.lstrip("v")
-    # Prefer bindings/python pyproject, then CMake project version, then git tag.
-    pyproject = REPO_ROOT / "bindings" / "python" / "pyproject.toml"
-    if pyproject.is_file():
-        text = pyproject.read_text(encoding="utf-8")
-        m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
-        if m:
-            return m.group(1)
+    # Prefer CMake project version, then git tag.
     cmake = REPO_ROOT / "CMakeLists.txt"
     if cmake.is_file():
         text = cmake.read_text(encoding="utf-8")
@@ -233,22 +226,12 @@ def build_native(
 
 
 def copy_from_python_natives(targets: list[Target]) -> list[dict[str, object]]:
-    src_root = REPO_ROOT / "bindings" / "python" / "augmem" / "cortext" / "native"
-    entries: list[dict[str, object]] = []
-    for target in targets:
-        src = src_root / target.package_tag / target.artifact_name
-        if not src.is_file():
-            raise FileNotFoundError(f"missing prebuilt native at {src}")
-        entries.append(
-            {
-                "package_tag": target.package_tag,
-                "zig_target": target.zig_target,
-                "artifact": target.artifact_name,
-                "source": src,
-                "size": src.stat().st_size,
-            }
-        )
-    return entries
+    raise SystemExit(
+        "--from-python-natives is no longer supported: in-tree language "
+        "bindings were removed. Build natives with zig (default) or pass "
+        "an explicit prebuilt tree. Standalone packages live under "
+        "github.com/augmem/cortext.{py,ts,go,dart,wasm}."
+    )
 
 
 def install_natives(
@@ -402,7 +385,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--from-python-natives",
         action="store_true",
-        help="Copy natives from bindings/python/.../native instead of zig build.",
+        help="(Removed) Former in-tree Python binding natives path; errors if used.",
     )
     parser.add_argument(
         "--skip-models",

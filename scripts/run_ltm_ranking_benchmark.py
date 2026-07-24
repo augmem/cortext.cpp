@@ -200,10 +200,7 @@ def candidate_source_sha256(source_root: Path) -> str:
         "cmake",
         "include",
         "src",
-        "bindings/javascript/index.js",
-        "bindings/javascript/model-bootstrap.js",
-        "bindings/javascript/package.json",
-        "bindings/javascript/src",
+        "ffi/node",
         "third_party",
     ]
     listed = subprocess.check_output(
