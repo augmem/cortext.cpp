@@ -226,10 +226,11 @@ def build_native(
 
 
 def copy_from_python_natives(targets: list[Target]) -> list[dict[str, object]]:
+    del targets  # retained only so the removed flag still type-checks at call sites
     raise SystemExit(
         "--from-python-natives is no longer supported: in-tree language "
-        "bindings were removed. Build natives with zig (default) or pass "
-        "an explicit prebuilt tree. Standalone packages live under "
+        "bindings were removed. Build natives with zig (default path of this "
+        "script). Standalone packages live under "
         "github.com/augmem/cortext.{py,ts,go,dart,wasm}."
     )
 

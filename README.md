@@ -358,6 +358,16 @@ models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
 models/mdbr-leaf-ir/vocab.txt
 ```
 
+Optional surname/forename CSVs used by probe tools follow the same no-LFS
+pattern (`python3 scripts/shard_surnames.py`, full CSVs gitignored):
+
+```text
+data/surnames/manifest.json
+data/surnames/chunks/*.part-*
+data/surnames/country_codes.csv
+data/surnames/LICENSE.txt
+```
+
 Bindings reassemble parts on first use (verify per-chunk and whole-file SHA-256
 from `models/manifest.json`), then set `CORTEXT_AIST_MODEL_PATH`. Example vendor
 step for a sibling checkout:
@@ -414,7 +424,7 @@ env var — use the paths the runtime and bindings already read
 VERSION=1.2.3   # or the release you want
 ASSETS="$HOME/.cache/augmem/cortext/assets"
 curl -fsSL -o cortext-assets.tgz \
-  "https://github.com/augmem/cortext/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
+  "https://github.com/augmem/cortext.cpp/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
 mkdir -p "$ASSETS"
 tar -xzf cortext-assets.tgz -C "$ASSETS"
 
@@ -437,6 +447,8 @@ behave **as if the model lives inside `libcortext`**:
 
 1. Git stores only under-100 MiB **shards** (no LFS) under
    `models/AIST-87M-GGUF/chunks/` plus `models/manifest.json` and vocab.
+   Optional name CSVs use the same pattern under `data/surnames/chunks/`;
+   reassemble with `python3 scripts/shard_surnames.py --assemble` when needed.
 2. The build **links those shards** (and vocab) into the shared library via
    `.incbin` (`CORTEXT_EMBED_AIST_MODEL=ON`).
 3. On first engine create, `MaterializeEmbeddedAistModel()` **assembles** the

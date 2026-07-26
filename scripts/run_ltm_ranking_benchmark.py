@@ -194,6 +194,43 @@ def package_runtime_sha256(package_root: Path) -> str:
     return digest.hexdigest()
 
 
+def resolve_js_package_root(
+    *,
+    explicit: str | None = None,
+    source_root: Path | None = None,
+    fallback: Path | None = None,
+) -> Path:
+    """Locate the JS package root after in-tree bindings were removed.
+
+    Preference order:
+    1. explicit --candidate-package-root / --package-root
+    2. legacy in-tree bindings/javascript (older checkouts)
+    3. sibling checkout ../cortext.ts next to the engine source root
+    4. fallback package root (usually the baseline package)
+    """
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser().resolve())
+    if source_root is not None:
+        root = source_root.expanduser().resolve()
+        candidates.append(root / "bindings" / "javascript")
+        candidates.append(root.parent / "cortext.ts")
+    if fallback is not None:
+        candidates.append(fallback.expanduser().resolve())
+
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if (path / "package.json").is_file():
+            return path
+    raise RuntimeError(
+        "JavaScript package root not found. Pass --candidate-package-root "
+        "pointing at a cortext.ts checkout (in-tree bindings/javascript was removed)."
+    )
+
+
 def candidate_source_sha256(source_root: Path) -> str:
     pathspecs = [
         "CMakeLists.txt",
@@ -595,11 +632,11 @@ def compare(args: argparse.Namespace) -> None:
     candidate_cmake_cache = Path(args.candidate_cmake_cache).expanduser().resolve()
     candidate_build_config = cmake_cache_record(candidate_cmake_cache)
     candidate_source_root = Path(args.candidate_source_root).expanduser().resolve()
-    candidate_package_root = candidate_source_root / "bindings" / "javascript"
-    if not (candidate_package_root / "package.json").is_file():
-        raise RuntimeError(
-            f"candidate JavaScript package does not exist: {candidate_package_root}"
-        )
+    candidate_package_root = resolve_js_package_root(
+        explicit=getattr(args, "candidate_package_root", None),
+        source_root=candidate_source_root,
+        fallback=package_root,
+    )
     baseline_addon_sha256 = sha256_file(baseline_addon)
     if baseline["artifact_identity"]["baseline_addon_sha256"] != baseline_addon_sha256:
         raise RuntimeError("baseline addon digest differs from the frozen baseline")
@@ -698,7 +735,10 @@ def bind(args: argparse.Namespace) -> None:
         raise RuntimeError("candidate artifact benchmark script digest changed")
 
     source_root = Path(args.candidate_source_root).expanduser().resolve()
-    candidate_package_root = source_root / "bindings" / "javascript"
+    candidate_package_root = resolve_js_package_root(
+        explicit=getattr(args, "candidate_package_root", None),
+        source_root=source_root,
+    )
     addon = Path(args.candidate_addon).expanduser().resolve()
     runtime = Path(args.candidate_runtime).expanduser().resolve()
     cmake_cache = Path(args.candidate_cmake_cache).expanduser().resolve()
@@ -762,6 +802,14 @@ def parse_args() -> argparse.Namespace:
     compare_parser.add_argument("--candidate-cmake-cache", required=True)
     compare_parser.add_argument("--candidate-tree", required=True)
     compare_parser.add_argument("--candidate-source-root", required=True)
+    compare_parser.add_argument(
+        "--candidate-package-root",
+        default=None,
+        help=(
+            "JS package root for the candidate measurement (cortext.ts checkout). "
+            "Defaults to bindings/javascript, sibling ../cortext.ts, or --package-root."
+        ),
+    )
     compare_parser.add_argument("--pairs", type=int, choices=(9, 18, 36, 72), required=True)
     compare_parser.add_argument("--warmups", type=int, choices=(2,), required=True)
     compare_parser.add_argument("--order-seed", type=int, choices=(20260714,), required=True)
@@ -775,6 +823,14 @@ def parse_args() -> argparse.Namespace:
     bind_parser.add_argument("--candidate-cmake-cache", required=True)
     bind_parser.add_argument("--candidate-tree", required=True)
     bind_parser.add_argument("--candidate-source-root", required=True)
+    bind_parser.add_argument(
+        "--candidate-package-root",
+        default=None,
+        help=(
+            "JS package root for the candidate artifact (cortext.ts checkout). "
+            "Defaults to bindings/javascript or sibling ../cortext.ts."
+        ),
+    )
     bind_parser.set_defaults(func=bind)
     return parser.parse_args()
 

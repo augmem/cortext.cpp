@@ -15,6 +15,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -44,7 +45,32 @@ def key_name(value: str) -> str:
     return re.sub(r"[^a-z]", "", value.lower())
 
 
+def ensure_names_csv(path: Path) -> Path:
+    """Return a readable names CSV, assembling shards when only parts are present."""
+    path = path.expanduser()
+    if path.is_file() and path.stat().st_size > 0:
+        # Skip Git LFS pointer stubs left behind when smudge is disabled.
+        with path.open("rb") as handle:
+            head = handle.read(120).decode("utf-8", errors="ignore")
+        if not head.startswith("version https://git-lfs.github.com/spec/v1"):
+            return path
+
+    # Default layout: data/surnames/forenames.csv beside chunks/ + manifest.json
+    root = path.parent
+    script = Path(__file__).resolve().parents[1] / "scripts" / "shard_surnames.py"
+    if not script.is_file():
+        raise FileNotFoundError(
+            f"names CSV missing at {path} and shard script not found at {script}"
+        )
+    cmd = [sys.executable, str(script), "--output", str(root), "--assemble"]
+    subprocess.run(cmd, check=True)
+    if not path.is_file():
+        raise FileNotFoundError(f"names CSV still missing after assemble: {path}")
+    return path
+
+
 def load_names(path: Path, top_n: int) -> list[str]:
+    path = ensure_names_csv(path)
     counts: dict[str, int] = {}
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)

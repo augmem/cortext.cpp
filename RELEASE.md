@@ -24,6 +24,9 @@ This tracked artifact accompanies the `v1.2.4` tag.
   `CORTEXT_AIST_MODEL_PATH`; opt out with `-DCORTEXT_EMBED_AIST_MODEL=OFF`.
 - Tracks under-100 MiB model parts in-repo (no LFS) under
   `models/AIST-87M-GGUF/chunks/` with manifest checksums.
+- Tracks under-100 MiB surname CSV parts in-repo (no LFS) under
+  `data/surnames/chunks/` with `data/surnames/manifest.json` checksums;
+  full CSVs are local-only (`scripts/shard_surnames.py --assemble`).
 
 ## Verification
 
