@@ -1,8 +1,7 @@
 # Cortext
 
-[![Release](https://img.shields.io/github/v/release/augmem/cortext)](https://github.com/augmem/cortext/releases)
+[![Release](https://img.shields.io/github/v/release/augmem/cortext.cpp)](https://github.com/augmem/cortext.cpp/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/augmem.cortext)](https://pypi.org/project/augmem.cortext/)
 [![npm](https://img.shields.io/npm/v/@augmem/cortext)](https://www.npmjs.com/package/@augmem/cortext)
 
 Local multimodal memory for AI apps, agents, devices, and humans.
@@ -13,9 +12,15 @@ relevant memories on later calls. It is designed for long-running assistants
 and realtime applications that need memory without sending an entire history
 window back to an LLM.
 
-Links: [Releases](https://github.com/augmem/cortext/releases) /
-[Python](bindings/python/README.md) /
-[JavaScript](bindings/javascript/README.md) /
+This repository is the **C++ engine** (`augmem/cortext.cpp`). Language packages
+live in sibling repos.
+
+Links: [Releases](https://github.com/augmem/cortext.cpp/releases) /
+[Python](https://github.com/augmem/cortext.py) /
+[TypeScript](https://github.com/augmem/cortext.ts) /
+[Go](https://github.com/augmem/cortext.go) /
+[Dart](https://github.com/augmem/cortext.dart) /
+[WASM](https://github.com/augmem/cortext.wasm) /
 [Paper](docs/paper/_manuscript/index.md) /
 [Roadmap](ROADMAP.md)
 
@@ -41,19 +46,22 @@ Links: [Releases](https://github.com/augmem/cortext/releases) /
 
 Choose the surface you need.
 
-Python:
+Python ([cortext.py](https://github.com/augmem/cortext.py) — GitHub Releases
+wheelhouse, not bare default PyPI):
 
 ```bash
-pip install augmem.cortext
+export CORTEXT_VERSION=1.2.4
+pip install "cortext==${CORTEXT_VERSION}" \
+  --find-links "https://github.com/augmem/cortext.py/releases/download/v${CORTEXT_VERSION}/index.html"
 ```
 
-Node.js / TypeScript:
+Node.js / TypeScript ([cortext.ts](https://github.com/augmem/cortext.ts)):
 
 ```bash
 npm install @augmem/cortext
 ```
 
-C++ from source:
+C++ from this engine repo:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -312,31 +320,25 @@ scores, usage counts, and optional soft-anchor metadata:
 For C++ callers, `Memory::content` is already raw bytes. For JSON callers,
 decode `content[].base64` according to `mimetype`.
 
-## Bindings
+## Language packages (standalone)
 
-- Python: `bindings/python`, published as `augmem.cortext`
-- JavaScript/TypeScript: `bindings/javascript`, published as `@augmem/cortext`
-- Go: `bindings/go`
-- Dart: `bindings/dart`
-- WebAssembly: `bindings/wasm`
+Language bindings are **not** vendored in this engine repository. Use:
 
-Build Python wheels with bundled native libraries:
+| Language | Repo | Package |
+| --- | --- | --- |
+| Python | [augmem/cortext.py](https://github.com/augmem/cortext.py) | `cortext` (GitHub Releases wheelhouse) |
+| TypeScript / Node | [augmem/cortext.ts](https://github.com/augmem/cortext.ts) | npm `@augmem/cortext` |
+| Go | [augmem/cortext.go](https://github.com/augmem/cortext.go) | `github.com/augmem/cortext.go` |
+| Dart | [augmem/cortext.dart](https://github.com/augmem/cortext.dart) | pub `cortext` |
+| WebAssembly | [augmem/cortext.wasm](https://github.com/augmem/cortext.wasm) | npm `@augmem/cortext-wasm` |
 
-```bash
-python3 scripts/build_python_package.py --zig /path/to/zig --skip-models
-```
+This repo still builds optional **N-API** glue under `ffi/node/` (for producing
+`cortext.node` artifacts consumed by cortext.ts) and **WASM** via
+`./build-wasm.sh` (Emscripten). Shared multi-arch natives and model shards ship
+as GitHub Release assets (`cortext-assets-<version>.tar.gz`).
 
-Build the npm package:
-
-```bash
-python3 scripts/build_javascript_package.py --zig /path/to/zig --skip-models
-```
-
-Registry packages do not embed the 135 MB AIST q8_0 model. Python and npm
-wrappers resolve a bundled/local model if present, otherwise download and
-checksum-verify q8_0 into the user cache on first engine creation. Native C++
-and CLI users should keep the model under `models/` or set
-`CORTEXT_AIST_MODEL_PATH`.
+Native C++ and CLI users should keep the model under `models/` or set
+`CORTEXT_AIST_MODEL_PATH` when not using an embed-on library build.
 
 ### Git-friendly AIST model shards (for language bindings)
 
@@ -354,6 +356,16 @@ Tracked layout (full `.gguf` stays gitignored):
 models/manifest.json
 models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
 models/mdbr-leaf-ir/vocab.txt
+```
+
+Optional surname/forename CSVs used by probe tools follow the same no-LFS
+pattern (`python3 scripts/shard_surnames.py`, full CSVs gitignored):
+
+```text
+data/surnames/manifest.json
+data/surnames/chunks/*.part-*
+data/surnames/country_codes.csv
+data/surnames/LICENSE.txt
 ```
 
 Bindings reassemble parts on first use (verify per-chunk and whole-file SHA-256
@@ -412,7 +424,7 @@ env var — use the paths the runtime and bindings already read
 VERSION=1.2.3   # or the release you want
 ASSETS="$HOME/.cache/augmem/cortext/assets"
 curl -fsSL -o cortext-assets.tgz \
-  "https://github.com/augmem/cortext/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
+  "https://github.com/augmem/cortext.cpp/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
 mkdir -p "$ASSETS"
 tar -xzf cortext-assets.tgz -C "$ASSETS"
 
@@ -435,6 +447,8 @@ behave **as if the model lives inside `libcortext`**:
 
 1. Git stores only under-100 MiB **shards** (no LFS) under
    `models/AIST-87M-GGUF/chunks/` plus `models/manifest.json` and vocab.
+   Optional name CSVs use the same pattern under `data/surnames/chunks/`;
+   reassemble with `python3 scripts/shard_surnames.py --assemble` when needed.
 2. The build **links those shards** (and vocab) into the shared library via
    `.incbin` (`CORTEXT_EMBED_AIST_MODEL=ON`).
 3. On first engine create, `MaterializeEmbeddedAistModel()` **assembles** the
@@ -537,9 +551,9 @@ The browser build uses Emscripten and emits an ES module plus `.wasm` payload:
 ./build-wasm.sh
 ```
 
-The wrapper lives in `bindings/wasm/cortext.js`; the browser demo lives in
-`examples/web/`. For demos, either select the AIST model file in the UI or
-preload it:
+Browser package and wrapper: [augmem/cortext.wasm](https://github.com/augmem/cortext.wasm).
+The in-repo browser demo lives in `examples/web/`. For demos, either select the
+AIST model file in the UI or preload it:
 
 ```bash
 ./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR="$PWD/models"
@@ -568,7 +582,7 @@ Then open `http://localhost:8000/examples/web/`.
 - `src/operations/`: control-loop and memory pipeline operations.
 - `tests/`: Catch2 test suite.
 - `examples/`: benchmarks, demos, and smoke tests.
-- `bindings/`: Python, Go, JavaScript/TypeScript, Dart, and WebAssembly FFI.
+- `ffi/node/`: optional N-API addon source (`addon.cpp`) for Node package builds.
 - `scripts/`, `tools/`: CLI, release packaging, experiment harnesses, and
   offline utilities.
 - `docs/paper/`: manuscript source, generated markdown, and artifacts.

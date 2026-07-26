@@ -895,8 +895,11 @@ if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
     message(FATAL_ERROR "Node.js headers not found under ${CORTEXT_NODE_INCLUDE_DIR}")
   endif()
 
+  # N-API glue for optional Node addon builds consumed by standalone
+  # language packages (e.g. github.com/augmem/cortext.ts). Language-facing
+  # package sources live outside this engine repository.
   add_library(cortext_node MODULE
-    bindings/javascript/src/addon.cpp
+    ffi/node/addon.cpp
   )
   target_compile_features(cortext_node PRIVATE cxx_std_20)
   target_include_directories(cortext_node PRIVATE
@@ -909,8 +912,8 @@ if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
     PREFIX ""
     OUTPUT_NAME "cortext"
     SUFFIX ".node"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bindings/javascript"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bindings/javascript"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ffi/node"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ffi/node"
   )
 
   if(APPLE)

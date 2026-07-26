@@ -1,5 +1,6 @@
 import createCortextModule from "../../build-wasm/dist/wasm/cortext.js";
-import { CortextWasm } from "../../bindings/wasm/cortext.js";
+// Thin demo wrapper (language package: github.com/augmem/cortext.wasm)
+import { CortextWasm } from "./cortext-wasm.js";
 
 const statusEl = document.querySelector("#status");
 const outputEl = document.querySelector("#output");

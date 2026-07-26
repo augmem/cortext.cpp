@@ -1,0 +1,90 @@
+{
+  "schema": "augmem.cortext.surnames.v1",
+  "note": "Surname CSVs are Git-chunked under 100 MiB so they can live in ordinary Git without LFS. Reassemble with `python3 scripts/shard_surnames.py --assemble` (or the probe tool, which assembles on demand).",
+  "assets": [
+    {
+      "filename": "forenames.csv",
+      "sha256": "06be58e5cca902583623aa911218fab3a26fb88b52390606bfcc5ab5a7536eca",
+      "size": 213699759,
+      "chunks": [
+        {
+          "filename": "chunks/forenames.csv.part-000",
+          "sha256": "36f5edf262f406e0f36e8a5c00a4fc62516e6dc1f7a9a63fe0cb8d7a9428d875",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/forenames.csv.part-001",
+          "sha256": "bc160e09fc836239b738b0929922541bf9704d47b8a17fa6dc92f2075392389f",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/forenames.csv.part-002",
+          "sha256": "035d8008b9a7f34a573a0590328a6a2eafb579e41c87eaabece0256f40bb95ff",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/forenames.csv.part-003",
+          "sha256": "1309db1cfa80037717f9055d2eda4821fffe5c231c782cc228bdaa18f4c9ed93",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/forenames.csv.part-004",
+          "sha256": "d6c10c898d2e72c8b7f64f18c92c2a7bc8208c9b49b2228be5ddc9effea65582",
+          "size": 12373167
+        }
+      ]
+    },
+    {
+      "filename": "surnames.csv",
+      "sha256": "d0cb535df5954c5951698984ebdc6038b66c7fdae08cb370d58e410b5c196d54",
+      "size": 360431915,
+      "chunks": [
+        {
+          "filename": "chunks/surnames.csv.part-000",
+          "sha256": "56322829fd0d1f3fba6a5b972012ba924b1ff416174d5590ff02e711537c6bbb",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/surnames.csv.part-001",
+          "sha256": "198451b98da4d08be63d95fd916428b56d6440f17a0fe84147c38bdbf9f53b16",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/surnames.csv.part-002",
+          "sha256": "cc886c5d8a508d630c991a2dd6469628a0047e0042ae06784a6023c9b89fb442",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/surnames.csv.part-003",
+          "sha256": "4dd1c0e0bb9ed2e39b722870e7a03e89e25d3e6b27efdc4653e263cbb18b5e9c",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/surnames.csv.part-004",
+          "sha256": "c20269e9d3a3ae9babb5efe0d3caee48ca5be7dcd805a3dc546e0bfab2581872",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/surnames.csv.part-005",
+          "sha256": "20e9545cad2a76b351bd21fa576e435a71881252cc2dcbe6cf6c38e9258e7de1",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/surnames.csv.part-006",
+          "sha256": "99486d986fd7ff5eaf3ba255f2b8046fc544a916b3a9dae2db7a59eef0bf2420",
+          "size": 50331648
+        },
+        {
+          "filename": "chunks/surnames.csv.part-007",
+          "sha256": "baf21aaf278465989e23a3cb5f47fb3662984a68bb3fe342317a1188534e34e7",
+          "size": 8110379
+        }
+      ]
+    },
+    {
+      "filename": "country_codes.csv",
+      "sha256": "016827751e7066a34f82de8aed7b1e7ad2f6bbf66755bc9234cf51373b38e982",
+      "size": 1226
+    }
+  ]
+}

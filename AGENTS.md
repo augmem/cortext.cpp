@@ -21,21 +21,18 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 ## Languages
 - C++20 - Core engine, public API, examples, and tests live in `CMakeLists.txt`, `src/`, `include/`, `examples/`, and `tests/`.
 - C - Low-level integration code and embedded extensions live in `CMakeLists.txt`, `src/capi.cpp`, `include/cortext/capi.h`, `third_party/sqlite-vec/sqlite-vec.c`, and `third_party/sqlite-objstore/src/*.c`.
-- Python 3.10+ - FFI package metadata is in `bindings/python/pyproject.toml`; experiment and data/model tooling live in `scripts/*.py` and `tools/**/*.py`.
-- Go 1.24 - Go bindings are declared in `bindings/go/go.mod`.
-- JavaScript/TypeScript - Node addon packaging lives in `bindings/javascript/package.json` and native addon source lives in `bindings/javascript/src/addon.cpp`.
+- Python 3.10+ - experiment and data/model tooling live in `scripts/*.py` and `tools/**/*.py`. Language package: standalone `augmem/cortext.py`.
+- Optional N-API - Node addon source lives in `ffi/node/addon.cpp` (package consumers use standalone `augmem/cortext.ts`).
 - CMake - Build orchestration lives in `CMakeLists.txt`, `CMakePresets.json`, `tests/CMakeLists.txt`, `examples/**/CMakeLists.txt`, and `cmake/*.cmake`.
 ## Runtime
 - Native host runtime on macOS/Linux is the default build path in `CMakeLists.txt` and `CMakePresets.json`.
 - Optional WebAssembly runtime is configured through `CMakePresets.json` and `cmake/EmscriptenToolchain.cmake`.
 - CMake + FetchContent + git submodules - native dependency resolution is defined in `CMakeLists.txt` and `.gitmodules`.
-- Binding-specific package managers:
-- Lockfile: missing at the repo root and in `bindings/`.
 ## Frameworks
 - CMake 3.16+ - primary native build system in `CMakeLists.txt`; presets require CMake 3.21+ in `CMakePresets.json`.
 - SQLite 3 - primary persistence layer built from vendored `third_party/sqlite` sources in `CMakeLists.txt` and `include/cortext/store/sqlite_store.hpp`.
 - Eigen 3.4.0 - numeric/vector math dependency fetched in `CMakeLists.txt`.
-- nlohmann/json v3.12.0 - JSON handling for C API responses, binding helpers, and tests in `CMakeLists.txt` and `src/capi.cpp`.
+- nlohmann/json v3.12.0 - JSON handling for C API responses and tests in `CMakeLists.txt` and `src/capi.cpp`.
 - Catch2 v3.5.3 - unit/integration test framework fetched in `tests/CMakeLists.txt`.
 - CTest - test registration and execution live in `CMakeLists.txt` and `tests/CMakeLists.txt`.
 - Emscripten - optional WASM toolchain in `cmake/EmscriptenToolchain.cmake`.
@@ -44,7 +41,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - `ggml` - required AIST GGUF kernel backend for audio/image-capable native builds in `CMakeLists.txt`, `src/models/aist_gguf_encoder.cpp`, and `src/models/ggml_support.hpp`.
 - `sqlite-vec` - embedded vector index for 256-dim embeddings in `CMakeLists.txt`, `src/store/schema.cpp`, and `src/store/extension_loader.cpp`.
 - `sqlite-objstore` - blob/object payload storage in `CMakeLists.txt`, `src/store/schema.cpp`, `src/store/extension_loader.cpp`, and `src/operations/memory_storage.cpp`.
-- Node.js headers / N-API v8 - optional Node addon build path in `CMakeLists.txt` and `bindings/javascript/src/addon.cpp`.
+- Node.js headers / N-API v8 - optional Node addon build path in `CMakeLists.txt` and `ffi/node/addon.cpp`.
 ## Configuration
 - Build toggles are controlled through CMake options in `CMakeLists.txt` and presets in `CMakePresets.json`.
 - Runtime model discovery is handled by encoder/backend resolution in `src/encoder/text_encoder_factory.hpp`, using bundled/default assets or `CORTEXT_AIST_MODEL_PATH` for explicit overrides.
@@ -53,7 +50,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Root build graph: `CMakeLists.txt`
 - Presets: `CMakePresets.json`
 - CI build recipe: `.github/workflows/build.yml`
-- Binding manifests: `bindings/python/pyproject.toml`, `bindings/go/go.mod`, and `bindings/javascript/package.json`
+- Language packages: standalone repos `augmem/cortext.{py,ts,go,dart,wasm}`
 ## Model and Runtime Assets
 - AIST GGUF release model in `models/AIST-87M-GGUF/`
 - Optional fallback/demo embedding assets in `models/mdbr-leaf-ir/`
@@ -61,7 +58,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 ## Platform Requirements
 - C++20-capable compiler and CMake are required by `README.md`, `CMakeLists.txt`, and `.github/workflows/build.yml`; SQLite is built from `third_party/sqlite`.
 - No hosted deployment target is defined in the repo.
-- The shipping artifact is a native shared/static library plus optional examples/bindings built locally from `CMakeLists.txt`.
+- The shipping artifact is a native shared/static library plus optional examples/tools built locally from `CMakeLists.txt`.
 - CI only verifies Linux native build/test on GitHub Actions in `.github/workflows/build.yml`.
 <!-- GSD:stack-end -->
 
@@ -137,7 +134,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Location: `include/cortext/cortext.hpp`, `include/cortext/capi.h`, `src/capi.cpp`
 - Contains: `cortext::Cortext`, the `Context` DTO, config structs, C ABI wrappers, JSON serialization helpers.
 - Depends on: `SignalProcessor`, encoder factory, store implementation.
-- Used by: `examples/topical_chat_analysis/main.cpp`, `bindings/python/cortext/__init__.py`, `bindings/go/cortext.go`, `bindings/javascript/src/addon.cpp`, tests such as `tests/cortext.test.cpp`.
+- Used by: `examples/topical_chat_analysis/main.cpp`, `ffi/node/addon.cpp`, tests such as `tests/cortext.test.cpp`, and standalone language packages.
 - Purpose: Build the runtime graph and choose local model backends.
 - Location: `src/cortext.cpp`, `src/encoder/text_encoder_factory.hpp`
 - Contains: `Cortext::Impl`, operation-pipeline assembly, text encoder selection, context hydration.

@@ -136,6 +136,15 @@ data/raw/
 data/memory_evals/
 data/emotion/
 data/ravdess/
+# Full surname CSVs stay local/build-time only. Git-friendly shards + manifest
+# are tracked so clones work without LFS; reassemble via scripts/shard_surnames.py.
+/data/surnames/*
+!/data/surnames/LICENSE.txt
+!/data/surnames/country_codes.csv
+!/data/surnames/manifest.json
+!/data/surnames/chunks/
+/data/surnames/chunks/*
+!/data/surnames/chunks/*.part-*
 # Full GGUF payloads stay local/build-time only. Git-friendly AIST shards +
 # vocab + manifest are tracked so binding repos can vendor without re-sharding.
 /models/*
