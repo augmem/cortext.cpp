@@ -1509,6 +1509,28 @@ extern "C"
   }
 
   int
+  cortext_process_text_with_media (cortext_handle h, const char *text,
+                                   const char *source_id,
+                                   const cortext_media *media)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !text || !source_id)
+      {
+        set_last_error ("handle, text, and source_id must all be non-NULL");
+        return 1;
+      }
+    if (!valid_media_or_set_error (media))
+      {
+        return 1;
+      }
+
+    return invoke_status_only ([&] {
+      (void)p->ProcessText (std::string (text), std::string (source_id),
+                            media_from_c (media), cortext::Retention::Durable);
+    });
+  }
+
+  int
   cortext_process_audio (cortext_handle h, const float *pcm,
                          size_t num_samples, const char *source_id)
   {
@@ -1719,6 +1741,43 @@ extern "C"
                                  retention);
         },
         include_embedding_from_options (options));
+  }
+
+  char *
+  cortext_process_text_with_media_json (cortext_handle h, const char *text,
+                                        const char *source_id,
+                                        const cortext_media *media)
+  {
+    const cortext_process_json_options options {
+      sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0
+    };
+    return cortext_process_text_with_media_json_with_options (
+        h, text, source_id, media, &options);
+  }
+
+  char *
+  cortext_process_text_with_media_json_with_options (
+      cortext_handle h, const char *text, const char *source_id,
+      const cortext_media *media,
+      const cortext_process_json_options *options)
+  {
+    auto *p = cast_handle (h);
+    if (!p || !text || !source_id)
+      {
+        set_last_error ("handle, text, and source_id must all be non-NULL");
+        return nullptr;
+      }
+    if (!valid_media_or_set_error (media))
+      {
+        return nullptr;
+      }
+
+    const auto retention = retention_from_options (options);
+    return invoke_json ([&] {
+      return p->ProcessText (std::string (text), std::string (source_id),
+                              media_from_c (media), retention);
+    },
+                        include_embedding_from_options (options));
   }
 
   char *

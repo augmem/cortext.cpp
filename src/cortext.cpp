@@ -163,7 +163,6 @@ ValidateImageInput (const std::uint8_t *data, int width, int height,
 }
 #endif
 
-#if !defined(CORTEXT_DISABLE_AUDIO) || !defined(CORTEXT_DISABLE_IMAGE)
 void
 ValidateMedia (const Cortext::Media &media)
 {
@@ -196,7 +195,6 @@ ApplyStoredMedia (Signal &signal, const Cortext::Media &media)
                                                media.data + media.size);
   signal.mimetype = media.mimetype;
 }
-#endif
 
 #if defined(CORTEXT_DISABLE_AUDIO)
 [[noreturn]] void
@@ -438,7 +436,11 @@ PayloadMatchesMemorySurface (const std::string &memory_modality,
     {
       return false;
     }
-  if (memory_modality == "text" || memory_mime == "text/plain"
+  // Text modality can carry caller-provided binary payloads (for example a
+  // token KV cache). Only canonical text/plain payloads require text-content
+  // validation; a custom MIME type declares an opaque payload surface.
+  if (memory_mime == "text/plain"
+      || (memory_mime.empty () && memory_modality == "text")
       || signal_mime == "text/plain")
     {
       return IsLikelyTextPayload (payload);
@@ -2024,6 +2026,61 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
+
+  auto out = impl_->processor->Process (s);
+  const auto process_end = std::chrono::steady_clock::now ();
+  span.SetAttribute ("cortext.candidate_memory_count",
+                     static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
+  span.SetAttribute ("cortext.used_memory_count",
+                     static_cast<std::int64_t> (out.used_memory_ids.size ()));
+  span.SetStatusOk ();
+  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
+  const auto hydrate_start = std::chrono::steady_clock::now ();
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  const auto hydrate_end = std::chrono::steady_clock::now ();
+  hydrate_span.SetStatusOk ();
+  result.encode_ms = ToMillis (encode_end - total_start);
+  result.process_ms = ToMillis (process_end - process_start);
+  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
+  result.total_ms = ToMillis (hydrate_end - total_start);
+  ApplySignalFilterDecision (result.output, filter_decision);
+  return result;
+}
+
+Cortext::Context
+Cortext::ProcessText (const std::string &text, const std::string &source_id,
+                      const Media &media, Retention retention)
+{
+  if (!impl_)
+    {
+      throw std::runtime_error ("Cortext not initialized");
+    }
+  ValidateMedia (media);
+  telemetry::ScopedSpan span ("cortext.api.process_text");
+  const auto total_start = std::chrono::steady_clock::now ();
+  const auto filter_decision = impl_->signal_filter.EvaluateText (text);
+  if (filter_decision.evaluated && !filter_decision.accepted)
+    {
+      span.SetStatusOk ();
+      return MakeFilteredContext (filter_decision, total_start);
+    }
+  std::vector<float> v;
+  telemetry::ScopedSpan encode_span ("cortext.encode");
+  impl_->encoder->EncodeText (text, v);
+  encode_span.SetStatusOk ();
+  const auto encode_end = std::chrono::steady_clock::now ();
+
+  // Build signal with optional caller-provided source payload. Text remains
+  // the canonical embedding input.
+  const auto process_start = std::chrono::steady_clock::now ();
+  cortext::Signal s;
+  s.embedding = ToEigen (RetrievalEmbeddingView (v));
+  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
+  s.timestamp = impl_->NowMillis ();
+  s.source_id = source_id;
+  s.retention = retention;
+  s.modality = "text";
+  ApplyStoredMedia (s, media);
 
   auto out = impl_->processor->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();

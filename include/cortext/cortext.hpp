@@ -161,12 +161,12 @@ public:
     bool signal_filter_text_enabled = false;
   };
 
-  /// @brief Optional source media payload to persist with an audio/image signal.
+  /// @brief Optional source media payload to persist with a signal.
   ///
-  /// Processing still uses the canonical audio/image input passed to
-  /// ProcessAudio/ProcessImage. When Media contains data, those bytes and this
-  /// MIME type become the durable payload instead of the canonical processing
-  /// representation. Media bytes are copied during the call.
+  /// Processing still uses the canonical input passed to ProcessText,
+  /// ProcessAudio, or ProcessImage. When Media contains data, those bytes and
+  /// this MIME type become the durable payload instead of the canonical
+  /// processing representation. Media bytes are copied during the call.
   struct Media
   {
     const std::uint8_t *data = nullptr;
@@ -235,6 +235,16 @@ public:
   /// or Ephemeral for no-storage query.
   /// @return Context with retrieved memories and processing output.
   Context ProcessText (const std::string &text, const std::string &source_id,
+                       Retention retention = Retention::Natural);
+
+  /// @brief Process text while storing caller-provided source media.
+  ///
+  /// The text remains the canonical embedding input. If media contains bytes,
+  /// those bytes are persisted as the signal/memory payload using
+  /// media.mimetype instead of the UTF-8 text bytes. If media is empty, no
+  /// text payload is persisted, matching the audio/image Media overloads.
+  Context ProcessText (const std::string &text, const std::string &source_id,
+                       const Media &media,
                        Retention retention = Retention::Natural);
 
   /// @brief Process text input with an explicit timestamp (ms since epoch).
