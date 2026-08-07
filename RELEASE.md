@@ -7,8 +7,9 @@ the tag or publish the release.
 
 - Version: `1.3.2`
 - Merged feature baseline before release metadata:
-  `aa59e38e93f2b74798f2877132ebb56817fdde8c` (PR #17 — ARM `sqlite-vec`
-  NEON portability; includes PR #16's Windows ARM clang-cl fix).
+  `35629cd8e50bd32a9e85dc4a8557bc3467ec73f8` (PR #18 — final ARM
+  `sqlite-vec` NEON portability helper; includes PR #17 and PR #16's Windows
+  ARM clang-cl fix).
 - Release source: the integrated commit addressed by the annotated `v1.3.2`
   tag; the GitHub release and shared native assets are rebuilt from that exact
   commit.
@@ -50,6 +51,10 @@ the tag or publish the release.
 - Pull request [#17](https://github.com/augmem/cortext.cpp/pull/17) is merged
   at `aa59e38e93f2b74798f2877132ebb56817fdde8c`, preserving signed NEON
   `sqlite-vec` L1 differences on ARM.
+- Pull request [#18](https://github.com/augmem/cortext.cpp/pull/18) is merged
+  at `35629cd8e50bd32a9e85dc4a8557bc3467ec73f8`; final helper commit `c9a0a93c`
+  corresponds to feature head `ad3b7750` and keeps signed/unsigned NEON lanes
+  portable across Apple Clang and GCC ARM builds.
 - Pull request [#11](https://github.com/augmem/cortext.cpp/pull/11) merged at
   `b6709817959b81e4fbbd4b0eb9be0a8102d80eb1` with exact-head GitHub Actions CI
   green: native, architecture-native, AIST embed, WASM browser, sanitizers,
