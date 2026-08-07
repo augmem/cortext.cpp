@@ -118,6 +118,10 @@ option(CORTEXT_ENABLE_MSAN "Enable MemorySanitizer (Clang only)" OFF)
 
 set(CORTEXT_NODE_EXECUTABLE "" CACHE FILEPATH "Path to the node executable used for Node.js addon builds")
 set(CORTEXT_NODE_INCLUDE_DIR "" CACHE PATH "Path to Node.js headers used for Node.js addon builds")
+set(CORTEXT_NODE_LIBRARY "" CACHE FILEPATH
+    "Path to the Node.js node.lib import library used for Windows addon builds")
+set(CORTEXT_NODE_PREFIX "" CACHE PATH
+    "Node.js installation prefix used to locate headers and node.lib")
 
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
@@ -883,13 +887,18 @@ if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
     )
   endif()
 
-  if(NOT CORTEXT_NODE_INCLUDE_DIR)
+  if(NOT CORTEXT_NODE_PREFIX)
     execute_process(
       COMMAND "${CORTEXT_NODE_EXECUTABLE}" -p "require('path').dirname(require('path').dirname(process.execPath))"
       OUTPUT_VARIABLE CORTEXT_NODE_PREFIX
       OUTPUT_STRIP_TRAILING_WHITESPACE
       COMMAND_ERROR_IS_FATAL ANY
     )
+    set(CORTEXT_NODE_PREFIX "${CORTEXT_NODE_PREFIX}" CACHE PATH
+      "Node.js installation prefix used to locate headers and node.lib" FORCE)
+  endif()
+
+  if(NOT CORTEXT_NODE_INCLUDE_DIR)
     set(CORTEXT_NODE_INCLUDE_DIR "${CORTEXT_NODE_PREFIX}/include/node")
   endif()
 
@@ -909,6 +918,27 @@ if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
   )
   target_link_libraries(cortext_node PRIVATE cortext)
+  if(WIN32)
+    if(NOT CORTEXT_NODE_LIBRARY)
+      unset(_cortext_node_library CACHE)
+      find_file(_cortext_node_library NAMES node.lib
+        PATHS
+          "${CORTEXT_NODE_PREFIX}"
+          "${CORTEXT_NODE_PREFIX}/x64"
+          "${CORTEXT_NODE_PREFIX}/lib"
+          "${CORTEXT_NODE_INCLUDE_DIR}/.."
+        NO_DEFAULT_PATH)
+      if(_cortext_node_library)
+        set(CORTEXT_NODE_LIBRARY "${_cortext_node_library}" CACHE FILEPATH
+          "Path to the Node.js node.lib import library used for Windows addon builds" FORCE)
+      endif()
+    endif()
+    if(NOT CORTEXT_NODE_LIBRARY OR NOT EXISTS "${CORTEXT_NODE_LIBRARY}")
+      message(FATAL_ERROR
+        "Node.js node.lib import library not found. Set -DCORTEXT_NODE_LIBRARY=<path/to/node.lib>. ")
+    endif()
+    target_link_libraries(cortext_node PRIVATE "${CORTEXT_NODE_LIBRARY}")
+  endif()
   target_compile_definitions(cortext_node PRIVATE NAPI_VERSION=8)
   set_target_properties(cortext_node PROPERTIES
     PREFIX ""
