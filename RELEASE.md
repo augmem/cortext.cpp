@@ -1,15 +1,16 @@
-# Cortext v1.3.1 Release Artifact
+# Cortext v1.3.2 Release Artifact
 
-This tracked artifact prepares the `v1.3.1` release metadata. It does not create
+This tracked artifact prepares the `v1.3.2` release metadata. It does not create
 the tag or publish the release.
 
 ## Release State
 
-- Version: `1.3.1`
+- Version: `1.3.2`
 - Merged feature baseline before release metadata:
-  `b26bc30ab76bd50731382a15a503c7891d12612a` (PR #13 — Node text-media
-  N-API bridge).
-- Release source: the integrated commit addressed by the annotated `v1.3.1`
+  `35629cd8e50bd32a9e85dc4a8557bc3467ec73f8` (PR #18 — final ARM
+  `sqlite-vec` NEON portability helper; includes PR #17 and PR #16's Windows
+  ARM clang-cl fix).
+- Release source: the integrated commit addressed by the annotated `v1.3.2`
   tag; the GitHub release and shared native assets are rebuilt from that exact
   commit.
 - Product surface: C++ facade, stable C ABI, optional N-API/`ffi/node` addon,
@@ -19,6 +20,11 @@ the tag or publish the release.
 
 ## Highlights
 
+- Includes the Windows ARM clang-cl portability fix: Clang-based ARM builds can
+  embed the AIST model without being rejected by the MSVC-only embed guard.
+- Includes the ARM `sqlite-vec` NEON portability fix: signed int8 L1 absolute
+  differences are reinterpreted before widening so large lane differences are
+  accumulated correctly without sign extension.
 - Adds the Node-API `processTextWithMediaJson` bridge for text processing with
   optional binary media, MIME type, and process options. The bridge consumes
   the merged C/C++ text-media API without adding a second native implementation.
@@ -39,6 +45,16 @@ the tag or publish the release.
 
 ## Verification
 
+- Pull request [#16](https://github.com/augmem/cortext.cpp/pull/16) is merged
+  at `8ac8fbc17b910b3cf1211916bfa5e9f7cc75fe28`, allowing clang-cl for ARM GGML
+  embedding.
+- Pull request [#17](https://github.com/augmem/cortext.cpp/pull/17) is merged
+  at `aa59e38e93f2b74798f2877132ebb56817fdde8c`, preserving signed NEON
+  `sqlite-vec` L1 differences on ARM.
+- Pull request [#18](https://github.com/augmem/cortext.cpp/pull/18) is merged
+  at `35629cd8e50bd32a9e85dc4a8557bc3467ec73f8`; final helper commit `c9a0a93c`
+  corresponds to feature head `ad3b7750` and keeps signed/unsigned NEON lanes
+  portable across Apple Clang and GCC ARM builds.
 - Pull request [#11](https://github.com/augmem/cortext.cpp/pull/11) merged at
   `b6709817959b81e4fbbd4b0eb9be0a8102d80eb1` with exact-head GitHub Actions CI
   green: native, architecture-native, AIST embed, WASM browser, sanitizers,
@@ -53,21 +69,22 @@ the tag or publish the release.
 
 ## Packaging
 
-- GitHub Release includes `cortext-assets-1.3.1.tar.gz` and its `.sha256`,
-  built by `.github/workflows/release-assets.yml` from the tagged tree.
+- Release assets remain core-owned: the GitHub Release includes
+  `cortext-assets-1.3.2.tar.gz` and its `.sha256`, built by
+  `.github/workflows/release-assets.yml` from the tagged tree.
 - Default native libraries embed the shipping AIST q8_0 shards; the release
   asset tree also carries model shards for thin/embed-off consumers.
-- Node prebuilds are built by the standalone `augmem/cortext.ts` release
-  pipeline from this exact `v1.3.1` tag. That pipeline configures CMake with
-  `CORTEXT_BUILD_NODE_BINDINGS=ON`, builds `cortext_node` on its host matrix,
-  and publishes the resulting `cortext.node` artifacts; this repository does
-  not publish Node prebuilds.
+- TypeScript/Node prebuilds consume this exact `v1.3.2` tag through the
+  standalone `augmem/cortext.ts` release pipeline. That pipeline configures
+  CMake with `CORTEXT_BUILD_NODE_BINDINGS=ON`, builds
+  `cortext_node` on its host matrix, and publishes the resulting
+  `cortext.node` artifacts; this repository does not publish Node prebuilds.
 - Language package versions and registry publishing remain owned by the
   standalone sibling repositories, not this engine repository.
 
 ## Version Surfaces
 
-The engine release surfaces report `1.3.1`:
+The engine release surfaces report `1.3.2`:
 
 - `CMakeLists.txt` project version
 - `build.zig` `cortext_version` and library package version
@@ -78,7 +95,7 @@ Language package versions are owned by their standalone sibling repositories.
 
 ## Publish Targets
 
-- GitHub release tag: `v1.3.1` (engine + `cortext-assets-1.3.1.tar.gz`)
+- GitHub release tag: `v1.3.2` (engine + `cortext-assets-1.3.2.tar.gz`)
 - Language packages: see sibling `augmem/cortext.py`, `augmem/cortext.ts`,
   `augmem/cortext.go`, `augmem/cortext.dart`, and `augmem/cortext.wasm`
   repositories.
