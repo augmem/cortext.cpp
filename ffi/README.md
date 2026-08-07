@@ -16,4 +16,6 @@ Language packages are published from sibling repositories:
 - [cortext.wasm](https://github.com/augmem/cortext.wasm)
 
 Enable the Node addon via CMake (`CORTEXT_BUILD_NODE_BINDINGS`) or Zig
-(`-Dnode-addon=true`).
+(`-Dnode-addon=true`). On Windows, CMake searches the Node prefix for
+`node.lib` (including `x64/` and `lib/`); set `-DCORTEXT_NODE_LIBRARY=...` to
+override the import-library path when Node is installed elsewhere.
