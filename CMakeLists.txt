@@ -118,6 +118,8 @@ option(CORTEXT_ENABLE_MSAN "Enable MemorySanitizer (Clang only)" OFF)
 
 set(CORTEXT_NODE_EXECUTABLE "" CACHE FILEPATH "Path to the node executable used for Node.js addon builds")
 set(CORTEXT_NODE_INCLUDE_DIR "" CACHE PATH "Path to Node.js headers used for Node.js addon builds")
+set(CORTEXT_NODE_LIBRARY "" CACHE FILEPATH
+    "Path to the Node.js import library used for Windows addon builds")
 
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
@@ -883,13 +885,13 @@ if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
     )
   endif()
 
+  execute_process(
+    COMMAND "${CORTEXT_NODE_EXECUTABLE}" -p "require('path').dirname(require('path').dirname(process.execPath))"
+    OUTPUT_VARIABLE CORTEXT_NODE_PREFIX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY
+  )
   if(NOT CORTEXT_NODE_INCLUDE_DIR)
-    execute_process(
-      COMMAND "${CORTEXT_NODE_EXECUTABLE}" -p "require('path').dirname(require('path').dirname(process.execPath))"
-      OUTPUT_VARIABLE CORTEXT_NODE_PREFIX
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      COMMAND_ERROR_IS_FATAL ANY
-    )
     set(CORTEXT_NODE_INCLUDE_DIR "${CORTEXT_NODE_PREFIX}/include/node")
   endif()
 
@@ -918,7 +920,28 @@ if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ffi/node"
   )
 
-  if(APPLE)
+  if(WIN32)
+    if(NOT CORTEXT_NODE_LIBRARY)
+      find_file(_cortext_node_library
+        NAMES node.lib
+        PATHS "${CORTEXT_NODE_PREFIX}"
+        PATH_SUFFIXES "" x64 lib
+        NO_DEFAULT_PATH
+      )
+      set(CORTEXT_NODE_LIBRARY "${_cortext_node_library}" CACHE FILEPATH
+        "Path to the Node.js import library used for Windows addon builds"
+        FORCE
+      )
+    endif()
+    if(NOT CORTEXT_NODE_LIBRARY OR NOT EXISTS "${CORTEXT_NODE_LIBRARY}")
+      message(FATAL_ERROR
+        "Node.js import library node.lib was not found under "
+        "${CORTEXT_NODE_PREFIX} (searched the prefix, x64, and lib). "
+        "Set CORTEXT_NODE_LIBRARY to the node.lib path."
+      )
+    endif()
+    target_link_libraries(cortext_node PRIVATE "${CORTEXT_NODE_LIBRARY}")
+  elseif(APPLE)
     target_link_options(cortext_node PRIVATE "-undefined" "dynamic_lookup")
     set_property(TARGET cortext_node APPEND PROPERTY BUILD_RPATH
       "@loader_path/../.."
