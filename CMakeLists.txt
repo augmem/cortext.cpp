@@ -40,6 +40,8 @@ option(CORTEXT_FETCH_GGML
        "Fetch and build bundled ggml when CORTEXT_GGML_SOURCE_DIR is unset" ON)
 option(CORTEXT_USE_SYSTEM_GGML
        "Use preinstalled ggml headers/libraries instead of bundled ggml" OFF)
+option(CORTEXT_ALLOW_CLANGCL_ARM
+       "Allow clang-cl for ARM ggml (requires explicit opt-in)" OFF)
 # Default ON: link Git AIST shards into libcortext; assemble full GGUF at load.
 # Opt out with -DCORTEXT_EMBED_AIST_MODEL=OFF (thin native + external model path).
 # MSVC cannot .incbin shards — configure fails unless you opt out.
@@ -393,6 +395,65 @@ function(cortext_resolve_ggml_source_dir input_dir output_dir)
     "${input_dir}")
 endfunction()
 
+# ggml v0.9.5 rejects MSVC in its ARM guard. Some clang-cl runners report
+# MSVC to CMake, so an explicit opt-in patches only the fetched, pinned source
+# before its subdirectory is added. Keep this exact guard match so a changed
+# ggml tag fails loudly instead of being rewritten by an arbitrary replacement.
+function(cortext_patch_fetched_ggml_arm_guard ggml_source_dir)
+  if(NOT CORTEXT_ALLOW_CLANGCL_ARM)
+    return()
+  endif()
+
+  set(_cortext_ggml_arm_cmake
+      "${ggml_source_dir}/src/ggml-cpu/CMakeLists.txt")
+  if(NOT EXISTS "${_cortext_ggml_arm_cmake}")
+    message(FATAL_ERROR
+      "Expected ggml ARM CMake file is missing: ${_cortext_ggml_arm_cmake}")
+  endif()
+
+  set(_cortext_ggml_arm_guard_old
+      [=[if (MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")]=])
+  set(_cortext_ggml_arm_guard_new
+      [=[if (MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang" AND NOT CORTEXT_ALLOW_CLANGCL_ARM)]=])
+  file(READ "${_cortext_ggml_arm_cmake}" _cortext_ggml_arm_contents)
+  string(FIND "${_cortext_ggml_arm_contents}"
+         "${_cortext_ggml_arm_guard_old}" _cortext_guard_first)
+  string(FIND "${_cortext_ggml_arm_contents}"
+         "${_cortext_ggml_arm_guard_new}" _cortext_guard_new_first)
+  if(_cortext_guard_first LESS 0)
+    if(_cortext_guard_new_first LESS 0)
+      message(FATAL_ERROR
+        "Expected ggml v0.9.5 ARM compiler guard text is missing from "
+        "${_cortext_ggml_arm_cmake}; refusing an unscoped patch")
+    endif()
+    string(FIND "${_cortext_ggml_arm_contents}"
+           "${_cortext_ggml_arm_guard_new}" _cortext_guard_new_last REVERSE)
+    if(NOT _cortext_guard_new_first EQUAL _cortext_guard_new_last)
+      message(FATAL_ERROR
+        "Expected exactly one ggml ARM compiler guard in "
+        "${_cortext_ggml_arm_cmake}; refusing an ambiguous patch")
+    endif()
+    return()
+  elseif(_cortext_guard_new_first GREATER_EQUAL 0)
+    message(FATAL_ERROR
+      "Both original and patched ggml ARM compiler guards are present in "
+      "${_cortext_ggml_arm_cmake}; refusing an ambiguous patch")
+  endif()
+
+  string(FIND "${_cortext_ggml_arm_contents}"
+         "${_cortext_ggml_arm_guard_old}" _cortext_guard_last REVERSE)
+  if(NOT _cortext_guard_first EQUAL _cortext_guard_last)
+    message(FATAL_ERROR
+      "Expected exactly one ggml ARM compiler guard in "
+      "${_cortext_ggml_arm_cmake}; refusing an ambiguous patch")
+  endif()
+
+  string(REPLACE "${_cortext_ggml_arm_guard_old}"
+                 "${_cortext_ggml_arm_guard_new}"
+                 _cortext_ggml_arm_patched "${_cortext_ggml_arm_contents}")
+  file(WRITE "${_cortext_ggml_arm_cmake}" "${_cortext_ggml_arm_patched}")
+endfunction()
+
 set(CORTEXT_GGML_AVAILABLE OFF)
 if(NOT EMSCRIPTEN)
   set(_cortext_ggml_header_path "")
@@ -484,6 +545,7 @@ if(NOT EMSCRIPTEN)
       endif()
       cortext_resolve_ggml_source_dir("${cortext_ggml_source_SOURCE_DIR}"
                                       _cortext_ggml_source_dir)
+      cortext_patch_fetched_ggml_arm_guard("${_cortext_ggml_source_dir}")
     endif()
 
     add_subdirectory("${_cortext_ggml_source_dir}"
