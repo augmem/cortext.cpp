@@ -137,7 +137,7 @@ endif()
 
 set(CORTEXT_EMBEDDED_AIST_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/aist_embed")
 if(CORTEXT_EMBED_AIST_MODEL)
-  if(MSVC)
+  if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     message(FATAL_ERROR
       "CORTEXT_EMBED_AIST_MODEL is not supported with MSVC (.incbin). "
       "Use Clang/GCC, or set -DCORTEXT_EMBED_AIST_MODEL=OFF and provide "
