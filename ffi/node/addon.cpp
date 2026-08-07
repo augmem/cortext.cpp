@@ -563,6 +563,70 @@ ProcessTextJSON (napi_env env, napi_callback_info info)
 }
 
 napi_value
+ProcessTextWithMediaJSON (napi_env env, napi_callback_info info)
+{
+  size_t argc = 5;
+  napi_value args[5];
+  napi_value jsthis;
+  NAPI_RETURN_IF_FAILED (
+      env, napi_get_cb_info (env, info, &argc, args, &jsthis, nullptr));
+  BindingHandle *wrapped = UnwrapHandle (env, jsthis);
+  if (wrapped == nullptr)
+    {
+      return ThrowCortextError (env, "invalid Cortext handle");
+    }
+
+  std::string text;
+  std::string source_id;
+  const uint8_t *media_data = nullptr;
+  size_t media_size = 0;
+  std::string media_mimetype;
+  cortext_process_json_options options{};
+  if (argc < 2 || !GetString (env, args[0], text)
+      || !GetString (env, args[1], source_id))
+    {
+      return ThrowTypeError (
+          env,
+          "processTextWithMediaJson(text, sourceId, media, mediaMimeType) expects strings, optional bytes, and optional string");
+    }
+
+  cortext_media media{};
+  const cortext_media *media_ptr = nullptr;
+  if (argc >= 3 && !IsNullOrUndefined (env, args[2]))
+    {
+      if (!GetUint8Data (env, args[2], &media_data, media_size))
+        {
+          return ThrowTypeError (env, "media must be bytes, null, or undefined");
+        }
+      if (argc >= 4 && !IsNullOrUndefined (env, args[3])
+          && !GetString (env, args[3], media_mimetype))
+        {
+          return ThrowTypeError (env, "mediaMimeType must be a string");
+        }
+      media = cortext_media{ media_data, media_size,
+                             media_mimetype.empty ()
+                                 ? nullptr
+                                 : media_mimetype.c_str () };
+      media_ptr = &media;
+    }
+  if (argc >= 5 && !GetProcessJSONOptions (env, args[4], options))
+    {
+      return ThrowTypeError (env, "process options must be an object");
+    }
+  if (argc < 5)
+    {
+      InitializeProcessJSONOptions (options);
+    }
+
+  return JSONStringResult (
+      env,
+      cortext_process_text_with_media_json_with_options (
+          wrapped->handle, text.c_str (), source_id.c_str (), media_ptr,
+          &options),
+      "cortext_process_text_with_media_json failed");
+}
+
+napi_value
 EmbedTextJSON (napi_env env, napi_callback_info info)
 {
   size_t argc = 1;
@@ -1007,6 +1071,8 @@ Init (napi_env env, napi_value exports)
   const napi_property_descriptor ctor_props[] = {
     { "processTextJson", nullptr, ProcessTextJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
+    { "processTextWithMediaJson", nullptr, ProcessTextWithMediaJSON, nullptr,
+      nullptr, nullptr, napi_default, nullptr },
     { "embedTextJson", nullptr, EmbedTextJSON, nullptr, nullptr, nullptr,
       napi_default, nullptr },
     { "processAudioJson", nullptr, ProcessAudioJSON, nullptr, nullptr, nullptr,
