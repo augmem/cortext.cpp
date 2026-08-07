@@ -2496,6 +2496,43 @@ TEST_CASE ("C API handles NULL handles without a model",
   }
 }
 
+TEST_CASE ("C API text media wrappers accept NULL media as empty media",
+           "[cortext][capi][media][text][aist]")
+{
+  ScopedTempDb temp_db;
+  auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+  REQUIRE (h != nullptr);
+
+  CHECK (cortext_process_text_with_media (
+             h, "canonical", "capi/null-media", nullptr)
+         == 0);
+  REQUIRE (cortext_flush (h) == 0);
+
+  char *json_ptr = cortext_process_text_with_media_json (
+      h, "canonical json", "capi/null-media-json", nullptr);
+  REQUIRE (json_ptr != nullptr);
+  const auto parsed = nlohmann::json::parse (json_ptr);
+  REQUIRE (parsed.at ("boundary_type") == "explicit_turn");
+  REQUIRE (parsed.at ("output").at ("stored_memory_id").is_number_integer ());
+  cortext_string_free (json_ptr);
+  REQUIRE (cortext_flush (h) == 0);
+  cortext_free (h);
+
+  auto store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  for (const char *source_id : { "capi/null-media", "capi/null-media-json" })
+    {
+      const auto rows = store->Execute (
+          "SELECT modality, COALESCE(mime, '') AS mime, "
+          "blob_id IS NULL AS no_blob FROM signals "
+          "WHERE source_id = ? ORDER BY signal_id DESC LIMIT 1",
+          { source_id });
+      REQUIRE (rows.size () == 1);
+      REQUIRE (std::any_cast<std::string> (rows[0].at ("modality")) == "text");
+      REQUIRE (std::any_cast<std::string> (rows[0].at ("mime")).empty ());
+      REQUIRE (AnyToLongLong (rows[0].at ("no_blob")) == 1);
+    }
+}
+
 TEST_CASE ("C API handles NULL inputs correctly",
            "[cortext][capi][safety][aist]")
 {
