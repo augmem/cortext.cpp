@@ -806,6 +806,8 @@ if(EMSCRIPTEN AND BUILD_WASM)
     "_cortext_last_error"
     "_cortext_string_free"
     "_cortext_process_text_json"
+    "_cortext_process_text_with_media_json"
+    "_cortext_process_text_with_media_json_with_options"
     "_cortext_wasm_process_text_json"
     "_cortext_process_audio_json"
     "_cortext_process_image_json"

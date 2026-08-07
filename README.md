@@ -267,6 +267,10 @@ Core calls:
 
 - `ProcessText`, `ProcessAudio`, `ProcessImage`: process a signal (default
   retention is Natural — no forced turn edge; storage via write gate).
+- Media overloads keep the canonical input for embedding and processing.
+  Non-empty caller media replaces the stored payload and MIME type. Empty Media
+  omits the stored payload for all media overloads; legacy calls without Media
+  retain their canonical payload behavior.
 - `Retention::Durable`: force turn boundary + force write (chat convenience).
 - `Retention::Boundary`: force turn boundary only; write gate still applies.
 - `Retention::Ephemeral`: process and retrieve without storing the input.

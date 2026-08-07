@@ -190,13 +190,14 @@ extern "C"
     int signal_filter_text_enabled;
   } cortext_config;
 
-  /// @brief Optional source media payload persisted for audio/image signals.
+  /// @brief Optional source media payload persisted for a processed signal.
   ///
-  /// The canonical process input is still passed through pcm/data arguments.
-  /// When this struct carries bytes, those bytes are stored as the durable
-  /// signal/memory payload using mimetype. Passing NULL, or a struct with
-  /// size == 0, means process without storing an audio/image payload. Media
-  /// bytes are copied during the call.
+  /// The canonical process input is still passed through text/pcm/data
+  /// arguments. When this struct carries bytes, those bytes are stored as the
+  /// durable signal/memory payload using mimetype. NULL or size == 0 omits
+  /// the canonical payload for every overload that accepts media. Legacy
+  /// process functions retain their canonical payload behavior. Media bytes
+  /// are copied during the call.
   typedef struct cortext_media
   {
     const uint8_t *data;
@@ -309,6 +310,15 @@ extern "C"
   /// Any retrieved memories are buffered until cortext_flush().
   CORTEXT_EXPORT int cortext_process_text (cortext_handle h, const char *text,
                                            const char *source_id);
+
+  /// @brief Processes text while storing caller-provided source media bytes.
+  ///
+  /// Text remains the canonical processing input. If media is non-NULL and
+  /// media->size > 0, media->data is stored using media->mimetype instead of
+  /// the canonical UTF-8 text bytes. An empty media omits the stored payload.
+  CORTEXT_EXPORT int cortext_process_text_with_media (
+      cortext_handle h, const char *text, const char *source_id,
+      const cortext_media *media);
 
   /// @brief Processes audio input through the memory system.
   /// @param h Handle to a Cortext instance.
@@ -430,6 +440,18 @@ extern "C"
   /// @brief Processes text input and returns configurable Context JSON.
   CORTEXT_EXPORT char *cortext_process_text_json_with_options (
       cortext_handle h, const char *text, const char *source_id,
+      const cortext_process_json_options *options);
+
+  /// @brief Processes text with source media and returns Context JSON.
+  CORTEXT_EXPORT char *cortext_process_text_with_media_json (
+      cortext_handle h, const char *text, const char *source_id,
+      const cortext_media *media);
+
+  /// @brief Processes text with source media and returns configurable Context
+  /// JSON.
+  CORTEXT_EXPORT char *cortext_process_text_with_media_json_with_options (
+      cortext_handle h, const char *text, const char *source_id,
+      const cortext_media *media,
       const cortext_process_json_options *options);
 
   /// @brief Processes audio input and returns the resulting Context as JSON.

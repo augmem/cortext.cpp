@@ -678,6 +678,91 @@ TEST_CASE ("Cortext media overloads validate source media before encoding",
       std::invalid_argument);
 }
 
+TEST_CASE ("Cortext text media payload overrides storage, not embedding",
+           "[cortext][media][text][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::string &db_path = temp_db.path ();
+
+  auto ctx = cortext::Cortext::Create (cfg, db_path);
+  REQUIRE (ctx != nullptr);
+
+  const std::string text = "canonical text remains the embedding input";
+  const std::vector<unsigned char> supplied_bytes = {
+    0x00, 0x01, 0x7f, 0xff, 0x20
+  };
+  const cortext::Cortext::Media media{
+    supplied_bytes.data (), supplied_bytes.size (),
+    "application/x-token-kv-cache"
+  };
+
+  const auto default_context
+      = ctx->ProcessText (text, "text/default", cortext::Retention::Durable);
+  const auto supplied_context = ctx->ProcessText (
+      text, "text/media", media, cortext::Retention::Durable);
+  const auto empty_media_context = ctx->ProcessText (
+      text, "text/empty-media", cortext::Cortext::Media{},
+      cortext::Retention::Durable);
+  REQUIRE (default_context.output.stored_memory_id.has_value ());
+  REQUIRE (supplied_context.output.stored_memory_id.has_value ());
+  REQUIRE (empty_media_context.output.stored_memory_id.has_value ());
+  ctx->Flush ();
+
+  const auto default_hydrated = ctx->DebugHydrateForTest (
+      { *default_context.output.stored_memory_id }, {});
+  REQUIRE (default_hydrated.retrieved_memory.size () == 1);
+  REQUIRE (default_hydrated.retrieved_memory[0].content.size () == 1);
+  const std::vector<unsigned char> default_bytes (text.begin (), text.end ());
+  REQUIRE (default_hydrated.retrieved_memory[0].content[0] == default_bytes);
+  REQUIRE (default_hydrated.retrieved_memory[0].mimetype == "text/plain");
+
+  const auto supplied_hydrated = ctx->DebugHydrateForTest (
+      { *supplied_context.output.stored_memory_id }, {});
+  REQUIRE (supplied_hydrated.retrieved_memory.size () == 1);
+  REQUIRE (supplied_hydrated.retrieved_memory[0].content.size () == 1);
+  REQUIRE (supplied_hydrated.retrieved_memory[0].content[0] == supplied_bytes);
+  REQUIRE (supplied_hydrated.retrieved_memory[0].mimetype
+           == "application/x-token-kv-cache");
+  // Caller media changes only the stored payload; the canonical text still
+  // drives the same retrieval embedding as the legacy overload.
+  REQUIRE (supplied_context.embedding == default_context.embedding);
+
+  // Empty Media deliberately creates a contentless signal. Hydration omits
+  // contentless memories, so verify the persisted signal row directly.
+  auto store = cortext::SQLiteStore::Create (db_path.c_str ());
+  const auto empty_rows = store->Execute (
+      "SELECT COALESCE(mime, '') AS mime, blob_id IS NULL AS no_blob "
+      "FROM signals WHERE memory_id = ? ORDER BY signal_id DESC LIMIT 1",
+      { *empty_media_context.output.stored_memory_id });
+  REQUIRE (empty_rows.size () == 1);
+  REQUIRE (std::any_cast<std::string> (empty_rows[0].at ("mime")).empty ());
+  REQUIRE (AnyToLongLong (empty_rows[0].at ("no_blob")) == 1);
+}
+
+TEST_CASE ("Cortext text media overload validates media before encoding",
+           "[cortext][media][text][safety][aist]")
+{
+  ScopedTempDb temp_db;
+  auto ctx = cortext::Cortext::Create ({}, temp_db.path ());
+  REQUIRE (ctx != nullptr);
+
+  const std::uint8_t payload[] = { 0x01, 0x02 };
+  const cortext::Cortext::Media missing_data{
+    nullptr, sizeof (payload), "text/plain"
+  };
+  const cortext::Cortext::Media missing_mime{
+    payload, sizeof (payload), ""
+  };
+
+  REQUIRE_THROWS_AS (
+      ctx->ProcessText ("text", "text/source", missing_data),
+      std::invalid_argument);
+  REQUIRE_THROWS_AS (
+      ctx->ProcessText ("text", "text/source", missing_mime),
+      std::invalid_argument);
+}
+
 TEST_CASE ("Cortext media ingress validates processing inputs before use",
            "[cortext][media][safety][aist]")
 {
@@ -2411,6 +2496,43 @@ TEST_CASE ("C API handles NULL handles without a model",
   }
 }
 
+TEST_CASE ("C API text media wrappers accept NULL media as empty media",
+           "[cortext][capi][media][text][aist]")
+{
+  ScopedTempDb temp_db;
+  auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+  REQUIRE (h != nullptr);
+
+  CHECK (cortext_process_text_with_media (
+             h, "canonical", "capi/null-media", nullptr)
+         == 0);
+  REQUIRE (cortext_flush (h) == 0);
+
+  char *json_ptr = cortext_process_text_with_media_json (
+      h, "canonical json", "capi/null-media-json", nullptr);
+  REQUIRE (json_ptr != nullptr);
+  const auto parsed = nlohmann::json::parse (json_ptr);
+  REQUIRE (parsed.at ("boundary_type") == "explicit_turn");
+  REQUIRE (parsed.at ("output").at ("stored_memory_id").is_number_integer ());
+  cortext_string_free (json_ptr);
+  REQUIRE (cortext_flush (h) == 0);
+  cortext_free (h);
+
+  auto store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  for (const char *source_id : { "capi/null-media", "capi/null-media-json" })
+    {
+      const auto rows = store->Execute (
+          "SELECT modality, COALESCE(mime, '') AS mime, "
+          "blob_id IS NULL AS no_blob FROM signals "
+          "WHERE source_id = ? ORDER BY signal_id DESC LIMIT 1",
+          { source_id });
+      REQUIRE (rows.size () == 1);
+      REQUIRE (std::any_cast<std::string> (rows[0].at ("modality")) == "text");
+      REQUIRE (std::any_cast<std::string> (rows[0].at ("mime")).empty ());
+      REQUIRE (AnyToLongLong (rows[0].at ("no_blob")) == 1);
+    }
+}
+
 TEST_CASE ("C API handles NULL inputs correctly",
            "[cortext][capi][safety][aist]")
 {
@@ -2452,6 +2574,19 @@ TEST_CASE ("C API handles NULL inputs correctly",
     CHECK (cortext_process_text (h, "text", nullptr) == 1);
     REQUIRE (std::string (cortext_last_error ())
              == "handle, text, and source_id must all be non-NULL");
+    cortext_free (h);
+  }
+
+  SECTION ("cortext_process_text_with_media rejects invalid media")
+  {
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    const std::uint8_t payload[2] = { 0x01, 0x02 };
+    cortext_media media{ nullptr, sizeof (payload), "text/plain" };
+    CHECK (cortext_process_text_with_media (h, "text", "src", &media) == 1);
+    REQUIRE (std::string (cortext_last_error ())
+             == "media data must be non-NULL when media size is non-zero");
     cortext_free (h);
   }
 
@@ -2537,6 +2672,27 @@ TEST_CASE ("C API handles NULL inputs correctly",
     cortext_media media{ media_bytes, sizeof (media_bytes), "audio/wav" };
     char *json_ptr = cortext_process_audio_with_media_json (
         h, pcm.data (), pcm.size (), "legacy/media", &media);
+    REQUIRE (json_ptr != nullptr);
+    const auto parsed = nlohmann::json::parse (json_ptr);
+    REQUIRE (parsed.at ("boundary_type") == "explicit_turn");
+    REQUIRE (parsed.at ("output").at ("stored_memory_id").is_number_integer ());
+    cortext_string_free (json_ptr);
+    cortext_free (h);
+  }
+
+  SECTION ("text-with-media C API wrappers preserve media payload contract")
+  {
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    const std::uint8_t payload[4] = { 0x00, 0x7f, 0xff, 0x01 };
+    cortext_media media{ payload, sizeof (payload), "text/custom" };
+
+    CHECK (cortext_process_text_with_media (h, "canonical", "capi/media",
+                                            &media)
+           == 0);
+    char *json_ptr = cortext_process_text_with_media_json (
+        h, "canonical json", "capi/media-json", &media);
     REQUIRE (json_ptr != nullptr);
     const auto parsed = nlohmann::json::parse (json_ptr);
     REQUIRE (parsed.at ("boundary_type") == "explicit_turn");
