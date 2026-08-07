@@ -425,7 +425,7 @@ env var — use the paths the runtime and bindings already read
 (`CORTEXT_LIBRARY_PATH`, `CORTEXT_AIST_MODEL_PATH`):
 
 ```bash
-VERSION=1.2.3   # or the release you want
+VERSION=1.3.0   # or the release you want
 ASSETS="$HOME/.cache/augmem/cortext/assets"
 curl -fsSL -o cortext-assets.tgz \
   "https://github.com/augmem/cortext.cpp/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
