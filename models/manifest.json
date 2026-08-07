@@ -1,6 +1,6 @@
 {
   "schema": "augmem.cortext.models.v1",
-  "cortext_version": "1.3.2",
+  "cortext_version": "1.3.3",
   "note": "AIST model is Git-chunked under 100 MiB so it can live in ordinary Git without LFS. Language bindings reassemble and checksum on first use; do not re-shard in binding repos \u2014 copy this tree from cortext.",
   "assets": [
     {
