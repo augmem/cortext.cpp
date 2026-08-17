@@ -14,7 +14,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#include "win_posix.h"
+#else
 #include <unistd.h>
+#endif
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>

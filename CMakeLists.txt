@@ -721,6 +721,7 @@ if(CORTEXT_EMBED_OBJSTORE)
   if(WIN32)
     list(APPEND CORTEXT_OBJSTORE_SRCS
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/src/win_dirent.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/src/win_posix.c
     )
   endif()
   if(CORTEXT_TARGET_AARCH64)

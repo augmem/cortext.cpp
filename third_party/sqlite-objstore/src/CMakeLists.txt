@@ -80,7 +80,7 @@ if(OBJSTORE_BACKEND_VFS)
 endif()
 
 if(WIN32)
-    list(APPEND OBJSTORE_SOURCES win_dirent.c)
+    list(APPEND OBJSTORE_SOURCES win_dirent.c win_posix.c)
 endif()
 
 function(_objstore_configure_library target)

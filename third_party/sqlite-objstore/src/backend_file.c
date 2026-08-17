@@ -28,8 +28,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#include "win_posix.h"
+#else
 #include <unistd.h>
-#if !defined(_WIN32)
 #include <sys/file.h>
 #endif
 #if defined(__linux__)
