@@ -718,6 +718,11 @@ if(CORTEXT_EMBED_OBJSTORE)
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/src/backend_sqlite.c
     )
   endif()
+  if(WIN32)
+    list(APPEND CORTEXT_OBJSTORE_SRCS
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/src/win_dirent.c
+    )
+  endif()
   if(CORTEXT_TARGET_AARCH64)
     list(APPEND CORTEXT_OBJSTORE_SRCS
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/third_party/blake3/blake3_neon.c

@@ -79,6 +79,10 @@ if(OBJSTORE_BACKEND_VFS)
     list(APPEND OBJSTORE_SOURCES backend_vfs.c)
 endif()
 
+if(WIN32)
+    list(APPEND OBJSTORE_SOURCES win_dirent.c)
+endif()
+
 function(_objstore_configure_library target)
     target_include_directories(${target}
         PUBLIC

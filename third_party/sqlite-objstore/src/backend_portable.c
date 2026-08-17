@@ -1,6 +1,10 @@
 #include "backend_portable.h"
 
+#if defined(_WIN32)
+#include "win_dirent.h"
+#else
 #include <dirent.h>
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <stddef.h>

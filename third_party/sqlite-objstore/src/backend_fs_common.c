@@ -1,6 +1,10 @@
 #include "backend_fs_common.h"
 
+#if defined(_WIN32)
+#include "win_dirent.h"
+#else
 #include <dirent.h>
+#endif
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
