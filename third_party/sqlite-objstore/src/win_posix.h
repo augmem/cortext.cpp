@@ -51,6 +51,12 @@
 #define LOCK_NB 4
 #define LOCK_UN 8
 #endif
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
 
 #ifdef __cplusplus
 extern "C" {
