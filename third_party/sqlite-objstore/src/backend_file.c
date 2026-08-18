@@ -51,7 +51,7 @@ extern int fallocate (int fd, int mode, off_t offset, off_t len);
 #define FILE_BACKEND_ROWIDX_MARKER ".ready"
 #define FILE_BACKEND_ROWIDX_SHARD_CHARS 2u
 
-static const size_t kObjstoreIdHexChars = OBJSTORE_ID_SIZE * 2u;
+#define kObjstoreIdHexChars (OBJSTORE_ID_SIZE * 2u)
 
 typedef struct file_backend_env
 {
