@@ -1384,9 +1384,20 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
 
           // Existing adjacency is derived from the stored embedding. Keeping
           // those links after an embedding moves can make the row-addressed
-          // route silently miss its exact target. Invalidate the generation
-          // and let the bounded backfill rebuild it instead of publishing a
-          // mixed old-topology/new-vector snapshot.
+          // route silently miss its exact target, so a moved active node is
+          // relinked locally instead: its old outbound adjacency is replaced
+          // by neighbors selected for the moved vector, and the same
+          // reciprocal path used for a new node links it from its new
+          // neighborhood. Inbound links held by old neighbors are kept: a
+          // traversal always scores a reached row by its stored vector, so a
+          // stale inbound edge is an extra path rather than a wrong answer,
+          // while stripping those edges measurably lowered reachability of
+          // unrelated rows. The relink slice is bounded by B, the same
+          // knob-derived row count one backfill seal inserts; a larger moved
+          // slice still invalidates the generation and lets the bounded
+          // backfill rebuild it instead of publishing a mixed
+          // old-topology/new-vector snapshot.
+          std::unordered_set<long long> moved;
           bool topology_requires_rebuild = false;
           for (const auto &[memory_id, embedding] : impl_->delta_embeddings)
             {
@@ -1394,13 +1405,17 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               if (prior == prior_by_id.end () || !prior->second.active)
                 continue;
               constexpr float kEmbeddingMovementEpsilon = 1e-6f;
-              topology_requires_rebuild
-                  = prior->second.embedding.size () != embedding.size ()
-                    || Distance (embedding, prior->second.embedding)
-                           > kEmbeddingMovementEpsilon;
-              if (topology_requires_rebuild)
-                break;
+              if (prior->second.embedding.size () != embedding.size ())
+                {
+                  topology_requires_rebuild = true;
+                  break;
+                }
+              if (Distance (embedding, prior->second.embedding)
+                  > kEmbeddingMovementEpsilon)
+                moved.insert (memory_id);
             }
+          if (moved.size () > impl_->parameters.backfill_batch_size)
+            topology_requires_rebuild = true;
           if (topology_requires_rebuild)
             {
               impl_->last_seal_failure_code = 62;
@@ -1447,6 +1462,7 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               const auto removed = impl_->removed.count (memory_id) != 0;
               const auto delta = impl_->delta_embeddings.find (memory_id);
               const auto prior = prior_by_id.find (memory_id);
+              const bool relink = moved.count (memory_id) != 0;
               if (removed)
                 {
                   if (prior == prior_by_id.end ())
@@ -1461,7 +1477,7 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               if (delta == impl_->delta_embeddings.end ())
                 continue;
 
-              if (prior != prior_by_id.end ())
+              if (prior != prior_by_id.end () && !relink)
                 {
                   NodeRow node = prior->second;
                   if (!node.active)
@@ -1532,8 +1548,12 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               NodeRow node;
               node.memory_id = memory_id;
               node.embedding = delta->second;
-              node.level = DeterministicLevel (
-                  memory_id, impl_->parameters.maximum_level);
+              // A relinked node keeps its persisted level so the canonical
+              // hierarchy entry and max-level metadata stay valid.
+              node.level = relink ? prior->second.level
+                                  : DeterministicLevel (
+                                      memory_id,
+                                      impl_->parameters.maximum_level);
               node.links.resize (static_cast<std::size_t> (node.level + 1));
               node.active = true;
               for (int level = 0; level <= node.level; ++level)
@@ -1555,9 +1575,28 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                       if (links.size () >= link_limit)
                         break;
                     }
+                  // Upper-level members are sparse in the proposal set, so a
+                  // relinked hierarchy node keeps its prior upper-level
+                  // links behind the new ones. Level zero, which owns exact
+                  // locality, is rebuilt only from the moved vector.
+                  if (relink && level > 0)
+                    for (const long long prior_link :
+                         prior->second.links[static_cast<std::size_t> (
+                             level)])
+                      {
+                        if (links.size () >= link_limit)
+                          break;
+                        if (prior_link != memory_id
+                            && impl_->removed.count (prior_link) == 0
+                            && std::find (links.begin (), links.end (),
+                                          prior_link)
+                                   == links.end ())
+                          links.push_back (prior_link);
+                      }
                 }
               updates[memory_id] = node;
-              ++next_active_count;
+              if (!relink)
+                ++next_active_count;
               if (next_entry_memory_id == 0 || node.level > next_max_level)
                 {
                   next_entry_memory_id = memory_id;
