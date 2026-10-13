@@ -354,10 +354,21 @@ ApplyRetrievalScore (Cortext::Context::Memory &memory,
   memory.relevance = ranked->relevance;
 }
 
+// An object-store read transaction shared by a run of hydrations, so each
+// payload read does not open and commit a transaction of its own. Reads only:
+// the run must not write. object_tx is set when the cortext has an object
+// store, else db_tx is the metadata transaction objects are read through.
+struct SharedObjectReads
+{
+  ObjectTransaction *object_tx = nullptr;
+  Transaction *db_tx = nullptr;
+};
+
 bool
 LoadObjectPayload (Store *store, ObjectStore *object_store,
                    const std::vector<unsigned char> &blob_id,
-                   std::vector<unsigned char> &out)
+                   std::vector<unsigned char> &out,
+                   SharedObjectReads *shared = nullptr)
 {
   if (blob_id.empty ())
     {
@@ -365,7 +376,18 @@ LoadObjectPayload (Store *store, ObjectStore *object_store,
     }
   try
     {
-      if (object_store)
+      if (shared && (shared->object_tx || shared->db_tx))
+        {
+          auto payload = shared->object_tx
+                             ? shared->object_tx->Get (blob_id)
+                             : GetObject (nullptr, *shared->db_tx, blob_id);
+          if (payload && !payload->empty ())
+            {
+              out = std::move (*payload);
+              return true;
+            }
+        }
+      else if (object_store)
         {
           auto tx = object_store->Begin ();
           auto payload = tx->Get (blob_id);
@@ -458,7 +480,8 @@ LoadSignalBlobs (Store *store, long long memory_id,
                  const std::string &memory_mime,
                  int max_signal_blobs,
                  std::size_t *loaded_signal_blobs,
-                 std::vector<std::vector<unsigned char>> &out)
+                 std::vector<std::vector<unsigned char>> &out,
+                 SharedObjectReads *shared = nullptr)
 {
   if (!store || memory_id <= 0)
     return false;
@@ -508,7 +531,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
                     {
                       std::vector<unsigned char> payload;
                       if (LoadObjectPayload (store, object_store, blob_id,
-                                             payload))
+                                             payload, shared))
                         {
                           const std::string signal_modality
                               = RowString (row, "modality");
@@ -563,13 +586,14 @@ LoadContentBlob (Store *store, ObjectStore *object_store,
                  const std::vector<unsigned char> &blob_id,
                  const std::string &memory_modality,
                  const std::string &memory_mime,
-                 std::vector<std::vector<unsigned char>> &out)
+                 std::vector<std::vector<unsigned char>> &out,
+                 SharedObjectReads *shared = nullptr)
 {
   if (!store || blob_id.empty ())
     return false;
 
   std::vector<unsigned char> payload;
-  if (LoadObjectPayload (store, object_store, blob_id, payload)
+  if (LoadObjectPayload (store, object_store, blob_id, payload, shared)
       && PayloadMatchesMemorySurface (memory_modality, memory_mime,
                                       memory_modality, memory_mime, payload))
     {
@@ -655,7 +679,9 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
                Cortext::Context::Memory &m,
                int max_hydrated_soft_anchors,
                int max_fallback_signal_blobs,
-               std::size_t *loaded_fallback_signal_blobs)
+               std::size_t *loaded_fallback_signal_blobs,
+               bool load_soft_anchors = true,
+               SharedObjectReads *shared = nullptr)
 {
   if (!store)
     return;
@@ -741,7 +767,8 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             {
               std::vector<unsigned char> payload;
               if (LoadObjectPayload (store, object_store,
-                                     reconstruction->blob_id, payload)
+                                     reconstruction->blob_id, payload,
+                                     shared)
                   && PayloadMatchesMemorySurface (
                       m.modality, m.mimetype, m.modality, m.mimetype, payload))
                 {
@@ -753,7 +780,7 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             {
               const auto blob_id = get_blob ("blob_id");
               LoadContentBlob (store, object_store, blob_id, m.modality,
-                               m.mimetype, m.content);
+                               m.mimetype, m.content, shared);
             }
 
           if (m.content.empty ())
@@ -762,7 +789,7 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
               LoadSignalBlobs (store, memory_id, object_store, m.modality,
                                m.mimetype, max_fallback_signal_blobs,
                                loaded_fallback_signal_blobs,
-                               m.content);
+                               m.content, shared);
             }
 
           // v2: Counts are inline on memories table
@@ -785,8 +812,9 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           m.arousal = 0.0;
           m.composite_score = 0.0;
           m.threshold_t = 0.0;
-          LoadSoftAnchors (store, memory_id, m.soft_anchors,
-                           max_hydrated_soft_anchors);
+          if (load_soft_anchors)
+            LoadSoftAnchors (store, memory_id, m.soft_anchors,
+                             max_hydrated_soft_anchors);
         }
     }
   catch (const std::exception &e)
@@ -859,6 +887,704 @@ LoadMemoryKind (Store *store, long long memory_id)
             telemetry::Attribute::String ("error", e.what ()) });
     }
   return {};
+}
+
+// Episodic contiguity completion for retrieved conversational turns.
+//
+// Recalling one moment of a conversation brings back what was said around it
+// (the temporal-contiguity effect of episodic recall), and the effect fades
+// with distance. A retrieved turn is rarely self-contained: a question's
+// answer, the statement an acknowledgement refers to, or the user message an
+// assistant reply was written for lives one or two turns away. For each
+// retrieved text turn, the adjacent turns from the same source stream
+// (adjacent LONG_TERM rows in write order, within a short time gap) are
+// hydrated as extra content blobs of that same retrieved memory, clipped and
+// under a per-context byte budget: first the immediate successor and
+// predecessor of every anchor in rank order, then, with what budget is left,
+// the turns two steps away. Cost is O(anchors): primary-key range lookups
+// bounded by a fixed id span plus one indexed supersession check per
+// neighbor, issued as two statements (lag 1, lag 2) for all anchors. Ranking
+// and the number of retrieved memories are unchanged.
+constexpr std::size_t kContiguityAnchorLimit = 11;
+constexpr std::size_t kContiguityLag2AnchorLimit = 6;
+constexpr std::size_t kContiguityNeighborMaxBytes = 480;
+constexpr std::size_t kContiguityContextBudgetBytes = 6144;
+constexpr long long kContiguityIdScanSpan = 16;
+constexpr long long kContiguityMaxGapMs = 30LL * 60LL * 1000LL;
+
+bool
+IsTextSurface (const std::string &modality, const std::string &mimetype)
+{
+  return modality == "text"
+         && (mimetype.empty () || mimetype.rfind ("text/", 0) == 0);
+}
+
+std::string
+SourceStreamOf (const std::string &source_id)
+{
+  const auto slash = source_id.rfind ('/');
+  return slash == std::string::npos ? source_id : source_id.substr (0, slash);
+}
+
+long long
+RowLongLong (const std::map<std::string, std::any> &row, const char *key)
+{
+  const auto it = row.find (key);
+  if (it == row.end () || !it->second.has_value ())
+    {
+      return 0;
+    }
+  return store::AnyToLongLong (it->second).value_or (0);
+}
+
+// Clip text bytes to max_bytes on a UTF-8 code point boundary.
+std::vector<unsigned char>
+ClipTextBlob (const std::vector<unsigned char> &text, std::size_t max_bytes)
+{
+  if (text.size () <= max_bytes)
+    {
+      return text;
+    }
+  std::size_t cut = max_bytes;
+  while (cut > 0 && (text[cut] & 0xC0u) == 0x80u)
+    {
+      --cut;
+    }
+  std::vector<unsigned char> out (text.begin (),
+                                  text.begin () + static_cast<std::ptrdiff_t> (cut));
+  static constexpr char kEllipsis[] = "...";
+  out.insert (out.end (), kEllipsis, kEllipsis + 3);
+  return out;
+}
+
+// Hydrations for the attachment steps, which read but never write. A memory
+// a step hydrates again (a neighbour that did not fit the budget, a
+// predecessor that is also a neighbour of another anchor) is served from the
+// first hydration; the fallback signal rows that hydration loaded are counted
+// again, as a fresh hydration would count them. Payload reads go through one
+// shared object-store transaction when one is supplied.
+class AttachmentHydrations
+{
+public:
+  AttachmentHydrations (Store *store, ObjectStore *object_store,
+                        SharedObjectReads *shared,
+                        int max_fallback_signal_blobs,
+                        std::size_t *loaded_fallback_signal_blobs)
+      : store_ (store), object_store_ (object_store), shared_ (shared),
+        max_fallback_signal_blobs_ (max_fallback_signal_blobs),
+        loaded_fallback_signal_blobs_ (loaded_fallback_signal_blobs)
+  {
+  }
+
+  // Text of a memory to attach to another memory's content: its content
+  // blobs joined by spaces and clipped to max_bytes, or empty when the
+  // memory has no text surface. Soft anchors are not loaded.
+  std::vector<unsigned char>
+  AttachedText (long long memory_id, std::size_t max_bytes)
+  {
+    const Hydrated &memory = Hydrate (memory_id);
+    if (!IsTextSurface (memory.modality, memory.mimetype)
+        || !memory.has_content)
+      {
+        return {};
+      }
+    std::vector<unsigned char> text;
+    for (const auto &blob : memory.content)
+      {
+        if (blob.empty ())
+          {
+            continue;
+          }
+        if (!text.empty ())
+          {
+            text.push_back (' ');
+          }
+        text.insert (text.end (), blob.begin (), blob.end ());
+        if (text.size () > max_bytes)
+          {
+            break;
+          }
+      }
+    return ClipTextBlob (text, max_bytes);
+  }
+
+private:
+  struct Hydrated
+  {
+    std::string modality;
+    std::string mimetype;
+    std::vector<std::vector<unsigned char> > content;
+    bool has_content = false;
+    std::size_t fallback_signal_blobs = 0;
+  };
+
+  const Hydrated &
+  Hydrate (long long memory_id)
+  {
+    auto it = cache_.find (memory_id);
+    if (it == cache_.end ())
+      {
+        Cortext::Context::Memory memory;
+        std::size_t fallback_signal_blobs = 0;
+        HydrateMemory (store_, object_store_, memory_id, memory, 1,
+                       max_fallback_signal_blobs_, &fallback_signal_blobs,
+                       false, shared_);
+        Hydrated hydrated;
+        hydrated.modality = std::move (memory.modality);
+        hydrated.mimetype = std::move (memory.mimetype);
+        hydrated.has_content = HasHydratedContent (memory);
+        hydrated.content = std::move (memory.content);
+        hydrated.fallback_signal_blobs = fallback_signal_blobs;
+        it = cache_.emplace (memory_id, std::move (hydrated)).first;
+      }
+    if (loaded_fallback_signal_blobs_)
+      {
+        *loaded_fallback_signal_blobs_ += it->second.fallback_signal_blobs;
+      }
+    return it->second;
+  }
+
+  Store *store_;
+  ObjectStore *object_store_;
+  SharedObjectReads *shared_;
+  int max_fallback_signal_blobs_;
+  std::size_t *loaded_fallback_signal_blobs_;
+  std::unordered_map<long long, Hydrated> cache_;
+};
+
+// A step from a turn to the adjacent LONG_TERM turn in an anchor's stream.
+struct ContiguityProbe
+{
+  long long position_id = 0;
+  long long anchor_start_ts = 0;
+  std::string anchor_stream;
+  bool forward = false;
+};
+
+// The adjacent turn a probe found.
+struct ContiguousTurn
+{
+  // The adjacent turn when it belongs to the same stretch of conversation
+  // (same stream, inside the contiguity gap), else 0. A walk continues from
+  // it even when it is not attachable.
+  long long position_id = 0;
+  // Set to position_id when the turn is a text turn not hidden by a
+  // correction from the same stretch of conversation.
+  long long memory_id = 0;
+};
+
+// Resolves every probe in one statement: one UNION ALL arm per probe, each
+// a primary-key range lookup bounded by a fixed id span plus one indexed
+// supersession check. Forward arms come first so the statement text depends
+// only on how many probes go each way. Supersessions from other
+// conversations are topical successors and do not hide the turn.
+std::vector<ContiguousTurn>
+FindContiguousTurns (Store *store, const std::vector<ContiguityProbe> &probes)
+{
+  std::vector<ContiguousTurn> turns (probes.size ());
+  if (!store || probes.empty ())
+    {
+      return turns;
+    }
+  std::string sql;
+  std::vector<std::any> params;
+  params.reserve (probes.size () * 9);
+  for (const bool forward : { true, false })
+    {
+      for (std::size_t k = 0; k < probes.size (); ++k)
+        {
+          const auto &probe = probes[k];
+          if (probe.forward != forward)
+            {
+              continue;
+            }
+          if (!sql.empty ())
+            {
+              sql += " UNION ALL ";
+            }
+          sql += "SELECT ? AS probe, n.memory_id, n.start_ts, n.source_id, "
+                 "  n.modality, "
+                 "  EXISTS (SELECT 1 FROM associations a "
+                 "          JOIN memories c ON c.memory_id = a.source_memory_id "
+                 "          WHERE a.target_memory_id = n.memory_id "
+                 "            AND a.edge_type = 'supersedes' "
+                 "            AND c.start_ts BETWEEN n.start_ts - ? "
+                 "                               AND n.start_ts + ? "
+                 "            AND ((c.source_id >= ? AND c.source_id < ? "
+                 "                  AND instr(substr(c.source_id, ?), '/') = 0) "
+                 "                 OR (c.source_id = ? "
+                 "                     AND instr(c.source_id, '/') = 0))) "
+                 "    AS corrected "
+                 "FROM (SELECT memory_id, start_ts, source_id, modality "
+                 "      FROM memories WHERE ";
+          sql += forward ? "memory_id > ? AND memory_id <= ? "
+                           "AND kind = 'LONG_TERM' "
+                           "ORDER BY memory_id ASC LIMIT 1) n"
+                         : "memory_id < ? AND memory_id >= ? "
+                           "AND kind = 'LONG_TERM' "
+                           "ORDER BY memory_id DESC LIMIT 1) n";
+          const std::string stream_prefix = probe.anchor_stream + "/";
+          const std::string stream_end
+              = probe.anchor_stream + "0"; // '0' follows '/'
+          const long long bound
+              = forward ? probe.position_id + kContiguityIdScanSpan
+                        : probe.position_id - kContiguityIdScanSpan;
+          params.emplace_back (static_cast<long long> (k));
+          params.emplace_back (kContiguityMaxGapMs);
+          params.emplace_back (kContiguityMaxGapMs);
+          params.emplace_back (stream_prefix);
+          params.emplace_back (stream_end);
+          params.emplace_back (
+              static_cast<long long> (stream_prefix.size () + 1));
+          params.emplace_back (probe.anchor_stream);
+          params.emplace_back (probe.position_id);
+          params.emplace_back (bound);
+        }
+    }
+  const auto rows = store->Execute (sql, params);
+  for (const auto &row : rows)
+    {
+      const long long k = RowLongLong (row, "probe");
+      if (k < 0 || static_cast<std::size_t> (k) >= probes.size ())
+        {
+          continue;
+        }
+      const auto &probe = probes[static_cast<std::size_t> (k)];
+      const long long neighbor_id = RowLongLong (row, "memory_id");
+      if (neighbor_id <= 0
+          || SourceStreamOf (RowString (row, "source_id"))
+                 != probe.anchor_stream)
+        {
+          continue;
+        }
+      const long long gap
+          = RowLongLong (row, "start_ts") - probe.anchor_start_ts;
+      if (gap > kContiguityMaxGapMs || gap < -kContiguityMaxGapMs)
+        {
+          continue;
+        }
+      auto &turn = turns[static_cast<std::size_t> (k)];
+      turn.position_id = neighbor_id;
+      if (RowString (row, "modality") == "text"
+          && RowLongLong (row, "corrected") == 0)
+        {
+          turn.memory_id = neighbor_id;
+        }
+    }
+  return turns;
+}
+
+// Kind and start time of the first `limit` retrieved memories, in one
+// indexed primary-key lookup.
+struct AnchorRow
+{
+  std::string kind;
+  long long start_ts = 0;
+};
+
+std::unordered_map<long long, AnchorRow>
+LoadAnchorRows (Store *store,
+                const std::vector<Cortext::Context::Memory> &retrieved,
+                std::size_t limit)
+{
+  std::unordered_map<long long, AnchorRow> out;
+  std::vector<std::any> params;
+  std::string placeholders;
+  for (std::size_t i = 0; i < std::min (limit, retrieved.size ()); ++i)
+    {
+      if (retrieved[i].id <= 0)
+        continue;
+      if (!params.empty ())
+        placeholders += ", ";
+      placeholders += "?";
+      params.emplace_back (retrieved[i].id);
+    }
+  if (!store || params.empty ())
+    return out;
+  try
+    {
+      const auto rows = store->Execute (
+          "SELECT memory_id, kind, start_ts FROM memories "
+          "WHERE memory_id IN (" + placeholders + ")",
+          params);
+      for (const auto &row : rows)
+        out[RowLongLong (row, "memory_id")]
+            = { RowString (row, "kind"), RowLongLong (row, "start_ts") };
+    }
+  catch (const std::exception &e)
+    {
+      out.clear ();
+      telemetry::LogWarn (
+          "Failed to load retrieved anchor rows",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  return out;
+}
+
+// Attaches adjacent-turn context to retrieved text turns: lag 1 for every
+// anchor in rank order, then lag 2. The adjacent turns are found up front,
+// all lag-1 steps in one statement and all lag-2 steps in another; which of
+// them are attached is then decided in the same order as a turn-by-turn walk.
+// Returns the number of neighbor blobs attached; their memory ids are added
+// to attached_ids.
+std::size_t
+AttachContiguousTurns (Store *store,
+                       std::vector<Cortext::Context::Memory> &retrieved,
+                       const std::unordered_map<long long, AnchorRow>
+                           &anchor_rows,
+                       AttachmentHydrations &hydrations,
+                       std::unordered_set<long long> &attached_ids)
+{
+  if (!store || retrieved.empty () || SourceBlobsDisabled ())
+    {
+      return 0;
+    }
+  std::unordered_set<long long> retrieved_ids;
+  retrieved_ids.reserve (retrieved.size ());
+  for (const auto &memory : retrieved)
+    {
+      retrieved_ids.insert (memory.id);
+    }
+  std::unordered_set<long long> excluded_ids = retrieved_ids;
+  std::size_t budget = kContiguityContextBudgetBytes;
+  std::size_t attached = 0;
+  const std::size_t anchors
+      = std::min (kContiguityAnchorLimit, retrieved.size ());
+  struct AnchorWalk
+  {
+    std::size_t index = 0;
+    long long start_ts = 0;
+    std::string stream;
+    ContiguousTurn successor;
+    ContiguousTurn predecessor;
+    ContiguousTurn successor_lag2;
+    ContiguousTurn predecessor_lag2;
+  };
+  // Attaches the adjacent turn to the anchor when it is still unattached
+  // and fits the budget; returns the walked position (0 when the stretch
+  // ends).
+  auto attach_adjacent = [&] (const AnchorWalk &walk,
+                              const ContiguousTurn &turn,
+                              bool forward) -> long long {
+    if (turn.memory_id <= 0 || excluded_ids.count (turn.memory_id) != 0)
+      {
+        return turn.position_id;
+      }
+    auto text = hydrations.AttachedText (turn.memory_id,
+                                         kContiguityNeighborMaxBytes);
+    if (!text.empty () && text.size () <= budget)
+      {
+        auto &anchor = retrieved[walk.index];
+        budget -= text.size ();
+        if (forward)
+          anchor.content.push_back (std::move (text));
+        else
+          anchor.content.insert (anchor.content.begin (), std::move (text));
+        excluded_ids.insert (turn.memory_id);
+        attached_ids.insert (turn.memory_id);
+        ++attached;
+      }
+    return turn.position_id;
+  };
+  try
+    {
+      std::vector<AnchorWalk> walks;
+      walks.reserve (anchors);
+      for (std::size_t i = 0; i < anchors; ++i)
+        {
+          const auto &anchor = retrieved[i];
+          if (anchor.id <= 0 || !IsTextSurface (anchor.modality, anchor.mimetype)
+              || !HasHydratedContent (anchor))
+            {
+              continue;
+            }
+          const auto anchor_row = anchor_rows.find (anchor.id);
+          if (anchor_row == anchor_rows.end ()
+              || anchor_row->second.kind != "LONG_TERM")
+            {
+              continue;
+            }
+          AnchorWalk walk;
+          walk.index = i;
+          walk.start_ts = anchor_row->second.start_ts;
+          walk.stream = SourceStreamOf (anchor.source_id);
+          walks.push_back (std::move (walk));
+        }
+      if (walks.empty ())
+        {
+          return 0;
+        }
+      // Lag-1 steps of every anchor, both ways.
+      std::vector<ContiguityProbe> probes;
+      probes.reserve (walks.size () * 2);
+      for (const auto &walk : walks)
+        {
+          const long long anchor_id = retrieved[walk.index].id;
+          probes.push_back ({ anchor_id, walk.start_ts, walk.stream, true });
+          probes.push_back ({ anchor_id, walk.start_ts, walk.stream, false });
+        }
+      auto turns = FindContiguousTurns (store, probes);
+      for (std::size_t w = 0; w < walks.size (); ++w)
+        {
+          walks[w].successor = turns[2 * w];
+          walks[w].predecessor = turns[2 * w + 1];
+        }
+      // Lag-2 steps continue from the lag-1 turns of the top anchors.
+      probes.clear ();
+      std::vector<ContiguousTurn *> lag2_targets;
+      for (auto &walk : walks)
+        {
+          if (walk.index >= kContiguityLag2AnchorLimit)
+            break;
+          if (walk.successor.position_id > 0)
+            {
+              probes.push_back ({ walk.successor.position_id, walk.start_ts,
+                                  walk.stream, true });
+              lag2_targets.push_back (&walk.successor_lag2);
+            }
+          if (walk.predecessor.position_id > 0)
+            {
+              probes.push_back ({ walk.predecessor.position_id,
+                                  walk.start_ts, walk.stream, false });
+              lag2_targets.push_back (&walk.predecessor_lag2);
+            }
+        }
+      if (!probes.empty ())
+        {
+          turns = FindContiguousTurns (store, probes);
+          for (std::size_t k = 0; k < lag2_targets.size (); ++k)
+            {
+              *lag2_targets[k] = turns[k];
+            }
+        }
+      // Lag 1, in rank order. Forward association is stronger than
+      // backward: the successor (the reply) is attached first.
+      std::size_t walked = 0;
+      for (auto &walk : walks)
+        {
+          if (budget == 0)
+            break;
+          attach_adjacent (walk, walk.successor, true);
+          if (budget > 0)
+            attach_adjacent (walk, walk.predecessor, false);
+          else
+            walk.predecessor = {};
+          ++walked;
+        }
+      // Lag 2 with what is left of the budget: contiguity decays with
+      // distance, so the second turn out comes after every first one.
+      for (std::size_t w = 0; w < walked; ++w)
+        {
+          const auto &walk = walks[w];
+          if (budget == 0 || walk.index >= kContiguityLag2AnchorLimit)
+            break;
+          if (walk.successor.position_id > 0)
+            attach_adjacent (walk, walk.successor_lag2, true);
+          if (budget > 0 && walk.predecessor.position_id > 0)
+            attach_adjacent (walk, walk.predecessor_lag2, false);
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to attach contiguous turns",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  return attached;
+}
+
+// Recall of superseded predecessors for retrieved memories.
+//
+// At write time every new memory gets 'supersedes' edges to the few older
+// memories it is most similar to (weight grows with similarity), and
+// retrieval treats any memory with an active incoming 'supersedes' edge as
+// replaced: it is never a seed again. Those edges are topical, not only
+// corrections, so a large share of older statements (an earlier course
+// count, a previous status, the session where an event was first mentioned)
+// becomes unreachable as soon as a similar later turn arrives. People do not
+// lose the earlier version of a fact when they learn the newer one: recalling
+// the update brings back the earlier episode it updated. Within one stretch
+// of conversation (same source stream, inside the contiguity gap) a newer
+// statement is a correction that replaces the stale one outright, so those
+// predecessors stay suppressed. For each of the top retrieved
+// memories, the older memories it supersedes (strongest edges first) are
+// hydrated as extra content blobs of that same retrieved memory, placed
+// before its own content so the packet reads oldest to newest, clipped and
+// under a per-context byte budget. Cost is O(anchors): one indexed lookup on
+// idx_associations_source for all anchors plus a bounded number of
+// hydrations.
+// Ranking, the retrieval pool and the number of retrieved memories are
+// unchanged.
+constexpr std::size_t kSupersededRecallAnchorLimit = 11;
+constexpr long long kSupersededRecallPerAnchor = 2;
+constexpr std::size_t kSupersededRecallMaxBytes = 512;
+constexpr std::size_t kSupersededRecallContextBudgetBytes = 4096;
+
+// A superseded target of an anchor, strongest edge first.
+struct SupersededTarget
+{
+  long long memory_id = 0;
+  std::string source_id;
+  long long start_ts = 0;
+};
+
+// The `per_anchor` strongest LONG_TERM text targets of the 'supersedes'
+// edges out of each anchor (by weight, then newest target), in one statement
+// over idx_associations_source.
+std::unordered_map<long long, std::vector<SupersededTarget> >
+LoadSupersededTargets (Store *store, const std::vector<long long> &anchor_ids,
+                       long long per_anchor)
+{
+  std::unordered_map<long long, std::vector<SupersededTarget> > out;
+  if (!store || anchor_ids.empty ())
+    {
+      return out;
+    }
+  std::string placeholders;
+  std::vector<std::any> params;
+  params.reserve (anchor_ids.size () + 1);
+  for (const long long id : anchor_ids)
+    {
+      if (!placeholders.empty ())
+        placeholders += ", ";
+      placeholders += "?";
+      params.emplace_back (id);
+    }
+  params.emplace_back (per_anchor);
+  const auto rows = store->Execute (
+      "SELECT r.anchor_id, r.memory_id, r.source_id, r.start_ts "
+      "FROM (SELECT a.source_memory_id AS anchor_id, "
+      "             a.target_memory_id AS memory_id, m.source_id, "
+      "             m.start_ts, "
+      "             ROW_NUMBER() OVER ("
+      "               PARTITION BY a.source_memory_id "
+      "               ORDER BY a.weight DESC, a.target_memory_id DESC) "
+      "               AS edge_rank "
+      "      FROM associations a "
+      "      JOIN memories m ON m.memory_id = a.target_memory_id "
+      "      WHERE a.source_memory_id IN (" + placeholders + ") "
+      "        AND a.edge_type = 'supersedes' "
+      "        AND m.kind = 'LONG_TERM' AND m.modality = 'text') r "
+      "WHERE r.edge_rank <= ? "
+      "ORDER BY r.anchor_id, r.edge_rank",
+      params);
+  for (const auto &row : rows)
+    {
+      out[RowLongLong (row, "anchor_id")].push_back (
+          { RowLongLong (row, "memory_id"), RowString (row, "source_id"),
+            RowLongLong (row, "start_ts") });
+    }
+  return out;
+}
+
+// Returns the number of superseded-predecessor blobs attached.
+std::size_t
+AttachSupersededPredecessors (
+    Store *store, std::vector<Cortext::Context::Memory> &retrieved,
+    const std::unordered_map<long long, AnchorRow> &anchor_rows,
+    std::unordered_set<long long> excluded_ids,
+    AttachmentHydrations &hydrations)
+{
+  if (!store || retrieved.empty () || SourceBlobsDisabled ())
+    {
+      return 0;
+    }
+  for (const auto &memory : retrieved)
+    {
+      excluded_ids.insert (memory.id);
+    }
+  std::size_t budget = kSupersededRecallContextBudgetBytes;
+  std::size_t attached = 0;
+  const std::size_t anchors
+      = std::min (kSupersededRecallAnchorLimit, retrieved.size ());
+  try
+    {
+      // Which anchors recall predecessors does not depend on what earlier
+      // anchors attached (an anchor's content only grows), so all their
+      // edges are read at once.
+      std::vector<std::size_t> anchor_indexes;
+      std::vector<long long> anchor_ids;
+      std::unordered_set<long long> seen_anchor_ids;
+      for (std::size_t i = 0; i < anchors; ++i)
+        {
+          const auto &anchor = retrieved[i];
+          if (anchor.id <= 0
+              || !IsTextSurface (anchor.modality, anchor.mimetype)
+              || !HasHydratedContent (anchor)
+              || anchor_rows.find (anchor.id) == anchor_rows.end ())
+            {
+              continue;
+            }
+          anchor_indexes.push_back (i);
+          if (seen_anchor_ids.insert (anchor.id).second)
+            {
+              anchor_ids.push_back (anchor.id);
+            }
+        }
+      // Over-fetch so already-packeted targets do not starve the anchor.
+      const auto targets = LoadSupersededTargets (
+          store, anchor_ids, kSupersededRecallPerAnchor * 2);
+      for (const std::size_t i : anchor_indexes)
+        {
+          if (budget == 0)
+            {
+              break;
+            }
+          auto &anchor = retrieved[i];
+          const auto anchor_targets = targets.find (anchor.id);
+          if (anchor_targets == targets.end ())
+            {
+              continue;
+            }
+          const long long anchor_start_ts
+              = anchor_rows.find (anchor.id)->second.start_ts;
+          const std::string anchor_stream = SourceStreamOf (anchor.source_id);
+          std::vector<std::vector<unsigned char> > recalled;
+          for (const auto &target : anchor_targets->second)
+            {
+              if (static_cast<long long> (recalled.size ())
+                  >= kSupersededRecallPerAnchor)
+                {
+                  break;
+                }
+              const long long target_id = target.memory_id;
+              const long long gap = anchor_start_ts - target.start_ts;
+              const bool in_conversation_correction
+                  = SourceStreamOf (target.source_id) == anchor_stream
+                    && gap < kContiguityMaxGapMs && gap > -kContiguityMaxGapMs;
+              if (target_id <= 0 || in_conversation_correction
+                  || !excluded_ids.insert (target_id).second)
+                {
+                  continue;
+                }
+              auto text = hydrations.AttachedText (target_id,
+                                                   kSupersededRecallMaxBytes);
+              if (text.empty () || text.size () > budget)
+                {
+                  continue;
+                }
+              budget -= text.size ();
+              recalled.push_back (std::move (text));
+            }
+          // Strongest edge first in rank, but oldest-to-newest in the packet:
+          // the recalled predecessors precede the anchor's own content.
+          anchor.content.insert (
+              anchor.content.begin (),
+              std::make_move_iterator (recalled.rbegin ()),
+              std::make_move_iterator (recalled.rend ()));
+          attached += recalled.size ();
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to attach superseded predecessors",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  return attached;
 }
 
 struct LinkedDisplayMemory
@@ -1875,6 +2601,61 @@ struct Cortext::Impl
           }
       }
 
+    // The attachment steps only read: one object-store transaction serves
+    // all their payload reads instead of one transaction per read.
+    std::unique_ptr<ObjectTransaction> attachment_object_tx;
+    SharedObjectReads attachment_reads;
+    if (!SourceBlobsDisabled () && object_store)
+      {
+        try
+          {
+            attachment_object_tx = object_store->Begin ();
+            attachment_reads.object_tx = attachment_object_tx.get ();
+          }
+        catch (const std::exception &e)
+          {
+            attachment_object_tx.reset ();
+            attachment_reads = {};
+            telemetry::LogWarn (
+                "Failed to begin attachment object reads",
+                { telemetry::Attribute::String ("component", "cortext"),
+                  telemetry::Attribute::String ("error", e.what ()) });
+          }
+      }
+    AttachmentHydrations attachment_hydrations (
+        store.get (), object_store.get (), &attachment_reads,
+        max_fallback_signal_blobs, &loaded_fallback_signal_blobs);
+    const auto anchor_rows = SourceBlobsDisabled ()
+        ? std::unordered_map<long long, AnchorRow> ()
+        : LoadAnchorRows (store.get (), result.retrieved_memory,
+                          std::max (kContiguityAnchorLimit,
+                                    kSupersededRecallAnchorLimit));
+    std::unordered_set<long long> contiguous_turn_ids;
+    const std::size_t contiguous_turns_attached = AttachContiguousTurns (
+        store.get (), result.retrieved_memory, anchor_rows,
+        attachment_hydrations, contiguous_turn_ids);
+    result.output.operation_ms["Cortext.contiguous_turns_attached"]
+        = static_cast<double> (contiguous_turns_attached);
+    const std::size_t superseded_predecessors_attached
+        = AttachSupersededPredecessors (
+            store.get (), result.retrieved_memory, anchor_rows,
+            std::move (contiguous_turn_ids), attachment_hydrations);
+    if (attachment_object_tx)
+      {
+        try
+          {
+            attachment_object_tx->Commit ();
+          }
+        catch (const std::exception &e)
+          {
+            telemetry::LogWarn (
+                "Failed to end attachment object reads",
+                { telemetry::Attribute::String ("component", "cortext"),
+                  telemetry::Attribute::String ("error", e.what ()) });
+          }
+      }
+    result.output.operation_ms["Cortext.superseded_predecessors_attached"]
+        = static_cast<double> (superseded_predecessors_attached);
     result.output.operation_ms["Cortext.fallback_hydration_signal_rows"]
         = static_cast<double> (loaded_fallback_signal_blobs);
     return result;
