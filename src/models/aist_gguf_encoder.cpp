@@ -31,6 +31,7 @@
 
 #if defined(CORTEXT_ENABLE_GGML)
 #include <ggml.h>
+#include <ggml-alloc.h>
 #include CORTEXT_GGML_BACKEND_HEADER_PATH
 #endif
 
@@ -1692,7 +1693,7 @@ public:
     image_plan_.reset ();
     audio_plan_.reset ();
     plans_.clear ();
-    full_text_plans_.clear ();
+    ReleaseTextGraph ();
     if (weights_buffer_ != nullptr)
       {
         ggml_backend_buffer_free (weights_buffer_);
@@ -1809,7 +1810,7 @@ public:
         error = ex.what ();
         image_plan_.reset ();
         audio_plan_.reset ();
-        full_text_plans_.clear ();
+        ReleaseTextGraph ();
         plans_.clear ();
         weights_.clear ();
         biases_.clear ();
@@ -1859,6 +1860,14 @@ public:
   UsesFullAudioGraph () const
   {
     return full_audio_graph_used_;
+  }
+
+  std::size_t
+  TextGraphBufferBytes () const
+  {
+    return text_allocator_ == nullptr
+               ? 0
+               : ggml_gallocr_get_buffer_size (text_allocator_, 0);
   }
 
   const std::string &
@@ -1960,6 +1969,19 @@ public:
       }
     ggml_backend_tensor_set (plan.token_ids, token_ids.data (), 0,
                              sizeof (std::int32_t) * token_ids.size ());
+    // The shared activation buffer may have reused input memory for
+    // intermediates on the previous compute, so every input is rewritten.
+    const std::size_t seq = ids.size ();
+    std::vector<std::int32_t> positions (seq);
+    std::iota (positions.begin (), positions.end (), 0);
+    const std::vector<std::int32_t> token_types (seq, 0);
+    const std::vector<float> mean (seq, 1.0F / static_cast<float> (seq));
+    ggml_backend_tensor_set (plan.position_ids, positions.data (), 0,
+                             sizeof (std::int32_t) * positions.size ());
+    ggml_backend_tensor_set (plan.token_type_ids, token_types.data (), 0,
+                             sizeof (std::int32_t) * token_types.size ());
+    ggml_backend_tensor_set (plan.mean_weights, mean.data (), 0,
+                             sizeof (float) * mean.size ());
     const enum ggml_status status = ggml_backend_graph_compute (
         backend_, plan.graph);
     if (status != GGML_STATUS_SUCCESS)
@@ -2101,22 +2123,20 @@ private:
     struct ggml_cgraph *graph = nullptr;
   };
 
+  // Activations live in the kernel's shared text_allocator_ buffer, so a
+  // plan owns only graph metadata.
   struct FullTextPlan
   {
     ~FullTextPlan ()
     {
-      if (buffer != nullptr)
-        {
-          ggml_backend_buffer_free (buffer);
-        }
       if (ctx != nullptr)
         {
           ggml_free (ctx);
         }
     }
 
+    Eigen::Index seq = 0;
     struct ggml_context *ctx = nullptr;
-    ggml_backend_buffer_t buffer = nullptr;
     struct ggml_tensor *token_ids = nullptr;
     struct ggml_tensor *position_ids = nullptr;
     struct ggml_tensor *token_type_ids = nullptr;
@@ -2603,20 +2623,36 @@ private:
     return ggml_cont_2d (ctx, context, kHeads * kHeadDim, seq);
   }
 
+  void
+  ReleaseTextGraph ()
+  {
+    full_text_plan_.reset ();
+    if (text_allocator_ != nullptr)
+      {
+        ggml_gallocr_free (text_allocator_);
+        text_allocator_ = nullptr;
+      }
+  }
+
   FullTextPlan &
   GetOrCreateFullTextPlan (Eigen::Index seq)
   {
-    const auto found = full_text_plans_.find (seq);
-    if (found != full_text_plans_.end ())
+    // One plan at a time: caching a fully allocated graph per sequence
+    // length held up to context_length activation sets at once.
+    if (full_text_plan_ && full_text_plan_->seq == seq)
       {
-        return *found->second;
+        return *full_text_plan_;
       }
+    full_text_plan_.reset ();
 
+    constexpr std::size_t kMaxTextGraphNodes = 4096;
     ggml_init_params params{};
-    params.mem_size = 64 * 1024 * 1024;
+    params.mem_size = ggml_tensor_overhead () * kMaxTextGraphNodes
+                      + ggml_graph_overhead_custom (kMaxTextGraphNodes, false);
     params.mem_buffer = nullptr;
     params.no_alloc = true;
     std::unique_ptr<FullTextPlan> plan = std::make_unique<FullTextPlan> ();
+    plan->seq = seq;
     plan->ctx = ggml_init (params);
     if (plan->ctx == nullptr)
       {
@@ -2628,6 +2664,10 @@ private:
     plan->position_ids = ggml_new_tensor_1d (ctx, GGML_TYPE_I32, seq);
     plan->token_type_ids = ggml_new_tensor_1d (ctx, GGML_TYPE_I32, seq);
     plan->mean_weights = ggml_new_tensor_2d (ctx, GGML_TYPE_F32, seq, 1);
+    ggml_set_input (plan->token_ids);
+    ggml_set_input (plan->position_ids);
+    ggml_set_input (plan->token_type_ids);
+    ggml_set_input (plan->mean_weights);
 
     struct ggml_tensor *word = Weight (
         "text_encoder.0.model.embeddings.word_embeddings.weight");
@@ -2678,35 +2718,24 @@ private:
     struct ggml_tensor *semantic = ProjectionBlockOp (ctx, features,
                                                       "text_projection");
     plan->output = ggml_l2_norm (ctx, semantic, 1e-12F);
+    ggml_set_output (plan->output);
 
-    plan->graph = ggml_new_graph_custom (ctx, 4096, false);
+    plan->graph = ggml_new_graph_custom (ctx, kMaxTextGraphNodes, false);
     ggml_build_forward_expand (plan->graph, plan->output);
-    plan->buffer = ggml_backend_alloc_ctx_tensors (ctx, backend_);
-    if (plan->buffer == nullptr)
+    if (text_allocator_ == nullptr)
+      {
+        text_allocator_ = ggml_gallocr_new (
+            ggml_backend_get_default_buffer_type (backend_));
+      }
+    if (text_allocator_ == nullptr
+        || !ggml_gallocr_alloc_graph (text_allocator_, plan->graph))
       {
         throw std::runtime_error (
             "ggml backend failed to allocate AIST full text graph tensors");
       }
 
-    std::vector<std::int32_t> positions (static_cast<std::size_t> (seq));
-    std::vector<std::int32_t> token_types (static_cast<std::size_t> (seq),
-                                           0);
-    std::vector<float> mean (static_cast<std::size_t> (seq),
-                             1.0F / static_cast<float> (seq));
-    for (Eigen::Index i = 0; i < seq; ++i)
-      {
-        positions[static_cast<std::size_t> (i)] =
-            static_cast<std::int32_t> (i);
-      }
-    ggml_backend_tensor_set (plan->position_ids, positions.data (), 0,
-                             sizeof (std::int32_t) * positions.size ());
-    ggml_backend_tensor_set (plan->token_type_ids, token_types.data (), 0,
-                             sizeof (std::int32_t) * token_types.size ());
-    ggml_backend_tensor_set (plan->mean_weights, mean.data (), 0,
-                             sizeof (float) * mean.size ());
-
-    auto inserted = full_text_plans_.emplace (seq, std::move (plan));
-    return *inserted.first->second;
+    full_text_plan_ = std::move (plan);
+    return *full_text_plan_;
   }
 
   ModalityPlan &
@@ -2903,8 +2932,8 @@ private:
   std::unordered_map<std::string, std::vector<float>> host_vectors_;
   std::vector<std::pair<std::string, std::vector<float>>> folded_constants_;
   std::unordered_map<std::string, std::unique_ptr<LinearPlan>> plans_;
-  std::unordered_map<Eigen::Index, std::unique_ptr<FullTextPlan>>
-      full_text_plans_;
+  std::unique_ptr<FullTextPlan> full_text_plan_;
+  ggml_gallocr_t text_allocator_ = nullptr;
   std::unique_ptr<ModalityPlan> image_plan_;
   std::unique_ptr<ModalityPlan> audio_plan_;
   struct ggml_context *weights_ctx_ = nullptr;
@@ -3400,7 +3429,12 @@ public:
   AistRuntimeStats
   Stats () const
   {
-    return stats_;
+    AistRuntimeStats stats = stats_;
+    if (kernel_ != nullptr)
+      {
+        stats.text_graph_buffer_bytes = kernel_->TextGraphBufferBytes ();
+      }
+    return stats;
   }
 
   bool

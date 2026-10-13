@@ -6,8 +6,10 @@
 
 #include <cortext/models/aist_gguf_encoder.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 namespace
@@ -127,4 +129,55 @@ TEST_CASE ("AIST GGUF executes native text image and audio kernels",
   encoder.EncodeAudio (pcm.data (), pcm.size (), audio_embedding);
   REQUIRE (audio_embedding.size () == 1280);
   CHECK (std::abs (Norm (audio_embedding) - 1.0) < 1.0e-3);
+}
+
+TEST_CASE ("AIST GGUF text graph memory stays bounded across lengths",
+           "[aist][gguf][integration]")
+{
+  cortext::AistGgufConfig config;
+  config.model_path = AistModelPath ().string ();
+  config.context_length = 512;
+  cortext::AistGgufEncoder encoder (config);
+  REQUIRE (encoder.UsesKernelOps ());
+
+  // Each text tokenizes to a distinct sequence length, as a real ingest
+  // stream does. The longest goes first so it sizes the activation buffer.
+  std::vector<std::string> texts;
+  for (int words = 160; words >= 1; words -= 3)
+    {
+      std::string text;
+      for (int w = 0; w < words; ++w)
+        {
+          text += (w % 2 == 0) ? "memory " : "garden ";
+        }
+      texts.push_back (text);
+    }
+
+  std::vector<float> embedding;
+  encoder.EncodeText (texts.front (), embedding);
+  const std::size_t after_longest
+      = encoder.DebugRuntimeStats ().text_graph_buffer_bytes;
+  REQUIRE (after_longest > 0);
+  for (const std::string &text : texts)
+    {
+      encoder.EncodeText (text, embedding);
+    }
+  CHECK (encoder.DebugRuntimeStats ().text_graph_buffer_bytes
+         == after_longest);
+
+  // Shared activation memory must not leak state between lengths.
+  std::vector<float> fresh;
+  cortext::AistGgufEncoder fresh_encoder (config);
+  fresh_encoder.EncodeText (texts[texts.size () / 2], fresh);
+  encoder.EncodeText (texts.back () + "pool", embedding);
+  encoder.EncodeText (texts[texts.size () / 2] + " ", embedding);
+  REQUIRE (embedding.size () == fresh.size ());
+  double max_abs_diff = 0.0;
+  for (std::size_t i = 0; i < fresh.size (); ++i)
+    {
+      max_abs_diff = std::max (
+          max_abs_diff,
+          static_cast<double> (std::abs (embedding[i] - fresh[i])));
+    }
+  CHECK (max_abs_diff < 1.0e-5);
 }

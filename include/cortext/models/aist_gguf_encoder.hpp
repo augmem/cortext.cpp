@@ -54,6 +54,8 @@ struct AistRuntimeStats
   std::size_t semantic_requests = 0;
   std::size_t semantic_cache_hits = 0;
   std::size_t semantic_cache_misses = 0;
+  /// Backend bytes held for full text graph activations (not weights).
+  std::size_t text_graph_buffer_bytes = 0;
 };
 
 std::optional<std::filesystem::path>
