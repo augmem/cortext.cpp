@@ -44,6 +44,7 @@ struct Options
   int max_episodes = 0;
   int max_queries = 0;
   bool reuse_engine = false;
+  bool consolidate_on_recommend = false;
 };
 
 struct Signal
@@ -77,6 +78,7 @@ struct Query
   std::vector<std::string> answers;
   std::vector<std::string> evidence;
   bool requires_abstention = false;
+  std::uint64_t timestamp_ms = 0;
 };
 
 struct Counts
@@ -105,6 +107,8 @@ void PrintUsage (std::ostream &out)
       << "  --max-episodes N    Limit episodes, 0 means all\n"
       << "  --max-queries N     Limit queries, 0 means all\n"
       << "  --reuse-engine      Reuse one engine/DB across episodes\n"
+      << "  --consolidate=recommended  Run Consolidate() whenever an ingest\n"
+      << "                      context reports Recommended or Required\n"
       << "  -h, --help          Show this help\n";
 }
 
@@ -176,6 +180,12 @@ Options ParseArgs (int argc, char **argv)
       else if (arg == "--reuse-engine")
         {
           opts.reuse_engine = true;
+        }
+      else if (auto v = TakeArg (arg, "--consolidate="))
+        {
+          if (*v != "recommended" && *v != "off")
+            throw std::runtime_error ("--consolidate must be recommended or off");
+          opts.consolidate_on_recommend = *v == "recommended";
         }
       else
         {
@@ -374,7 +384,13 @@ std::string Clip (const std::string &text, std::size_t max_chars)
     {
       return text;
     }
-  return text.substr (0, max_chars);
+  // Back off to a UTF-8 code point boundary so the JSON dump stays valid.
+  std::size_t cut = max_chars;
+  while (cut > 0 && (static_cast<unsigned char> (text[cut]) & 0xC0u) == 0x80u)
+    {
+      --cut;
+    }
+  return text.substr (0, cut);
 }
 
 int Base64Value (char c)
@@ -638,6 +654,7 @@ LoadQueries (const std::filesystem::path &path, int max_queries)
       q.question_type = JsonString (j, "question_type", "unknown");
       q.answers = JsonStringList (j, "answers");
       q.evidence = JsonStringList (j, "evidence");
+      q.timestamp_ms = JsonU64 (j, "query_timestamp_ms");
       if (q.evidence.empty ())
         {
           q.evidence = JsonStringList (j, "evidence_phrases");
@@ -781,6 +798,19 @@ int Run (const Options &opts)
       int image_signals = 0;
       int audio_signals = 0;
       int skipped_signals = 0;
+      int consolidations = 0;
+      // Production cadence: the host consolidates when the engine says so.
+      auto settle = [&] (const auto &ingest_context) {
+        if (opts.consolidate_on_recommend
+            && ingest_context.consolidation_state
+                   != cortext::ConsolidationState::None)
+          {
+            (void)engine->Consolidate ();
+            engine->Flush ();
+            ++consolidations;
+          }
+      };
+      std::uint64_t last_timestamp_ms = 0;
       for (const auto &signal : episode.signals)
         {
           signal_modality_counts[signal.modality] += 1;
@@ -794,14 +824,16 @@ int Run (const Options &opts)
                 }
               if (signal.timestamp_ms > 0)
                 {
-                  (void)engine->ProcessTextAt (signal.text, signal.source_id,
-                                               signal.timestamp_ms,
-                                               cortext::Retention::Durable);
+                  last_timestamp_ms
+                      = std::max (last_timestamp_ms, signal.timestamp_ms);
+                  settle (engine->ProcessTextAt (signal.text, signal.source_id,
+                                               last_timestamp_ms,
+                                               cortext::Retention::Durable));
                 }
               else
                 {
-                  (void)engine->ProcessText (signal.text, signal.source_id,
-                                             cortext::Retention::Durable);
+                  settle (engine->ProcessText (signal.text, signal.source_id,
+                                             cortext::Retention::Durable));
                 }
               ++text_signals;
               ++processed_signals;
@@ -821,17 +853,17 @@ int Run (const Options &opts)
               media.mimetype = signal.mimetype;
               if (signal.timestamp_ms > 0)
                 {
-                  (void)engine->ProcessImage (pixels.data (), signal.width,
+                  settle (engine->ProcessImage (pixels.data (), signal.width,
                                               signal.height, signal.channels,
                                               signal.source_id, media,
-                                              cortext::Retention::Durable);
+                                              cortext::Retention::Durable));
                 }
               else
                 {
-                  (void)engine->ProcessImage (pixels.data (), signal.width,
+                  settle (engine->ProcessImage (pixels.data (), signal.width,
                                               signal.height, signal.channels,
                                               signal.source_id, media,
-                                              cortext::Retention::Durable);
+                                              cortext::Retention::Durable));
                 }
               ++image_signals;
               ++processed_signals;
@@ -847,10 +879,10 @@ int Run (const Options &opts)
                 }
               cortext::Cortext::Media media;
               media.mimetype = signal.mimetype;
-              (void)engine->ProcessAudio (signal.samples.data (),
+              settle (engine->ProcessAudio (signal.samples.data (),
                                           signal.samples.size (),
                                           signal.source_id, media,
-                                          cortext::Retention::Durable);
+                                          cortext::Retention::Durable));
               ++audio_signals;
               ++processed_signals;
               continue;
@@ -863,8 +895,16 @@ int Run (const Options &opts)
       for (const auto &query : q_it->second)
         {
           const auto start = std::chrono::steady_clock::now ();
-          auto context = engine->ProcessText (query.question, "eval/query",
-                                              cortext::Retention::Ephemeral);
+          // Ask at the benchmark's question date when the key carries one,
+          // clamped so engine time never runs backwards.
+          auto context
+              = query.timestamp_ms > 0
+                    ? engine->ProcessTextAt (
+                          query.question, "eval/query",
+                          std::max (query.timestamp_ms, last_timestamp_ms),
+                          cortext::Retention::Ephemeral)
+                    : engine->ProcessText (query.question, "eval/query",
+                                           cortext::Retention::Ephemeral);
           const auto end = std::chrono::steady_clock::now ();
           const double query_ms =
               std::chrono::duration<double, std::milli> (end - start).count ();
@@ -889,6 +929,19 @@ int Run (const Options &opts)
                   {"salience", memory.salience},
                   {"text", text},
                   {"preview", Clip (text, 240)},
+              });
+            }
+
+          nlohmann::json working = nlohmann::json::array ();
+          for (std::size_t i = 0; i < context.working_memory.size (); ++i)
+            {
+              const auto &memory = context.working_memory[i];
+              working.push_back ({
+                  {"slot", i},
+                  {"id", memory.id},
+                  {"source_id", memory.source_id},
+                  {"modality", memory.modality},
+                  {"text", MemoryText (memory)},
               });
             }
 
@@ -924,7 +977,10 @@ int Run (const Options &opts)
                      {"ingested_image_signals", image_signals},
                      {"ingested_audio_signals", audio_signals},
                      {"skipped_unsupported_signals", skipped_signals},
+                     {"consolidations", consolidations},
+                     {"query_timestamp_ms", query.timestamp_ms},
                      {"retrieved", retrieved},
+                     {"working", working},
                  }.dump ()
               << "\n";
         }
