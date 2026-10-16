@@ -289,42 +289,6 @@ TEST_CASE ("Delta_threshold_mood bounded by kappa_mood",
 }
 
 // =============================================================================
-// 5.3.5 Prediction Horizon Tests (Phase 1.4 correction)
-// =============================================================================
-
-TEST_CASE ("Prediction horizon increases with Focus",
-           "[regression][prediction]")
-{
-  // Paper Section 8.5: prediction_horizon = round(lerp(2, 8, F))
-  // Higher Focus = longer prediction horizon
-
-  SECTION ("Low focus yields short horizon (2)")
-  {
-    // At F=0: lerp(2, 8, 0) = 2
-    double expected = std::round (Lerp (2.0, 8.0, 0.0));
-    REQUIRE (expected == 2.0);
-  }
-
-  SECTION ("High focus yields long horizon (8)")
-  {
-    // At F=1: lerp(2, 8, 1) = 8
-    double expected = std::round (Lerp (2.0, 8.0, 1.0));
-    REQUIRE (expected == 8.0);
-  }
-
-  SECTION ("Horizon increases monotonically with focus")
-  {
-    for (double F = 0.0; F < 1.0; F += 0.2)
-      {
-        double horizon_low = std::round (Lerp (2.0, 8.0, F));
-        double horizon_high = std::round (Lerp (2.0, 8.0, F + 0.2));
-
-        REQUIRE (horizon_low <= horizon_high);
-      }
-  }
-}
-
-// =============================================================================
 // 5.3.6 Streaming Pacing Thresholds (Phase 2 additions)
 // =============================================================================
 

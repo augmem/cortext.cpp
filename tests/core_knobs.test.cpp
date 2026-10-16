@@ -740,8 +740,6 @@ TEST_CASE ("Runtime adaptation constants derive from knobs", "[core][knobs]")
   REQUIRE (BlenderOutcomeScoringWeights (0.5, 1.0, 0.5).user
            > BlenderOutcomeScoringWeights (0.5, 0.0, 0.5).user);
   REQUIRE (BlenderOutcomeAlpha (0.0) > BlenderOutcomeAlpha (1.0));
-
-  REQUIRE (PredictionHorizon (0.5) == 4);
 }
 
 TEST_CASE ("Graph and memory policy constants derive from knobs",

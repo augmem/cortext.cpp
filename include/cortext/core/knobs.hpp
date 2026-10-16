@@ -1876,14 +1876,6 @@ BlenderOutcomeAlpha (double T)
   return Lerp (0.12, 0.03, Clamp (T, 0.0, 1.0));
 }
 
-inline int
-PredictionHorizon (double F)
-{
-  return std::max (
-      1, static_cast<int> (
-             std::round (Lerp (2.0, 8.0, FocusBias (F)))));
-}
-
 // Rate observation window (seconds)
 inline int
 WRateSeconds (double T)
