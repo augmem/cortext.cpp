@@ -297,18 +297,6 @@ TEST_CASE ("ReconsolidationGain follows spec: lerp(0.2, 0.02, T)",
   REQUIRE (ReconsolidationGain (0.3) > ReconsolidationGain (0.7));
 }
 
-TEST_CASE ("RippleDecay follows spec: lerp(0.5, 0.1, T)",
-           "[formula][knobs][decay]")
-{
-  // RippleDecay = lerp(0.5, 0.1, T)
-  REQUIRE (RippleDecay (0.0) == Catch::Approx (0.5));
-  REQUIRE (RippleDecay (1.0) == Catch::Approx (0.1));
-  REQUIRE (RippleDecay (0.5) == Catch::Approx (0.3));
-
-  // Monotonic
-  REQUIRE (RippleDecay (0.3) > RippleDecay (0.7));
-}
-
 TEST_CASE ("Reinforcement edge-maintenance calibrations remain bounded",
            "[formula][knobs][reinforcement]")
 {

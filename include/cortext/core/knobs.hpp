@@ -2010,34 +2010,6 @@ ReconsolidationPrimaryDriftMagnitude (double F, double S, double T,
 }
 
 inline double
-RippleStrengthMin (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.01
-                    * (1.0 + 0.08 * (f - f0) - 0.20 * (s - s0)
-                       + 0.30 * (t - 0.5)),
-                0.003, 0.020);
-}
-
-inline double
-RippleDriftCapFactor (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.50
-                    * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)
-                       - 0.12 * (t - 0.5)),
-                0.30, 0.70);
-}
-
-inline double
 ReconsolidationUncertaintyRelevanceWeight (double F, double S, double T)
 {
   const double f = FocusBias (F);
@@ -2049,30 +2021,6 @@ ReconsolidationUncertaintyRelevanceWeight (double F, double S, double T)
                     * (1.0 + 0.06 * (f - f0) - 0.06 * (s - s0)
                        + 0.08 * (t - 0.5)),
                 0.30, 0.70);
-}
-
-inline double
-RippleDecay (double T)
-{
-  // ripple_decay = lerp(0.5, 0.1, T)
-  return Lerp (0.5, 0.1, T);
-}
-
-inline int
-RippleDepth (double T)
-{
-  // ripple_depth = round(lerp(2, 1, T)) — higher stability = shallower ripple
-  return static_cast<int> (std::round (Lerp (2.0, 1.0, T)));
-}
-
-inline int
-ReconsolidationRippleReconstructionLimit (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = (1.0 - t) * s * Lerp (1.0, 0.4, f) * 5.0 - 1.0;
-  return static_cast<int> (std::round (Clamp (raw, 0.0, 6.0)));
 }
 
 inline int

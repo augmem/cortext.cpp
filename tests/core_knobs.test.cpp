@@ -773,12 +773,6 @@ TEST_CASE ("Reconsolidation and cascade gates derive from knobs",
            == Catch::Approx (0.30));
   REQUIRE (ReconsolidationDriftSkipEpsilon (0.5, 0.5, 0.5)
            == Catch::Approx (0.001));
-  REQUIRE (RippleStrengthMin (0.5, 0.5, 0.5)
-           == Catch::Approx (0.01));
-  REQUIRE (RippleDriftCapFactor (0.5, 0.5, 0.5)
-           == Catch::Approx (0.50));
-  REQUIRE (ReconsolidationRippleReconstructionLimit (0.5, 0.5, 0.5)
-           == 0);
   REQUIRE (ReconsolidationPrimaryReconstructionLimit (0.5, 0.5, 0.5)
            == 1);
   REQUIRE (ReconsolidationUncertaintyRelevanceWeight (0.5, 0.5, 0.5)
@@ -796,10 +790,6 @@ TEST_CASE ("Reconsolidation and cascade gates derive from knobs",
                                                    1.0, 1.0, 1.0));
   REQUIRE (ReconsolidationDriftClamp (0.5, 0.5, 0.0)
            > ReconsolidationDriftClamp (0.5, 0.5, 1.0));
-  REQUIRE (RippleStrengthMin (0.5, 0.0, 0.5)
-           > RippleStrengthMin (0.5, 1.0, 0.5));
-  REQUIRE (ReconsolidationRippleReconstructionLimit (0.0, 1.0, 0.0)
-           > ReconsolidationRippleReconstructionLimit (1.0, 0.0, 1.0));
   REQUIRE (ReconsolidationPrimaryReconstructionLimit (0.0, 1.0, 0.0)
            > ReconsolidationPrimaryReconstructionLimit (1.0, 0.0, 1.0));
 

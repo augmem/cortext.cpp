@@ -501,11 +501,12 @@ drift_magnitude = (1 − T) × S × lability ×
                    contextual_relevance
 ```
 
-Reconsolidation effects propagate to semantically related memories with decay:
-
-```
-ripple_decay = lerp(0.5, 0.1, T)  # per semantic hop
-```
+Drift applies only to the retrieved memories themselves. Earlier builds also
+rippled lability and drift over `co_occurs` and `reinforces` association edges
+with `ripple_decay = lerp(0.5, 0.1, T)` per hop. Only clustering consolidation
+wrote those edges, so after it was removed the ripple never fired: full-length
+stores hold only `supersedes` edges (BEAM conversation 7: 45,290 edges, all
+`supersedes`). The ripple and its knobs were removed with no packet change.
 
 ## Stored Source Metadata and Supersession
 
