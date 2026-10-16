@@ -2767,7 +2767,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
           "FROM memories m "
           "JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
           "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
-          "ORDER BY m.start_ts ASC");
+          "ORDER BY m.start_ts ASC, m.memory_id ASC");
 
       int pos = 0;
       for (const auto &row : rows)
