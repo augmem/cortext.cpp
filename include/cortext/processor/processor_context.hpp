@@ -732,10 +732,6 @@ struct ProcessorContext
     entry.last_access = last_access;
   }
 
-  std::unordered_map<std::string, std::vector<long long>> index_store;
-  std::unordered_map<long long, std::string> index_reverse;
-
-  std::unordered_map<std::string, std::unordered_map<long long, double>> procedural_store;
   std::vector<RetrievalSurfaceEntry> retrieval_surface_cache;
   std::uint32_t retrieval_surface_seed_visit_epoch = 0;
   std::unordered_map<long long, size_t> retrieval_surface_index;

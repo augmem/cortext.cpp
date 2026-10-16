@@ -13,9 +13,6 @@ add_executable(cortext_neuromodulator_ablation_bench
   neuromodulator_ablation_bench.cpp
 )
 
-add_executable(cortext_procedural_ablation_bench
-  procedural_ablation_bench.cpp
-)
 
 add_executable(cortext_live_loop_steady_state_bench
   live_loop_steady_state_bench.cpp
@@ -51,9 +48,6 @@ target_include_directories(cortext_constructive_recall_ablation_bench PRIVATE
 target_include_directories(cortext_neuromodulator_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_procedural_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
 target_include_directories(cortext_live_loop_steady_state_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -81,9 +75,6 @@ target_link_libraries(cortext_constructive_recall_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_neuromodulator_ablation_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_procedural_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_live_loop_steady_state_bench PRIVATE

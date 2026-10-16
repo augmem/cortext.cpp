@@ -1,11 +1,8 @@
 #include "cortext/operations/detect_memory_usage.hpp"
 
-#include "neuromodulator_internal.hpp"
-#include "signal_record_rollback_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
-#include "cortext/core/sparse.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
@@ -88,7 +85,6 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
 
   const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
   const auto &retrieved_records = context.GetRetrievedMemoryCandidates ();
-  const auto &cfg = context.GetConfig ();
   Store *store = context.GetStore ();
   const bool interrupt_allowed = context.GetInterruptAllowed ();
   const auto selected_id = context.GetSelectedCandidateId ();
@@ -175,32 +171,6 @@ DetectMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
             : 0.0;
   p_ctx.last_used_rate = usage_rate;
   p_ctx.last_used_flag = used_count > 0 ? 1.0 : 0.0;
-
-  // Update procedural store for successful usage
-  if (cfg.procedural_enabled && used_count > 0 && x_ptr->size () > 0)
-    {
-      const int k_key = core::SparseKeySize (
-          context.GetConfig ().focus, context.GetConfig ().sensitivity,
-          context.GetConfig ().stability);
-      const std::string key = core::SparseKey (*x_ptr, k_key);
-      if (!key.empty ())
-        {
-          for (const auto &event : context.GetMemoryUsageEvents ())
-            {
-              if (!event.used || event.memory_id <= 0)
-                continue;
-
-              const double gain
-                  = neuromodulation::ValueUpdateGain (p_ctx.neuromod_da);
-              signal_record_rollback_internal::
-                  PreserveProceduralValueBeforeUpdate (
-                      p_ctx, key, event.memory_id);
-              double &q = p_ctx.procedural_store[key][event.memory_id];
-              q = core::Clamp (q + gain * std::max (0.0, p_ctx.delta_reward),
-                               0.0, 1.0);
-            }
-        }
-    }
 
   // Telemetry for observability
   telemetry::AddCounter ("cortext.detect_memory_usage.signals_processed_total",

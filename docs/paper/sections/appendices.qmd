@@ -11,7 +11,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
 * **Per-memory defaults (on insert):** `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`, `context = 0_vector`, `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`. Application provenance remains in the separate opaque `source_id`. SQLite defaults remain migration/backstop values for legacy rows. Evidence packets live in ordered `signals` rows, and the constructive-recall ledger starts empty until the initial reconstruction row is appended in `memory_reconstructions`.
 * **RLS defaults:** `w_* = w_bootstrap`, `P = diag(P_init(T))` with `P_init(T) = lerp(500, 2000, 1 − T)`, `blender_ready = false`, `blender_update_count = 0`.
 * **Knob-derived control parameters (initialized from priors):** `weight_relevance`, `attention_width`, `coverage_gain_floor`, `mismatch_weight`, `weight_novelty`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`, `rate_target`.
-* **Buffers:** `signal_stream` (μ_acc stream), `score_stream`, `memory_stream`, `recent_memory_centroids`, `index_store`, `procedural_store` start empty.
+* **Buffers:** `signal_stream` (μ_acc stream), `score_stream`, `memory_stream`, `recent_memory_centroids` start empty.
 * **Retention history:** `retention_history` starts empty (populated after the first signal step).
 
 * **Accumulator state (per stream; retained across timesteps):**
@@ -21,7 +21,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
   * `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, outcome_pred, φ_t, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, blender_ready, blender_update_count, blender_P}`
 
 * **Buffers (retained across timesteps; bounded by window rules):**
-  * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, index_store, procedural_store, retention_history}`
+  * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, retention_history}`
 
 * **Recorded signal fields (per signal):**
   * `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`

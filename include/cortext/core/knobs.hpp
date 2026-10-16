@@ -489,22 +489,6 @@ RetrievalVectorDistanceScore (double distance, double F, double S, double T)
   return Clamp (1.0 / (1.0 + sharpness * distance), 0.0, 1.0);
 }
 
-inline int
-RetrievalSparseKeySize (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = 0.5;
-  const double s0 = SensitivityBias (0.5);
-  const double raw = (16.0 + (64.0 - 16.0) * f)
-                     * Clamp (1.0 + 0.10 * (s - s0)
-                                  - 0.06 * (t - 0.5)
-                                  - 0.04 * (f - f0),
-                              0.85, 1.15);
-  return std::max (8, static_cast<int> (std::round (Clamp (raw, 8.0, 72.0))));
-}
-
 inline double
 RetrievalCompetitionSuppressionBase (double F, double S, double T)
 {

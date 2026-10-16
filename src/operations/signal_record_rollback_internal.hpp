@@ -87,19 +87,11 @@ class Scope
 public:
   using BackupFn = void (*) (void *owner);
   using PreserveSlotFn = void (*) (void *owner, std::size_t slot_index);
-  using PreserveSparseIndexFn = void (*) (
-      void *owner, const std::string &key, long long memory_id);
-  using PreserveProceduralFn = void (*) (
-      void *owner, const std::string &key, long long memory_id);
 
   Scope (ProcessorContext &context, void *owner, BackupFn backup,
-         BackupFn backup_all, PreserveSlotFn preserve_slot,
-         PreserveSparseIndexFn preserve_sparse_index,
-         PreserveProceduralFn preserve_procedural)
+         BackupFn backup_all, PreserveSlotFn preserve_slot)
       : context_ (&context), owner_ (owner), backup_ (backup),
         backup_all_ (backup_all), preserve_slot_ (preserve_slot),
-        preserve_sparse_index_ (preserve_sparse_index),
-        preserve_procedural_ (preserve_procedural),
         previous_ (active_)
   {
     active_ = this;
@@ -153,45 +145,12 @@ public:
       }
   }
 
-  static void
-  PreserveSparseIndexBeforeInsert (ProcessorContext &context,
-                                   const std::string &key,
-                                   long long memory_id)
-  {
-    for (auto *scope = active_; scope; scope = scope->previous_)
-      {
-        if (scope->context_ == &context)
-          {
-            scope->preserve_sparse_index_ (
-                scope->owner_, key, memory_id);
-            return;
-          }
-      }
-  }
-
-  static void
-  PreserveProceduralValueBeforeUpdate (ProcessorContext &context,
-                                       const std::string &key,
-                                       long long memory_id)
-  {
-    for (auto *scope = active_; scope; scope = scope->previous_)
-      {
-        if (scope->context_ == &context)
-          {
-            scope->preserve_procedural_ (scope->owner_, key, memory_id);
-            return;
-          }
-      }
-  }
-
 private:
   ProcessorContext *context_ = nullptr;
   void *owner_ = nullptr;
   BackupFn backup_ = nullptr;
   BackupFn backup_all_ = nullptr;
   PreserveSlotFn preserve_slot_ = nullptr;
-  PreserveSparseIndexFn preserve_sparse_index_ = nullptr;
-  PreserveProceduralFn preserve_procedural_ = nullptr;
   Scope *previous_ = nullptr;
   static inline thread_local Scope *active_ = nullptr;
 };
@@ -213,22 +172,6 @@ PreserveWorkingMemorySlotBeforeErase (ProcessorContext &context,
                                       std::size_t slot_index)
 {
   Scope::PreserveWorkingMemorySlotBeforeErase (context, slot_index);
-}
-
-inline void
-PreserveSparseIndexBeforeInsert (ProcessorContext &context,
-                                 const std::string &key,
-                                 long long memory_id)
-{
-  Scope::PreserveSparseIndexBeforeInsert (context, key, memory_id);
-}
-
-inline void
-PreserveProceduralValueBeforeUpdate (ProcessorContext &context,
-                                     const std::string &key,
-                                     long long memory_id)
-{
-  Scope::PreserveProceduralValueBeforeUpdate (context, key, memory_id);
 }
 
 } // namespace cortext::operations::signal_record_rollback_internal

@@ -543,15 +543,6 @@ struct CaptureCacheIdentityOp : IOperation
       {
         first_data = surface.data ();
         first_size = surface.size ();
-        auto &processor_context = ctx.GetProcessorContext ();
-        auto &ids = processor_context.index_store["large/stable"];
-        ids.reserve (4096);
-        for (long long id = 1; id <= 4096; ++id)
-          {
-            ids.push_back (id);
-            processor_context.index_reverse[id] = "large/stable";
-            processor_context.procedural_store["large/stable"][id] = 0.5;
-          }
       }
     else if (retained)
       {
@@ -578,12 +569,7 @@ struct ExerciseJournalAwareCommitFailureOp : IOperation
     auto &processor_context = ctx.GetProcessorContext ();
     ++call_count;
     if (call_count == 1)
-      {
-        processor_context.index_store["stable"] = { 11LL, 12LL };
-        processor_context.index_reverse[11LL] = "stable";
-        processor_context.procedural_store["stable"][11LL] = 0.75;
-        return;
-      }
+      return;
     if (call_count == 2)
       {
         processor_context.retrieval_surface_cache.clear ();
@@ -591,15 +577,6 @@ struct ExerciseJournalAwareCommitFailureOp : IOperation
         processor_context.retrieval_surface_embedding_index.clear ();
         operations::execution_cache_sidecar_internal::Erase (
             processor_context);
-        operations::signal_record_rollback_internal::
-            PreserveSparseIndexBeforeInsert (
-                processor_context, "stable", 99LL);
-        operations::signal_record_rollback_internal::
-            PreserveProceduralValueBeforeUpdate (
-                processor_context, "stable", 11LL);
-        processor_context.index_store["stable"].push_back (99LL);
-        processor_context.index_reverse[99LL] = "stable";
-        processor_context.procedural_store["stable"][11LL] = 0.0;
         tx.Execute ("INSERT INTO deferred_child(parent_id) VALUES(?)",
                     { 999LL });
         return;
@@ -610,12 +587,7 @@ struct ExerciseJournalAwareCommitFailureOp : IOperation
         *restored
             = processor_context.retrieval_surface_index.contains (41LL)
               && processor_context.retrieval_surface_embedding_index.contains (
-                  51LL)
-              && processor_context.index_store.at ("stable")
-                     == std::vector<long long> { 11LL, 12LL }
-              && processor_context.index_reverse.at (11LL) == "stable"
-              && processor_context.procedural_store.at ("stable").at (11LL)
-                     == 0.75;
+                  51LL);
       }
   }
 
@@ -636,10 +608,7 @@ struct ExerciseJournalAwareReadOnlyRollbackOp : IOperation
     auto &processor_context = ctx.GetProcessorContext ();
     ++call_count;
     if (call_count == 1)
-      {
-        processor_context.index_store["stable"] = { 7LL, 8LL };
-        return;
-      }
+      return;
     if (call_count == 2)
       {
         processor_context.retrieval_surface_cache.clear ();
@@ -647,11 +616,6 @@ struct ExerciseJournalAwareReadOnlyRollbackOp : IOperation
         processor_context.retrieval_surface_embedding_index.clear ();
         operations::execution_cache_sidecar_internal::Erase (
             processor_context);
-        operations::signal_record_rollback_internal::
-            PreserveSparseIndexBeforeInsert (
-                processor_context, "stable", 99LL);
-        processor_context.index_store["stable"].push_back (99LL);
-        processor_context.index_reverse[99LL] = "stable";
         return;
       }
     if (restored)
@@ -660,9 +624,7 @@ struct ExerciseJournalAwareReadOnlyRollbackOp : IOperation
         *restored
             = processor_context.retrieval_surface_index.contains (41LL)
               && processor_context.retrieval_surface_embedding_index.contains (
-                  51LL)
-              && processor_context.index_store.at ("stable")
-                     == std::vector<long long> { 7LL, 8LL };
+                  51LL);
       }
   }
 
@@ -785,10 +747,8 @@ struct CaptureBaseLineageAcrossFailureOp : IOperation
 
 struct ExerciseRollbackCacheRestoreOp : IOperation
 {
-  ExerciseRollbackCacheRestoreOp (bool *retrieval_restored,
-                                  bool *volatile_restored)
-      : retrieval_restored (retrieval_restored),
-        volatile_restored (volatile_restored)
+  explicit ExerciseRollbackCacheRestoreOp (bool *retrieval_restored)
+      : retrieval_restored (retrieval_restored)
   {
   }
 
@@ -810,9 +770,6 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
         cache_only_entry.embedding = Eigen::VectorXf::Constant (256, 0.25f);
         processor_context.UpsertRetrievalSurface (
             std::move (cache_only_entry));
-        processor_context.index_store["stable"] = { 11LL, 12LL };
-        processor_context.index_reverse[11LL] = "stable";
-        processor_context.procedural_store["stable"][11LL] = 0.75;
         return;
       }
     if (call_count == 2)
@@ -820,9 +777,6 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
         processor_context.retrieval_surface_cache.clear ();
         processor_context.retrieval_surface_index.clear ();
         processor_context.retrieval_surface_embedding_index.clear ();
-        processor_context.index_store["stable"] = { 99LL };
-        processor_context.index_reverse[11LL] = "mutated";
-        processor_context.procedural_store["stable"][11LL] = 0.0;
         throw std::runtime_error ("force rollback");
       }
 
@@ -840,25 +794,9 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
               && processor_context.retrieval_surface_cache[0].memory_id == 41LL
               && processor_context.retrieval_surface_cache[1].memory_id == 77LL;
       }
-    if (volatile_restored)
-      {
-        const auto index_it = processor_context.index_store.find ("stable");
-        const auto reverse_it = processor_context.index_reverse.find (11LL);
-        const auto procedural_it
-            = processor_context.procedural_store.find ("stable");
-        *volatile_restored
-            = index_it != processor_context.index_store.end ()
-              && index_it->second == std::vector<long long> { 11LL, 12LL }
-              && reverse_it != processor_context.index_reverse.end ()
-              && reverse_it->second == "stable"
-              && procedural_it != processor_context.procedural_store.end ()
-              && procedural_it->second.contains (11LL)
-              && procedural_it->second.at (11LL) == 0.75;
-      }
   }
 
   bool *retrieval_restored;
-  bool *volatile_restored;
   mutable int call_count = 0;
 };
 
@@ -3258,10 +3196,9 @@ TEST_CASE ("SignalProcessor restores exact durable and cache-only state after "
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   bool retrieval_restored = false;
-  bool volatile_restored = false;
   auto pipeline = std::make_unique<DynamicOperationSet> (
       std::make_unique<ExerciseRollbackCacheRestoreOp> (
-          &retrieval_restored, &volatile_restored));
+          &retrieval_restored));
   SignalProcessor proc (cfg, store, std::move (pipeline));
 
   Signal signal;
@@ -3279,7 +3216,6 @@ TEST_CASE ("SignalProcessor restores exact durable and cache-only state after "
   signal.timestamp = 4000;
   proc.Process (signal);
   REQUIRE (retrieval_restored);
-  REQUIRE (volatile_restored);
 }
 
 TEST_CASE ("SignalProcessor rollback rebuild preserves original base lineage",

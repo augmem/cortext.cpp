@@ -1,5 +1,4 @@
 #include <cortext/core/algorithms.hpp>
-#include <cortext/core/sparse.hpp>
 #include <cortext/core/utils.hpp>
 #include <cortext/encoder/encoder.hpp>
 #include <cortext/operations/competition.hpp>
@@ -418,57 +417,6 @@ RunReconStudy (bool disable_scale)
   return cortext::core::CosineSimilarity (updated, current);
 }
 
-double
-RunValueStudy (double neuromod_da, bool disable_scale)
-{
-  auto unique_store = cortext::SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
-  cortext::store::ApplyMigrations (*store);
-
-  const Eigen::VectorXf emb = MakeVec ({ { 0, 1.0f } });
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
-      { 7LL, ToFloatVec (emb), 1LL });
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, "
-      "n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES(?, ?, 'bench', 'LONG_TERM', 1, 1, 'text', 0.5, 0.5, 1.0, 1)",
-      { 7LL, 7LL });
-
-  cortext::ProcessorContext pctx;
-  pctx.neuromod_da = neuromod_da;
-  pctx.delta_reward = 0.8;
-
-  cortext::SignalProcessor::Config cfg;
-  cfg.encoder = &GetBenchEncoder ();
-  cfg.focus = 1.0;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
-  cfg.procedural_enabled = true;
-
-  cortext::Signal signal = MakeSignal (emb, 10);
-  cortext::OperationContext ctx (signal, pctx, cfg, store.get ());
-  ctx.SetInterruptAllowed (true);
-  ctx.SetSelectedCandidateId (7LL);
-  ctx.SetRetrievedMemoryEmbeddings (
-      std::unordered_map<long long, Eigen::VectorXf>{ { 7LL, emb } });
-
-  std::optional<ScopedEnvVar> disable_guard;
-  if (disable_scale)
-    {
-      disable_guard.emplace ("CORTEXT_DISABLE_NEUROMOD_VALUE_GAIN", "1");
-    }
-
-  cortext::operations::DetectMemoryUsage op;
-  auto tx = store->Begin ();
-  op.Execute (ctx, *tx);
-  tx->Commit ();
-
-  const int k_key = cortext::core::SparseKeySize (cfg.focus, cfg.sensitivity, cfg.stability);
-  const std::string key = cortext::core::SparseKey (signal.embedding, k_key);
-  return pctx.procedural_store[key][7LL];
-}
-
 } // namespace
 
 int
@@ -480,9 +428,6 @@ main ()
   const double loser_strength_off = RunCompetitionStudy (true);
   const double recon_on = RunReconStudy (false);
   const double recon_off = RunReconStudy (true);
-  const double value_high_da = RunValueStudy (1.0, false);
-  const double value_low_da = RunValueStudy (0.0, false);
-  const double value_disabled = RunValueStudy (1.0, true);
 
   std::cout << "neuromod_write_accept_on=" << write_on
             << " neuromod_write_accept_off=" << write_off << "\n";
@@ -491,15 +436,10 @@ main ()
             << loser_strength_off << "\n";
   std::cout << "neuromod_recon_similarity_on=" << recon_on
             << " neuromod_recon_similarity_off=" << recon_off << "\n";
-  std::cout << "neuromod_value_update_high_da=" << value_high_da
-            << " neuromod_value_update_low_da=" << value_low_da
-            << " neuromod_value_update_disabled=" << value_disabled << "\n";
 
   const bool pass = write_on > write_off
                     && loser_strength_on < loser_strength_off
-                    && recon_on > recon_off
-                    && value_high_da > value_low_da
-                    && value_disabled == value_high_da;
+                    && recon_on > recon_off;
   std::cout << "neuromodulator_bench_passed=" << (pass ? "1" : "0") << "\n";
   return pass ? 0 : 1;
 }

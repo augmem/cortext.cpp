@@ -500,4 +500,4 @@ if |μ_acc| = 0: e_rep ← e_peak
 if |e_peak| = 0 OR dim(e_peak) ≠ dim(μ_acc): e_rep ← μ_acc
 ```
 
-On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1), boundary_score}. Store `c_t` as the temporal context for the memory. Append e_rep to memory_stream and l2_normalize(μ_acc) to recent_memory_centroids. Update `index_store` with the sparse key (@sec-pattern-separation). Reset accumulator for next unit.
+On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1), boundary_score}. Store `c_t` as the temporal context for the memory. Append e_rep to memory_stream and l2_normalize(μ_acc) to recent_memory_centroids. Reset accumulator for next unit.

@@ -245,10 +245,6 @@ struct DetachedProcessorCaches
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
   std::shared_ptr<operations::execution_cache_sidecar_internal::State>
       execution_cache_sidecar;
-  std::unordered_map<std::string, std::vector<long long>> index_store;
-  std::unordered_map<long long, std::string> index_reverse;
-  std::unordered_map<std::string, std::unordered_map<long long, double>>
-      procedural_store;
 };
 
 DetachedProcessorCaches
@@ -274,18 +270,6 @@ DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
   for (const auto &[source_id, entries] : caches.retrieval_surface_source_index)
     {
       (void)source_id;
-      count += entries.size ();
-    }
-  count += caches.index_store.size () + caches.index_reverse.size ()
-           + caches.procedural_store.size ();
-  for (const auto &[key, ids] : caches.index_store)
-    {
-      (void)key;
-      count += ids.size ();
-    }
-  for (const auto &[key, entries] : caches.procedural_store)
-    {
-      (void)key;
       count += entries.size ();
     }
   return count;
@@ -355,9 +339,6 @@ void
 ClearRebuildableProcessorCaches (ProcessorContext &ctx)
 {
   ClearDbDerivedProcessorCaches (ctx);
-  ctx.index_store = {};
-  ctx.index_reverse = {};
-  ctx.procedural_store = {};
 }
 
 DetachedProcessorCaches
@@ -374,9 +355,6 @@ DetachRebuildableProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.retrieval_surface_source_index_dirty);
   caches.execution_cache_sidecar
       = operations::execution_cache_sidecar_internal::Detach (ctx);
-  caches.index_store = std::move (ctx.index_store);
-  caches.index_reverse = std::move (ctx.index_reverse);
-  caches.procedural_store = std::move (ctx.procedural_store);
   ClearRebuildableProcessorCaches (ctx);
   return caches;
 }
@@ -395,9 +373,6 @@ RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
       = std::move (caches.retrieval_surface_source_index_dirty);
   operations::execution_cache_sidecar_internal::Restore (
       ctx, std::move (caches.execution_cache_sidecar));
-  ctx.index_store = std::move (caches.index_store);
-  ctx.index_reverse = std::move (caches.index_reverse);
-  ctx.procedural_store = std::move (caches.procedural_store);
 }
 
 class ScopedProcessorCacheDetach
@@ -491,12 +466,6 @@ std::atomic_int g_signal_record_snapshot_setup_throw_stage { 0 };
 class SignalRecordRollbackJournal
 {
 public:
-  struct SparseIndexBackup
-  {
-    bool existed = false;
-    std::size_t size = 0;
-  };
-
   SignalRecordRollbackJournal (ProcessorContext &context,
                                std::string source_id, bool journal_aware)
       : context_ (context), source_id_ (std::move (source_id)),
@@ -620,7 +589,6 @@ public:
         snapshot.accumulator_states = std::move (context_.accumulator_states);
       }
     RestoreWorkingMemoryRecordsInto (snapshot);
-    RestoreVolatileCachesInto (snapshot);
   }
 
   void
@@ -713,73 +681,6 @@ public:
   {
     static_cast<SignalRecordRollbackJournal *> (owner)
         ->PreserveWorkingMemorySlotBeforeErase (slot_index);
-  }
-
-  void
-  PreserveSparseIndexBeforeInsert (const std::string &key,
-                                   long long memory_id)
-  {
-    if (!journal_aware_)
-      return;
-    if (!sparse_index_backups_.contains (key))
-      {
-        const auto index_it = context_.index_store.find (key);
-        sparse_index_backups_.emplace (
-            key, SparseIndexBackup {
-                     index_it != context_.index_store.end (),
-                     index_it != context_.index_store.end ()
-                         ? index_it->second.size ()
-                         : 0 });
-      }
-    if (!index_reverse_backups_.contains (memory_id))
-      {
-        const auto reverse_it = context_.index_reverse.find (memory_id);
-        index_reverse_backups_.emplace (
-            memory_id,
-            reverse_it != context_.index_reverse.end ()
-                ? std::optional<std::string> (reverse_it->second)
-                : std::nullopt);
-      }
-  }
-
-  static void
-  PreserveSparseIndexBeforeInsertThunk (void *owner, const std::string &key,
-                                        long long memory_id)
-  {
-    static_cast<SignalRecordRollbackJournal *> (owner)
-        ->PreserveSparseIndexBeforeInsert (key, memory_id);
-  }
-
-  void
-  PreserveProceduralValueBeforeUpdate (const std::string &key,
-                                       long long memory_id)
-  {
-    if (!journal_aware_)
-      return;
-    auto &key_backups = procedural_backups_[key];
-    if (key_backups.contains (memory_id))
-      return;
-    const auto outer_it = context_.procedural_store.find (key);
-    if (outer_it == context_.procedural_store.end ())
-      {
-        key_backups.emplace (memory_id, std::nullopt);
-        return;
-      }
-    const auto value_it = outer_it->second.find (memory_id);
-    key_backups.emplace (
-        memory_id,
-        value_it != outer_it->second.end ()
-            ? std::optional<double> (value_it->second)
-            : std::nullopt);
-  }
-
-  static void
-  PreserveProceduralValueBeforeUpdateThunk (void *owner,
-                                            const std::string &key,
-                                            long long memory_id)
-  {
-    static_cast<SignalRecordRollbackJournal *> (owner)
-        ->PreserveProceduralValueBeforeUpdate (key, memory_id);
   }
 
 private:
@@ -886,55 +787,6 @@ private:
     AttachWorkingMemoryRecords (snapshot, restored);
   }
 
-  void
-  RestoreVolatileCachesInto (ProcessorContext &snapshot)
-  {
-    for (const auto &[key, backup] : sparse_index_backups_)
-      {
-        if (!backup.existed)
-          {
-            context_.index_store.erase (key);
-            continue;
-          }
-        auto index_it = context_.index_store.find (key);
-        if (index_it != context_.index_store.end ())
-          index_it->second.resize (
-              std::min (index_it->second.size (), backup.size));
-      }
-    for (const auto &[memory_id, old_value] : index_reverse_backups_)
-      {
-        if (old_value)
-          context_.index_reverse.insert_or_assign (memory_id, *old_value);
-        else
-          context_.index_reverse.erase (memory_id);
-      }
-    for (const auto &[key, entries] : procedural_backups_)
-      {
-        for (const auto &[memory_id, old_value] : entries)
-          {
-            if (old_value)
-              context_.procedural_store[key].insert_or_assign (
-                  memory_id, *old_value);
-            else
-              {
-                auto outer_it = context_.procedural_store.find (key);
-                if (outer_it != context_.procedural_store.end ())
-                  {
-                    outer_it->second.erase (memory_id);
-                    if (outer_it->second.empty ())
-                      context_.procedural_store.erase (outer_it);
-                  }
-              }
-          }
-      }
-    snapshot.index_store = std::move (context_.index_store);
-    snapshot.index_reverse = std::move (context_.index_reverse);
-    snapshot.procedural_store = std::move (context_.procedural_store);
-    sparse_index_backups_.clear ();
-    index_reverse_backups_.clear ();
-    procedural_backups_.clear ();
-  }
-
   ProcessorContext &context_;
   std::string source_id_;
   bool current_existed_ = false;
@@ -949,13 +801,6 @@ private:
   std::optional<AccumulatorState> current_accumulator_backup_;
   std::optional<std::unordered_map<std::string, AccumulatorState>>
       full_accumulator_backup_;
-  std::unordered_map<std::string, SparseIndexBackup> sparse_index_backups_;
-  std::unordered_map<long long, std::optional<std::string>>
-      index_reverse_backups_;
-  std::unordered_map<
-      std::string,
-      std::unordered_map<long long, std::optional<double>>>
-      procedural_backups_;
 };
 
 /// Owns the caller-provided operation and the rollback storage for its
@@ -3358,9 +3203,7 @@ SignalProcessor::Process (const Signal &signal)
           *context_, &signal_record_journal,
           &SignalRecordRollbackJournal::EnsureBackedUpThunk,
           &SignalRecordRollbackJournal::EnsureAllBackedUpThunk,
-          &SignalRecordRollbackJournal::PreserveWorkingMemorySlotBeforeEraseThunk,
-          &SignalRecordRollbackJournal::PreserveSparseIndexBeforeInsertThunk,
-          &SignalRecordRollbackJournal::PreserveProceduralValueBeforeUpdateThunk);
+          &SignalRecordRollbackJournal::PreserveWorkingMemorySlotBeforeEraseThunk);
   if (tx)
     {
       op_context.AddOperationTiming ("SignalProcessor.begin_transaction",

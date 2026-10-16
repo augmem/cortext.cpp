@@ -10,7 +10,6 @@
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
-#include "cortext/core/sparse.hpp"
 #include "cortext/store/object_store.hpp"
 #include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
@@ -1493,18 +1492,6 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             {
               historical_surface_search_cache_internal::
                   SetCurrentSurfaceDatabaseCurrent (p_ctx, false);
-            }
-          const int k_key = core::SparseKeySize (
-              context.GetConfig ().focus, context.GetConfig ().sensitivity,
-              context.GetConfig ().stability);
-          const std::string key = core::SparseKey (embedding_to_store, k_key);
-          if (!key.empty ())
-            {
-              signal_record_rollback_internal::
-                  PreserveSparseIndexBeforeInsert (
-                      p_ctx, key, memory_id);
-              p_ctx.index_store[key].push_back (memory_id);
-              p_ctx.index_reverse[memory_id] = key;
             }
           context.AddOperationTiming ("MemoryStorage.retrieval_surface_update",
                                       ElapsedMillis (surface_start));

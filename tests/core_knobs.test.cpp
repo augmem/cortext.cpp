@@ -500,13 +500,6 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
            == Catch::Approx (0.5));
   REQUIRE (RetrievalVectorDistanceScore (1.0, 1.0, 0.5, 0.5)
            < RetrievalVectorDistanceScore (1.0, 0.0, 0.5, 0.5));
-  REQUIRE (RetrievalSparseKeySize (0.5, 0.5, 0.5) == 40);
-  REQUIRE (RetrievalSparseKeySize (1.0, 0.5, 0.5)
-           > RetrievalSparseKeySize (0.0, 0.5, 0.5));
-  REQUIRE (RetrievalSparseKeySize (0.5, 1.0, 0.5)
-           > RetrievalSparseKeySize (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalSparseKeySize (0.5, 0.5, 1.0)
-           < RetrievalSparseKeySize (0.5, 0.5, 0.0));
   REQUIRE (RetrievalTokenOverlapQueryWeight (1.0, 0.5, 0.5)
            > RetrievalTokenOverlapQueryWeight (0.0, 0.5, 0.5));
   REQUIRE (RetrievalRouteTokenMinChars (0.5, 0.5, 0.5) == 3);

@@ -629,54 +629,19 @@ Earlier builds marked high-intensity, high-arousal memories as flashbulb memorie
 
 Earlier builds tagged the temporal neighbours of a high-surprise or high-arousal signal (`tag_strength`, `tag_expires_at`). A tagged memory got a consolidation-score bonus of `lerp(0.10, 0.25, S) × tag_strength`. That score was the tag's only consumer. Clustering consolidation was removed (@sec-consolidation), and the engine ablation study (2026-10) removed tagging and its columns with it. Phase-1 ablation left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. The June research-branch result that tagging removal hurt (@sec-experimental) was measured on a branch where consolidation was live, so it does not apply to the current engine.
 
-## Pattern Separation Sparse Index {#sec-pattern-separation}
+## Pattern Separation Sparse Index and Procedural Lane (Removed) {#sec-pattern-separation}
 
-Pattern separation is a lightweight sparse-key side channel maintained for
-experimental indexing and procedural-value updates without adding a decoder,
-taxonomy, or fact layer. For an accumulator or stored memory embedding `x`, Cortext selects
-the `k` largest-magnitude dimensions, preserves each selected dimension's sign,
-sorts the selected indices, and serializes the result as a stable sparse key:
-
-```
-k_sparse(F,S,T) = RetrievalSparseKeySize(F,S,T)
-top_k(x) = indices of the k_sparse largest |x_i|
-sparse_key(x) = join(sort({ i || sign(x_i) : i in top_k(x) }))
-```
-
-The write path stores each committed memory id under
-`index_store[sparse_key(e_rep)]`. The procedural update lane reuses the same
-keying function but stores values rather than membership lists:
-
-```
-index_store[sparse_key(e_rep)] += memory_id
-procedural_store[sparse_key(μ_acc)][memory_id] = Q(proc_key, memory_id)
-```
-
-Thus `index_store` is a processor-local sparse content-addressed bucket, while
-`procedural_store` is a processor-local sparse context-to-memory value table.
-Empty embeddings or non-positive key sizes produce no key and therefore do not
-update either store. Neither map is currently persisted, and production graph
-retrieval does not consume `index_store`; dense SQLite/vector discovery remains
-the active seed path.
-
-## Procedural Memory Lane (Habit/Skill Memory)
-
-In addition to declarative memory, Cortext maintains experimental procedural
-values for which previously successful routine memory could be surfaced in a
-context, learned from repeated successful use.
-
-```
-proc_key ← sparse_key(μ_acc)  # same sparsification as @sec-pattern-separation
-Q(proc_key, memory_id) ← routine value
-```
-
-Updates occur when a retrieved memory is used successfully and downstream outcome signals are positive:
-```
-Q ← Q + value_update_gain × δ_reward_t × (1 − Q)
-```
-
-The current implementation updates this processor-local table but does not read
-it in production graph retrieval, so it does not yet add proactive seeds or
-surface action tokens. The historical `procedural_proactive` ablation in
+Earlier builds kept two processor-local side tables keyed by a sparse
+signature of an embedding (the signs of its `RetrievalSparseKeySize(F,S,T)`
+largest-magnitude dimensions): `index_store[sparse_key(e_rep)]` listed every
+stored memory id, and `procedural_store[sparse_key(μ_acc)][memory_id]` held a
+routine value `Q ← Q + value_update_gain × δ_reward × (1 − Q)` updated when a
+retrieved memory was used. Neither table was persisted and no operation read
+either one: retrieval seeds come from the dense vector surface only. The tables
+were still journaled for rollback on every signal and grew by one entry per
+stored memory. The engine ablation study (2026-10) removed both tables, the
+sparse key and its knob with no packet change. The public `procedural_enabled`
+configuration flag no longer controls anything; removing it is a public API
+change and awaits approval. The historical `procedural_proactive` ablation in
 @sec-experimental evaluated an earlier research-branch path and was an exact
-null; it is not evidence that proactive procedural retrieval ships today.
+null.
