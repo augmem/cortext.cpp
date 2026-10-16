@@ -92,9 +92,6 @@ ApplyRIFRecovery (OperationContext &context, Transaction &tx, long long now_ts,
       result.clock.log_factor, result.clock.last_ts);
   rif_active_epoch_cache_internal::StageMemories (
       sidecar->rif_active_epoch, result.changed_memory_ids);
-  auto &p_ctx = context.GetProcessorContext ();
-  p_ctx.retrieval_suppression_embedding_ids.clear ();
-  p_ctx.retrieval_suppression_memory_ids.clear ();
   context.AddOperationTiming ("Competition.rif_recovery_active_sql",
                               ElapsedMillis (start));
   if (ProfileWorkCountersEnabled ())

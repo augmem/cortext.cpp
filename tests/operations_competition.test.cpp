@@ -359,7 +359,6 @@ TEST_CASE ("Alg21 memory-scoped RIF recovery survives embedding fork",
 
   ProcessorContext pctx;
   pctx.recent_context_embeddings.push_back (ctx_vec);
-  pctx.retrieval_suppression_memory_ids.insert (100LL);
   auto signal = MakeSignal (ctx_vec, 1'000'000);
   OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetRetrievedMemoryEmbeddings (
@@ -381,7 +380,6 @@ TEST_CASE ("Alg21 memory-scoped RIF recovery survives embedding fork",
   REQUIRE (std::any_cast<double> (rows[0].at ("suppression"))
            == Catch::Approx (0.0));
   REQUIRE (std::any_cast<double> (rows[0].at ("strength")) > 0.5);
-  REQUIRE (pctx.retrieval_suppression_memory_ids.empty ());
 }
 
 TEST_CASE ("Alg21 RIF recovery UPDATE does not violate NOT NULL constraint",

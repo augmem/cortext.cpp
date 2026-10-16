@@ -271,13 +271,6 @@ struct ProcessorContext
   double mismatch_weight = 0.5;
   std::deque<Eigen::VectorXf> recent_context_embeddings;
 
-  /// @brief Embedding ids whose persisted memories currently carry retrieval
-  /// induced forgetting suppression and therefore need recovery updates.
-  std::unordered_set<long long> retrieval_suppression_embedding_ids;
-  /// @brief Memory ids whose persisted memories currently carry retrieval
-  /// induced forgetting suppression and therefore need recovery updates.
-  std::unordered_set<long long> retrieval_suppression_memory_ids;
-
   // ======================================================================
   // Sensitivity-Related State (Algorithms 3, 4, 16)
   // ======================================================================

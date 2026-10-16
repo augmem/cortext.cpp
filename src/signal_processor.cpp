@@ -245,8 +245,6 @@ struct DetachedProcessorCaches
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
   std::shared_ptr<operations::execution_cache_sidecar_internal::State>
       execution_cache_sidecar;
-  std::unordered_set<long long> retrieval_suppression_embedding_ids;
-  std::unordered_set<long long> retrieval_suppression_memory_ids;
   std::unordered_map<std::string, std::vector<long long>> index_store;
   std::unordered_map<long long, std::string> index_reverse;
   std::unordered_map<std::string, std::unordered_map<long long, double>>
@@ -272,9 +270,7 @@ DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
         + caches.retrieval_surface_index.size ()
         + caches.retrieval_surface_embedding_index.size ()
         + caches.retrieval_surface_source_index.size ()
-        + caches.retrieval_surface_source_index_dirty.size ()
-        + caches.retrieval_suppression_embedding_ids.size ()
-        + caches.retrieval_suppression_memory_ids.size ();
+        + caches.retrieval_surface_source_index_dirty.size ();
   for (const auto &[source_id, entries] : caches.retrieval_surface_source_index)
     {
       (void)source_id;
@@ -304,8 +300,6 @@ ClearDbDerivedProcessorCaches (ProcessorContext &ctx)
   ctx.retrieval_surface_source_index = {};
   ctx.retrieval_surface_source_index_dirty = {};
   operations::execution_cache_sidecar_internal::Erase (ctx);
-  ctx.retrieval_suppression_embedding_ids = {};
-  ctx.retrieval_suppression_memory_ids = {};
 }
 
 // Moves the DB-derived caches ClearDbDerivedProcessorCaches drops, except the
@@ -323,10 +317,6 @@ DetachDbDerivedProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.retrieval_surface_source_index);
   caches.retrieval_surface_source_index_dirty
       = std::move (ctx.retrieval_surface_source_index_dirty);
-  caches.retrieval_suppression_embedding_ids
-      = std::move (ctx.retrieval_suppression_embedding_ids);
-  caches.retrieval_suppression_memory_ids
-      = std::move (ctx.retrieval_suppression_memory_ids);
   return caches;
 }
 
@@ -359,10 +349,6 @@ RestoreDbDerivedProcessorCaches (ProcessorContext &ctx,
       = std::move (caches.retrieval_surface_source_index);
   ctx.retrieval_surface_source_index_dirty
       = std::move (caches.retrieval_surface_source_index_dirty);
-  ctx.retrieval_suppression_embedding_ids
-      = std::move (caches.retrieval_suppression_embedding_ids);
-  ctx.retrieval_suppression_memory_ids
-      = std::move (caches.retrieval_suppression_memory_ids);
 }
 
 void
@@ -388,10 +374,6 @@ DetachRebuildableProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.retrieval_surface_source_index_dirty);
   caches.execution_cache_sidecar
       = operations::execution_cache_sidecar_internal::Detach (ctx);
-  caches.retrieval_suppression_embedding_ids
-      = std::move (ctx.retrieval_suppression_embedding_ids);
-  caches.retrieval_suppression_memory_ids
-      = std::move (ctx.retrieval_suppression_memory_ids);
   caches.index_store = std::move (ctx.index_store);
   caches.index_reverse = std::move (ctx.index_reverse);
   caches.procedural_store = std::move (ctx.procedural_store);
@@ -413,10 +395,6 @@ RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
       = std::move (caches.retrieval_surface_source_index_dirty);
   operations::execution_cache_sidecar_internal::Restore (
       ctx, std::move (caches.execution_cache_sidecar));
-  ctx.retrieval_suppression_embedding_ids
-      = std::move (caches.retrieval_suppression_embedding_ids);
-  ctx.retrieval_suppression_memory_ids
-      = std::move (caches.retrieval_suppression_memory_ids);
   ctx.index_store = std::move (caches.index_store);
   ctx.index_reverse = std::move (caches.index_reverse);
   ctx.procedural_store = std::move (caches.procedural_store);
@@ -2461,16 +2439,6 @@ LoadRecentScores (Store &store, ProcessorContext &ctx,
 }
 
 void
-LoadRetrievalSuppressionIds (Store &store, ProcessorContext &ctx)
-{
-  (void)store;
-  // Lazy RIF state is persisted and indexed in SQLite.  Do not mirror the
-  // active history into ProcessorContext during initialization or rollback.
-  ctx.retrieval_suppression_embedding_ids.clear ();
-  ctx.retrieval_suppression_memory_ids.clear ();
-}
-
-void
 LoadHistoricalSurfaceSearchCache (
     Store &store, ProcessorContext &ctx,
     const std::unordered_map<long long, long long> *base_embedding_ids
@@ -3199,7 +3167,6 @@ SignalProcessor::SignalProcessor (const Config &config,
 
       // Load persisted state for algorithm resumption (v2 schema)
       loaded_state = LoadState (*store_, *context_, config_);      // Unified state
-      LoadRetrievalSuppressionIds (*store_, *context_);
       LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
                                  config_.sensitivity, config_.stability);
       LoadRecentContext (*store_, *context_, config_);
@@ -3450,7 +3417,6 @@ SignalProcessor::Process (const Signal &signal)
       {
         if (rollback_snapshot.full_cache_snapshot)
           {
-            LoadRetrievalSuppressionIds (*store_, *context_);
             LoadHistoricalSurfaceSearchCache (*store_, *context_);
           }
         else
@@ -3458,7 +3424,6 @@ SignalProcessor::Process (const Signal &signal)
             LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
                                        config_.sensitivity,
                                        config_.stability);
-            LoadRetrievalSuppressionIds (*store_, *context_);
           }
       }
   };
@@ -3487,7 +3452,6 @@ SignalProcessor::Process (const Signal &signal)
             LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
                                        config_.sensitivity,
                                        config_.stability);
-            LoadRetrievalSuppressionIds (*store_, *context_);
           }
       }
     rollback_snapshot.initialized = false;
