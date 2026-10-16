@@ -4,8 +4,6 @@
 
 
 #include "cortext/operations/sensitivity.hpp"
-#include "cortext/operations/stability.hpp"
-#include "cortext/operations/stability_feedback.hpp"
 #include "cortext/operations/uncertainty.hpp"
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -25,10 +23,10 @@ SeedMemory (Store &store, long long id)
   store.Execute (
       "INSERT OR REPLACE INTO memories("
       "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
-      "s_max, s_avg, strength, stability, drift_mag, "
+      "s_max, s_avg, strength, drift_mag, "
       "lability_state, suppression_count, created_at) "
       "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-      "1.0, 1.0, 0.0, 0.0, 0, ?)",
+      "1.0, 0.0, 0.0, 0, ?)",
       { id, id, now_ts, now_ts });
 }
 } // namespace
@@ -65,45 +63,6 @@ TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
 }
 
 
-
-TEST_CASE ("Alg17 emits adj, Alg6 consumes it", "[stability]")
-{
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg{};
-  cortext::testing::RequireEncoder (cfg);
-  cfg.stability = 0.5;
-  Signal sig;
-  sig.timestamp = 100;
-  auto unique_store = cortext::SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
-  cortext::testing::InitializeCoreSchema (*store);
-  SeedMemory (*store, 1LL);
-  SeedMemory (*store, 2LL);
-  SeedMemory (*store, 3LL);
-  OperationContext ctx (sig, pctx, cfg, store.get ());
-
-  // Feed some usage events with positive/negative gains
-  ctx.SetMemoryUsageEvents ({
-      { 1, true, +0.2 },
-      { 2, true, -0.1 },
-      { 3, true, +0.3 },
-  });
-  ApplyStabilityFeedback fdbk;
-  auto tx = store->Begin ();
-  fdbk.Execute (ctx, *tx);
-  tx->Commit ();
-  // Should set a delta
-  REQUIRE (ctx.GetDeltaHalfLifeAdjustment ().has_value ());
-
-  // Provide observed retention and run Alg6
-  const double half_life_before = pctx.half_life;
-  ctx.SetObservedRetentionSeconds (120.0);
-  UpdateStability st;
-  st.Execute (ctx, cortext::testing::GetNullTransaction ());
-  REQUIRE_FALSE (pctx.observed_retention_history.empty ());
-  REQUIRE (pctx.observed_retention_history.back () == 120.0);
-  REQUIRE (pctx.half_life != half_life_before);
-}
 
 TEST_CASE ("Alg4: ΔT_sensitivity is not clamped (Alg8 clamps later)",
            "[sensitivity]")

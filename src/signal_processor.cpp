@@ -2091,7 +2091,6 @@ SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
   const double T = core::Clamp (config.stability, 0.0, 1.0);
   const auto focus_priors = core::FocusStatePriorsForKnobs (F);
   const auto sensitivity_priors = core::SensitivityStatePriorsForKnobs (S);
-  const auto stability_priors = core::StabilityStatePriorsForKnobs (T);
 
   ctx.weight_relevance_prior = focus_priors.relevance_weight;
   ctx.coverage_gain_floor_prior = focus_priors.coverage_gain_floor;
@@ -2122,20 +2121,6 @@ SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
   ctx.rate_target = ctx.rate_target_prior;
 
   ctx.hysteresis_band_prior = core::BaseBandPrior (T);
-  ctx.half_life_prior = core::BaseHalfLifePrior (T);
-  ctx.rate_decay_prior = stability_priors.rate_decay;
-  ctx.periphery_half_life_prior
-      = core::ClampHalfLife (stability_priors.secondary_half_life_scale
-                             * ctx.half_life_prior);
-  ctx.salience_half_life_prior
-      = core::ClampHalfLife (stability_priors.secondary_half_life_scale
-                             * ctx.half_life_prior);
-  ctx.drift_weight_prior = stability_priors.drift_weight;
-  ctx.half_life = ctx.half_life_prior;
-  ctx.rate_decay = ctx.rate_decay_prior;
-  ctx.periphery_half_life = ctx.periphery_half_life_prior;
-  ctx.salience_half_life = ctx.salience_half_life_prior;
-  ctx.drift_weight = ctx.drift_weight_prior;
 
   ctx.T_dynamic = core::TPrior (F, S, T);
   ctx.T_target = ctx.T_dynamic;
@@ -2168,9 +2153,7 @@ LoadState (Store &store, ProcessorContext &ctx,
             && NearlyEqual (ExtractDouble (row, "coverage_gain_floor", 0.65),
                             0.65)
             && NearlyEqual (ExtractDouble (row, "weight_novelty", 0.3), 0.3)
-            && NearlyEqual (ExtractDouble (row, "weight_surprise", 0.2), 0.2)
-            && NearlyEqual (ExtractDouble (row, "rate_decay", 0.60), 0.60)
-            && NearlyEqual (ExtractDouble (row, "drift_weight", 0.5), 0.5);
+            && NearlyEqual (ExtractDouble (row, "weight_surprise", 0.2), 0.2);
       ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
       ctx.outcome_pred = ExtractDouble (row, "outcome_pred", 0.0);
       ctx.neuromod_ach = ExtractDouble (row, "neuromod_ach", 0.0);
@@ -2198,13 +2181,9 @@ LoadState (Store &store, ProcessorContext &ctx,
           true);
       ctx.hysteresis = ExtractPolicyDouble (
           row, "hysteresis", 0.05, ctx.hysteresis, true);
-      ctx.half_life = ExtractPolicyDouble (
-          row, "half_life", 120.0, ctx.half_life, true);
       ctx.rate_target = ExtractPolicyDouble (
           row, "rate_target", 0.2, ctx.rate_target,
           true);
-      ctx.delta_half_life_adj
-          = ExtractDouble (row, "delta_half_life_adj", 0.0);
       ctx.last_signal_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_timestamp", 0));
       ctx.episode_start_ts
@@ -2247,21 +2226,6 @@ LoadState (Store &store, ProcessorContext &ctx,
           true);
       ctx.score_gain = ExtractPolicyDouble (
           row, "score_gain", 1.0, ctx.score_gain, true);
-
-      // Stability state
-      ctx.rate_decay = ExtractPolicyDouble (
-          row, "rate_decay", 0.60, ctx.rate_decay, true);
-      ctx.periphery_half_life
-          = ExtractPolicyDouble (row, "periphery_half_life", 120.0,
-                                 ctx.periphery_half_life,
-                                 true);
-      ctx.salience_half_life
-          = ExtractPolicyDouble (row, "salience_half_life", 120.0,
-                                 ctx.salience_half_life,
-                                 true);
-      ctx.drift_weight = ExtractPolicyDouble (
-          row, "drift_weight", 0.5, ctx.drift_weight, true);
-      ctx.retention_ema = ExtractDouble (row, "retention_ema", 0.0);
 
       // Rate control (Algorithm 8)
       ctx.m_rate = ExtractDouble (row, "m_rate", 0.0);
@@ -2839,44 +2803,6 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
     }
 }
 
-void
-LoadObservedRetentionHistory (Store &store, ProcessorContext &ctx,
-                              std::uint64_t now_ms, int history_limit)
-{
-  const int limit = std::max (1, history_limit);
-  try
-    {
-      auto rows = store.Execute (
-          "SELECT COALESCE(last_used, last_access) AS last_used "
-          "FROM memories "
-          "WHERE COALESCE(last_used, last_access) IS NOT NULL "
-          "  AND kind != 'WORKING' "
-          "ORDER BY last_used ASC "
-          "LIMIT ?",
-          { static_cast<long long> (limit) });
-      for (const auto &row : rows)
-        {
-          const auto last_used
-              = ExtractInt64 (row, "last_used", 0);
-          if (last_used <= 0)
-            continue;
-          const double retention_sec
-              = std::max (0.0,
-                          static_cast<double> (
-                              static_cast<long long> (now_ms) - last_used)
-                              / 1000.0);
-          ctx.observed_retention_history.push_back (retention_sec);
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load observed retention history",
-          { telemetry::Attribute::String ("component", "signal_processor"),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-}
-
 // v2 Schema: Load working memory from MEMORIES table (kind='WORKING')
 void
 LoadWorkingMemory (Store &store, ProcessorContext &ctx,
@@ -3309,10 +3235,6 @@ SignalProcessor::SignalProcessor (const Config &config,
                                  config_.sensitivity, config_.stability);
       LoadRecentContext (*store_, *context_, config_);
       LoadRecentScores (*store_, *context_, config_);
-      LoadObservedRetentionHistory (
-          *store_, *context_, now_ms,
-          core::ObservedRetentionHistoryLimit (
-              config_.focus, config_.sensitivity, config_.stability));
       LoadWorkingMemory (*store_, *context_, config_,
                          now_ms);                                  // From MEMORIES
       LoadSoftAnchors (*store_, *context_);
@@ -4622,7 +4544,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "INSERT OR REPLACE INTO state "
       "(id, signals_processed, "
       // Threshold state
-      "theta_dynamic, theta_target, hysteresis, half_life, "
+      "theta_dynamic, theta_target, hysteresis, "
       // Focus state
       "weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, "
       // Sensitivity state
@@ -4631,15 +4553,13 @@ SignalProcessor::PersistState (Transaction &tx)
       // Emotion state
       "emotion_intensity, valence, arousal, mood_vector, last_mood_ts, "
       "flashbulb_rate, "
-      // Stability state
-      "rate_decay, periphery_half_life, salience_half_life, drift_weight, retention_ema, "
       // Rate control
       "m_rate, rho_hat_prev, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
       // Uncertainty
       "u_uncertainty, "
       "outcome_pred, neuromod_ach, neuromod_ne, neuromod_da, osc_phase, "
       // Embedding prediction
-      "last_embedding, x_pred_ema, delta_half_life_adj, "
+      "last_embedding, x_pred_ema, "
       // Working memory
       "wm_maintenance_cost, wm_slot_count, wm_last_accepted, wm_last_chunked, "
       // Consolidation
@@ -4655,14 +4575,13 @@ SignalProcessor::PersistState (Transaction &tx)
       // Blender matrices
       "blender_P_matrix) "
       "VALUES (1, ?, "
-      "?, ?, ?, ?, "  // Threshold
+      "?, ?, ?, "  // Threshold
       "?, ?, ?, ?, "  // Focus
       "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
       "?, ?, ?, ?, ?, ?, "  // Emotion
-      "?, ?, ?, ?, ?, "  // Stability
       "?, ?, ?, ?, ?, ?, "  // Rate control
       "?, ?, ?, ?, ?, ?, "  // Uncertainty + modulators
-      "?, ?, ?, "  // Embedding prediction
+      "?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
       "?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Consolidation
       "?, ?, ?, ?, ?, "  // Episode tracking + write_rate_timestamps
@@ -4673,7 +4592,6 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->signals_processed,
         // Threshold state
         context_->T_dynamic, context_->T_target, context_->hysteresis,
-        context_->half_life,
         // Focus state
         context_->weight_relevance, context_->attention_width,
         context_->coverage_gain_floor, context_->mismatch_weight,
@@ -4686,10 +4604,6 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->arousal_ewma, mood_blob,
         static_cast<long long> (context_->last_mood_ts),
         context_->flashbulb_rate_ewma,
-        // Stability state
-        context_->rate_decay, context_->periphery_half_life,
-        context_->salience_half_life, context_->drift_weight,
-        context_->retention_ema,
         // Rate control
         context_->m_rate, context_->rho_hat_prev, context_->dt_ema,
         context_->rate_ticks,
@@ -4709,7 +4623,6 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->x_pred_ema.has_value ()
             ? std::any (ToFloatVector (*context_->x_pred_ema))
             : std::any (std::vector<float> ()),
-        context_->delta_half_life_adj,
         // Working memory
         wm_maintenance_cost,
         wm_slot_count,
@@ -4883,8 +4796,6 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
 
   const double working_source_reliability = core::SourceReliabilityPrior (
       config_.focus, config_.sensitivity, config_.stability);
-  const double working_stability = core::MemoryInitialStabilityPolicy (
-      config_.focus, config_.sensitivity, config_.stability);
 
   bool all_slots_clean = true;
 
@@ -4970,7 +4881,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                       "embedding_id = ?, source_id = ?, modality = ?, "
                       "start_ts = ?, n_signals = ?, s_max = ?, s_avg = ?, "
                       "s_emotion_max = ?, s_arousal_avg = ?, drift_mag = ?, "
-                      "strength = ?, source_reliability = ?, stability = ?, "
+                      "strength = ?, source_reliability = ?, "
                       "last_access = ?, strength_updated_at = ?, end_ts = NULL "
                       "WHERE memory_id = ? AND kind = 'WORKING'",
                       { embedding_id,
@@ -4979,7 +4890,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                         slot.modality, slot.start_ts, slot.n_signals,
                         slot.s_max, slot.s_avg, slot.s_emotion_max,
                         slot.s_arousal_avg, slot.drift_acc, slot.strength,
-                        working_source_reliability, working_stability, ts_ms,
+                        working_source_reliability, ts_ms,
                         strength_ts_ms, memory_id });
                   operations::rif_state_internal::RefreshActiveStrengthWhere (
                       tx, "memory_id = ?", { memory_id });
@@ -4995,16 +4906,16 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                   "INSERT INTO memories "
                   "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
                   " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
-                  " strength, source_reliability, stability, last_access, "
+                  " strength, source_reliability, last_access, "
                   " strength_updated_at, created_at) "
-                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   { embedding_id,
                     slot.source_id.empty () ? std::string ("unknown")
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
                     slot.drift_acc, slot.strength, working_source_reliability,
-                    working_stability, ts_ms, strength_ts_ms, slot_created_at });
+                    ts_ms, strength_ts_ms, slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
               add_timing ("SignalProcessor.wm_insert_slot_memory",

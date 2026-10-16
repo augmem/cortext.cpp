@@ -285,35 +285,6 @@ TEST_CASE ("MaxDeltaTPerMin follows spec: lerp(0.30, 0.10, maturity)",
 // 5.1.5 Half-Life & Decay Functions (9 functions)
 // =============================================================================
 
-TEST_CASE ("BaseHalfLifePrior follows spec: exp(ln(120) + T*ln(360))",
-           "[formula][knobs][decay]")
-{
-  // BaseHalfLifePrior = exp(ln(120) + T * ln(43200/120))
-  // At T=0: exp(ln(120)) = 120
-  REQUIRE (BaseHalfLifePrior (0.0) == Catch::Approx (120.0));
-
-  // At T=1: exp(ln(120) + ln(360)) = exp(ln(43200)) = 43200
-  REQUIRE (BaseHalfLifePrior (1.0) == Catch::Approx (43200.0));
-
-  // Monotonic
-  REQUIRE (BaseHalfLifePrior (0.3) < BaseHalfLifePrior (0.7));
-
-  // Range check
-  REQUIRE (BaseHalfLifePrior (0.5) >= 120.0);
-  REQUIRE (BaseHalfLifePrior (0.5) <= 43200.0);
-}
-
-TEST_CASE ("ClampHalfLife follows spec: clamp(value, 120, 43200)",
-           "[formula][knobs][decay]")
-{
-  // ClampHalfLife = clamp(value, 120, 43200)
-  REQUIRE (ClampHalfLife (100.0) == 120.0);
-  REQUIRE (ClampHalfLife (120.0) == 120.0);
-  REQUIRE (ClampHalfLife (1000.0) == 1000.0);
-  REQUIRE (ClampHalfLife (43200.0) == 43200.0);
-  REQUIRE (ClampHalfLife (50000.0) == 43200.0);
-}
-
 TEST_CASE ("TauLabile follows spec: lerp(30, 300, T)",
            "[formula][knobs][decay]")
 {
@@ -545,31 +516,6 @@ TEST_CASE ("LabelFrequencyThreshold follows spec: lerp(5, 15, T)",
 
   // Monotonic
   REQUIRE (LabelFrequencyThreshold (0.3) < LabelFrequencyThreshold (0.7));
-}
-
-TEST_CASE ("WRet follows spec: lerp(10, 50, T)",
-           "[formula][knobs][consolidation]")
-{
-  // WRet = round(lerp(10, 50, T))
-  // Spec (§2.3.2, line 339): w_ret(T) = round(lerp(10, 50, T))
-  REQUIRE (WRet (0.0) == 10);
-  REQUIRE (WRet (1.0) == 50);
-  REQUIRE (WRet (0.5) == 30);
-
-  // Monotonic
-  REQUIRE (WRet (0.3) < WRet (0.7));
-}
-
-TEST_CASE ("PeripheryCutoff follows spec: lerp(0.03, 0.20, T)",
-           "[formula][knobs][consolidation]")
-{
-  // PeripheryCutoff = lerp(0.03, 0.20, T)
-  REQUIRE (PeripheryCutoff (0.0) == Catch::Approx (0.03));
-  REQUIRE (PeripheryCutoff (1.0) == Catch::Approx (0.20));
-  REQUIRE (PeripheryCutoff (0.5) == Catch::Approx (0.115));
-
-  // Monotonic
-  REQUIRE (PeripheryCutoff (0.3) < PeripheryCutoff (0.7));
 }
 
 // =============================================================================
@@ -888,13 +834,11 @@ TEST_CASE ("Extreme stability values", "[formula][knobs][composite]")
 {
   // High stability: long half-lives, slow decay, stable persistence
   double T_high = 1.0;
-  REQUIRE (BaseHalfLifePrior (T_high) == Catch::Approx (43200.0));
   REQUIRE (LambdaMood (30.0, T_high) > 0.95);
   REQUIRE (EmotionCascadeWindowSeconds (T_high) == 3600);
 
   // Low stability: short half-lives, fast decay, responsive
   double T_low = 0.0;
-  REQUIRE (BaseHalfLifePrior (T_low) == Catch::Approx (120.0));
   REQUIRE (LambdaMood (30.0, T_low) == Catch::Approx (0.5));
   REQUIRE (EmotionCascadeWindowSeconds (T_low) == 300);
 }

@@ -86,7 +86,4 @@ struct MniGateDiagnostics;  ///< mni_* and interrupt_gate_* telemetry values
 // DetectMemoryUsage
 struct MemoryUsageEvents;
 
-// ApplyStabilityFeedback
-struct DeltaHalfLifeAdjustment;
-
 } // namespace cortext::tags

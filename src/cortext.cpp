@@ -72,7 +72,6 @@
 #include "cortext/operations/write_gate.hpp"
 #include "cortext/operations/soft_anchor.hpp"
 #include "cortext/operations/memory_storage.hpp"
-#include "cortext/operations/stability_feedback.hpp"
 #include "cortext/operations/working_memory.hpp"
 #include "cortext/operations/detect_memory_usage.hpp"
 #include "cortext/operations/drift_accumulation.hpp"
@@ -1900,7 +1899,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ApplyEmotionalConsolidation;
   using cortext::operations::ApplyReconsolidation;
   using cortext::operations::ApplyRetrievalCompetition;
-  using cortext::operations::ApplyStabilityFeedback;
   using cortext::operations::CheckSpikeBypass;
   using cortext::operations::CheckStreamingPacing;
   using cortext::operations::ComputeCoherence;
@@ -1936,7 +1934,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::UpdateRecentContext;
   using cortext::operations::UpdateSensitivity;
   using cortext::operations::UpdateSoftAnchor;
-  using cortext::operations::UpdateStability;
   using cortext::operations::UpdateThreshold;
   using cortext::operations::UpdateUncertainty;
   using cortext::operations::WorkingMemory;
@@ -1972,7 +1969,6 @@ BuildRootOperationSet (bool probe_mode)
   using FeedbackStage = OperationSet<
       ApplyRetrievalCompetition,
       ApplyReconsolidation,
-      ApplyStabilityFeedback, UpdateStability,
       RecordMemoryUsage, ApplyEmotionalConsolidation, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
       PropagateEmotionalCascade>;

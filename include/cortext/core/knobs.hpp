@@ -100,20 +100,6 @@ FocusStatePriorsForKnobs (double F)
   return { Sigmoid (2.0 * f - 1.0), 0.3 + 0.7 * f, 1.0 - f };
 }
 
-struct StabilityStatePriors
-{
-  double rate_decay;
-  double secondary_half_life_scale;
-  double drift_weight;
-};
-
-inline StabilityStatePriors
-StabilityStatePriorsForKnobs (double T)
-{
-  const double t = Clamp (T, 0.0, 1.0);
-  return { Lerp (0.60, 0.98, t), 0.50, 0.50 * (1.0 - t) };
-}
-
 inline double
 MetricRarityStabilityScale (double T)
 {
@@ -1968,26 +1954,6 @@ LabelFrequencyThreshold (double T)
   return static_cast<int> (std::round (Lerp (5.0, 15.0, Clamp (T, 0.0, 1.0))));
 }
 
-// Retention window size (w_ret) — Algorithm 0.2
-// Spec (§2.3.2, line 339): w_ret(T) = round(lerp(10, 50, T))
-inline int
-WRet (double T)
-{
-  return static_cast<int> (std::round (Lerp (10.0, 50.0, T)));
-}
-
-inline int
-ObservedRetentionHistoryLimit (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (192.0, 384.0, t) * Lerp (1.08, 0.94, f)
-                             * Lerp (0.95, 1.05, s),
-                         96.0, 512.0)));
-}
-
 inline int
 RecentRetrievedIdWindow (double F, double S, double T)
 {
@@ -2018,54 +1984,12 @@ MemoryInitialStrengthPolicy (double F, double S, double T)
                 0.90, 1.0);
 }
 
-inline double
-MemoryInitialStabilityPolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double instability = std::max (0.0, 0.5 - t);
-  const double sensitivity_pressure = std::max (0.0, s - s0);
-  const double diffuse_pressure = std::max (0.0, f0 - f);
-  return Clamp (1.0
-                    - 0.12 * instability
-                          * (1.0 + 0.25 * sensitivity_pressure
-                             + 0.15 * diffuse_pressure),
-                0.82, 1.0);
-}
-
-// Periphery cutoff — Algorithm 0.2
-inline double
-PeripheryCutoff (double T)
-{
-  return Lerp (0.03, 0.20, T);
-}
-
 // --- Stability prior helpers (Algorithm 5) ---
 inline double
 BaseBandPrior (double T)
 {
   // band_min = 0.02; band_max = 0.25
   return Lerp (0.02, 0.25, T);
-}
-
-inline double
-BaseHalfLifePrior (double T)
-{
-  // hl_min = 120.0; hl_max = 43200.0 (2 min → 12 h)
-  const double hl_min = 120.0;
-  const double hl_max = 43200.0;
-  return std::exp (std::log (hl_min) + T * std::log (hl_max / hl_min));
-}
-
-inline double
-ClampHalfLife (double value)
-{
-  const double hl_min = 120.0;
-  const double hl_max = 43200.0;
-  return Clamp (value, hl_min, hl_max);
 }
 
 // --- Algorithm 20 (Reconsolidation) Helpers ---
@@ -2659,17 +2583,6 @@ ReinforcementFallbackContextualSupport (double F, double S, double T)
                     * (1.0 + 0.06 * (f - f0) - 0.08 * (s - s0)
                        + 0.06 * (t - 0.5)),
                 0.35, 0.65);
-}
-
-inline double
-StabilityFeedbackUsageGain (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.05 * Lerp (0.95, 1.05, f) * Lerp (1.12, 0.88, s)
-                    * Lerp (0.75, 1.25, t),
-                0.02, 0.10);
 }
 
 // --- Knowledge Graph Enhancement (Section 9.5) ---

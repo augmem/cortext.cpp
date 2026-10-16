@@ -316,19 +316,6 @@ struct ProcessorContext
   // Stability-Related State (Algorithms 5, 6, 17)
   // ======================================================================
   double hysteresis_band_prior = 0.02;
-  double half_life_prior = 120.0;
-  double rate_decay_prior = 0.60;
-  double periphery_half_life_prior = 120.0;
-  double salience_half_life_prior = 120.0;
-  double drift_weight_prior = 0.5;
-  std::deque<double> observed_retention_history;
-  double half_life = 120.0;
-  double rate_decay = 0.60;
-  double periphery_half_life = 120.0;
-  double salience_half_life = 120.0;
-  double drift_weight = 0.5;
-  double retention_ema = 0.0;
-  double delta_half_life_adj = 0.0;
 
   // ======================================================================
   // Threshold & Score Tracking State (Algorithm 8)
@@ -361,11 +348,6 @@ struct ProcessorContext
   int consolidation_count = 0;
   int memories_since_consolidation = 0;
   bool is_processing_signal = false;
-
-  // Retention aggregates scan the memory table. Keep them periodic so
-  // stability adaptation does not add a corpus-size term to every signal.
-  int last_retention_scan_signal = -1;
-  uint64_t last_retention_scan_consolidation_ts = 0;
 
   // ======================================================================
   // Episode Tracking State (Algorithm 12)

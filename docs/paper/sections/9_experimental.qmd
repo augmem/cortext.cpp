@@ -973,6 +973,7 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | serial position effects (`ApplySerialPositionEffects`, `ApplySerialPositionMultiplier`) | 0/250, 0/48, 0/40 (minor-feedback group). The multiplier only fed memory-strength reinforcement |
 | synaptic tagging (`ApplySynapticTagging`, `tag_strength`, `tag_expires_at`) | 0/250, 0/48, 0/40. Its only consumer was the consolidation score. The June research-branch "removal hurts" verdict was measured with consolidation live |
 | sensitivity feedback (`ApplySensitivityFeedback`, `memories.redundancy`, the unwritten `connectivity`) | 0/250, 0/48, 0/40 (minor-feedback group). `redundancy` only fed the consolidation score |
+| stability feedback and half-life adaptation (`ApplyStabilityFeedback`, `UpdateStability`, `memories.stability`, persisted half-life/rate-decay/drift-weight/retention state) | 0/250, 0/48, 0/40 (minor-feedback group). Their only consumers were the consolidation score and memory-strength decay |
 
 ## Experimental Interpretation
 

@@ -679,15 +679,6 @@ GetCoreMigrations ()
           },
       },
       {
-          19,
-          "Long-term retention sample index",
-          {
-              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_created_strength "
-              "ON memories(created_at DESC, start_ts DESC, strength) "
-              "WHERE kind = 'LONG_TERM'",
-          },
-      },
-      {
           20,
           "Drop obsolete strength retention index",
           {
@@ -955,6 +946,21 @@ GetCoreMigrations ()
           {
               "ALTER TABLE memories DROP COLUMN redundancy",
               "ALTER TABLE memories DROP COLUMN connectivity",
+          },
+      },
+      {
+          41,
+          "Drop the removed per-memory stability and half-life adaptation state",
+          {
+              "DROP INDEX IF EXISTS idx_memories_ltm_created_strength",
+              "ALTER TABLE memories DROP COLUMN stability",
+              "ALTER TABLE state DROP COLUMN half_life",
+              "ALTER TABLE state DROP COLUMN rate_decay",
+              "ALTER TABLE state DROP COLUMN periphery_half_life",
+              "ALTER TABLE state DROP COLUMN salience_half_life",
+              "ALTER TABLE state DROP COLUMN drift_weight",
+              "ALTER TABLE state DROP COLUMN retention_ema",
+              "ALTER TABLE state DROP COLUMN delta_half_life_adj",
           },
       },
   };

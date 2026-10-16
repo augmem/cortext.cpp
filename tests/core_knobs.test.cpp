@@ -174,15 +174,6 @@ TEST_CASE ("Bootstrap state priors derive from knobs", "[core][knobs]")
   REQUIRE (focus_mid.mismatch_weight == Catch::Approx (0.5));
   REQUIRE (FocusStatePriorsForKnobs (1.0).relevance_weight
            > FocusStatePriorsForKnobs (0.0).relevance_weight);
-
-  const auto stability_mid = StabilityStatePriorsForKnobs (0.5);
-  REQUIRE (stability_mid.rate_decay == Catch::Approx (0.79));
-  REQUIRE (stability_mid.secondary_half_life_scale == Catch::Approx (0.50));
-  REQUIRE (stability_mid.drift_weight == Catch::Approx (0.25));
-  REQUIRE (StabilityStatePriorsForKnobs (1.0).rate_decay
-           > StabilityStatePriorsForKnobs (0.0).rate_decay);
-  REQUIRE (StabilityStatePriorsForKnobs (1.0).drift_weight
-           < StabilityStatePriorsForKnobs (0.0).drift_weight);
 }
 
 TEST_CASE ("StreamingPacingThreshold knob function", "[core][knobs]")
@@ -551,8 +542,6 @@ TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
   REQUIRE (RetrievalDurableSourceLinkFanout (0.5, 1.0, 0.5, 4)
            > RetrievalDurableSourceLinkFanout (0.5, 0.0, 0.5, 4));
 
-  REQUIRE (ObservedRetentionHistoryLimit (0.5, 0.5, 1.0)
-           > ObservedRetentionHistoryLimit (0.5, 0.5, 0.0));
   REQUIRE (RecentRetrievedIdWindow (0.5, 0.5, 1.0)
            > RecentRetrievedIdWindow (0.5, 0.5, 0.0));
 }
@@ -653,12 +642,8 @@ TEST_CASE ("Memory trace policy derives from knobs with neutral midpoint",
 {
   REQUIRE (MemoryInitialStrengthPolicy (0.5, 0.5, 0.5)
            == Catch::Approx (1.0));
-  REQUIRE (MemoryInitialStabilityPolicy (0.5, 0.5, 0.5)
-           == Catch::Approx (1.0));
   REQUIRE (MemoryInitialStrengthPolicy (0.0, 1.0, 0.0)
            < MemoryInitialStrengthPolicy (0.5, 0.5, 0.5));
-  REQUIRE (MemoryInitialStabilityPolicy (0.0, 1.0, 0.0)
-           < MemoryInitialStabilityPolicy (0.5, 0.5, 0.5));
 }
 
 TEST_CASE ("MaxWaitDrift knob function", "[core][knobs]")

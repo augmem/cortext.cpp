@@ -605,28 +605,8 @@ public:
   // Stability Feedback API (Algorithm 17 → Algorithm 6 bridge)
   // ======================================================================
   
-  void
-  SetDeltaHalfLifeAdjustment (std::optional<double> v)
-  {
-    delta_half_life_adj_ = v;
-  }
-  std::optional<double>
-  GetDeltaHalfLifeAdjustment () const
-  {
-    return delta_half_life_adj_;
-  }
 
   // Observed retention (seconds) for Alg 6 input
-  void
-  SetObservedRetentionSeconds (std::optional<double> v)
-  {
-    observed_retention_sec_ = v;
-  }
-  std::optional<double>
-  GetObservedRetentionSeconds () const
-  {
-    return observed_retention_sec_;
-  }
 
   // ======================================================================
   // Effective Focus API (Algorithm 10 stabilizer)
@@ -1016,8 +996,6 @@ private:
   std::optional<Eigen::VectorXf> boundary_centroid_;
 
   // Stability feedback bridge and optional observed retention
-  std::optional<double> delta_half_life_adj_;
-  std::optional<double> observed_retention_sec_;
 
   // Memory usage events attached to this signal
   std::vector<MemoryUsageEvent> memory_usage_events_;

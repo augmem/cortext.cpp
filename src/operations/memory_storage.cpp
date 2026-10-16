@@ -1290,8 +1290,6 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
 
       const double initial_strength = core::MemoryInitialStrengthPolicy (
           cfg.focus, cfg.sensitivity, cfg.stability);
-      const double initial_stability = core::MemoryInitialStabilityPolicy (
-          cfg.focus, cfg.sensitivity, cfg.stability);
       const auto insert_memory_start = SteadyClock::now ();
       savepoint->Execute (
           "INSERT INTO memories ("
@@ -1299,8 +1297,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score, "
           "  drift_mag, emotion, ambient_mood, episode_id, "
           "  blob_id, created_at, context, source_origin, source_reliability, "
-          "  strength, stability"
-          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "  strength"
+          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
             static_cast<long long> (n_signals), primary_modality,
@@ -1310,7 +1308,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
             static_cast<long long> (end_ts),
             ctx_vec.empty () ? std::any () : std::any (ctx_vec),
             origin, source_reliability,
-            initial_strength, initial_stability });
+            initial_strength });
       context.AddOperationTiming ("MemoryStorage.insert_memory",
                                   ElapsedMillis (insert_memory_start));
 

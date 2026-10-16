@@ -332,16 +332,13 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   auto sig_blob_id = BlobFromAny (sig_rows[0].at ("blob_id"));
   REQUIRE (!sig_blob_id.empty ());
 
-  // v2: Verify memories carries the initial strength and stability
+  // v2: Verify memories carries the initial strength
   auto fb_rows = store->Execute (
-      "SELECT strength, stability FROM memories "
+      "SELECT strength FROM memories "
       "WHERE embedding_id = ?", { *stored_id });
   REQUIRE (fb_rows.size () == 1);
   REQUIRE (std::any_cast<double> (fb_rows[0].at ("strength"))
            == Catch::Approx (core::MemoryInitialStrengthPolicy (
-               cfg.focus, cfg.sensitivity, cfg.stability)));
-  REQUIRE (std::any_cast<double> (fb_rows[0].at ("stability"))
-           == Catch::Approx (core::MemoryInitialStabilityPolicy (
                cfg.focus, cfg.sensitivity, cfg.stability)));
 
   // No buffered instructions since we use savepoints
@@ -399,20 +396,15 @@ TEST_CASE ("MemoryStorage initializes scalar memory fields from knobs",
   REQUIRE (stored_id.has_value ());
 
   auto rows = store->Execute (
-      "SELECT strength, stability FROM memories WHERE embedding_id = ?",
+      "SELECT strength FROM memories WHERE embedding_id = ?",
       { *stored_id });
   REQUIRE (rows.size () == 1);
 
   const double expected_strength = core::MemoryInitialStrengthPolicy (
       cfg.focus, cfg.sensitivity, cfg.stability);
-  const double expected_stability = core::MemoryInitialStabilityPolicy (
-      cfg.focus, cfg.sensitivity, cfg.stability);
   REQUIRE (expected_strength < 1.0);
-  REQUIRE (expected_stability < 1.0);
   REQUIRE (std::any_cast<double> (rows[0].at ("strength"))
            == Catch::Approx (expected_strength));
-  REQUIRE (std::any_cast<double> (rows[0].at ("stability"))
-           == Catch::Approx (expected_stability));
 }
 
 TEST_CASE ("MemoryStorage discards when write_decision is false",

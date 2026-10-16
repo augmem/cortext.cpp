@@ -144,74 +144,15 @@ m_norm ← ‖M_t‖ / √6  # max norm when all components at 1
 
 ## Stability-Driven Persistence
 
-Stability governs temporal dynamics through half-life, decay rates, and hysteresis.
-
-### Stability Priors
-
-Given Stability knob T ∈ [0, 1], initialize Stability control variables:
+Stability sets the hysteresis band of the write threshold:
 
 ```
 hysteresis = lerp(0.02, 0.25, T)
-half_life = base_half_life(T)
-rate_decay = lerp(0.60, 0.98, T)
-periphery_half_life = clamp(0.5 × half_life,
-                                   τ_min, τ_max)
-drift_weight = 0.5 × (1 − T)
 ```
 
-### Dynamic Stability Update {#sec-stability-update}
+### Half-Life Adaptation (Removed) {#sec-stability-update}
 
-The stability update uses uncertainty-modulated learning rate and a stability-derived retention window:
-
-```
-α_min_T = 0.02; α_span_T = 0.18
-α_T(t) = α_min_T + (1 − T) × α_span_T × u(t)
-win_ret(T) = round(lerp(10, 50, T))  # retention history window size
-```
-
-At each signal event, compute retention statistics and adjust half-life:
-
-```
-active_memories ← {m | strength(m) ≥ periphery_cutoff(T)}
-observed_retention ← mean_age(active_memories)
-retention_ema_t ← EWMA(retention_ema_{t−1},
-                       observed_retention, α = α_T(t))
-```
-
-```
-retention_ema ← retention_ema_t
-```
-
-Definitions:
-```
-age_s(m) ← now_s() − to_s(m.created_at)  # fallback: use start_ts if created_at unset
-mean_age(active_memories) ← mean_{m ∈ active_memories} age_s(m); if empty, return 0
-retention_history ← append(observed_retention); keep last win_ret(T) values
-```
-
-Compute z-score relative to recent retention history:
-
-```
-last_win_ret ← tail(retention_history, win_ret(T))
-μ_ret ← mean(last_win_ret)
-σ_ret ← max(std(last_win_ret), 1.0)
-zscore_ret ← clamp((observed_retention − μ_ret) / σ_ret, −3, +3)
-```
-
-The target half-life incorporates feedback adjustment from the stability feedback mechanism (@sec-feedback):
-
-```
-stability_adj ← ΔHalfLife_adj_t if provided else 0
-target_half_life_t ← clamp(base_half_life(T) ×
-                          (1 + 0.25 × zscore_ret + stability_adj),
-                          τ_min, τ_max)
-half_life_t ← EWMA(half_life_{t−1}, target_half_life_t,
-                   α = α_T(t))
-```
-
-```
-half_life ← half_life_t
-```
+Earlier builds also kept an adaptive memory half-life. It started at `base_half_life(T)` and moved each signal by an EWMA toward `base_half_life(T) × (1 + 0.25 × zscore_ret + ΔHalfLife_adj)`. Here `zscore_ret` was the z-scored mean age of memories whose strength stayed above `PeripheryCutoff(T)`, and `ΔHalfLife_adj` came from stability feedback (@sec-feedback). Derived state included `rate_decay`, `periphery_half_life`, `salience_half_life`, `drift_weight` and `retention_ema`. Memory-strength decay was the only consumer of the half-life. The engine ablation study (2026-10) removed memory strength (@sec-reinforcement), and then this adaptation and its persisted state, which no operation read any more.
 
 ## Neuromodulator Layer (Internal Mapping)
 

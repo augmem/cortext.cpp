@@ -8,7 +8,7 @@ The engine ablation study (2026-10) removed the traces, the reinforcement and de
 
 `strength` now holds only its knob-derived initial value, adjusted by retrieval-induced suppression (@sec-advanced). A slim `RecordMemoryUsage` step keeps the retrieval counters that hydrated memories expose: `retrieved_count`, `used_count`, `last_used` and `last_access`. Store growth is unbounded again. A bounded store needs a forgetting policy that is measured against recall first.
 
-## Contextual Gain and Per-Memory Stability (Definitions)
+## Contextual Gain (Definitions)
 
 Contextual gain is a per-retrieval signal used by multiple feedback loops:
 
@@ -19,12 +19,10 @@ contextual_gain_t(m) ← undefined                # otherwise
 
 When undefined, treat contextual_gain_t(m) as 0 in downstream updates. It is not persisted (the smoothed per-memory column was removed with memory strength).
 
-Per-memory stability initializes at creation and is bounded:
+Per-memory strength initializes at creation:
 
 ```
 strength(m)_init = memory_initial_strength(F,S,T)
-stability(m)_init = memory_initial_stability(F,S,T)
-stability(m) ← clamp(stability(m), 0.0, 2.0)
 ```
 
 Retrieved vs used:
@@ -60,26 +58,9 @@ Earlier builds adjusted `weight_relevance` and `attention_width` from the contex
 
 Earlier builds nudged `weight_novelty` by `η_base × (novelty_reward × contextual_gain − redundancy)` for used memories, and persisted a per-memory `redundancy` that fed only the clustering-consolidation score. The engine ablation study (2026-10) removed the step, the `redundancy` column, and the never-written `connectivity` column. With the step switched off as part of the minor-feedback group, packets stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
 
-### Stability Feedback
+### Stability Feedback (Removed)
 
-```
-γT_base = 0.05
-for each used memory m:
-    if contextual_gain(m) > 0:
-        stability_t(m) ← stability(m) + γT_base
-    else:
-        stability_t(m) ← stability(m) × (1 − γT_base)
-    stability(m) ← clamp(stability_t(m), 0.0, 2.0)
-```
-
-The mean stability of used memories provides adjustment to the half-life target:
-
-```
-adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
-ΔHalfLife_adj_t ← adj
-```
-
-This factor is consumed by the Stability update (@sec-stability-update), avoiding conflicting adjustments between feedback mechanisms.
+Earlier builds raised the per-memory `stability` of used memories with positive contextual gain (`+0.05`) and lowered it otherwise (`× 0.95`). The mean stability of used memories adjusted the half-life target (@sec-stability-update). Stability had two consumers, the clustering-consolidation score and the half-life adaptation, and both are gone. The engine ablation study (2026-10) removed the step, `memories.stability` and the half-life state. Contextual gain is a raw cosine and practically never ≤ 0, so stability never fell below its initial value. As a result the consolidation score's `T·stability` term alone kept every memory above the candidate floor (@sec-consolidation). With the step switched off as part of the minor-feedback group, packets stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
 
 ## Influence Feedback (Removed)
 

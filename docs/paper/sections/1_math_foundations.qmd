@@ -156,18 +156,6 @@ win_rate_s(T) = round(lerp(60, 300, T))
 
 The context window n_ctx determines how many recent items inform relevance computation. The scoring window win_score controls the lookback for variance estimation and percentile calculation. The rate window win_rate_s specifies the temporal horizon (in seconds) for write-rate measurement.
 
-### Half-Life and Decay
-
-Memory half-life follows a log-scale mapping to span multiple orders of magnitude:
-
-```
-τ_min = 120.0 seconds (2 minutes)
-τ_max = 43200.0 seconds (12 hours)
-base_half_life(T) = exp(ln(τ_min) + T × ln(τ_max / τ_min))
-```
-
-This exponential mapping ensures that low Stability yields half-lives near 2 minutes while high Stability approaches 12 hours, with smooth interpolation across the range.
-
 ### Hysteresis and Rate Targets
 
 ```

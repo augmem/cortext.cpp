@@ -414,61 +414,6 @@ TEST_CASE ("Emotional cascade window increases with Stability",
 // 5.3.9 Half-Life and Decay Parameters
 // =============================================================================
 
-TEST_CASE ("Base half-life prior spans 2 minutes to 12 hours",
-           "[regression][decay]")
-{
-  // BaseHalfLifePrior = exp(ln(120) + T * ln(43200/120))
-
-  SECTION ("At T=0: 2 minutes (120 seconds)")
-  {
-    REQUIRE (BaseHalfLifePrior (0.0) == Catch::Approx (120.0));
-  }
-
-  SECTION ("At T=1: 12 hours (43200 seconds)")
-  {
-    REQUIRE (BaseHalfLifePrior (1.0) == Catch::Approx (43200.0));
-  }
-
-  SECTION ("Exponential growth with stability")
-  {
-    // Verify exponential (not linear) interpolation
-    double mid = BaseHalfLifePrior (0.5);
-    double linear_mid = (120.0 + 43200.0) / 2.0;
-
-    // Exponential midpoint is geometric mean: sqrt(120 * 43200) ≈ 2277
-    double exp_mid = std::sqrt (120.0 * 43200.0);
-
-    REQUIRE (mid == Catch::Approx (exp_mid).epsilon (0.01));
-    REQUIRE (mid < linear_mid); // Exponential is below linear midpoint
-  }
-}
-
-TEST_CASE ("Half-life clamping enforces bounds",
-           "[regression][decay]")
-{
-  // ClampHalfLife = clamp(value, 120, 43200)
-
-  SECTION ("Values below 120 clamped to 120")
-  {
-    REQUIRE (ClampHalfLife (0.0) == 120.0);
-    REQUIRE (ClampHalfLife (60.0) == 120.0);
-    REQUIRE (ClampHalfLife (119.9) == 120.0);
-  }
-
-  SECTION ("Values above 43200 clamped to 43200")
-  {
-    REQUIRE (ClampHalfLife (50000.0) == 43200.0);
-    REQUIRE (ClampHalfLife (100000.0) == 43200.0);
-  }
-
-  SECTION ("Values within range unchanged")
-  {
-    REQUIRE (ClampHalfLife (120.0) == 120.0);
-    REQUIRE (ClampHalfLife (1000.0) == 1000.0);
-    REQUIRE (ClampHalfLife (43200.0) == 43200.0);
-  }
-}
-
 // =============================================================================
 // 5.3.10 Cross-Subsystem Coherence Tests
 // =============================================================================
@@ -502,7 +447,6 @@ TEST_CASE ("High Stability affects all persistence parameters consistently",
   double T = 0.9;
 
   // All should be "more persistent" / slower decay
-  REQUIRE (BaseHalfLifePrior (T) > 10000.0);    // Longer half-life
   REQUIRE (LambdaMood (1.0, T) > 0.99);         // Slower mood decay
   REQUIRE (WRateSeconds (T) > 250);             // Longer write intervals
   REQUIRE (EmotionCascadeWindowSeconds (T) > 3000); // Longer affect window
