@@ -310,7 +310,6 @@ add_library(cortext
     src/operations/focus_spread.cpp
     src/operations/boundary.cpp
     src/operations/memory_usage_record.cpp
-    src/operations/sensitivity_feedback.cpp
     src/operations/stability_feedback.cpp
     src/operations/reconsolidation.cpp
     src/operations/competition.cpp

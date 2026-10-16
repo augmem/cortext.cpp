@@ -2662,17 +2662,6 @@ ReinforcementFallbackContextualSupport (double F, double S, double T)
 }
 
 inline double
-SensitivityFeedbackNoveltyGain (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.10 * Lerp (1.12, 0.90, f) * Lerp (0.85, 1.25, s)
-                    * Lerp (1.08, 0.90, t),
-                0.04, 0.20);
-}
-
-inline double
 StabilityFeedbackUsageGain (double F, double S, double T)
 {
   const double f = FocusBias (F);

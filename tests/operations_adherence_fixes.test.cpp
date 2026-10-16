@@ -4,7 +4,6 @@
 
 
 #include "cortext/operations/sensitivity.hpp"
-#include "cortext/operations/sensitivity_feedback.hpp"
 #include "cortext/operations/stability.hpp"
 #include "cortext/operations/stability_feedback.hpp"
 #include "cortext/operations/uncertainty.hpp"
@@ -26,11 +25,10 @@ SeedMemory (Store &store, long long id)
   store.Execute (
       "INSERT OR REPLACE INTO memories("
       "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
-      "s_max, s_avg, strength, stability, connectivity, drift_mag, "
-      "redundancy, "
+      "s_max, s_avg, strength, stability, drift_mag, "
       "lability_state, suppression_count, created_at) "
       "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-      "1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+      "1.0, 1.0, 0.0, 0.0, 0, ?)",
       { id, id, now_ts, now_ts });
 }
 } // namespace
@@ -126,29 +124,4 @@ TEST_CASE ("Alg4: ΔT_sensitivity is not clamped (Alg8 clamps later)",
   up.Execute (ctx, cortext::testing::GetNullTransaction ());
   // Ensure value is set (not necessarily clamped here)
   REQUIRE (ctx.GetDeltaThresholdSensitivity ().has_value ());
-}
-
-TEST_CASE ("Alg16 uses base gains (no knob scaling)", "[feedback]")
-{
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg{};
-  cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 0.7;
-  Signal sig;
-  sig.timestamp = 1;
-  sig.embedding = Eigen::VectorXf::Ones (4);
-  sig.embedding.normalize ();
-  OperationContext ctx (sig, pctx, cfg);
-  pctx.weight_novelty = 0.5;
-  pctx.recent_context_embeddings.push_back (sig.embedding);
-  ctx.SetRetrievedMemoryEmbeddings ({ { 1LL, sig.embedding } });
-  // Provide usage events
-  ctx.SetMemoryUsageEvents ({
-      { 1, true, +0.2 },
-      { 2, true, -0.1 },
-  });
-  const double novelty_before = pctx.weight_novelty;
-  ApplySensitivityFeedback sfb;
-  sfb.Execute (ctx, cortext::testing::GetNullTransaction ());
-  REQUIRE (pctx.weight_novelty < novelty_before);
 }

@@ -42,7 +42,6 @@ add_executable(cortext_tests
   operations_blend.test.cpp
   operations_metrics.test.cpp
   operations_memory_usage_record.test.cpp
-  operations_sensitivity_feedback.test.cpp
   operations_stability_feedback.test.cpp
   operations_reconsolidation.test.cpp
   operations_competition.test.cpp

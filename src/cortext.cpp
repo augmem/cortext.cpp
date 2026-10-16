@@ -67,7 +67,6 @@
 #include "cortext/operations/neuromodulators.hpp"
 #include "cortext/operations/recent_context.hpp"
 #include "cortext/operations/reconsolidation.hpp"
-#include "cortext/operations/sensitivity_feedback.hpp"
 #include "cortext/operations/signal_metrics_persistence.hpp"
 #include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
@@ -1901,7 +1900,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ApplyEmotionalConsolidation;
   using cortext::operations::ApplyReconsolidation;
   using cortext::operations::ApplyRetrievalCompetition;
-  using cortext::operations::ApplySensitivityFeedback;
   using cortext::operations::ApplyStabilityFeedback;
   using cortext::operations::CheckSpikeBypass;
   using cortext::operations::CheckStreamingPacing;
@@ -1973,7 +1971,7 @@ BuildRootOperationSet (bool probe_mode)
 
   using FeedbackStage = OperationSet<
       ApplyRetrievalCompetition,
-      ApplyReconsolidation, ApplySensitivityFeedback,
+      ApplyReconsolidation,
       ApplyStabilityFeedback, UpdateStability,
       RecordMemoryUsage, ApplyEmotionalConsolidation, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,

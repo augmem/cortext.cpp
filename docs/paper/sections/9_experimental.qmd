@@ -972,6 +972,7 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | memory strength and eviction (`UpdateMemoryStrength` traces, reinforcement and decay, periphery-cutoff eviction, storage-pressure gate, `memory_evictions`) | 0/250, 0/48, 0/40. Eviction never ran at default knobs. Once a stability fix opened its gate (storage floor 0), it deleted 94% of S, 92% of Eval 1 and 99.7% of BEAM conversation 7 memories, and packet recall fell 0.630 → 0.086, 0.587 → 0.084 and 0.103 → 0. Retrieval counters moved to `RecordMemoryUsage` |
 | serial position effects (`ApplySerialPositionEffects`, `ApplySerialPositionMultiplier`) | 0/250, 0/48, 0/40 (minor-feedback group). The multiplier only fed memory-strength reinforcement |
 | synaptic tagging (`ApplySynapticTagging`, `tag_strength`, `tag_expires_at`) | 0/250, 0/48, 0/40. Its only consumer was the consolidation score. The June research-branch "removal hurts" verdict was measured with consolidation live |
+| sensitivity feedback (`ApplySensitivityFeedback`, `memories.redundancy`, the unwritten `connectivity`) | 0/250, 0/48, 0/40 (minor-feedback group). `redundancy` only fed the consolidation score |
 
 ## Experimental Interpretation
 

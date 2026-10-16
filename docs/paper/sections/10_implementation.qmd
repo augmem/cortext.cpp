@@ -743,7 +743,7 @@ RetrievalStage:
 
 FeedbackStage:
   retrieval competition, reconsolidation,
-  sensitivity/stability feedback,
+  stability feedback,
   memory usage counters, emotional consolidation,
   working memory, accumulator reset, emotional cascade
 ```

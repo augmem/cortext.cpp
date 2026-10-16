@@ -949,6 +949,14 @@ GetCoreMigrations ()
               "ALTER TABLE memories DROP COLUMN tag_expires_at",
           },
       },
+      {
+          40,
+          "Drop the removed redundancy and connectivity columns",
+          {
+              "ALTER TABLE memories DROP COLUMN redundancy",
+              "ALTER TABLE memories DROP COLUMN connectivity",
+          },
+      },
   };
 }
 

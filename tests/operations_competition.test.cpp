@@ -87,11 +87,10 @@ public:
         store->Execute (
             "INSERT OR REPLACE INTO memories("
             "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
-            "s_max, s_avg, strength, stability, connectivity, drift_mag, "
-            "redundancy, "
+            "s_max, s_avg, strength, stability, drift_mag, "
             "lability_state, suppression_count, created_at) "
             "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-            "1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+            "1.0, 1.0, 0.0, 0.0, 0, ?)",
             { id, id, now_ts, now_ts });
       }
   }

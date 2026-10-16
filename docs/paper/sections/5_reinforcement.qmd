@@ -56,21 +56,9 @@ The system tracks causal influence of retrieved memories on generation quality t
 
 Earlier builds adjusted `weight_relevance` and `attention_width` from the contextual gain of used memories. They also dilated the attention width with drift and pulled it back toward its prior every turn. The engine ablation study (2026-10) removed this step. With it switched off as part of the minor-feedback group, packets stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. `weight_relevance` and `attention_width` now stay at their knob-derived priors unless `UpdateFocus` moves them.
 
-### Sensitivity Feedback
+### Sensitivity Feedback (Removed)
 
-```
-η_base = 0.10
-weight_novelty_t ← weight_novelty
-for each used memory m:
-    novelty_reward ← 1 − sim(m.embedding, recent_context)
-    weight_novelty_t += η_base × (novelty_reward ×
-                         contextual_gain(m) −
-                         redundancy(m, recent_context))
-weight_novelty_t ← clamp(weight_novelty_t, 0, 1)
-weight_novelty ← weight_novelty_t
-```
-
-This rewards novelty that proves useful while penalizing redundant retrievals.
+Earlier builds nudged `weight_novelty` by `η_base × (novelty_reward × contextual_gain − redundancy)` for used memories, and persisted a per-memory `redundancy` that fed only the clustering-consolidation score. The engine ablation study (2026-10) removed the step, the `redundancy` column, and the never-written `connectivity` column. With the step switched off as part of the minor-feedback group, packets stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
 
 ### Stability Feedback
 
