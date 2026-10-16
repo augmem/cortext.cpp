@@ -54,8 +54,6 @@ add_executable(cortext_tests
   centroids.test.cpp
   operations_interrupt_gate.test.cpp
   operations_working_memory.test.cpp
-  operations_serial_position.test.cpp
-  operations_serial_position_apply.test.cpp
   operations_embedding_prediction_error.test.cpp
   operations_precision_modulation.test.cpp
 

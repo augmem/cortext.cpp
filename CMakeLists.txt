@@ -316,8 +316,6 @@ add_library(cortext
     src/operations/competition.cpp
     src/operations/emotion.cpp
     src/operations/working_memory.cpp
-    src/operations/serial_position.cpp
-    src/operations/serial_position_apply.cpp
     src/operations/interrupt_gate.cpp
     src/operations/embedding_prediction_error.cpp
     src/operations/precision.cpp

@@ -68,8 +68,6 @@
 #include "cortext/operations/recent_context.hpp"
 #include "cortext/operations/reconsolidation.hpp"
 #include "cortext/operations/sensitivity_feedback.hpp"
-#include "cortext/operations/serial_position.hpp"
-#include "cortext/operations/serial_position_apply.hpp"
 #include "cortext/operations/signal_metrics_persistence.hpp"
 #include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
@@ -1905,8 +1903,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ApplyReconsolidation;
   using cortext::operations::ApplyRetrievalCompetition;
   using cortext::operations::ApplySensitivityFeedback;
-  using cortext::operations::ApplySerialPositionEffects;
-  using cortext::operations::ApplySerialPositionMultiplier;
   using cortext::operations::ApplyStabilityFeedback;
   using cortext::operations::ApplySynapticTagging;
   using cortext::operations::CheckSpikeBypass;
@@ -1982,7 +1978,6 @@ BuildRootOperationSet (bool probe_mode)
       ApplyRetrievalCompetition,
       ApplyReconsolidation, ApplySensitivityFeedback,
       ApplyStabilityFeedback, UpdateStability,
-      ApplySerialPositionEffects, ApplySerialPositionMultiplier,
       RecordMemoryUsage, ApplyEmotionalConsolidation, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
       PropagateEmotionalCascade>;

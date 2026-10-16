@@ -113,9 +113,8 @@ public:
     std::optional<std::string> boundary_type;
     ConsolidationState consolidation_state = ConsolidationState::None;
 
-    // Composite score and serial-position application (if provided)
+    // Composite score (if provided)
     std::optional<double> composite_score;
-    std::optional<double> serial_position_multiplier;
 
     // Metrics (Algorithm 7 inputs) in normalized domains
     std::unordered_map<operations::Metric, double> metrics;

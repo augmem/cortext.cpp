@@ -1687,7 +1687,6 @@ AssembleOutputFields (const OperationContext &op_context,
   out.boundary_type = op_context.GetBoundaryType ();
   out.interrupt_gate_affect_drive = op_context.GetInterruptGateAffectDrive ();
   out.composite_score = op_context.GetCompositeScore ();
-  out.serial_position_multiplier = op_context.GetSerialPositionMultiplier ();
   out.metrics = op_context.GetAllMetrics ();
   out.operation_ms = op_context.GetOperationTimings ();
   out.stored_embedding_id = op_context.GetStoredEmbeddingId ();

@@ -2,7 +2,7 @@
 
 This section presents algorithms modeling higher-order cognitive phenomena:
 working memory maintenance, soft anchor formation, retrieval uncertainty,
-reconsolidation dynamics, and serial position effects.
+and reconsolidation dynamics.
 
 **Knob note:** Unless explicitly stated otherwise, F and S in this section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
 
@@ -616,30 +616,9 @@ High Focus produces narrow winner-take-all dynamics; low Focus permits broader a
 
 Earlier builds kept a per-memory `pre_activation` value. An expectation state (`x_pred_ema`) and recent context raised it, it decayed at `lerp(0.7, 0.3, T)` per turn, and high surprise refreshed it faster. After the hard cutover, graph retrieval no longer read the field. The research ranking prior `predictive_bonus = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T) × pre_activation` was never part of the production ranker. The engine ablation study (2026-10) removed the operation, the column and its indexes. Skipping the operation left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. Instructions retired changed by -1%, +3% and -1%, which is noise.
 
-## Serial Position Effects
+## Serial Position Effects (Removed)
 
-The architecture models primacy, recency, and distinctiveness effects observed in human memory [@murdock1962serial]:
-
-```
-primacy_window = round(lerp(5, 2, F))
-primacy_bonus = lerp(1.2, 2.0, S)
-recency_window = round(lerp(7, 3, F))
-rehearsal_curve_depth = lerp(0.2, 0.6, S)
-```
-
-The von Restorff (isolation) effect enhances memory for distinctive items [@hunt1995subtlety]:
-
-```
-distinctiveness_threshold = lerp(0.6, 0.8, F)
-von_restorff_multiplier = lerp(1.5, 3.0, S)
-```
-
-Items in the middle region suffer interference:
-
-```
-interference_zone = positions[primacy_window+1 : −recency_window]
-middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
-```
+Earlier builds modelled primacy, recency and von Restorff distinctiveness [@murdock1962serial; @hunt1995subtlety]. They derived a per-signal multiplier from knob-dependent windows (`primacy_window = round(lerp(5, 2, F))`, `recency_window = round(lerp(7, 3, F))`, `von_restorff_multiplier = lerp(1.5, 3.0, S)` and others) and applied it to memory-strength reinforcement. Memory strength was removed (@sec-reinforcement), so nothing consumed the multiplier, and the engine ablation study (2026-10) removed the two operations. Phase-1 ablation, as part of the minor-feedback group, left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
 
 ## Emotional Consolidation {#sec-emotional-consolidation}
 

@@ -628,80 +628,6 @@ public:
     return observed_retention_sec_;
   }
 
-  // Serial Position Effects API (Algorithm 26)
-  // ======================================================================
-  
-  void
-  SetSerialPrimacyWindow (int v)
-  {
-    serial_primacy_window_ = v;
-  }
-  int
-  GetSerialPrimacyWindow () const
-  {
-    return serial_primacy_window_;
-  }
-  void
-  SetSerialRecencyWindow (int v)
-  {
-    serial_recency_window_ = v;
-  }
-  int
-  GetSerialRecencyWindow () const
-  {
-    return serial_recency_window_;
-  }
-  void
-  SetSerialPrimacyBonus (double v)
-  {
-    serial_primacy_bonus_ = v;
-  }
-  double
-  GetSerialPrimacyBonus () const
-  {
-    return serial_primacy_bonus_;
-  }
-  void
-  SetSerialRehearsalCurveDepth (double v)
-  {
-    serial_rehearsal_curve_depth_ = v;
-  }
-  double
-  GetSerialRehearsalCurveDepth () const
-  {
-    return serial_rehearsal_curve_depth_;
-  }
-  void
-  SetSerialDistinctivenessThreshold (double v)
-  {
-    serial_distinctiveness_threshold_ = v;
-  }
-  double
-  GetSerialDistinctivenessThreshold () const
-  {
-    return serial_distinctiveness_threshold_;
-  }
-  void
-  SetSerialVonRestorffMultiplier (double v)
-  {
-    serial_von_restorff_multiplier_ = v;
-  }
-  double
-  GetSerialVonRestorffMultiplier () const
-  {
-    return serial_von_restorff_multiplier_;
-  }
-  void
-  SetSerialMiddleSuppression (double v)
-  {
-    serial_middle_suppression_ = v;
-  }
-  double
-  GetSerialMiddleSuppression () const
-  {
-    return serial_middle_suppression_;
-  }
-
   // ======================================================================
   // Effective Focus API (Algorithm 10 stabilizer)
   // ======================================================================
@@ -753,18 +679,6 @@ public:
   GetAllMetrics () const
   {
     return metrics_;
-  }
-
-  // Serial position multiplier (Algorithm 26 application)
-  void
-  SetSerialPositionMultiplier (std::optional<double> v)
-  {
-    serial_position_multiplier_ = v;
-  }
-  std::optional<double>
-  GetSerialPositionMultiplier () const
-  {
-    return serial_position_multiplier_;
   }
 
   // Diagnostics for Algorithm 7 weight handling
@@ -1112,16 +1026,6 @@ private:
   std::vector<RetrievedMemoryCandidate> retrieved_memory_candidates_;
   // Selected candidate ID from interrupt gate (if any)
   std::optional<long long> selected_candidate_id_;
-
-  // Serial Position Effects (Algorithm 26) fields
-  int serial_primacy_window_ = 0;
-  int serial_recency_window_ = 0;
-  double serial_primacy_bonus_ = 0.0;
-  double serial_rehearsal_curve_depth_ = 0.0;
-  double serial_distinctiveness_threshold_ = 0.0;
-  double serial_von_restorff_multiplier_ = 0.0;
-  double serial_middle_suppression_ = 0.0;
-  std::optional<double> serial_position_multiplier_;
 
   // Write gate decision (Algorithm 7+8)
   bool write_decision_ = false;

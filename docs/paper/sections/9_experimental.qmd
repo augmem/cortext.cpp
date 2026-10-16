@@ -967,6 +967,7 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | clustering consolidation (`EvaluateConsolidation`, scoring gate, clusterer, shallow `ASSOCIATION` replay, typed-edge graph build) | Inert at default knobs: 0 candidates per pass because stability never fell below 1.0. With a stability fix that made it fire, packet recall moved -0.012 on S, -0.010 on Eval 1 and 0 on BEAM. Judge sufficiency +0.012 ± 0.023 on S and -0.009 ± 0.023 on Eval 1. Instructions +1–2%. Packets are byte-identical to the inert pipeline after removal |
 | graph expansion (one-hop traversal of `co_occurs`/`similar_to`/`reinforces`/`causes`/`derived_from`/episode edges with a bounded graph bonus) | 0/250, 0/48, 0/40 in phase 1, where only `supersedes` edges existed. After clustering consolidation was removed, no traversable edge is written |
 | memory strength and eviction (`UpdateMemoryStrength` traces, reinforcement and decay, periphery-cutoff eviction, storage-pressure gate, `memory_evictions`) | 0/250, 0/48, 0/40. Eviction never ran at default knobs. Once a stability fix opened its gate (storage floor 0), it deleted 94% of S, 92% of Eval 1 and 99.7% of BEAM conversation 7 memories, and packet recall fell 0.630 → 0.086, 0.587 → 0.084 and 0.103 → 0. Retrieval counters moved to `RecordMemoryUsage` |
+| serial position effects (`ApplySerialPositionEffects`, `ApplySerialPositionMultiplier`) | 0/250, 0/48, 0/40 (minor-feedback group). The multiplier only fed memory-strength reinforcement |
 
 ## Experimental Interpretation
 

@@ -646,12 +646,6 @@ TEST_CASE ("Neuromodulator and serial floor policies derive from knobs",
            > NeuromodulatorPolicyForKnobs (0.0, 0.5, 0.5).da_base);
   REQUIRE (NeuromodulatorPolicyForKnobs (0.5, 0.5, 1.0).oscillation_rate
            < NeuromodulatorPolicyForKnobs (0.5, 0.5, 0.0).oscillation_rate);
-
-  REQUIRE (SerialMiddleMultiplierFloor (0.5, 0.5) == Catch::Approx (0.10));
-  REQUIRE (SerialMiddleMultiplierFloor (1.0, 0.5)
-           > SerialMiddleMultiplierFloor (0.0, 0.5));
-  REQUIRE (SerialMiddleMultiplierFloor (0.5, 1.0)
-           < SerialMiddleMultiplierFloor (0.5, 0.0));
 }
 
 TEST_CASE ("Memory trace policy derives from knobs with neutral midpoint",
