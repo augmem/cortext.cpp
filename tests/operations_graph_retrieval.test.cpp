@@ -1372,7 +1372,7 @@ TEST_CASE ("Graph retrieval expands through sequential episode edges",
            != out.candidate_memory_ids.end ());
 }
 
-TEST_CASE ("Graph retrieval demotes superseded stale memories",
+TEST_CASE ("Graph retrieval keeps superseded memories eligible as seeds",
            "[operations][graph][retrieval][supersession][eval]")
 {
   cortext::testing::ScopedEnvVar disable_constructive_recall (
@@ -1402,15 +1402,15 @@ TEST_CASE ("Graph retrieval demotes superseded stale memories",
   const auto ranked = operations::retrieval_trace::GetLastRankedCandidates ();
   REQUIRE_FALSE (out.candidate_memory_ids.empty ());
   REQUIRE_FALSE (ranked.empty ());
-  REQUIRE (ranked.front ().memory_id == 20LL);
-
-  auto correction_it = std::find_if (
-      ranked.begin (), ranked.end (),
-      [] (const auto &candidate) { return candidate.memory_id == 20LL; });
-  REQUIRE (correction_it != ranked.end ());
+  // Supersession exclusion was removed (engine ablation 2026-10): the exact
+  // match outranks its replacement and both stay candidates.
+  REQUIRE (ranked.front ().memory_id == 10LL);
   REQUIRE (std::find (out.candidate_memory_ids.begin (),
                       out.candidate_memory_ids.end (), 10LL)
-           == out.candidate_memory_ids.end ());
+           != out.candidate_memory_ids.end ());
+  REQUIRE (std::find (out.candidate_memory_ids.begin (),
+                      out.candidate_memory_ids.end (), 20LL)
+           != out.candidate_memory_ids.end ());
 }
 
 TEST_CASE ("Graph retrieval scores older exact matches beyond old recency cap",
@@ -1445,46 +1445,6 @@ TEST_CASE ("Graph retrieval scores older exact matches beyond old recency cap",
   REQUIRE (out.candidate_memory_ids.front () == 1LL);
 }
 
-TEST_CASE ("Graph retrieval keeps historical memory before its replacement time",
-           "[operations][graph][retrieval][supersession]")
-{
-  cortext::testing::ScopedEnvVar disable_constructive_recall (
-      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
-  auto unique_store = SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<Store> (std::move (unique_store));
-  cortext::testing::InitializeCoreSchema (*store);
-
-  SeedMemory (*store, 10, 100, UnitVec (0), 1000);
-  SeedMemory (*store, 20, 200, VectorWithCosineToDim0 (0.92f), 5000);
-  store->Execute (
-      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, "
-      "weight, last_reinforced) VALUES(?, ?, 'supersedes', ?, ?)",
-      { 20LL, 10LL, 1.0, 5000LL });
-
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  auto ops = std::make_unique<DynamicOperationSet> (
-      std::make_unique<ForceRetrievalGateOp> (),
-      std::make_unique<GraphAugmentedRetrieveCandidates> ());
-  SignalProcessor processor (cfg, store, std::move (ops));
-
-  const auto out = processor.Process (MakeSignal (UnitVec (0), 3000));
-  REQUIRE_FALSE (out.candidate_memory_ids.empty ());
-  REQUIRE (out.candidate_memory_ids.front () == 10LL);
-
-  const auto at_replacement
-      = processor.Process (MakeSignal (UnitVec (0), 5000));
-  REQUIRE (std::find (at_replacement.candidate_memory_ids.begin (),
-                      at_replacement.candidate_memory_ids.end (), 10LL)
-           != at_replacement.candidate_memory_ids.end ());
-
-  const auto after_replacement
-      = processor.Process (MakeSignal (UnitVec (0), 5001));
-  REQUIRE (std::find (after_replacement.candidate_memory_ids.begin (),
-                      after_replacement.candidate_memory_ids.end (), 10LL)
-           == after_replacement.candidate_memory_ids.end ());
-}
-
 TEST_CASE ("Family features are cached and replaced with their embedding",
            "[operations][graph][retrieval][cache][family]")
 {
@@ -1516,42 +1476,6 @@ TEST_CASE ("Family features are cached and replaced with their embedding",
   REQUIRE (replacement.normalized[0] == Catch::Approx (0.0f));
   REQUIRE (replacement.normalized[1] == Catch::Approx (1.0f));
   surface_cache::Erase (pctx);
-}
-
-TEST_CASE ("Supersession eligibility index updates only affected targets",
-           "[operations][graph][retrieval][supersession][cache][scaling]")
-{
-  ProcessorContext pctx;
-  pctx.UpsertRetrievalSurface (
-      { 20, 200, 5000, 5000, 0, 0, 0, 0, "LONG_TERM", "replacement",
-        "text", -1.0, 0, 0.0, 0.0, false, true, UnitVec (0) });
-  auto &cache = pctx.association_fanout_cache;
-  cache.valid = true;
-  cache.out_by_source[20].push_back (
-      { 10, 100, "supersedes", 1.0, 5000 });
-  cache.in_by_target[10].push_back (
-      { 20, 200, "supersedes", 1.0, 5000 });
-  operations::association_fanout_cache::BuildSupersessionEligibility (
-      cache, pctx);
-  auto sidecar = operations::execution_cache_sidecar_internal::Find (pctx);
-  REQUIRE (sidecar);
-  REQUIRE (sidecar->supersession_eligibility.valid);
-  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10)
-           == 5000);
-
-  pctx.UpsertRetrievalSurface (
-      { 30, 300, 6000, 6000, 0, 0, 0, 0, "LONG_TERM", "unrelated",
-        "audio", -1.0, 0, 0.0, 0.0, false, true, UnitVec (1) });
-  REQUIRE (sidecar->supersession_eligibility.valid);
-
-  pctx.UpsertRetrievalSurface (
-      { 20, 200, 7000, 7000, 0, 0, 0, 0, "LONG_TERM", "replacement",
-        "image", -1.0, 0, 0.0, 0.0, false, true, UnitVec (0) });
-  operations::association_fanout_cache::NotifyRetrievalSurfaceChanged (
-      pctx, 20);
-  REQUIRE (sidecar->supersession_eligibility.valid);
-  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10)
-           == 7000);
 }
 
 TEST_CASE ("Graph retrieval temporal score decays across multi-month ages",
@@ -3894,7 +3818,7 @@ TEST_CASE ("Graph retrieval cache rebuild covers association supersession "
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 
-TEST_CASE ("Graph retrieval bounded fallback keeps eligible shared sibling",
+TEST_CASE ("Graph retrieval bounded fallback surfaces a superseded shared vector",
            "[operations][graph][retrieval][sql][shared-embedding][supersession]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -3930,16 +3854,14 @@ TEST_CASE ("Graph retrieval bounded fallback keeps eligible shared sibling",
   operation.Execute (ctx, *tx);
   tx->Rollback ();
 
-  REQUIRE (std::find_if (
-               ctx.GetRetrievedMemoryCandidates ().begin (),
-               ctx.GetRetrievedMemoryCandidates ().end (),
-               [] (const auto &candidate) { return candidate.memory_id == 10; })
-           == ctx.GetRetrievedMemoryCandidates ().end ());
-  REQUIRE (std::find_if (
-               ctx.GetRetrievedMemoryCandidates ().begin (),
-               ctx.GetRetrievedMemoryCandidates ().end (),
-               [] (const auto &candidate) { return candidate.memory_id == 11; })
-           != ctx.GetRetrievedMemoryCandidates ().end ());
+  // The shared vector is one family: one of its memory alternatives seeds.
+  const auto &retrieved = ctx.GetRetrievedMemoryCandidates ();
+  REQUIRE (std::count_if (retrieved.begin (), retrieved.end (),
+                          [] (const auto &candidate) {
+                            return candidate.memory_id == 10
+                                   || candidate.memory_id == 11;
+                          })
+           == 1);
   REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
@@ -4297,7 +4219,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
   operations::historical_surface_search_cache_internal::Erase (pctx);
 }
 
-TEST_CASE ("Graph retrieval keeps eligible sibling of superseded shared embedding",
+TEST_CASE ("Graph retrieval surfaces a superseded shared embedding once",
            "[operations][graph][retrieval][cache][shared-embedding][supersession]")
 {
   auto unique_store = SQLiteStore::Create (":memory:");
@@ -4322,12 +4244,10 @@ TEST_CASE ("Graph retrieval keeps eligible sibling of superseded shared embeddin
   SignalProcessor processor (cfg, store, std::move (ops));
 
   const auto out = processor.Process (MakeSignal (UnitVec (0), 3000));
-  REQUIRE (std::find (out.candidate_memory_ids.begin (),
-                      out.candidate_memory_ids.end (), 10LL)
-           == out.candidate_memory_ids.end ());
-  REQUIRE (std::find (out.candidate_memory_ids.begin (),
-                      out.candidate_memory_ids.end (), 11LL)
-           != out.candidate_memory_ids.end ());
+  REQUIRE (std::count_if (out.candidate_memory_ids.begin (),
+                          out.candidate_memory_ids.end (),
+                          [] (long long id) { return id == 10 || id == 11; })
+           == 1);
   REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 0);
 }
 

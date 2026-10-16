@@ -917,12 +917,6 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
                .at (correction_memory_id)
                .front ().memory_id
            == 10LL);
-  const auto sidecar
-      = operations::execution_cache_sidecar_internal::Find (pctx);
-  REQUIRE (sidecar);
-  REQUIRE (sidecar->supersession_eligibility.valid);
-  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10LL)
-           == 2000LL);
 
   auto stale_rows = store->Execute (
       "SELECT source_contradiction_count FROM memories WHERE memory_id = ?",

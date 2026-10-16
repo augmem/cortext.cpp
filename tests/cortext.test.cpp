@@ -536,7 +536,7 @@ TEST_CASE ("Durable flushes one shared Natural accumulator unit",
   REQUIRE (AnyToLongLong (signal_rows[2].at ("timestamp")) == 3000);
 }
 
-TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
+TEST_CASE ("Cortext recalls durable corrections at default knobs",
            "[cortext][belief_revision][eval][aist]")
 {
   ScopedTempDb temp_db;
@@ -579,40 +579,33 @@ TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
       "WHERE edge_type = 'supersedes'");
   REQUIRE (edge_rows.size () >= 2);
 
-  auto assert_correction_precedes_stale =
+  // Superseded facts are no longer excluded from seeding (engine ablation
+  // 2026-10: exclusion lowered gold-turn recall), so the stale fact may rank
+  // ahead of its correction. The contract is that a recall never shows the
+  // stale fact without the correction that replaced it.
+  auto assert_correction_recalled =
       [] (const cortext::Cortext::Context &recalled,
-          const std::string &corrected, const std::string &stale) {
-        std::size_t corrected_index = recalled.retrieved_memory.size ();
-        std::size_t stale_index = recalled.retrieved_memory.size ();
-        for (std::size_t i = 0; i < recalled.retrieved_memory.size (); ++i)
+          const std::string &corrected) {
+        bool found = false;
+        for (const auto &memory : recalled.retrieved_memory)
           {
-            const std::string text = TextFromMemory (
-                recalled.retrieved_memory[i]);
-            if (text.find (corrected) != std::string::npos)
+            if (TextFromMemory (memory).find (corrected) != std::string::npos)
               {
-                corrected_index = std::min (corrected_index, i);
-              }
-            if (text.find (stale) != std::string::npos)
-              {
-                stale_index = std::min (stale_index, i);
+                found = true;
               }
           }
-        REQUIRE (corrected_index < recalled.retrieved_memory.size ());
-        if (stale_index < recalled.retrieved_memory.size ())
-          {
-            REQUIRE (corrected_index < stale_index);
-          }
+        REQUIRE (found);
       };
 
   auto vet_recall = ctx->ProcessTextAt (
       "When is Bailey's vet appointment?", "cli/recall", 5000ULL,
       cortext::Retention::Ephemeral);
-  assert_correction_precedes_stale (vet_recall, corrected_vet, stale_vet);
+  assert_correction_recalled (vet_recall, corrected_vet);
 
   auto pill_recall = ctx->ProcessTextAt (
       "When is Bailey's morning pill?", "cli/recall", 6000ULL,
       cortext::Retention::Ephemeral);
-  assert_correction_precedes_stale (pill_recall, corrected_pill, stale_pill);
+  assert_correction_recalled (pill_recall, corrected_pill);
 }
 
 TEST_CASE ("internal replay ingress preserves media event timestamps",

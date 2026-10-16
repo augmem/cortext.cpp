@@ -815,8 +815,8 @@ batch semantic extraction job.
 ## Retrieval Implementation
 
 Production retrieval discovers a broad but bounded vector seed set from durable
-memory embeddings. Before the seed cap, it removes directed `supersedes`
-targets and collapses near-duplicate embedding families to one representative.
+memory embeddings. Before the seed cap, it collapses near-duplicate embedding
+families to one representative; superseded targets stay eligible.
 The family index accumulates exact squared coordinate differences in
 16-coordinate vectorized blocks and rejects a pair as soon as a completed
 block exceeds the complete squared-distance limit implied by the cosine
@@ -839,11 +839,11 @@ repeated normalization and Walsh--Hadamard construction without changing
 family order, comparison arithmetic, or fallback behavior. If the private
 vector cache is unavailable, durable
 processing rebuilds it once from the complete persisted surface and immediately
-applies the same family and supersession filters before truncation. A failed
+applies the same family filter before truncation. A failed
 rebuild installs a failure sentinel rather than repeating the two complete
 surface scans on every request. A unique cached vector retains every long-term
 memory metadata alternative that shares its base embedding, and query-time
-eligibility chooses a nonsuperseded sibling without duplicating vector storage.
+eligibility chooses an eligible sibling without duplicating vector storage.
 The cache separately indexes entries that have at least one long-term metadata
 alternative. Retrieval applies the existing timestamp, current-surface, and
 supersession predicates to that subset before evaluating vector distance, so
@@ -869,7 +869,7 @@ cannot leave a valid-looking stale fixed point for a later operation in the
 same transaction. Cache-only custom roots retain their exact rollback snapshot.
 The fallback executes a demand-driven sequence of ordered SQL pages
 over the current and historical vector surfaces. Each page joins memory
-metadata and applies kind, timestamp, and supersession eligibility before
+metadata and applies kind and timestamp eligibility before
 distance ordering, excludes a historical row when that memory already has a
 current reconstruction, collapses byte-identical historical vectors, and uses
 a second application of the existing F/S/T-derived seed-search breadth as its
@@ -912,8 +912,8 @@ surface.
 When constructive recall is disabled, both restart hydration and cache-loss
 rebuild select the base embedding and ignore reconstruction/current surfaces.
 This recovery path
-preserves an eligible target behind 900 closer ineligible rows and preserves an
-eligible sibling of a superseded shared embedding. A separate 600-member
+preserves an eligible target behind 900 closer ineligible rows and surfaces a
+shared embedding through exactly one of its memory alternatives. A separate 600-member
 byte-distinct cosine-near family requires two bounded pages and cannot hide the
 next semantic target. The ordinary 430-family regression remains one page and
 returns no more than the 477-row default page bound rather than materializing
@@ -938,10 +938,6 @@ Current
 writes are excluded by timestamp, and working-memory overlap filters prevent the
 retrieval result from echoing the active memory tail. Association edges are used
 as graph evidence; they do not bypass final scoring or output caps.
-When eviction removes a replacement memory from the processor surface, removal
-is published before its outgoing `supersedes` targets are recomputed. The
-sidecar therefore cannot retain an activation timestamp derived from a surface
-entry that has just been evicted.
 One dispatch exposes at most one actually used retrieval candidate, so
 retrieval does not synthesize reinforcement pair edges from the packet. Existing
 `reinforces` edges remain eligible for decay, pruning, degree normalization, and

@@ -328,9 +328,7 @@ DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
       count += sidecar.emotional_metadata.rows_by_memory.size ()
                + sidecar.emotional_metadata.memory_ids_by_embedding.size ()
                + sidecar.emotional_metadata.values_by_embedding.size ()
-               + sidecar.emotional_metadata.source_query_order.size ()
-               + sidecar.supersession_eligibility
-                     .activation_ts_by_target.size ();
+               + sidecar.emotional_metadata.source_query_order.size ();
     }
   for (const auto &[source_id, entries] : caches.retrieval_surface_source_index)
     {

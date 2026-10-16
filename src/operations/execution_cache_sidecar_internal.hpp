@@ -81,19 +81,12 @@ struct EmotionalCascadeTopologyFootprint
   std::vector<std::unordered_set<long long>> expandable_by_source;
 };
 
-struct SupersessionEligibility
-{
-  bool valid = false;
-  std::unordered_map<long long, long long> activation_ts_by_target;
-};
-
 struct State
 {
   EmotionalMetadataCache emotional_metadata;
   EmotionalCascadeFixedPoint emotional_fixed_point;
   AssociationTopologyChanges association_topology_changes;
   EmotionalCascadeTopologyFootprint emotional_cascade_topology_footprint;
-  SupersessionEligibility supersession_eligibility;
   rif_active_epoch_cache_internal::State rif_active_epoch;
 };
 

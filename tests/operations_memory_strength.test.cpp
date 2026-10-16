@@ -671,69 +671,6 @@ TEST_CASE (
   REQUIRE (std::any_cast<long long> (embedding_rows[0].at ("cnt")) == 1LL);
 }
 
-TEST_CASE ("Algorithm 18 eviction removes stale supersession eligibility",
-           "[op18][memory_strength][eviction][supersession][regression]")
-{
-  auto unique_store = cortext::SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
-  cortext::testing::InitializeCoreSchema (*store);
-
-  const Eigen::VectorXf replacement_embedding
-      = Eigen::VectorXf::Unit (kEmbeddingDim, 0);
-  const Eigen::VectorXf target_embedding
-      = Eigen::VectorXf::Unit (kEmbeddingDim, 1);
-  cortext::testing::SeedEmbeddingV2 (*store, 9900, replacement_embedding,
-                                    1000);
-  cortext::testing::SeedEmbeddingV2 (*store, 9901, target_embedding, 900);
-  cortext::testing::SeedMemoryV2 (*store, 100, 9900, "opaque/replacement",
-                                  "LONG_TERM", 0.1, 1000);
-  cortext::testing::SeedMemoryV2 (*store, 200, 9901, "opaque/target",
-                                  "LONG_TERM", 0.9, 900);
-  store->Execute (
-      "INSERT INTO associations(source_memory_id, target_memory_id, "
-      "edge_type, weight, last_reinforced) "
-      "VALUES(100, 200, 'supersedes', 1.0, 1000)");
-
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
-  cortext::ProcessorContext pctx;
-  pctx.UpsertRetrievalSurface (
-      { 100, 9900, 1000, 1000, 0, 0, 0, 0, "LONG_TERM",
-        "opaque/replacement", "image", -1.0, 0, 0.0, 0.0, false,
-        true, replacement_embedding });
-  pctx.UpsertRetrievalSurface (
-      { 200, 9901, 900, 900, 0, 0, 0, 0, "LONG_TERM", "opaque/target",
-        "audio", -1.0, 0, 0.0, 0.0, false, true,
-        target_embedding });
-  REQUIRE (cortext::operations::association_fanout_cache::Ensure (
-      store.get (), pctx));
-  const auto sidecar
-      = cortext::operations::execution_cache_sidecar_internal::Find (pctx);
-  REQUIRE (sidecar);
-  REQUIRE (sidecar->supersession_eligibility.valid);
-  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.contains (
-      200));
-
-  cortext::operations::eviction::EvictionPolicyOverride override;
-  override.consolidation_gate_enabled = false;
-  override.periphery_cutoff = 0.5;
-  cortext::operations::eviction::ScopedEvictionPolicyOverride scoped_override (
-      override);
-  auto signal = MakeSignal (4, 2000);
-  OperationContext ctx (signal, pctx, cfg, store.get ());
-  cortext::operations::UpdateMemoryStrength update_strength;
-  auto tx = store->Begin ();
-  update_strength.Execute (ctx, *tx);
-  tx->Commit ();
-
-  REQUIRE_FALSE (
-      sidecar->supersession_eligibility.activation_ts_by_target.contains (
-          200));
-}
-
 TEST_CASE (
     "Algorithm 18 deletes orphan objstore blobs for evicted memories",
     "[op18][memory_strength][eviction]")

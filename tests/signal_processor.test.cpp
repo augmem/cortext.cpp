@@ -449,10 +449,10 @@ struct CustomIndirectRifReadOp : IOperation
 struct CustomMutationCacheProbeOp : IOperation
 {
   CustomMutationCacheProbeOp (bool *fanout_current, bool *search_invalidated,
-                              bool *supersession_invalidated)
+                              bool *sidecar_invalidated)
       : fanout_current (fanout_current),
         search_invalidated (search_invalidated),
-        supersession_invalidated (supersession_invalidated)
+        sidecar_invalidated (sidecar_invalidated)
   {
   }
 
@@ -462,9 +462,7 @@ struct CustomMutationCacheProbeOp : IOperation
     auto &p_ctx = ctx.GetProcessorContext ();
     const auto prior_sidecar = ExecutionCacheState (p_ctx);
     REQUIRE (prior_sidecar);
-    prior_sidecar->supersession_eligibility.valid = true;
-    prior_sidecar->supersession_eligibility.activation_ts_by_target[999]
-        = 999;
+    prior_sidecar->emotional_fixed_point.recent_window_ts = 999;
     tx.Execute (
         "INSERT INTO associations(source_memory_id, target_memory_id, "
         "edge_type, weight, last_reinforced) "
@@ -481,19 +479,18 @@ struct CustomMutationCacheProbeOp : IOperation
     if (search_invalidated)
       *search_invalidated
           = !operations::historical_surface_search_cache_internal::Find (p_ctx);
-    if (supersession_invalidated)
+    if (sidecar_invalidated)
       {
         const auto sidecar = ExecutionCacheState (p_ctx);
-        *supersession_invalidated
+        *sidecar_invalidated
             = sidecar && sidecar.get () != prior_sidecar.get ()
-              && !sidecar->supersession_eligibility
-                       .activation_ts_by_target.contains (999);
+              && sidecar->emotional_fixed_point.recent_window_ts != 999;
       }
   }
 
   bool *fanout_current = nullptr;
   bool *search_invalidated = nullptr;
-  bool *supersession_invalidated = nullptr;
+  bool *sidecar_invalidated = nullptr;
 };
 
 struct CaptureAssociationSupersessionCoverageOp : IOperation
@@ -660,10 +657,6 @@ struct ExerciseJournalAwareCommitFailureOp : IOperation
               && processor_context.association_fanout_cache.in_by_target
                      .at (41LL).front ().memory_id
                      == 42LL
-              && sidecar->supersession_eligibility.valid
-              && sidecar->supersession_eligibility.activation_ts_by_target.at (
-                     41LL)
-                     == 1100LL
               && processor_context.index_store.at ("stable")
                      == std::vector<long long> { 11LL, 12LL }
               && processor_context.index_reverse.at (11LL) == "stable"
@@ -806,9 +799,6 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
         sidecar->emotional_fixed_point.emotional_input_generation
             = sidecar->emotional_metadata.cascade_input_generation;
         sidecar->emotional_fixed_point.recent_window_ts = 1234LL;
-        sidecar->supersession_eligibility.valid = true;
-        sidecar->supersession_eligibility.activation_ts_by_target[41LL]
-            = 1100LL;
         processor_context.index_store["stable"] = { 11LL, 12LL };
         processor_context.index_reverse[11LL] = "stable";
         processor_context.procedural_store["stable"][11LL] = 0.75;
@@ -826,9 +816,6 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
         sidecar->emotional_metadata.source_query_order.clear ();
         sidecar->emotional_fixed_point.valid = false;
         sidecar->emotional_fixed_point.recent_window_ts = 9999LL;
-        sidecar->supersession_eligibility.valid = false;
-        sidecar->supersession_eligibility.activation_ts_by_target[41LL]
-            = 9999LL;
         processor_context.index_store["stable"] = { 99LL };
         processor_context.index_reverse[11LL] = "mutated";
         processor_context.procedural_store["stable"][11LL] = 0.0;
@@ -862,11 +849,7 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
                      == sidecar->emotional_metadata.cascade_input_generation
               && sidecar->emotional_fixed_point
                          .recent_window_ts
-                     == 1234LL
-              && sidecar->supersession_eligibility.valid
-              && sidecar->supersession_eligibility.activation_ts_by_target.at (
-                     41LL)
-                     == 1100LL;
+                     == 1234LL;
       }
     if (volatile_restored)
       {
@@ -2504,12 +2487,12 @@ TEST_CASE ("Custom mutations invalidate and rebuild every database cache",
 
   bool fanout_current = false;
   bool search_invalidated = false;
-  bool supersession_invalidated = false;
+  bool sidecar_invalidated = false;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   auto root = std::make_unique<DynamicOperationSet> (
       std::make_unique<CustomMutationCacheProbeOp> (
-          &fanout_current, &search_invalidated, &supersession_invalidated));
+          &fanout_current, &search_invalidated, &sidecar_invalidated));
   SignalProcessor processor (cfg, store, std::move (root));
   Signal signal;
   signal.embedding = Eigen::VectorXf::Zero (256);
@@ -2520,7 +2503,7 @@ TEST_CASE ("Custom mutations invalidate and rebuild every database cache",
 
   REQUIRE (fanout_current);
   REQUIRE (search_invalidated);
-  REQUIRE (supersession_invalidated);
+  REQUIRE (sidecar_invalidated);
 }
 
 TEST_CASE ("Processor supersession cache covers association-only SQL rows",

@@ -556,9 +556,14 @@ if θ_topic ≤ cos(e_new, e_old) < θ_dup:
 ```
 
 Retrieval treats `supersedes` as a directional family relation rather than a
-traversable activation edge. Superseded targets are removed before the vector
-seed cap, leaving the replacement eligible as the family representative and
-preventing obsolete members from consuming prompt slots. The number of written
+traversable activation edge. Packet hydration uses it to attach a retrieved
+replacement's superseded predecessors. Earlier builds also removed superseded
+targets before the vector seed cap. The engine ablation study (2026-10) measured
+that exclusion as harmful and removed it. Keeping superseded targets eligible
+raised the share of gold turns among the seed anchors by +0.16 on Eval 1, +0.14
+on LongMemEval-S, +0.16 on LongMemEval-M and +0.05 on BEAM-10M. Packet recall
+rose by +0.017, +0.025, +0.000 and +0.039. In these conversations an "obsolete"
+turn is often the evidence a question asks about. The number of written
 supersession edges is capped by `SupersessionMaxEdges(F,S,T)`.
 
 ## Constructive Recall and Controlled Distortion

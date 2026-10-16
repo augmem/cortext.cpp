@@ -190,8 +190,9 @@ candidate discovery pass stays broad so durable memories remain reachable:
 seed_k(F) = round(lerp(96, 8, FocusBias(F)))
 ```
 
-Before the vector-seed cap is applied, superseded targets and near-duplicate
-embedding families are collapsed to one current representative. Family lookup
+Before the vector-seed cap is applied, near-duplicate embedding families are
+collapsed to one current representative. Superseded targets stay eligible:
+excluding them was removed after the engine ablation (@sec-experimental). Family lookup
 normalizes each embedding and partitions its coordinates into 32 deterministic
 blocks. For a candidate `x` and representative `y`, Cauchy--Schwarz gives the
 recall-safe upper bound

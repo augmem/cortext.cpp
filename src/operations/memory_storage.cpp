@@ -1527,14 +1527,6 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                 }
               if (!incrementally_maintained)
                 fanout_cache.valid = false;
-              else
-                {
-                  const auto sidecar
-                      = execution_cache_sidecar_internal::Ensure (p_ctx);
-                  if (!sidecar->supersession_eligibility.valid)
-                    association_fanout_cache::BuildSupersessionEligibility (
-                        fanout_cache, p_ctx);
-                }
             }
           if (!constructive_recall::Disabled ()
               && !constructive_recall::CurrentSurfaceWritesDisabled ())

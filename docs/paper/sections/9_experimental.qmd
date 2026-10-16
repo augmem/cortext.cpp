@@ -152,10 +152,10 @@ target after a sound block-norm upper bound and exact cosine family checks. The
 rebuild installs the recovered surface so subsequent requests do not repeat
 the full SQL scan. A failed rebuild installs a failure sentinel so later
 requests do not retry the two complete surface scans. Shared base vectors keep
-all long-term memory metadata alternatives behind one stored vector so a
-superseded sibling cannot hide an eligible sibling. Retrieval fallback executes
+all long-term memory metadata alternatives behind one stored vector so the
+shared vector surfaces through exactly one eligible sibling. Retrieval fallback executes
 demand-driven ordered pages over the current and historical vector surfaces.
-Every SQL page applies kind, timestamp, and supersession eligibility before
+Every SQL page applies kind and timestamp eligibility before
 distance ordering and a knob-derived top-k page limit; one C++ cosine-family
 index spans the pages until the ordinary seed budget is full or the surface is
 exhausted. Processor hydration records persisted-current currency separately
@@ -963,6 +963,7 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | predictive pre-activation (`ApplyPredictivePreActivation`, `memories.pre_activation` and its indexes) | 0/250, 0/48, 0/40. No ranker read the field |
 | influence feedback (`ApplyInfluenceFeedback`, `memories.influence/sustained_influence/mean_influence`, `state.sustained_influence`) | 0/250, 0/48, 0/40 (as part of the minor-feedback group). The columns were write-only |
 | focus feedback (`ApplyFocusFeedback`) | 0/250, 0/48, 0/40 (as part of the minor-feedback group) |
+| supersession exclusion (seed-time filter of `supersedes` targets, its eligibility sidecar and the SQL `instr()` superseded-id filter) | Not neutral: every packet changes, and recall rises. Packet gold-turn recall +0.025 on S, +0.018 on Eval 1, +0.066 on BEAM-10M conversation 7. Seed gold share +0.136, +0.158 and +0.081. Haiku judge (rubric v2) sufficiency -0.006 ± 0.051 on S and -0.005 ± 0.039 on Eval 1. Misleading 0.021 → 0.021 and 0.022 → 0.016. Instructions +2.5%. `supersedes` edges and superseded-predecessor hydration stay |
 
 ## Experimental Interpretation
 

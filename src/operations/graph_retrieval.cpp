@@ -301,7 +301,6 @@ RefreshProcessorSurfaces (Transaction &tx, ProcessorContext &p_ctx,
       p_ctx.retrieval_surface_embedding_index[new_embedding_id]
           = cache_it->second;
     }
-  association_fanout_cache::NotifyRetrievalSurfaceChanged (p_ctx, memory_id);
 
   if (old_embedding_id > 0 && old_embedding_id != new_embedding_id
       && p_ctx.retrieval_surface_embedding_index.find (old_embedding_id)
@@ -546,7 +545,6 @@ std::optional<std::vector<std::map<std::string, std::any>>>
 LoadHistoricalSeedRowsFromCache (
     const ProcessorContext &p_ctx, const Eigen::VectorXf &query_embedding,
     long long exclusion_ts, int candidate_limit,
-    const auto &superseded_memory_ids,
     double duplicate_threshold, SeedCacheProfile *profile)
 {
   const auto state
@@ -615,8 +613,7 @@ LoadHistoricalSeedRowsFromCache (
                    && reference.start_ts < exclusion_ts
                    && state->current_memory_index.count (
                           reference.memory_id)
-                          == 0
-                   && !superseded_memory_ids.Contains (reference.memory_id);
+                          == 0;
           });
       if (eligible_reference == entry.memory_references.end ())
         {
@@ -687,8 +684,7 @@ LoadHistoricalSeedRowsFromCache (
                    && reference.start_ts < exclusion_ts
                    && state->current_memory_index.count (
                           reference.memory_id)
-                          == 0
-                   && !superseded_memory_ids.Contains (reference.memory_id);
+                          == 0;
           });
       if (eligible_reference == entry.memory_references.end ())
         {
@@ -709,7 +705,6 @@ LoadCurrentSeedRowsFromCacheRoute (
     Store *store, const ProcessorContext &p_ctx,
     const Eigen::VectorXf &query_embedding,
     long long exclusion_ts, int candidate_limit,
-    const auto &superseded_memory_ids,
     double duplicate_threshold, SeedCacheProfile *profile,
     bool sparse_route_enabled,
     bool sqlite_sparse_route_enabled,
@@ -848,8 +843,7 @@ LoadCurrentSeedRowsFromCacheRoute (
         return std::nullopt;
       const auto &surface = p_ctx.retrieval_surface_cache[surface_it->second];
       if (surface.kind != "LONG_TERM" || !surface.vector_seed_eligible
-          || surface.start_ts >= exclusion_ts
-          || superseded_memory_ids.Contains (entry.memory_id))
+          || surface.start_ts >= exclusion_ts)
         continue;
       ranked.push_back (
           { index, use_sparse_route
@@ -938,7 +932,6 @@ LoadCurrentSeedRowsFromCache (
     Store *store, const ProcessorContext &p_ctx,
     const Eigen::VectorXf &query_embedding,
     long long exclusion_ts, int candidate_limit,
-    const auto &superseded_memory_ids,
     double duplicate_threshold, SeedCacheProfile *profile,
     bool sparse_route_enabled,
     bool sqlite_sparse_route_enabled,
@@ -946,7 +939,7 @@ LoadCurrentSeedRowsFromCache (
 {
   auto rows = LoadCurrentSeedRowsFromCacheRoute (
       store, p_ctx, query_embedding, exclusion_ts, candidate_limit,
-      superseded_memory_ids, duplicate_threshold, profile,
+      duplicate_threshold, profile,
       sparse_route_enabled, sqlite_sparse_route_enabled,
       sparse_route_capacity);
   if (rows || !sparse_route_enabled)
@@ -955,7 +948,7 @@ LoadCurrentSeedRowsFromCache (
     profile->sparse_exact_fallback = true;
   return LoadCurrentSeedRowsFromCacheRoute (
       store, p_ctx, query_embedding, exclusion_ts, candidate_limit,
-      superseded_memory_ids, duplicate_threshold, profile, false, false,
+      duplicate_threshold, profile, false, false,
       sparse_route_capacity);
 }
 
@@ -963,7 +956,6 @@ std::optional<std::vector<std::map<std::string, std::any>>>
 LoadCurrentSeedRowsFromProcessorSurface (
     const ProcessorContext &p_ctx, const Eigen::VectorXf &query_embedding,
     long long exclusion_ts, int candidate_limit,
-    const auto &superseded_memory_ids,
     double duplicate_threshold)
 {
   const int embedding_dim = static_cast<int> (query_embedding.size ());
@@ -979,8 +971,7 @@ LoadCurrentSeedRowsFromProcessorSurface (
     {
       const auto &surface = p_ctx.retrieval_surface_cache[index];
       if (surface.kind != "LONG_TERM" || !surface.vector_seed_eligible
-          || surface.start_ts >= exclusion_ts
-          || superseded_memory_ids.Contains (surface.memory_id))
+          || surface.start_ts >= exclusion_ts)
         {
           continue;
         }
@@ -1204,7 +1195,6 @@ std::vector<std::map<std::string, std::any>>
 LoadEligibleSeedRowsFromSqlFallback (
     Transaction &tx, const Eigen::VectorXf &query_embedding,
     long long exclusion_ts, int candidate_limit, int materialization_limit,
-    const auto &superseded_memory_ids,
     double duplicate_threshold, bool constructive_recall_enabled,
     bool current_surface_database_current)
 {
@@ -1214,16 +1204,6 @@ LoadEligibleSeedRowsFromSqlFallback (
       || query_embedding.size () <= 0)
     {
       return selected;
-    }
-
-  std::vector<long long> ordered_superseded_ids
-      = superseded_memory_ids.ActiveIds ();
-  std::sort (ordered_superseded_ids.begin (), ordered_superseded_ids.end ());
-  std::string superseded_membership = ",";
-  for (const long long memory_id : ordered_superseded_ids)
-    {
-      superseded_membership += std::to_string (memory_id);
-      superseded_membership += ',';
     }
 
   std::unordered_set<long long> seen_memory_ids;
@@ -1252,8 +1232,7 @@ LoadEligibleSeedRowsFromSqlFallback (
       "  JOIN embeddings e ON e.embedding_id = mr.embedding_id "
       "  JOIN memories m ON m.memory_id = latest.memory_id "
       "  WHERE m.kind = 'LONG_TERM' "
-      "    AND COALESCE(m.start_ts, 0) < ?2 "
-      "    AND instr(?3, ',' || CAST(m.memory_id AS TEXT) || ',') = 0"
+      "    AND COALESCE(m.start_ts, 0) < ?2"
       "), current_eligible AS ("
       "  SELECT m.memory_id, cme.embedding_id, m.start_ts, cme.embedding, "
       "         vec_distance_l2(cme.embedding, ?1) AS distance "
@@ -1261,7 +1240,6 @@ LoadEligibleSeedRowsFromSqlFallback (
       "  JOIN memories m ON m.memory_id = cme.memory_id "
       "  WHERE m.kind = 'LONG_TERM' "
       "    AND COALESCE(m.start_ts, 0) < ?2 "
-      "    AND instr(?3, ',' || CAST(m.memory_id AS TEXT) || ',') = 0 "
       "    AND NOT EXISTS ("
       "      SELECT 1 FROM latest_reconstruction latest "
       "      WHERE latest.memory_id = m.memory_id"
@@ -1274,7 +1252,6 @@ LoadEligibleSeedRowsFromSqlFallback (
       "  JOIN embeddings e ON e.embedding_id = m.embedding_id "
       "  WHERE m.kind = 'LONG_TERM' "
       "    AND COALESCE(m.start_ts, 0) < ?2 "
-      "    AND instr(?3, ',' || CAST(m.memory_id AS TEXT) || ',') = 0 "
       "    AND NOT EXISTS ("
       "      SELECT 1 FROM current_memory_embeddings cme2 "
       "      WHERE cme2.memory_id = m.memory_id"
@@ -1302,10 +1279,7 @@ LoadEligibleSeedRowsFromSqlFallback (
       ") "
       "SELECT memory_id, embedding_id, start_ts, embedding "
       "FROM eligible ";
-          params = {
-            ToFloatVector (query_embedding), exclusion_ts,
-            superseded_membership
-          };
+          params = { ToFloatVector (query_embedding), exclusion_ts };
         }
       else
         {
@@ -1317,9 +1291,7 @@ LoadEligibleSeedRowsFromSqlFallback (
                 "  FROM current_memory_embeddings cme "
                 "  JOIN memories m ON m.memory_id = cme.memory_id "
                 "  WHERE m.kind = 'LONG_TERM' "
-                "    AND COALESCE(m.start_ts, 0) < ? "
-                "    AND instr(?, ',' || CAST(m.memory_id AS TEXT) || ',') "
-                "        = 0"
+                "    AND COALESCE(m.start_ts, 0) < ?"
                 "), historical_eligible AS ("
                 "  SELECT m.memory_id, m.embedding_id, m.start_ts, "
                 "         e.embedding, "
@@ -1328,8 +1300,6 @@ LoadEligibleSeedRowsFromSqlFallback (
                 "  JOIN embeddings e ON e.embedding_id = m.embedding_id "
                 "  WHERE m.kind = 'LONG_TERM' "
                 "    AND COALESCE(m.start_ts, 0) < ? "
-                "    AND instr(?, ',' || CAST(m.memory_id AS TEXT) || ',') "
-                "        = 0 "
                 "    AND NOT EXISTS ("
                 "      SELECT 1 FROM current_memory_embeddings cme2 "
                 "      WHERE cme2.memory_id = m.memory_id"
@@ -1353,8 +1323,7 @@ LoadEligibleSeedRowsFromSqlFallback (
                 "SELECT memory_id, embedding_id, start_ts, embedding "
                 "FROM eligible ";
           params = { ToFloatVector (query_embedding), exclusion_ts,
-                     superseded_membership, ToFloatVector (query_embedding),
-                     exclusion_ts, superseded_membership };
+                     ToFloatVector (query_embedding), exclusion_ts };
         }
       query += "ORDER BY distance ASC, memory_id ASC, embedding_id ASC "
                "LIMIT ?";
@@ -1380,7 +1349,7 @@ LoadEligibleSeedRowsFromSqlFallback (
           const long long memory_id = AnyLongLong (row, "memory_id");
           const auto embedding_it = row.find ("embedding");
           Eigen::VectorXf embedding;
-          if (memory_id <= 0 || superseded_memory_ids.Contains (memory_id)
+          if (memory_id <= 0
               || !seen_memory_ids.insert (memory_id).second
               || embedding_it == row.end ()
               || !AnyToEmbedding (embedding_it->second,
@@ -1491,56 +1460,6 @@ RetrievalEdgeType (const std::string &edge_type)
          || edge_type == "derived_from" || edge_type == "next_in_episode"
          || edge_type == "prev_in_episode"
          || edge_type == "within_same_event";
-}
-
-struct SupersessionEligibility
-{
-  std::shared_ptr<execution_cache_sidecar_internal::State> cache_owner;
-  const std::unordered_map<long long, long long> *activation_ts_by_target
-      = nullptr;
-  std::uint64_t exclusion_ts = 0;
-
-  bool
-  Contains (long long memory_id) const
-  {
-    if (!activation_ts_by_target)
-      return false;
-    const auto activation = activation_ts_by_target->find (memory_id);
-    return activation != activation_ts_by_target->end ()
-           && activation->second >= 0
-           && static_cast<std::uint64_t> (activation->second) < exclusion_ts;
-  }
-
-  std::vector<long long>
-  ActiveIds () const
-  {
-    std::vector<long long> active;
-    if (!activation_ts_by_target)
-      return active;
-    active.reserve (activation_ts_by_target->size ());
-    for (const auto &[memory_id, activation_ts] : *activation_ts_by_target)
-      if (activation_ts >= 0
-          && static_cast<std::uint64_t> (activation_ts) < exclusion_ts)
-        active.push_back (memory_id);
-    return active;
-  }
-};
-
-SupersessionEligibility
-SupersededMemoryIds (
-    const ProcessorContext::AssociationFanoutCache *fanout_cache,
-    const ProcessorContext &p_ctx, std::uint64_t exclusion_ts)
-{
-  SupersessionEligibility out;
-  out.exclusion_ts = exclusion_ts;
-  if (!fanout_cache)
-    return out;
-  out.cache_owner = execution_cache_sidecar_internal::Find (p_ctx);
-  if (out.cache_owner
-      && out.cache_owner->supersession_eligibility.valid)
-    out.activation_ts_by_target
-        = &out.cache_owner->supersession_eligibility.activation_ts_by_target;
-  return out;
 }
 
 std::vector<Candidate>
@@ -1706,8 +1625,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   start_profile_timing ();
   auto *fanout_cache
       = association_fanout_cache::Ensure (context.GetStore (), p_ctx);
-  const auto superseded_memory_ids = SupersededMemoryIds (
-      fanout_cache, p_ctx, exclusion_ts);
   profile_timing ("GraphRetrieve.family_index", section_start);
 
   std::vector<std::map<std::string, std::any>> rows;
@@ -1733,7 +1650,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       auto current_knn_rows = LoadCurrentSeedRowsFromCache (
           context.GetStore (), p_ctx, signal.embedding,
           static_cast<long long> (exclusion_ts),
-          seed_search_limit, superseded_memory_ids, duplicate_threshold,
+          seed_search_limit, duplicate_threshold,
           seed_cache_profile_ptr, any_sparse_route_enabled,
           sqlite_sparse_route_enabled,
           sparse_route_capacity);
@@ -1746,7 +1663,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       else
         historical_knn_rows = LoadHistoricalSeedRowsFromCache (
             p_ctx, signal.embedding, static_cast<long long> (exclusion_ts),
-            seed_search_limit, superseded_memory_ids, duplicate_threshold,
+            seed_search_limit, duplicate_threshold,
             seed_cache_profile_ptr);
       if (current_knn_rows && historical_knn_rows)
         {
@@ -1849,7 +1766,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           if (auto current_knn_rows = LoadCurrentSeedRowsFromCache (
                   context.GetStore (), p_ctx, signal.embedding,
                   static_cast<long long> (exclusion_ts), seed_search_limit,
-                  superseded_memory_ids, duplicate_threshold, nullptr,
+                  duplicate_threshold, nullptr,
                   any_sparse_route_enabled, sqlite_sparse_route_enabled,
                   sparse_route_capacity))
             {
@@ -1862,7 +1779,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                = LoadCurrentSeedRowsFromProcessorSurface (
                    p_ctx, signal.embedding,
                    static_cast<long long> (exclusion_ts), seed_search_limit,
-                   superseded_memory_ids, duplicate_threshold))
+                   duplicate_threshold))
         {
           cache_search_available = true;
           AppendUniqueRows (rows, std::move (*processor_rows),
@@ -1886,7 +1803,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
               auto current_knn_rows = LoadCurrentSeedRowsFromCache (
                   context.GetStore (), p_ctx, signal.embedding,
                   static_cast<long long> (exclusion_ts), seed_search_limit,
-                  superseded_memory_ids, duplicate_threshold, nullptr,
+                  duplicate_threshold, nullptr,
                   any_sparse_route_enabled, sqlite_sparse_route_enabled,
                   sparse_route_capacity);
               std::optional<
@@ -1900,7 +1817,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                 historical_knn_rows = LoadHistoricalSeedRowsFromCache (
                     p_ctx, signal.embedding,
                     static_cast<long long> (exclusion_ts), seed_search_limit,
-                    superseded_memory_ids, duplicate_threshold, nullptr);
+                    duplicate_threshold, nullptr);
               if (current_knn_rows && historical_knn_rows)
                 {
                   cache_search_available = true;
@@ -1927,7 +1844,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           auto fallback_rows = LoadEligibleSeedRowsFromSqlFallback (
               tx, signal.embedding, static_cast<long long> (exclusion_ts),
               seed_limit, fallback_materialization_limit,
-              superseded_memory_ids, duplicate_threshold,
+              duplicate_threshold,
               constructive_recall_enabled,
               surface_search_state && surface_search_state
                                           ->current_surface_database_current);
@@ -1961,7 +1878,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           exact_control_rows = LoadCurrentSeedRowsFromCache (
               context.GetStore (), p_ctx, signal.embedding,
               static_cast<long long> (exclusion_ts), seed_search_limit,
-              superseded_memory_ids, duplicate_threshold, nullptr, false,
+              duplicate_threshold, nullptr, false,
               false, sparse_route_capacity);
         }
     }
@@ -1988,7 +1905,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         candidate.start_ts = AnyLongLong (row, "start_ts");
         auto it_embedding = row.find ("embedding");
         if (candidate.memory_id <= 0 || candidate.embedding_id <= 0
-            || superseded_memory_ids.Contains (candidate.memory_id)
             || it_embedding == row.end ()
             || !AnyToEmbedding (it_embedding->second, embedding_dim,
                                 candidate.embedding))
@@ -2094,8 +2010,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                              const ProcessorContext::AssociationFanoutEdge &edge,
                              int &expanded) {
         if (expanded >= fanout || !RetrievalEdgeType (edge.edge_type)
-            || edge.memory_id <= 0 || edge.memory_id == seed.memory_id
-            || superseded_memory_ids.Contains (edge.memory_id))
+            || edge.memory_id <= 0 || edge.memory_id == seed.memory_id)
           {
             return;
           }
