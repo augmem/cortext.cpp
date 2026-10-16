@@ -977,6 +977,18 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | emotional consolidation and cascade (`ApplyEmotionalConsolidation`, `PropagateEmotionalCascade`, emotional-metadata cache, `flashbulb`/`emotional_intensity`/`half_life_bonus`/`detail_suppression`/`gist_components`/`cascade_*` columns) | 0/250, 0/48, 0/40 (affect group). Outputs fed only memory-strength decay and the cascade |
 | linked-source hydration (`LABEL`/`ASSOCIATION` routing rows resolved through `has_label`/`derived_from` routes, query-aware linked ordering, compact-item limit) | 0/250, 0/48, 0/40 with query-aware ordering off. With clustering consolidation removed, nothing writes those routes |
 
+Working-memory items with equal start timestamps were returned in whatever order SQLite's chosen index produced. Dropping the strength and affect columns and indexes changed that plan, which reordered tied working-memory slots in 45/48 S and 244/250 Eval 1 packets (same items, same retrieved list). Hydration now breaks ties by `memory_id`, so the order no longer depends on the query plan.
+
+Five subsystems changed packets when switched off but did not clearly help or hurt on recall alone. They were judged with Haiku (rubric v2) against the pipeline above. S and Eval 1 used one repetition per changed case; BEAM-10M conversation 7 used two. Each delta is "switched off minus on" with a 95% interval.
+
+| Subsystem | Judge sufficiency delta | Recall and cost | Decision |
+|---|---|---|---|
+| embedding movement (reconsolidation drift) | S -0.048 ± 0.045, Eval 1 -0.032 ± 0.029; misleading +0.012 on Eval 1 | packet recall -0.025 / -0.008; instructions -18%, store 380 → 265 MB | kept: switching it off hurts |
+| `supersedes` edges and superseded hydration | S -0.036 ± 0.052 (sufficient -0.095 ± 0.090), Eval 1 -0.016 ± 0.013 | packet recall -0.037 / -0.025; instructions -6% | kept: switching it off hurts |
+| working memory | S 0.000 ± 0.047 (sufficient -0.024), Eval 1 -0.014 ± 0.015 (sufficient -0.018) | packet recall -0.012 / -0.015; instructions -25% | kept: every sign is negative, though only just inside the noise |
+| neuromodulator effect scales and encode/retrieve oscillator | S 0.000, Eval 1 0.000 ± 0.009, BEAM +0.028 ± 0.054 | packet recall -0.003 on Eval 1; no cost change | kept for now: neutral here, but the July MSC confirmation (n = 117) measured -0.49 sufficiency for removing the oscillator. That conflict needs an MSC rerun before removal |
+| SQLite sparse route (BEAM only; S and Eval 1 packets are identical with it off) | BEAM +0.042 ± 0.059 (n = 18) | recall equal; instructions -22%, store 372 → 279 MB, query p95 906 → 811 ms | kept and flagged: neutral on quality and cheaper off, but it was built for stores past BEAM length, and scaling past 22k turns is untested without it |
+
 ## Experimental Interpretation
 
 The hard-cut branch changes the research question. Earlier results asked how
