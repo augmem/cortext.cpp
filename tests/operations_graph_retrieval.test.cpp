@@ -1,5 +1,4 @@
 #include "test_helpers.hpp"
-#include "../src/operations/association_fanout_cache_internal.hpp"
 #include "../src/operations/constructive_recall_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"

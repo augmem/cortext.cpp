@@ -883,7 +883,6 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
     acc.signals.push_back (std::move (rec));
   }
   pctx.accumulator_states[s.source_id] = std::move (acc);
-  pctx.association_fanout_cache.valid = true;
 
   OperationContext ctx (s, pctx, cfg, store);
   ctx.SetAccumulatorWriteDecision (true);
@@ -904,11 +903,6 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
       { correction_memory_id, 10LL });
   REQUIRE (edge_rows.size () == 1);
   REQUIRE (std::any_cast<double> (edge_rows[0].at ("weight")) > 0.0);
-  REQUIRE (pctx.association_fanout_cache.valid);
-  REQUIRE (pctx.association_fanout_cache.out_by_source
-               .at (correction_memory_id)
-               .front ().memory_id
-           == 10LL);
 
   auto stale_rows = store->Execute (
       "SELECT source_contradiction_count FROM memories WHERE memory_id = ?",

@@ -1,7 +1,6 @@
 #include "cortext/operations/graph_retrieval.hpp"
 
 #include "constructive_recall_internal.hpp"
-#include "association_fanout_cache_internal.hpp"
 #include "historical_surface_search_cache_internal.hpp"
 #include "family_embedding_features_internal.hpp"
 #include "retrieval_trace_state.hpp"
@@ -1602,13 +1601,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       }
   };
   auto &p_ctx = context.GetProcessorContext ();
-
-  start_profile_timing ();
-  // Retrieval no longer expands over association edges, but it keeps the
-  // fanout cache current once per signal for reconsolidation, the emotional
-  // cascade and incremental supersedes upserts in the next MemoryStorage.
-  (void)association_fanout_cache::Ensure (context.GetStore (), p_ctx);
-  profile_timing ("GraphRetrieve.family_index", section_start);
 
   std::vector<std::map<std::string, std::any>> rows;
   std::unordered_set<long long> seen_seed_memory_ids;

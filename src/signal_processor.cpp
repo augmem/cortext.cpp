@@ -245,7 +245,6 @@ struct DetachedProcessorCaches
       std::vector<ProcessorContext::RetrievalSurfaceSourceIndexEntry>>
       retrieval_surface_source_index;
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
-  ProcessorContext::AssociationFanoutCache association_fanout_cache;
   std::shared_ptr<operations::execution_cache_sidecar_internal::State>
       execution_cache_sidecar;
   std::unordered_set<long long> retrieval_suppression_embedding_ids;
@@ -278,26 +277,12 @@ DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
         + caches.retrieval_surface_embedding_index.size ()
         + caches.retrieval_surface_source_index.size ()
         + caches.retrieval_surface_source_index_dirty.size ()
-        + caches.association_fanout_cache.out_by_source.size ()
-        + caches.association_fanout_cache.in_by_target.size ()
         + caches.retrieval_suppression_embedding_ids.size ()
         + caches.retrieval_suppression_memory_ids.size ();
   for (const auto &[source_id, entries] : caches.retrieval_surface_source_index)
     {
       (void)source_id;
       count += entries.size ();
-    }
-  for (const auto &[memory_id, edges] :
-       caches.association_fanout_cache.out_by_source)
-    {
-      (void)memory_id;
-      count += edges.size ();
-    }
-  for (const auto &[memory_id, edges] :
-       caches.association_fanout_cache.in_by_target)
-    {
-      (void)memory_id;
-      count += edges.size ();
     }
   count += caches.index_store.size () + caches.index_reverse.size ()
            + caches.procedural_store.size ();
@@ -324,7 +309,6 @@ ClearDbDerivedProcessorCaches (ProcessorContext &ctx)
   ctx.retrieval_surface_embedding_index = {};
   ctx.retrieval_surface_source_index = {};
   ctx.retrieval_surface_source_index_dirty = {};
-  ctx.association_fanout_cache = {};
   operations::execution_cache_sidecar_internal::Erase (ctx);
   ctx.retrieval_suppression_embedding_ids = {};
   ctx.retrieval_suppression_memory_ids = {};
@@ -347,8 +331,6 @@ DetachDbDerivedProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.retrieval_surface_source_index);
   caches.retrieval_surface_source_index_dirty
       = std::move (ctx.retrieval_surface_source_index_dirty);
-  caches.association_fanout_cache
-      = std::move (ctx.association_fanout_cache);
   caches.retrieval_suppression_embedding_ids
       = std::move (ctx.retrieval_suppression_embedding_ids);
   caches.retrieval_suppression_memory_ids
@@ -387,7 +369,6 @@ RestoreDbDerivedProcessorCaches (ProcessorContext &ctx,
       = std::move (caches.retrieval_surface_source_index);
   ctx.retrieval_surface_source_index_dirty
       = std::move (caches.retrieval_surface_source_index_dirty);
-  ctx.association_fanout_cache = std::move (caches.association_fanout_cache);
   ctx.retrieval_suppression_embedding_ids
       = std::move (caches.retrieval_suppression_embedding_ids);
   ctx.retrieval_suppression_memory_ids
@@ -417,8 +398,6 @@ DetachRebuildableProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.retrieval_surface_source_index);
   caches.retrieval_surface_source_index_dirty
       = std::move (ctx.retrieval_surface_source_index_dirty);
-  caches.association_fanout_cache
-      = std::move (ctx.association_fanout_cache);
   caches.execution_cache_sidecar
       = operations::execution_cache_sidecar_internal::Detach (ctx);
   caches.retrieval_suppression_embedding_ids
@@ -446,7 +425,6 @@ RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
       = std::move (caches.retrieval_surface_source_index);
   ctx.retrieval_surface_source_index_dirty
       = std::move (caches.retrieval_surface_source_index_dirty);
-  ctx.association_fanout_cache = std::move (caches.association_fanout_cache);
   operations::execution_cache_sidecar_internal::Restore (
       ctx, std::move (caches.execution_cache_sidecar));
   ctx.retrieval_suppression_embedding_ids
@@ -2640,8 +2618,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
       ctx.retrieval_surface_source_index_dirty.clear ();
       ctx.association_cache.clear ();
       ctx.association_cache_index.clear ();
-      ctx.association_fanout_cache = {};
-      std::unordered_map<long long, long long> base_embedding_ids;
+          std::unordered_map<long long, long long> base_embedding_ids;
 
       const long long constructive_recall_enabled
           = operations::constructive_recall::Disabled () ? 0LL : 1LL;

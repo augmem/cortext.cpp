@@ -80,7 +80,6 @@ ALGORITHM_GROUPS = [
         "id": "memory-storage-and-graph-maintenance",
         "paths": [
             "src/operations/active_signal_embedding_ring_internal.hpp",
-            "src/operations/association_fanout_cache_internal.hpp",
             "src/operations/detect_memory_usage.cpp",
             "src/operations/memory_storage.cpp",
             "src/operations/reconsolidation.cpp",

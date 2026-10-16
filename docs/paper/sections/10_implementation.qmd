@@ -54,9 +54,12 @@ SQLite parameters are checked at bind time, including exact statement/argument
 counts, so `SQLITE_TOOBIG`, `SQLITE_RANGE`, and allocation failures cannot be
 silently converted into NULL values. `Process()` and `Flush()` both snapshot
 mutable processor state until the database transaction commits; rollback
-restores working-memory dirty flags and persisted-record cursors. Association
-writers invalidate the fanout cache in constant time and rebuild it lazily on
-the next traversal.
+restores working-memory dirty flags and persisted-record cursors. No operation
+traverses association edges at runtime, so the engine keeps no in-memory
+association fanout index. An earlier fanout cache served only the
+reconsolidation ripple; after that was removed it was rebuilt from a full
+`associations` scan on the first query after every flush (54 ms at 20k BEAM
+turns) and never read.
 
 Natural and Durable retention enter the same operation chain and accumulate the
 current signal before boundary evaluation. Natural leaves boundary and write
@@ -786,15 +789,14 @@ supersession predicates to that subset before evaluating vector distance, so
 signal-only historical embeddings do not enter the distance kernel. This is an
 execution-only index: it does not change the eligible set, distance expression,
 tie order, family collapse, or source and modality semantics.
-Alongside the shared association fanout cache, an internal execution sidecar
-maintains, for each supersession target, the earliest start timestamp of an
+An internal execution sidecar maintains, for each supersession target, the earliest start timestamp of an
 eligible replacement. Retrieval tests that timestamp directly instead of
 rebuilding a target set by scanning every incoming edge. Memory storage
-publishes its already-committed supersession decisions into the fanout cache
-and recomputes only the affected target's eligibility. A current-surface change
+recomputes only the affected target's eligibility after it commits a
+supersession decision. A current-surface change
 likewise recomputes only targets reached by that memory's outgoing
 `supersedes` edges. Missing target metadata invalidates the cache and returns
-to authoritative SQLite rehydration. Neither structure is part of
+to authoritative SQLite rehydration. The sidecar is not part of
 the public processor layout. The strict replacement-before-query predicate and
 base embedding identity remain unchanged.
 The emotional-metadata portion of the sidecar is trusted only by the

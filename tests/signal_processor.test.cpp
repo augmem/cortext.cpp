@@ -12,7 +12,6 @@
 #include <cortext/processor/operation_set.hpp>
 #include <cortext/store/sqlite_store.hpp>
 #include <cortext/store/utils.hpp>
-#include "../src/operations/association_fanout_cache_internal.hpp"
 #include "../src/operations/active_signal_embedding_ring_internal.hpp"
 #include "../src/operations/execution_cache_sidecar_internal.hpp"
 #include "../src/operations/bounded_activation_shadow_internal.hpp"
@@ -429,10 +428,9 @@ struct CustomIndirectRifReadOp : IOperation
 
 struct CustomMutationCacheProbeOp : IOperation
 {
-  CustomMutationCacheProbeOp (bool *fanout_current, bool *search_invalidated,
+  CustomMutationCacheProbeOp (bool *search_invalidated,
                               bool *sidecar_invalidated)
-      : fanout_current (fanout_current),
-        search_invalidated (search_invalidated),
+      : search_invalidated (search_invalidated),
         sidecar_invalidated (sidecar_invalidated)
   {
   }
@@ -447,15 +445,6 @@ struct CustomMutationCacheProbeOp : IOperation
         "INSERT INTO associations(source_memory_id, target_memory_id, "
         "edge_type, weight, last_reinforced) "
         "VALUES(1, 2, 'similar_to', 0.75, 2000)");
-    const auto &fanout = operations::association_fanout_cache::Ensure (
-        ctx.GetStore (), p_ctx);
-    if (fanout_current)
-      {
-        const auto it = fanout->out_by_source.find (1);
-        *fanout_current
-            = it != fanout->out_by_source.end () && !it->second.empty ()
-              && it->second.front ().memory_id == 2;
-      }
     if (search_invalidated)
       *search_invalidated
           = !operations::historical_surface_search_cache_internal::Find (p_ctx);
@@ -467,7 +456,6 @@ struct CustomMutationCacheProbeOp : IOperation
       }
   }
 
-  bool *fanout_current = nullptr;
   bool *search_invalidated = nullptr;
   bool *sidecar_invalidated = nullptr;
 };
@@ -601,7 +589,6 @@ struct ExerciseJournalAwareCommitFailureOp : IOperation
         processor_context.retrieval_surface_cache.clear ();
         processor_context.retrieval_surface_index.clear ();
         processor_context.retrieval_surface_embedding_index.clear ();
-        processor_context.association_fanout_cache = {};
         operations::execution_cache_sidecar_internal::Erase (
             processor_context);
         operations::signal_record_rollback_internal::
@@ -619,17 +606,11 @@ struct ExerciseJournalAwareCommitFailureOp : IOperation
       }
     if (restored)
       {
-        (void)operations::association_fanout_cache::Ensure (
-            ctx.GetStore (), processor_context);
         const auto sidecar = ExecutionCacheState (processor_context);
         *restored
             = processor_context.retrieval_surface_index.contains (41LL)
               && processor_context.retrieval_surface_embedding_index.contains (
                   51LL)
-              && processor_context.association_fanout_cache.valid
-              && processor_context.association_fanout_cache.in_by_target
-                     .at (41LL).front ().memory_id
-                     == 42LL
               && processor_context.index_store.at ("stable")
                      == std::vector<long long> { 11LL, 12LL }
               && processor_context.index_reverse.at (11LL) == "stable"
@@ -2493,14 +2474,13 @@ TEST_CASE ("Custom mutations invalidate and rebuild every database cache",
   cortext::testing::SeedMemoryV2 (
       *store, 2, 12, "source-b", "ASSOCIATION", 1.0, 1000);
 
-  bool fanout_current = false;
   bool search_invalidated = false;
   bool sidecar_invalidated = false;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   auto root = std::make_unique<DynamicOperationSet> (
       std::make_unique<CustomMutationCacheProbeOp> (
-          &fanout_current, &search_invalidated, &sidecar_invalidated));
+          &search_invalidated, &sidecar_invalidated));
   SignalProcessor processor (cfg, store, std::move (root));
   Signal signal;
   signal.embedding = Eigen::VectorXf::Zero (256);
@@ -2509,7 +2489,6 @@ TEST_CASE ("Custom mutations invalidate and rebuild every database cache",
   signal.timestamp = 2000;
   processor.Process (signal);
 
-  REQUIRE (fanout_current);
   REQUIRE (search_invalidated);
   REQUIRE (sidecar_invalidated);
 }

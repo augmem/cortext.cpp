@@ -3,7 +3,6 @@
 #include "active_signal_embedding_ring_internal.hpp"
 #include "historical_surface_search_cache_internal.hpp"
 #include "retrieval_trace_state.hpp"
-#include "association_fanout_cache_internal.hpp"
 #include "signal_record_rollback_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -1481,41 +1480,6 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
           retrieval_trace::RecordSurfaceUpsert (
               memory_id, embedding_id, ToFloatVector (embedding_to_store));
-          auto &fanout_cache = p_ctx.association_fanout_cache;
-          if (fanout_cache.valid && !supersession_edges.empty ())
-            {
-              bool incrementally_maintained = true;
-              for (const auto &edge : supersession_edges)
-                {
-                  const auto target_it = p_ctx.retrieval_surface_index.find (
-                      edge.target_memory_id);
-                  if (target_it == p_ctx.retrieval_surface_index.end ()
-                      || target_it->second
-                             >= p_ctx.retrieval_surface_cache.size ())
-                    {
-                      incrementally_maintained = false;
-                      break;
-                    }
-                  const auto &target
-                      = p_ctx.retrieval_surface_cache[target_it->second];
-                  const long long target_embedding_id
-                      = historical_surface_search_cache_internal::
-                          BaseEmbeddingIdForMemory (
-                              p_ctx, edge.target_memory_id,
-                              target.embedding_id);
-                  if (target_embedding_id <= 0)
-                    {
-                      incrementally_maintained = false;
-                      break;
-                    }
-                  association_fanout_cache::UpsertAssociation (
-                      fanout_cache, memory_id, edge.target_memory_id,
-                      embedding_id, target_embedding_id, "supersedes",
-                      edge.weight, static_cast<long long> (end_ts));
-                }
-              if (!incrementally_maintained)
-                fanout_cache.valid = false;
-            }
           if (!constructive_recall::Disabled ()
               && !constructive_recall::CurrentSurfaceWritesDisabled ())
             {

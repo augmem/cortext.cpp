@@ -520,33 +520,6 @@ struct ProcessorContext
     }
   };
 
-  struct AssociationFanoutEdge
-  {
-    long long memory_id = 0;
-    long long embedding_id = 0;
-    std::string edge_type;
-    double weight = 1.0;
-    long long last_reinforced = 0;
-  };
-
-  struct AssociationFanoutCache
-  {
-    bool valid = false;
-    long long edge_count = 0;
-    long long source_sum = 0;
-    long long target_sum = 0;
-    long long source_max = 0;
-    long long target_max = 0;
-    long long weight_sum_micros = 0;
-    long long last_reinforced_sum = 0;
-    int last_fingerprint_check_signal = -1;
-    int consolidation_count = -1;
-    std::unordered_map<long long, std::vector<AssociationFanoutEdge>>
-        out_by_source;
-    std::unordered_map<long long, std::vector<AssociationFanoutEdge>>
-        in_by_target;
-  };
-
   void
   UpsertAssociationCache (long long memory_id, long long embedding_id,
                           const Eigen::VectorXf &embedding,
@@ -823,8 +796,6 @@ struct ProcessorContext
                      std::vector<RetrievalSurfaceSourceIndexEntry>>
       retrieval_surface_source_index;
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
-  AssociationFanoutCache association_fanout_cache;
-
 };
 
 } // namespace cortext
