@@ -110,7 +110,7 @@ TEST_CASE("Migrations apply core tables automatically", "[schema][migration]") {
     REQUIRE(has("signals"));      // v2 signals table
     REQUIRE(has("episodes"));     // v2 episodes table
     REQUIRE(has("memory_reconstructions"));
-    REQUIRE(has("meta_learning_coeffs"));
+    REQUIRE_FALSE(has("meta_learning_coeffs")); // dropped by migration 35
     REQUIRE(has("cortext_schema_migrations"));
     // embeddings is a virtual table (vec0), check it separately
     auto emb_rows = store->Execute(

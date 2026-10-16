@@ -1,6 +1,5 @@
 #include "cortext/operations/focus.hpp"
 
-#include "meta_learning_internal.hpp"
 
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/constants.hpp"
@@ -31,7 +30,9 @@ InitializeFocusPriors::Execute (OperationContext &context, Transaction &tx) cons
   p_ctx.mismatch_weight_prior = focus_priors.mismatch_weight;
 
   p_ctx.attention_width_prior
-      = meta_learning::ResolveAttentionWidthPrior (tx, config);
+      = core::Lerp (static_cast<double> (core::kAttentionWidthMin),
+                    static_cast<double> (core::kAttentionWidthMax),
+                    1.0 - config.focus);
 
   // Also initialize the dynamic values from the priors.
   p_ctx.weight_relevance = p_ctx.weight_relevance_prior;

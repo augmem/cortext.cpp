@@ -746,7 +746,7 @@ FeedbackStage:
   focus/sensitivity/stability feedback, influence feedback,
   serial-position effects, memory strength/eviction, emotional consolidation,
   working memory, accumulator reset, consolidation gate/cluster/shallow,
-  graph build, emotional cascade, meta-learning
+  graph build, emotional cascade
 ```
 
 Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so replay

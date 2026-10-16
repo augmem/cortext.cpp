@@ -158,7 +158,6 @@ if signal.force_consolidation:
     gate_cluster_and_shallow_replay()
     build_memory_graph()
 update_emotional_cascade()
-update_meta_learning()
 ```
 
 The normative execution order for a single timestep t:
@@ -167,7 +166,7 @@ The normative execution order for a single timestep t:
 2.  **Run CoreStage:** initialize priors, update accumulator/drift, compute uncertainty, adaptation, metrics, neuromodulators, composite score, threshold, boundary, spike bypass, and write gate.
 3.  **Run StorageStage:** write the memory unit when the write gate opens, then update Soft Anchor, synaptic tagging, and signal metric persistence from the stored memory id.
 4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any reset, run streaming pacing and graph retrieval, update rate state from the current write decision, compute the MNI gate, and record memory usage/reinforcement.
-5.  **Run FeedbackStage:** apply retrieval competition, predictive pre-activation, reconsolidation, F/S/T feedback, serial-position and strength updates, emotional consolidation, working memory, accumulator reset, optional forced consolidation, graph build, emotional cascade, and meta-learning.
+5.  **Run FeedbackStage:** apply retrieval competition, predictive pre-activation, reconsolidation, F/S/T feedback, serial-position and strength updates, emotional consolidation, working memory, accumulator reset, optional forced consolidation, graph build, and emotional cascade.
 6.  **Interrupt Abort:** If the MNI gate marked a pending abort, the next signal compares similarity to the selected memory against the current unit and resets only when the new signal aligns more with the selected memory.
 
 Timing notes:

@@ -1,5 +1,4 @@
 #include "cortext/operations/sensitivity.hpp"
-#include "meta_learning_internal.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -31,7 +30,7 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   const auto sensitivity_priors = core::SensitivityStatePriorsForKnobs (S_raw);
 
   // Priors per algorithms.md Algorithm 3
-  p_ctx.base_rate_prior = meta_learning::ResolveRateTargetPrior (tx, config);
+  p_ctx.base_rate_prior = core::BaseRatePrior (config.sensitivity);
   p_ctx.weight_novelty_prior = sensitivity_priors.novelty_weight;
   p_ctx.weight_surprise_prior = sensitivity_priors.surprise_weight;
   p_ctx.weight_valence_prior = sensitivity_priors.valence_weight;

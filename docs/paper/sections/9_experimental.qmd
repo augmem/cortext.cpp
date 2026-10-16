@@ -952,6 +952,14 @@ spending roughly two orders of magnitude less context than chat RAG. The
 artifact is
 `docs/paper/artifacts/replay_v8_context_blowout/judge_gemma4_12b_local_context128_prioronly.json`.
 
+## Engine Ablation Removals (2026-10)
+
+A leave-one-out study switched off each engine subsystem in turn. It used a build with experiment hooks; the hooks are not part of the release. The evals were Eval 1 (250 cases), LongMemEval-S (48), every second LongMemEval-M episode (24), and full-length BEAM-10M conversations (19-24k turns each). Tier-1 metrics are judge-free: gold-turn recall in the packet and in the seed set, query p95, ingest per turn, instructions retired, peak RSS and store size. A subsystem was removed when switching it off measurably helped quality, or when it left every packet byte-identical with no cost benefit. Each removal was then rechecked on its own commit: build, the full test suite, and byte-identical packets against the parent commit on LongMemEval-S (48), Eval 1 (250) and BEAM-10M conversation 7 (about 21k turns), unless the entry says otherwise.
+
+| Removed | Ablation evidence (packets changed; recall deltas) |
+|---|---|
+| meta-learned knob priors (`ApplyMetaLearning`, `meta_learning_coeffs`) | 0/250 Eval 1, 0/48 S, 0/40 BEAM; no cost change. The priors are the closed-form F/S/T functions again |
+
 ## Experimental Interpretation
 
 The hard-cut branch changes the research question. Earlier results asked how

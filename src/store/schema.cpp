@@ -518,23 +518,6 @@ GetCoreMigrations ()
           },
       },
       {
-          5,
-          "Meta-learning coefficient store",
-          {
-              "CREATE TABLE IF NOT EXISTS meta_learning_coeffs ("
-              "  family TEXT PRIMARY KEY,"
-              "  alpha_f REAL NOT NULL,"
-              "  alpha_s REAL NOT NULL,"
-              "  alpha_t REAL NOT NULL,"
-              "  beta REAL NOT NULL,"
-              "  a REAL NOT NULL,"
-              "  b REAL NOT NULL,"
-              "  update_count INTEGER NOT NULL DEFAULT 0,"
-              "  updated_at INTEGER NOT NULL DEFAULT 0"
-              ")",
-          },
-      },
-      {
           6,
           "Soft Anchor shadow state and links",
           {
@@ -970,6 +953,13 @@ GetCoreMigrations ()
               "idx_memories_ltm_unclustered_strength_created "
               "ON memories(strength, created_at, embedding_id) "
               "WHERE kind = 'LONG_TERM' AND cluster_id IS NULL",
+          },
+      },
+      {
+          35,
+          "Drop the removed meta-learning coefficient store from older stores",
+          {
+              "DROP TABLE IF EXISTS meta_learning_coeffs",
           },
       },
   };

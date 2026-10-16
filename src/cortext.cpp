@@ -9,7 +9,6 @@
 #include "cortext/internal/replay_ingress.hpp"
 #include "encoder/text_encoder_factory.hpp"
 #include "operations/constructive_recall_internal.hpp"
-#include "operations/meta_learning_internal.hpp"
 #include "operations/retrieval_trace_state.hpp"
 #include "operations/signal_record_rollback_internal.hpp"
 #include "operations/sparse_retrieval_knobs_internal.hpp"
@@ -1944,7 +1943,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::InitializeSensitivityPriors;
   using cortext::operations::InitializeStabilityPriors;
   using cortext::operations::MemoryStorage;
-  using cortext::operations::ApplyMetaLearning;
   using cortext::operations::PersistSignalMetrics;
   using cortext::operations::PropagateEmotionalCascade;
   using cortext::operations::ResetAccumulatorAfterFlush;
@@ -2005,8 +2003,7 @@ BuildRootOperationSet (bool probe_mode)
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
       EvaluateConsolidation, ConsolidationGate,
       ConsolidationCluster, cortext::operations::ConsolidationShallow,
-      BuildGraphFromConsolidation, PropagateEmotionalCascade,
-      ApplyMetaLearning>;
+      BuildGraphFromConsolidation, PropagateEmotionalCascade>;
 
   using ProbeRoot = OperationSet<CoreStage, RetrievalStage>;
   using FullRoot

@@ -52,7 +52,6 @@ const cortext_cpp_sources = &.{
     "src/operations/embedding_prediction_error.cpp",
     "src/operations/precision.cpp",
     "src/operations/constructive_recall_internal.cpp",
-    "src/operations/meta_learning_internal.cpp",
     "src/operations/graph_build.cpp",
     "src/operations/graph_retrieval.cpp",
     "src/operations/sparse_retrieval_route_internal.cpp",

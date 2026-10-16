@@ -1,5 +1,4 @@
 #include "cortext/operations/stability.hpp"
-#include "meta_learning_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/core/knobs.hpp"
@@ -40,8 +39,7 @@ InitializeStabilityPriors::Execute (OperationContext &context, Transaction &tx) 
       return;
     }
 
-  p_ctx.hysteresis_band_prior
-      = meta_learning::ResolveHysteresisBandPrior (tx, cfg);
+  p_ctx.hysteresis_band_prior = core::BaseBandPrior (T);
   const auto stability_priors = core::StabilityStatePriorsForKnobs (T);
   p_ctx.half_life_prior = core::BaseHalfLifePrior (T);
   p_ctx.rate_decay_prior = stability_priors.rate_decay;
