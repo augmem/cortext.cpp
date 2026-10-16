@@ -323,14 +323,6 @@ RefreshProcessorSurfaces (Transaction &tx, ProcessorContext &p_ctx,
         }
     }
 
-  auto assoc_it = p_ctx.association_cache_index.find (memory_id);
-  if (assoc_it != p_ctx.association_cache_index.end ())
-    {
-      auto &entry = p_ctx.association_cache[assoc_it->second];
-      entry.embedding_id = new_embedding_id;
-      entry.embedding = embedding;
-      entry.embedding_norm = embedding.norm ();
-    }
   if (!constructive_recall::CurrentSurfaceWritesDisabled ())
     {
       historical_surface_search_cache_internal::UpsertCurrent (

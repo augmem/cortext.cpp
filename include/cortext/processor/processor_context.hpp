@@ -475,15 +475,6 @@ struct ProcessorContext
   // ======================================================================
   // Index and Procedural Stores (CLS extensions)
   // ======================================================================
-  struct AssociationCacheEntry
-  {
-    long long memory_id = 0;
-    long long embedding_id = 0;
-    Eigen::VectorXf embedding;
-    float embedding_norm = 0.0f;
-    bool is_association = false;
-  };
-
   struct RetrievalSurfaceEntry
   {
     long long memory_id = 0;
@@ -519,40 +510,6 @@ struct ProcessorContext
       return memory_id == other.memory_id && start_ts == other.start_ts;
     }
   };
-
-  void
-  UpsertAssociationCache (long long memory_id, long long embedding_id,
-                          const Eigen::VectorXf &embedding,
-                          bool is_association)
-  {
-    if (memory_id <= 0 || embedding_id <= 0 || embedding.size () == 0)
-      {
-        return;
-      }
-    const float norm = embedding.norm ();
-    if (norm <= 1e-9f)
-      {
-        return;
-      }
-    auto it = association_cache_index.find (memory_id);
-    if (it != association_cache_index.end ())
-      {
-        auto &entry = association_cache[it->second];
-        entry.embedding_id = embedding_id;
-        entry.embedding = embedding;
-        entry.embedding_norm = norm;
-        entry.is_association = is_association;
-        return;
-      }
-    AssociationCacheEntry entry;
-    entry.memory_id = memory_id;
-    entry.embedding_id = embedding_id;
-    entry.embedding = embedding;
-    entry.embedding_norm = norm;
-    entry.is_association = is_association;
-    association_cache_index[memory_id] = association_cache.size ();
-    association_cache.push_back (std::move (entry));
-  }
 
   void
   UpsertRetrievalSurface (RetrievalSurfaceEntry entry)
@@ -786,8 +743,6 @@ struct ProcessorContext
   std::unordered_map<long long, std::string> index_reverse;
 
   std::unordered_map<std::string, std::unordered_map<long long, double>> procedural_store;
-  std::vector<AssociationCacheEntry> association_cache;
-  std::unordered_map<long long, size_t> association_cache_index;
   std::vector<RetrievalSurfaceEntry> retrieval_surface_cache;
   std::uint32_t retrieval_surface_seed_visit_epoch = 0;
   std::unordered_map<long long, size_t> retrieval_surface_index;

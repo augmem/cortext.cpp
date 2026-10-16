@@ -212,8 +212,6 @@ TEST_CASE ("Alg20 structured reconsolidation does not overwrite shared embedding
 
   ProcessorContext pctx;
   pctx.recent_context_embeddings.push_back (cur);
-  pctx.UpsertAssociationCache (100LL, 420LL, mem, false);
-  pctx.UpsertAssociationCache (101LL, 420LL, mem, false);
   ProcessorContext::RetrievalSurfaceEntry surface_entry;
   surface_entry.memory_id = 100LL;
   surface_entry.embedding_id = 420LL;
@@ -287,10 +285,6 @@ TEST_CASE ("Alg20 structured reconsolidation does not overwrite shared embedding
   REQUIRE (cache_it != pctx.retrieval_surface_index.end ());
   REQUIRE (pctx.retrieval_surface_cache[cache_it->second].embedding_id
            == target_embedding);
-  auto assoc_it = pctx.association_cache_index.find (100LL);
-  REQUIRE (assoc_it != pctx.association_cache_index.end ());
-  REQUIRE (pctx.association_cache[assoc_it->second].embedding_id
-           == target_embedding);
   auto sibling_cache_it = pctx.retrieval_surface_embedding_index.find (420LL);
   REQUIRE (sibling_cache_it != pctx.retrieval_surface_embedding_index.end ());
 #if defined(CORTEXT_EXPERIMENT_HOOKS)
@@ -325,7 +319,6 @@ TEST_CASE ("Alg20 constructive reconsolidation refreshes processor caches",
 
   ProcessorContext pctx;
   pctx.recent_context_embeddings.push_back (cur);
-  pctx.UpsertAssociationCache (100LL, 420LL, mem, false);
   ProcessorContext::RetrievalSurfaceEntry surface_entry;
   surface_entry.memory_id = 100LL;
   surface_entry.embedding_id = 420LL;
@@ -373,12 +366,6 @@ TEST_CASE ("Alg20 constructive reconsolidation refreshes processor caches",
   REQUIRE (pctx.retrieval_surface_cache[cache_it->second].embedding_id
            == reconstruction_embedding_id);
   REQUIRE (pctx.retrieval_surface_cache[cache_it->second].embedding (0)
-           > mem (0));
-  auto assoc_it = pctx.association_cache_index.find (100LL);
-  REQUIRE (assoc_it != pctx.association_cache_index.end ());
-  REQUIRE (pctx.association_cache[assoc_it->second].embedding_id
-           == reconstruction_embedding_id);
-  REQUIRE (pctx.association_cache[assoc_it->second].embedding (0)
            > mem (0));
 }
 

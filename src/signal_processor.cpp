@@ -234,8 +234,6 @@ ExtractInt64Column (const std::vector<std::map<std::string, std::any>> &rows,
 
 struct DetachedProcessorCaches
 {
-  std::vector<ProcessorContext::AssociationCacheEntry> association_cache;
-  std::unordered_map<long long, size_t> association_cache_index;
   std::vector<ProcessorContext::RetrievalSurfaceEntry>
       retrieval_surface_cache;
   std::unordered_map<long long, size_t> retrieval_surface_index;
@@ -270,9 +268,7 @@ std::size_t
 DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
 {
   std::size_t count
-      = caches.association_cache.size ()
-        + caches.association_cache_index.size ()
-        + caches.retrieval_surface_cache.size ()
+      = caches.retrieval_surface_cache.size ()
         + caches.retrieval_surface_index.size ()
         + caches.retrieval_surface_embedding_index.size ()
         + caches.retrieval_surface_source_index.size ()
@@ -302,8 +298,6 @@ DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
 void
 ClearDbDerivedProcessorCaches (ProcessorContext &ctx)
 {
-  ctx.association_cache = {};
-  ctx.association_cache_index = {};
   ctx.retrieval_surface_cache = {};
   ctx.retrieval_surface_index = {};
   ctx.retrieval_surface_embedding_index = {};
@@ -321,8 +315,6 @@ DetachedProcessorCaches
 DetachDbDerivedProcessorCaches (ProcessorContext &ctx)
 {
   DetachedProcessorCaches caches;
-  caches.association_cache = std::move (ctx.association_cache);
-  caches.association_cache_index = std::move (ctx.association_cache_index);
   caches.retrieval_surface_cache = std::move (ctx.retrieval_surface_cache);
   caches.retrieval_surface_index = std::move (ctx.retrieval_surface_index);
   caches.retrieval_surface_embedding_index
@@ -359,8 +351,6 @@ void
 RestoreDbDerivedProcessorCaches (ProcessorContext &ctx,
                                  DetachedProcessorCaches &caches)
 {
-  ctx.association_cache = std::move (caches.association_cache);
-  ctx.association_cache_index = std::move (caches.association_cache_index);
   ctx.retrieval_surface_cache = std::move (caches.retrieval_surface_cache);
   ctx.retrieval_surface_index = std::move (caches.retrieval_surface_index);
   ctx.retrieval_surface_embedding_index
@@ -388,8 +378,6 @@ DetachedProcessorCaches
 DetachRebuildableProcessorCaches (ProcessorContext &ctx)
 {
   DetachedProcessorCaches caches;
-  caches.association_cache = std::move (ctx.association_cache);
-  caches.association_cache_index = std::move (ctx.association_cache_index);
   caches.retrieval_surface_cache = std::move (ctx.retrieval_surface_cache);
   caches.retrieval_surface_index = std::move (ctx.retrieval_surface_index);
   caches.retrieval_surface_embedding_index
@@ -415,8 +403,6 @@ void
 RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
                                    DetachedProcessorCaches &caches)
 {
-  ctx.association_cache = std::move (caches.association_cache);
-  ctx.association_cache_index = std::move (caches.association_cache_index);
   ctx.retrieval_surface_cache = std::move (caches.retrieval_surface_cache);
   ctx.retrieval_surface_index = std::move (caches.retrieval_surface_index);
   ctx.retrieval_surface_embedding_index
@@ -2616,8 +2602,6 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
       ctx.retrieval_surface_embedding_index.clear ();
       ctx.retrieval_surface_source_index.clear ();
       ctx.retrieval_surface_source_index_dirty.clear ();
-      ctx.association_cache.clear ();
-      ctx.association_cache_index.clear ();
           std::unordered_map<long long, long long> base_embedding_ids;
 
       const long long constructive_recall_enabled
@@ -2726,15 +2710,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
             {
               entry.context_embedding = BlobToEigen (ctx_it->second);
             }
-          const long long association_memory_id = entry.memory_id;
-          const long long association_embedding_id = entry.embedding_id;
-          const Eigen::VectorXf association_embedding = entry.embedding;
-          const bool association_is_association = entry.kind == "ASSOCIATION";
           ctx.UpsertRetrievalSurface (std::move (entry));
-          ctx.UpsertAssociationCache (association_memory_id,
-                                      association_embedding_id,
-                                      association_embedding,
-                                      association_is_association);
         }
       LoadHistoricalSurfaceSearchCache (store, ctx, &base_embedding_ids);
       operations::historical_surface_search_cache_internal::
