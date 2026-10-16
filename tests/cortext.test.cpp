@@ -1204,7 +1204,7 @@ TEST_CASE ("replay clock override preserves working memory on reopen",
   }
 }
 
-TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
+TEST_CASE ("internal replay consolidation is maintenance that leaves memories unchanged",
            "[cortext][replay][consolidation][aist]")
 {
   ScopedTempDb temp_db;
@@ -1245,10 +1245,6 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
             "SELECT COUNT(*) AS c FROM memories WHERE kind = 'LONG_TERM'", {})
             [0]
             .at ("c"));
-    eligibility_store->Execute (
-        "UPDATE memories SET strength = 0.0, redundancy = 1.0 "
-        "WHERE kind = 'LONG_TERM'",
-        {});
   }
 
   const std::uint64_t consolidation_ts = source_ts + 86400000ULL;
@@ -1275,23 +1271,13 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
                    {})[0]
                    .at ("c"))
            == long_term_count_before);
-  auto rows = store->Execute (
-      "SELECT start_ts, created_at, source_id, kind FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'association_%' "
-      "ORDER BY memory_id DESC LIMIT 1");
-  REQUIRE (rows.size () == 1);
-  REQUIRE (AnyToLongLong (rows[0].at ("start_ts"))
-           == static_cast<long long> (consolidation_ts));
-  REQUIRE (AnyToLongLong (rows[0].at ("created_at"))
-           == static_cast<long long> (consolidation_ts));
-  REQUIRE (std::any_cast<std::string> (rows[0].at ("kind"))
-           == "ASSOCIATION");
-
   const long long association_count = AnyToLongLong (
       store->Execute (
           "SELECT COUNT(*) AS c FROM memories WHERE kind = 'ASSOCIATION'",
           {})[0]
           .at ("c"));
+  // Clustering consolidation was removed: maintenance writes no nodes.
+  REQUIRE (association_count == 0);
   const long long edge_count = AnyToLongLong (
       store->Execute ("SELECT COUNT(*) AS c FROM associations", {})[0]
           .at ("c"));

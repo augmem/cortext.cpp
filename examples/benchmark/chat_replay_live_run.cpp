@@ -2991,7 +2991,6 @@ RunPacketCorpusProfile (const Config &cfg,
     "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code",
     "SignalProcessor.sqlite_sparse_route_recenter_derived_centroid",
     "SignalProcessor.sqlite_sparse_route_recenter_centroid_source",
-    "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count",
     "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count",
     "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count",
     "SignalProcessor.sqlite_sparse_route_recenter_post_activated_count",
@@ -3274,10 +3273,6 @@ RunPacketCorpusProfile (const Config &cfg,
               OperationValue (
                   consolidation_ctx,
                   "SignalProcessor.sqlite_sparse_route_recenter_centroid_source") },
-            { "sqlite_sparse_route_recenter_centroid_cluster_count",
-              OperationValue (
-                  consolidation_ctx,
-                  "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count") },
             { "sqlite_sparse_route_recenter_centroid_member_count",
               OperationValue (
                   consolidation_ctx,

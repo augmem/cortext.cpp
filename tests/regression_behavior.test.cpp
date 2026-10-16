@@ -406,78 +406,9 @@ TEST_CASE ("Emotional cascade window increases with Stability",
   }
 }
 
-TEST_CASE ("Merge threshold increases with Focus",
-           "[regression][consolidation]")
-{
-  // merge_threshold(F) = lerp(0.85, 0.95, F)
-  // Higher focus = stricter merging (higher similarity required)
-
-  SECTION ("Low focus: permissive merging (0.85)")
-  {
-    REQUIRE (MergeThreshold (0.0) == Catch::Approx (0.85));
-  }
-
-  SECTION ("High focus: strict merging (0.95)")
-  {
-    REQUIRE (MergeThreshold (1.0) == Catch::Approx (0.95));
-  }
-
-  SECTION ("Threshold increases monotonically")
-  {
-    // Use < 0.9 to avoid F+0.1 clamping to 1.0 (boundary conditions)
-    for (double F = 0.0; F < 0.9; F += 0.1)
-      {
-        REQUIRE (MergeThreshold (F) < MergeThreshold (F + 0.1));
-      }
-    // Verify the full range endpoints
-    REQUIRE (MergeThreshold (0.0) < MergeThreshold (1.0));
-  }
-}
-
 // =============================================================================
 // 5.3.8 Knowledge Graph Parameters (Phase 4 additions)
 // =============================================================================
-
-TEST_CASE ("Causal drift threshold increases with Stability",
-           "[regression][graph]")
-{
-  // causal_drift_threshold(T) = lerp(0.15, 0.35, T)
-  // Higher stability = higher drift required for causal edge
-
-  SECTION ("Low stability: low threshold (0.15)")
-  {
-    REQUIRE (CausalDriftThreshold (0.0) == Catch::Approx (0.15));
-  }
-
-  SECTION ("High stability: high threshold (0.35)")
-  {
-    REQUIRE (CausalDriftThreshold (1.0) == Catch::Approx (0.35));
-  }
-}
-
-TEST_CASE ("Reinforcement decay increases with Stability",
-           "[regression][graph]")
-{
-  // reinforcement_decay(T) = lerp(0.9, 0.99, T)
-  // Higher stability = slower decay of reinforcement edges
-
-  SECTION ("Low stability: faster decay (0.9)")
-  {
-    REQUIRE (ReinforcementDecay (0.0) == Catch::Approx (0.9));
-  }
-
-  SECTION ("High stability: slower decay (0.99)")
-  {
-    REQUIRE (ReinforcementDecay (1.0) == Catch::Approx (0.99));
-  }
-}
-
-TEST_CASE ("Contradiction threshold midpoint wrapper returns -0.5",
-           "[regression][graph]")
-{
-  // Legacy zero-arg wrapper is anchored at the midpoint F/S/T setting.
-  REQUIRE (ContradictionThreshold () == Catch::Approx (-0.5));
-}
 
 // =============================================================================
 // 5.3.9 Half-Life and Decay Parameters
@@ -549,10 +480,8 @@ TEST_CASE ("High Focus affects all selectivity parameters consistently",
 
   // All should be "stricter" / more selective
   REQUIRE (MaxResults (F) <= 24);               // Fewer results, but no longer single digits
-  REQUIRE (MergeThreshold (F) > 0.93);          // Stricter merging
   REQUIRE (WMGateThreshold (F) > 0.35);         // Stricter WM entry
   REQUIRE (MaxWaitDrift (F) < 0.7);             // More aggressive pacing
-  REQUIRE (MinClusterSize (F) > 8);             // Larger min clusters
 }
 
 TEST_CASE ("High Sensitivity affects all plasticity parameters consistently",
@@ -575,7 +504,6 @@ TEST_CASE ("High Stability affects all persistence parameters consistently",
   // All should be "more persistent" / slower decay
   REQUIRE (BaseHalfLifePrior (T) > 10000.0);    // Longer half-life
   REQUIRE (LambdaMood (1.0, T) > 0.99);         // Slower mood decay
-  REQUIRE (ReinforcementDecay (T) > 0.97);      // Slower edge decay
   REQUIRE (WRateSeconds (T) > 250);             // Longer write intervals
   REQUIRE (EmotionCascadeWindowSeconds (T) > 3000); // Longer affect window
 }

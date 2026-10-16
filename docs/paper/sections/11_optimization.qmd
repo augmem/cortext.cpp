@@ -17,7 +17,7 @@ signal embedding
   -> graph retrieval
   -> constructive reconstruction when enabled
   -> feedback and working-memory maintenance
-  -> optional shallow consolidation on explicit request
+  -> sparse-route maintenance on explicit Consolidate()
 ```
 
 The removed hot path was:
@@ -1784,7 +1784,7 @@ unrecorded algorithm or experiment implementation fails closed.
 
 | Trace identity | Algorithm surface |
 |---|---|
-| `TRACE[algorithm:consolidation-envelope-and-detector]` | Drift rearm, accumulator reset, shallow consolidation, and consolidation-throughput state. |
+| `TRACE[algorithm:consolidation-envelope-and-detector]` | Drift rearm, accumulator reset, and consolidation-throughput state (shallow consolidation removed 2026-10). |
 | `TRACE[algorithm:shared-retention-and-rollback]` | Shared Natural/Durable accumulation, signal-record rollback journal, working memory, and processor transaction ownership. |
 | `TRACE[algorithm:lazy-rif-active-epoch]` | Lazy RIF clock/generation state, active-epoch SQLite, memory-strength integration, store compatibility, and migration. |
 | `TRACE[algorithm:bounded-graph-retrieval]` | Bounded activation observation, graph retrieval, historical search cache, evaluated embedding-family features, and explicitly enabled public-seed tracing. |

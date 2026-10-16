@@ -24,9 +24,7 @@
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
-#include "cortext/operations/consolidation.hpp"
 #include "cortext/operations/blend.hpp"
-#include "cortext/operations/graph_build.hpp"
 #include "cortext/operations/graph_retrieval.hpp"
 
 #include "cortext/operations/embedding_prediction_error.hpp"
@@ -56,7 +54,6 @@
 #include <utility>
 #include <vector>
 
-// ConsolidationGate operation declaration
 #include "cortext/operations/boundary.hpp"
 #include "cortext/operations/coherence.hpp"
 #include "cortext/operations/competition.hpp"
@@ -94,9 +91,6 @@
 #include "cortext/operations/spike_bypass.hpp"
 #include "cortext/operations/write_gate.hpp"
 
-#include "cortext/operations/consolidation_cluster.hpp"
-#include "cortext/operations/consolidation_gate.hpp"
-#include "cortext/operations/consolidation_shallow.hpp"
 // Phase 4: Knowledge Graph Enhancement
 #include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
@@ -1878,28 +1872,28 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
 namespace
 {
 
+/// Maintenance signals (`force_consolidation`, sent by Consolidate()) run no
+/// per-signal operations; the processor seals and recenters the sparse
+/// retrieval route around them.
 class SignalOperationDispatch final : public IOperation
 {
 public:
-  SignalOperationDispatch (std::unique_ptr<IOperation> signal_operation,
-                           std::unique_ptr<IOperation> maintenance_operation)
-      : signal_operation_ (std::move (signal_operation)),
-        maintenance_operation_ (std::move (maintenance_operation))
+  explicit SignalOperationDispatch (
+      std::unique_ptr<IOperation> signal_operation)
+      : signal_operation_ (std::move (signal_operation))
   {
   }
 
   void
   Execute (OperationContext &context, Transaction &tx) const override
   {
-    IOperation *operation = context.GetSignal ().force_consolidation
-                                ? maintenance_operation_.get ()
-                                : signal_operation_.get ();
-    operation->Execute (context, tx);
+    if (context.GetSignal ().force_consolidation)
+      return;
+    signal_operation_->Execute (context, tx);
   }
 
 private:
   std::unique_ptr<IOperation> signal_operation_;
-  std::unique_ptr<IOperation> maintenance_operation_;
 };
 
 } // namespace
@@ -1915,7 +1909,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ApplySerialPositionMultiplier;
   using cortext::operations::ApplyStabilityFeedback;
   using cortext::operations::ApplySynapticTagging;
-  using cortext::operations::BuildGraphFromConsolidation;
   using cortext::operations::CheckSpikeBypass;
   using cortext::operations::CheckStreamingPacing;
   using cortext::operations::ComputeCoherence;
@@ -1925,11 +1918,8 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ComputeMetrics;
   using cortext::operations::ComputeMniGateDecision;
   using cortext::operations::ComputeWriteGate;
-  using cortext::operations::ConsolidationCluster;
-  using cortext::operations::ConsolidationGate;
   using cortext::operations::DetectBoundary;
   using cortext::operations::DetectMemoryUsage;
-  using cortext::operations::EvaluateConsolidation;
   using cortext::operations::FitMetricWeightsRLS;
   using cortext::operations::GraphAugmentedRetrieveCandidates;
   using cortext::operations::InitializeEmbeddedCentroids;
@@ -1995,16 +1985,11 @@ BuildRootOperationSet (bool probe_mode)
       ApplySerialPositionEffects, ApplySerialPositionMultiplier,
       UpdateMemoryStrength, ApplyEmotionalConsolidation, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
-      EvaluateConsolidation, ConsolidationGate,
-      ConsolidationCluster, cortext::operations::ConsolidationShallow,
-      BuildGraphFromConsolidation, PropagateEmotionalCascade>;
+      PropagateEmotionalCascade>;
 
   using ProbeRoot = OperationSet<CoreStage, RetrievalStage>;
   using FullRoot
       = OperationSet<CoreStage, StorageStage, RetrievalStage, FeedbackStage>;
-  using MaintenanceRoot = OperationSet<
-      EvaluateConsolidation, ConsolidationGate, ConsolidationCluster,
-      cortext::operations::ConsolidationShallow, BuildGraphFromConsolidation>;
 
   // Every operation declares its Requires/Satisfies contract; the chain
   // aggregation proves at compile time that both root variants are
@@ -2017,9 +2002,6 @@ BuildRootOperationSet (bool probe_mode)
                  "probe operation set consumes a value no operation produces");
   static_assert (IsSelfContained<FullRoot>,
                  "full operation set consumes a value no operation produces");
-  static_assert (
-      IsSelfContained<MaintenanceRoot>,
-      "maintenance operation set consumes a value no operation produces");
 
   if (probe_mode)
     {
@@ -2030,8 +2012,7 @@ BuildRootOperationSet (bool probe_mode)
   return operations::signal_record_rollback_internal::
       MarkEngineOwnedJournalAware (
           std::make_unique<SignalOperationDispatch> (
-              std::make_unique<FullRoot> (),
-              std::make_unique<MaintenanceRoot> ()));
+              std::make_unique<FullRoot> ()));
 }
 
 namespace
@@ -2291,8 +2272,8 @@ struct Cortext::Impl
     internal::ThrowIfStopRequested ();
     telemetry::ScopedSpan span ("cortext.api.consolidate");
     const auto total_start = std::chrono::steady_clock::now ();
-    // Drive the operation set to allow EvaluateConsolidation to emit events
-    // and ConsolidationGate to run scoring/jobs when start is signaled.
+    // A maintenance signal runs no operations; the processor seals and
+    // recenters the sparse retrieval route around it.
     std::vector<float> v;
     telemetry::ScopedSpan encode_span ("cortext.encode");
     encoder->EncodeText (std::string (), v);

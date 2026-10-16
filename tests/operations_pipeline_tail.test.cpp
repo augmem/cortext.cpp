@@ -7,7 +7,6 @@
 #include <cortext/core/utils.hpp>
 #include <cortext/operations/accumulator_reset.hpp>
 #include <cortext/operations/accumulator_scores.hpp>
-#include <cortext/operations/consolidation_gate.hpp>
 #include <cortext/operations/neuromodulators.hpp>
 #include <cortext/operations/signal_metrics_persistence.hpp>
 #include <cortext/operations/synaptic_tagging.hpp>
@@ -264,47 +263,6 @@ TEST_CASE ("UpdateNeuromodulators derives bounded control state",
   REQUIRE (pctx.encode_bias <= 1.0);
   REQUIRE (pctx.retrieval_bias == Catch::Approx (1.0 - pctx.encode_bias));
   REQUIRE (pctx.osc_phase > 0.0);
-}
-
-TEST_CASE ("ConsolidationGate only scores when the gate is open",
-           "[operations][consolidation_gate]")
-{
-  auto store = MakeStore ();
-  for (long long id = 1; id <= 4; ++id)
-    {
-      cortext::testing::SeedEmbeddingV2 (*store, id, UnitVec (id - 1), 1000);
-      const double strength = id == 4 ? 0.8 : 0.04 * static_cast<double> (id);
-      cortext::testing::SeedMemoryV2Extended (*store, id, id, "candidate",
-                                              strength, 0.0, 0.0, 0.0, 1000);
-    }
-
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 1.0;
-
-  ConsolidationGate op;
-  {
-    const auto signal = MakeSignal ();
-    OperationContext ctx (signal, pctx, cfg, store.get ());
-    auto tx = store->Begin ();
-    op.Execute (ctx, *tx);
-    tx->Commit ();
-    REQUIRE (ctx.GetConsolidationCandidates ().empty ());
-  }
-
-  {
-    const auto signal = MakeSignal ();
-    OperationContext ctx (signal, pctx, cfg, store.get ());
-    ctx.SetConsolidationShouldStart (true);
-    auto tx = store->Begin ();
-    op.Execute (ctx, *tx);
-    tx->Commit ();
-    REQUIRE (ctx.GetConsolidationCandidates ().size () == 3);
-    REQUIRE (ctx.GetConsolidationCandidates ().front ().memory_id == 1LL);
-  }
 }
 
 TEST_CASE ("PersistSignalMetrics updates signal metric columns",

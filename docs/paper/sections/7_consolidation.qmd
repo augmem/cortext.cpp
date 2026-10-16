@@ -1,9 +1,6 @@
 # Consolidation and Graph Integration {#sec-consolidation}
 
-Consolidation now means explicit embedding replay over stored memories. It uses
-a maintenance-only transaction path beside the normal signal pipeline, not a
-semantic batch processor or a synthetic input signal. The current hard-cut implementation removes the previous internal
-generative consolidation stack and keeps only shallow graph consolidation.
+`Consolidate()` is now a maintenance call. It seals and recenters the sparse retrieval route on a maintenance-only transaction path beside the normal signal pipeline. Clustering consolidation is gone: shallow replay into `ASSOCIATION` centroids and the typed-edge graph build were removed in the 2026-10 engine ablation (see "Clustering Consolidation (Removed)" below). Earlier hard cuts had already removed the generative consolidation stack.
 
 ## Complementary Learning Systems Split
 
@@ -14,12 +11,9 @@ for the product:
   source payloads, embeddings, timestamps, and graph metadata.
 * **Bounded live state:** working memory and soft-anchor state support immediate
   continuity without scanning the whole store.
-* **Slow durable graph:** explicit consolidation clusters older long-term
-  memories during observed throughput troughs and writes stable graph
-  structure.
+* **Slow maintenance:** explicit `Consolidate()` calls, made during observed throughput troughs, seal the incremental sparse-route epoch and recenter its activation entry.
 
-The split is functional rather than model-based. No decoder is required to
-transfer state from the fast path to the durable graph.
+The engine no longer keeps a slow durable graph tier. Its clustering produced no measurable quality gain (see below).
 
 ## Consolidation Triggers {#sec-consolidation-triggers}
 
@@ -30,8 +24,8 @@ application's control while still letting the engine derive an ordered urgency s
 from the three knobs.
 
 Ordinary retained and ephemeral signals use the normal operation chain. A
-forced request dispatches only `EvaluateConsolidation`, its score gate, the
-clusterer, shallow replay, and graph construction. Maintenance therefore does
+forced request runs no per-signal operations; the processor only seals and
+recenters the sparse retrieval route. Maintenance therefore does
 not create an episode, signal, working-memory row, long-term memory, blob, or
 searchable embedding, and it does not update normal throughput observations.
 The single `consolidation_state` output is an ordered hint for the caller; it
@@ -117,87 +111,18 @@ The engine can recommend consolidation, but the API call is the only way to
 start it. `source_id` and modality are never hint inputs or maintenance
 commands.
 
-## Candidate Selection
+## Clustering Consolidation (Removed)
 
-Consolidation operates on stored memory representatives, not raw signals.
-Candidates are restricted to eligible `LONG_TERM` source memories that have not
-already been assigned to the current consolidation cluster. The clustering
-threshold, minimum size, and batch cap derive from F/S/T:
+Earlier builds ran five operations on every maintenance signal: `EvaluateConsolidation`, `ConsolidationGate` (scoring), `ConsolidationCluster`, `ConsolidationShallow` and `BuildGraphFromConsolidation`. They scored weak long-term memories as `T·strength − F·redundancy + S·connectivity + T·stability + tag` against `PeripheryCutoff(T)`. They clustered the candidates at `MergeThreshold(F)`, wrote `ASSOCIATION` centroids with `derived_from` edges, and derived `co_occurs`, `similar_to`, `causes`, `implies` and episode edges.
 
-```text
-merge_threshold = MergeThreshold(F)
-min_cluster_size = MinClusterSize(F)
-max_clusters = ConsolidationMaxClusters(F,S,T)
-```
+The 2026-10 engine ablation found the pipeline inert at the default knobs. Per-memory stability started at 1.0 and never fell, because stability feedback updated only used memories and their raw-cosine gain is practically never ≤ 0. That made `T·stability = 0.5` exceed the 0.115 floor, so scoring kept 0 of about 1,234 inputs per pass over 85k BEAM turns. A fix that lowers the stability of retrieved-but-unused memories made the pipeline fire. On LongMemEval-S it ran 112 passes, wrote 112 `ASSOCIATION` nodes, clustered 1,703 memories and wrote 11.1k typed edges. On a 22.6k-turn BEAM-10M conversation it clustered 490 memories into 12.8k edges. It still did not earn its keep:
 
-An explicit request does not broaden eligibility and does not manufacture a
-nearest-neighbor mini-cluster. If fewer than the knob-derived minimum form a
-coherent density cluster at `MergeThreshold(F)`, replay is a successful no-op.
-This makes force mean "evaluate now," not "merge something regardless of
-evidence."
+* Packet gold-turn recall moved -0.012 on S and -0.010 on Eval 1, and was unchanged on BEAM.
+* Haiku judge (rubric v2) sufficiency moved +0.012 ± 0.023 on S and -0.009 ± 0.023 on Eval 1. Misleading was flat.
+* Instructions retired rose 1–2%.
+* Firing also opened the strength-based eviction gate. With the storage floor at 0, eviction removed 94% of LongMemEval-S memories (22,390 of 23,868), and packet recall fell from 0.630 to 0.086 (@sec-reinforcement).
 
-## Shallow Replay Product
-
-For each cluster, shallow consolidation writes one centroid `ASSOCIATION` memory
-and durable graph edges:
-
-```text
-association.embedding = centroid(cluster)
-association.kind = ASSOCIATION
-association.source_id = association_<timestamp>_<counter>
-association.label = ""
-
-for source in cluster:
-  source.cluster_id = cluster.cluster_id
-  emit association --derived_from--> source
-```
-
-Centroids are averaged over embeddings that actually contribute to the centroid
-dimension. Candidates with empty or incompatible embeddings are excluded from
-cluster membership instead of diluting or reshaping the accepted centroid vector.
-Downstream label matching derives its expected dimension from the first non-empty
-centroid in the replay batch.
-
-If durable `LABEL` memories already exist, the association centroid can attach
-to the nearest labels:
-
-```text
-max_labels = ShallowConsolidationMaxLabels(F,S,T)
-threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
-emit association --has_label--> label when cos(centroid, label) >= threshold
-```
-
-This is intentionally opportunistic. The current engine does not synthesize
-labels from a decoder, does not attach a static taxonomy database, and does not
-promote provisional shadow labels. Existing label nodes are treated as graph
-evidence only.
-
-## Graph Build
-
-After shallow replay, `BuildGraphFromConsolidation` reinforces durable graph
-structure among the cluster products and sources. The graph builder remains
-bounded by the candidate/cluster cap and knob-derived edge conditions and
-weights.
-The graph products are useful for later retrieval because graph expansion can
-recover clustered source memories through `derived_from`, co-occurrence,
-similarity, reinforcement, and causal edges.
-Graph construction runs only when shallow replay persisted a cluster and loads
-only the cluster identifiers created by that transaction. Repeating replay
-without newly eligible coherent memories therefore does not rebuild historical
-clusters, replace their timestamps, or decay reinforcement edges.
-
-Association centroids are derived navigation nodes rather than independent
-source observations. Direct semantic vector seeds are restricted to
-`LONG_TERM` memories; `ASSOCIATION` nodes remain retrievable through incoming
-or outgoing graph expansion. Retrieval collapses direct long-term families
-first and commits the knob-bounded direct-anchor prefix before graph-expanded
-families can compete for the remaining positions. The same family index is
-then seeded with those protected representatives, so a near-duplicate derived
-centroid cannot remove an already protected source. This preserves graph
-utility without allowing derived nodes to consume the direct-anchor budget.
-When a current embedding exists for a memory, retrieval also skips scoring its
-redundant historical base embedding; the authoritative current surface was
-already inserted first.
+The pipeline, its knobs (`MergeThreshold`, `MinClusterSize`, `ConsolidationMaxClusters`, graph-build thresholds and others) and its operation-context plumbing were removed. Maintenance signals now run no per-signal operations. The sparse route recenters on the active-signal ring centroid, which was already the fallback whenever no cluster centroid existed. At the default knobs that was every pass.
 
 ## Reconstruction Surface Discipline
 
@@ -225,7 +150,8 @@ The following systems are no longer part of the runtime:
 * STM shadow graph promotion,
 * persistent confidence-monitoring state,
 * bitemporal fact assertion/cache/evidence tables,
-* fact-aware retrieval and eviction policies.
+* fact-aware retrieval and eviction policies,
+* clustering consolidation (candidate scoring, clustering, shallow `ASSOCIATION` replay, typed-edge graph build).
 
 The removal is a hard cut, not a compatibility shim. New databases no longer
 create the removed tables, public bindings no longer expose the removed mode
@@ -233,8 +159,4 @@ fields, and replay reports no longer emit the removed debug metrics.
 
 ## Latency Discipline
 
-The consolidation target is bounded sleep-like replay. The work is dominated by
-SQLite candidate reads, vector centroid formation, association writes, and graph
-edge updates. There are no hidden decoder calls in the current path, so replay
-latency should scale with the number of selected memories and cluster edges, not
-with source text length or multimodal payload size.
+Maintenance work is the sparse-route seal (bounded by the dirty epoch delta) and one recenter. It does not scale with the number of stored memories, source text length or multimodal payload size.

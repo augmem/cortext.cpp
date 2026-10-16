@@ -2022,61 +2022,7 @@ ConsolidationEscalationMultiplier (double T)
   return Lerp (1.5, 2.5, Clamp (T, 0.0, 1.0));
 }
 
-inline int
-ShallowConsolidationMaxLabels (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (2.0, 6.0, s) * Lerp (1.0, 0.70, f)
-                     * Lerp (1.04, 0.96, t);
-  return std::max (1, static_cast<int> (std::round (raw)));
-}
-
-inline double
-ShallowConsolidationLabelMinSimilarity (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double s0 = SensitivityBias (0.5);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (0.30, 0.60, f) * Lerp (1.0, 1.1, t)
-                    * Clamp (1.0 - 0.06 * (s - s0), 0.94, 1.04),
-                0.15, 0.95);
-}
-
 // --- Consolidation Clustering (Section 7.3-7.4) ---
-
-// Merge threshold for clustering — Section 7.5.1
-inline double
-MergeThreshold (double F)
-{
-  // merge_threshold(F) = lerp(0.85, 0.95, F)
-  // Higher focus = stricter merging (higher similarity required)
-  // Also used for co-occurrence edges in Section 7.5.1
-  return Lerp (0.85, 0.95, FocusBias (F));
-}
-
-// Minimum cluster size — Section 7.4
-inline int
-MinClusterSize (double F)
-{
-  // min_cluster_size(F) = round(lerp(3, 10, F))
-  // Higher focus = larger minimum clusters required
-  return static_cast<int> (std::round (Lerp (3.0, 10.0, FocusBias (F))));
-}
-
-inline int
-ConsolidationMaxClusters (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (140.0, 40.0, f)
-                     * (1.0 + 0.12 * (s - SensitivityBias (0.5))
-                        + 0.10 * (t - 0.5));
-  return static_cast<int> (std::round (Clamp (raw, 32.0, 256.0)));
-}
 
 // Label frequency threshold — Section 7.4
 inline int
@@ -2586,18 +2532,6 @@ FlashbulbGain (double S)
   return Lerp (1.0, 1.1, s);
 }
 
-inline double
-ConsolidationCandidateTagWeight (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double raw = Lerp (0.10, 0.25, s) * (1.0 - 0.05 * (f - f0))
-                     * (1.0 + 0.04 * (t - 0.5));
-  return Clamp (raw, 0.05, 0.35);
-}
-
 // --- Algorithm 4b (Mood Integrator) Helpers ---
 inline double
 AlphaMood (double S)
@@ -2835,26 +2769,6 @@ WMCapacityPressureExponent (double F, double S, double T)
   return Clamp (Lerp (2.2, 4.2, f) * Lerp (0.90, 1.08, s)
 	                    * Lerp (0.95, 1.05, t),
 	                1.5, 5.0);
-}
-
-inline double
-DerivedSourceEdgeWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  return Clamp (1.0 + 0.03 * (f - f0) - 0.04 * (s - s0)
-                    + 0.08 * (t - t0),
-                0.80, 1.0);
-}
-
-inline double
-DerivedSourceFallbackEdgeWeight (double F, double S, double T)
-{
-  return DerivedSourceEdgeWeight (F, S, T);
 }
 
 // --- Section 5.5 (Adaptive Threshold Precision Modulation) ---
@@ -3104,22 +3018,6 @@ StabilityFeedbackUsageGain (double F, double S, double T)
 // --- Knowledge Graph Enhancement (Section 9.5) ---
 
 inline double
-CausalDriftThreshold (double T)
-{
-  // causal_drift_threshold(T) = lerp(0.15, 0.35, T)
-  // Higher stability = higher drift required for causal edge
-  return Lerp (0.15, 0.35, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-ReinforcementDecay (double T)
-{
-  // reinforcement_decay(T) = lerp(0.9, 0.99, T)
-  // Higher stability = slower decay of reinforcement edges
-  return Lerp (0.9, 0.99, Clamp (T, 0.0, 1.0));
-}
-
-inline double
 ReinforcementCoRetrievalStep (double F, double S, double T)
 {
   // Compatibility calibration retained as an input to the reinforcement-edge
@@ -3167,34 +3065,6 @@ ReinforcementFanoutDamping (double F, double S, double T, int candidate_count)
 }
 
 inline double
-ReinforcementPruneThreshold (double F, double S, double T)
-{
-  // Prune only reinforcement edges below a knob-derived evidence floor. The
-  // floor reuses the historical step calibration without creating new pair
-  // edges: higher Focus requires cleaner evidence, higher Sensitivity permits
-  // more aggressive weak-edge pruning, and higher Stability preserves weaker
-  // long-term associations.
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double anchored_step = ReinforcementCoRetrievalStep (F, S, T);
-  const double required_retrievals = Lerp (2.0, 6.0, f)
-                                     * Lerp (1.25, 0.85, s)
-                                     * Lerp (1.15, 0.65, t);
-  return Clamp (anchored_step * required_retrievals, 0.03, 0.18);
-}
-
-inline double
-GraphBuildSameEventBoundaryThreshold (double F, double S, double T)
-{
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (BoundaryThreshold (F, S) * Lerp (0.62, 0.44, s)
-                    * Lerp (0.95, 1.10, t),
-                0.18, 0.45);
-}
-
-inline double
 GraphBuildSequentialTauSeconds (double F, double S, double T)
 {
   const double f = FocusBias (F);
@@ -3205,32 +3075,6 @@ GraphBuildSequentialTauSeconds (double F, double S, double T)
   return Clamp (Lerp (10.0, 60.0, t)
                     * (1.0 - 0.08 * (f - f0) + 0.06 * (s - s0)),
                 5.0, 90.0);
-}
-
-inline double
-GraphBuildSequentialWeight (double F, double S, double T, double gap_s,
-                            double boundary_score)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double tau = GraphBuildSequentialTauSeconds (F, S, T);
-  const double temporal = std::exp (-std::max (0.0, gap_s) / std::max (tau, 1e-6));
-  const double boundary_power = Clamp (1.0 + 0.08 * (f - f0)
-                                           - 0.08 * (s - s0)
-                                           + 0.10 * (t - 0.5),
-                                      0.75, 1.30);
-  const double boundary = std::pow (
-      1.0 - Clamp (boundary_score, 0.0, 1.0), boundary_power);
-  return Clamp (temporal * boundary, 0.0, 1.0);
-}
-
-inline double
-CausalDriftWeightScale (double T)
-{
-  return Lerp (1.6, 2.4, Clamp (T, 0.0, 1.0));
 }
 
 inline double
@@ -3250,21 +3094,6 @@ MinEpisodesForConcept (double T)
   // min_episodes_for_concept(T) = round(lerp(2, 5, T))
   // Higher stability = more episodes required for concept detection
   return static_cast<int> (std::round (Lerp (2.0, 5.0, Clamp (T, 0.0, 1.0))));
-}
-
-inline double
-CoOccurrenceThreshold (double F)
-{
-  // Same as MergeThreshold - co-occurrence uses same similarity threshold
-  // co_occurrence_threshold(F) = lerp(0.85, 0.95, F)
-  return MergeThreshold (F);
-}
-
-inline double
-SimilarToThreshold (double F)
-{
-  // similar_to threshold: high cosine similarity (soft equivalence)
-  return Lerp (0.90, 0.98, FocusBias (F));
 }
 
 inline double
@@ -3342,34 +3171,6 @@ MinEdgeWeight (double F)
 {
   // min_edge_weight(F) for graph traversal
   return Lerp (0.08, 0.40, FocusBias (F));
-}
-
-inline double
-ImpliesDriftThreshold (double T)
-{
-  // implies threshold (directional drift correlation)
-  return Lerp (0.10, 0.25, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-ContradictionThreshold (double F, double S, double T)
-{
-  // Contradiction detection remains centered at the historical -0.5 default.
-  // Higher Sensitivity admits weaker contradiction cues; higher Focus and
-  // Stability require clearer opposition before writing contradiction edges.
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (-0.50 + 0.08 * (s - SensitivityBias (0.5))
-                    - 0.05 * (f - FocusBias (0.5))
-                    - 0.04 * (t - 0.5),
-                -0.70, -0.30);
-}
-
-inline double
-ContradictionThreshold ()
-{
-  return ContradictionThreshold (0.5, 0.5, 0.5);
 }
 
 // --- Section 8: Interrupt Gate Parameters ---

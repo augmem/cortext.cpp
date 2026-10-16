@@ -319,14 +319,9 @@ add_library(cortext
     src/operations/serial_position.cpp
     src/operations/serial_position_apply.cpp
     src/operations/interrupt_gate.cpp
-    src/operations/consolidation.cpp
-    src/operations/consolidation_cluster.cpp
-    src/operations/consolidation_gate.cpp
-    src/operations/consolidation_shallow.cpp
     src/operations/embedding_prediction_error.cpp
     src/operations/precision.cpp
     src/operations/constructive_recall_internal.cpp
-    src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
     src/operations/sparse_retrieval_route_internal.cpp
     src/operations/sparse_retrieval_route_sqlite_internal.cpp

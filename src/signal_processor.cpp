@@ -175,51 +175,11 @@ ElapsedMillis (std::chrono::steady_clock::time_point start,
       .count ();
 }
 
-struct ConsolidationActivationCentroid
+struct ActivationCentroid
 {
   std::optional<Eigen::VectorXf> embedding;
-  std::size_t cluster_count = 0;
   std::size_t member_count = 0;
 };
-
-ConsolidationActivationCentroid
-BuildConsolidationActivationCentroid (const OperationContext &context)
-{
-  ConsolidationActivationCentroid result;
-  Eigen::VectorXd weighted_sum;
-  for (const auto &cluster : context.GetConsolidationClusters ())
-    {
-      const std::size_t member_count
-          = cluster.memory_ids.empty () ? cluster.embedding_ids.size ()
-                                        : cluster.memory_ids.size ();
-      if (cluster.centroid.empty () || member_count == 0)
-        continue;
-      if (weighted_sum.size () == 0)
-        weighted_sum = Eigen::VectorXd::Zero (
-            static_cast<Eigen::Index> (cluster.centroid.size ()));
-      if (weighted_sum.size ()
-          != static_cast<Eigen::Index> (cluster.centroid.size ()))
-        return {};
-      for (std::size_t index = 0; index < cluster.centroid.size (); ++index)
-        {
-          const double value = cluster.centroid[index];
-          if (!std::isfinite (value))
-            return {};
-          weighted_sum[static_cast<Eigen::Index> (index)]
-              += value * static_cast<double> (member_count);
-        }
-      ++result.cluster_count;
-      result.member_count += member_count;
-    }
-  if (result.cluster_count == 0 || result.member_count == 0)
-    return result;
-  weighted_sum /= static_cast<double> (result.member_count);
-  const double norm = weighted_sum.norm ();
-  if (!(norm > 0.0) || !std::isfinite (norm))
-    return {};
-  result.embedding = weighted_sum.cast<float> ();
-  return result;
-}
 
 inline int64_t
 ExtractInt64 (const std::map<std::string, std::any> &row,
@@ -1938,12 +1898,12 @@ BlobToEigen (const std::any &blob)
   return result;
 }
 
-ConsolidationActivationCentroid
+ActivationCentroid
 BuildActiveSignalRingCentroid (Store &store, int embedding_dim,
                                double focus, double sensitivity,
                                double stability)
 {
-  ConsolidationActivationCentroid result;
+  ActivationCentroid result;
   const int capacity
       = operations::active_signal_embedding_ring_internal::Capacity (
           focus, sensitivity, stability);
@@ -4113,20 +4073,15 @@ SignalProcessor::Process (const Signal &signal)
                       const bool profile_recenter_overlap
                           = internal::experimental_env::Flag (
                               "CORTEXT_PROFILE_RECENTER_ACTIVATION_OVERLAP");
-                      auto consolidation_centroid
-                          = BuildConsolidationActivationCentroid (op_context);
-                      int consolidation_centroid_source = 1;
-                      if (!consolidation_centroid.embedding)
-                        {
-                          consolidation_centroid
-                              = BuildActiveSignalRingCentroid (
-                                  *store_, signal.embedding.size (),
-                                  config_.focus, config_.sensitivity,
-                                  config_.stability);
-                          consolidation_centroid_source = 2;
-                        }
-                      if (!consolidation_centroid.embedding)
-                        consolidation_centroid_source = 0;
+                      // Recenter on the active-signal ring centroid
+                      // (source 2); 0 means no centroid was available.
+                      const auto recenter_centroid
+                          = BuildActiveSignalRingCentroid (
+                              *store_, signal.embedding.size (),
+                              config_.focus, config_.sensitivity,
+                              config_.stability);
+                      const int recenter_centroid_source
+                          = recenter_centroid.embedding ? 2 : 0;
                       std::optional<std::vector<long long>>
                           pre_recenter_activated;
                       std::size_t pre_recenter_node_rows = 0;
@@ -4143,9 +4098,9 @@ SignalProcessor::Process (const Signal &signal)
                       op_start = std::chrono::steady_clock::now ();
                       const bool recentered
                           = sealed && state->sqlite_sparse_route
-                            && consolidation_centroid.embedding
+                            && recenter_centroid.embedding
                             && state->sqlite_sparse_route->Recenter (
-                                *consolidation_centroid.embedding);
+                                *recenter_centroid.embedding);
                       op_context.AddOperationTiming (
                           "SignalProcessor.sqlite_sparse_route_recenter",
                           ElapsedMillis (
@@ -4155,19 +4110,15 @@ SignalProcessor::Process (const Signal &signal)
                           recentered ? 1.0 : 0.0);
                       op_context.AddOperationTiming (
                           "SignalProcessor.sqlite_sparse_route_recenter_derived_centroid",
-                          consolidation_centroid.embedding ? 1.0 : 0.0);
+                          recenter_centroid.embedding ? 1.0 : 0.0);
                       op_context.AddOperationTiming (
                           "SignalProcessor.sqlite_sparse_route_recenter_centroid_source",
                           static_cast<double> (
-                              consolidation_centroid_source));
-                      op_context.AddOperationTiming (
-                          "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count",
-                          static_cast<double> (
-                              consolidation_centroid.cluster_count));
+                              recenter_centroid_source));
                       op_context.AddOperationTiming (
                           "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count",
                           static_cast<double> (
-                              consolidation_centroid.member_count));
+                              recenter_centroid.member_count));
                       std::optional<std::vector<long long>>
                           post_recenter_activated;
                       std::size_t post_recenter_node_rows = 0;

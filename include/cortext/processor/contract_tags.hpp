@@ -93,9 +93,4 @@ struct SerialPositionMultiplier;
 // ApplyStabilityFeedback
 struct DeltaHalfLifeAdjustment;
 
-// Consolidation chain
-struct ConsolidationShouldStart;
-struct ConsolidationCandidates;
-struct ConsolidationClusters;
-
 } // namespace cortext::tags

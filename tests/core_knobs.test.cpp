@@ -409,23 +409,6 @@ TEST_CASE ("Soft Anchor continuity gates derive from knobs", "[core][knobs]")
 
 TEST_CASE ("Graph build thresholds derive from knobs", "[core][knobs]")
 {
-  const double same_event_mid
-      = GraphBuildSameEventBoundaryThreshold (0.5, 0.5, 0.5);
-  REQUIRE (same_event_mid > 0.25);
-  REQUIRE (same_event_mid < 0.35);
-  REQUIRE (GraphBuildSameEventBoundaryThreshold (0.5, 1.0, 0.5)
-           < GraphBuildSameEventBoundaryThreshold (0.5, 0.0, 0.5));
-  REQUIRE (GraphBuildSameEventBoundaryThreshold (0.5, 0.5, 1.0)
-           > GraphBuildSameEventBoundaryThreshold (0.5, 0.5, 0.0));
-
-  REQUIRE (CausalDriftWeightScale (1.0) > CausalDriftWeightScale (0.0));
-
-  REQUIRE (ContradictionThreshold () == Catch::Approx (-0.5));
-  REQUIRE (ContradictionThreshold (0.5, 1.0, 0.5)
-           > ContradictionThreshold (0.5, 0.0, 0.5));
-  REQUIRE (ContradictionThreshold (1.0, 0.5, 0.5)
-           < ContradictionThreshold (0.0, 0.5, 0.5));
-
   REQUIRE (SupersessionSimilarityThreshold (1.0, 0.5, 0.5)
            > SupersessionSimilarityThreshold (0.0, 0.5, 0.5));
   REQUIRE (SupersessionSimilarityThreshold (0.5, 1.0, 0.5)
@@ -679,16 +662,6 @@ TEST_CASE ("Neuromodulator and serial floor policies derive from knobs",
            < SerialMiddleMultiplierFloor (0.5, 0.0));
 }
 
-TEST_CASE ("Consolidation cluster policy derives from knobs",
-           "[core][knobs]")
-{
-  REQUIRE (ConsolidationMaxClusters (0.5, 0.5, 0.5) == 100);
-  REQUIRE (ConsolidationMaxClusters (0.0, 0.5, 0.5)
-           > ConsolidationMaxClusters (1.0, 0.5, 0.5));
-  REQUIRE (ConsolidationMaxClusters (0.5, 0.5, 1.0)
-           > ConsolidationMaxClusters (0.5, 0.5, 0.0));
-}
-
 TEST_CASE ("Memory trace policy derives from knobs with neutral midpoint",
            "[core][knobs]")
 {
@@ -815,27 +788,6 @@ TEST_CASE ("InterruptCandidateCount follows spec: round(lerp(10, 6, F))",
   REQUIRE (InterruptCandidateCount (0.3) >= InterruptCandidateCount (0.7));
 }
 
-TEST_CASE ("Consolidation label budgets derive from knobs",
-           "[core][knobs]")
-{
-  REQUIRE (ShallowConsolidationMaxLabels (0.5, 0.5, 0.5) == 3);
-  REQUIRE (ShallowConsolidationLabelMinSimilarity (0.5, 0.5, 0.5)
-           == Catch::Approx (0.441));
-
-  REQUIRE (ShallowConsolidationMaxLabels (0.0, 1.0, 0.5)
-           > ShallowConsolidationMaxLabels (1.0, 0.0, 0.5));
-  REQUIRE (ShallowConsolidationLabelMinSimilarity (1.0, 0.5, 0.5)
-           > ShallowConsolidationLabelMinSimilarity (0.0, 0.5, 0.5));
-  REQUIRE (ShallowConsolidationLabelMinSimilarity (0.5, 1.0, 0.5)
-           < ShallowConsolidationLabelMinSimilarity (0.5, 0.0, 0.5));
-
-  REQUIRE (ConsolidationCandidateTagWeight (0.5, 0.5, 0.5)
-           == Catch::Approx (0.16));
-  REQUIRE (ConsolidationCandidateTagWeight (0.5, 1.0, 0.5)
-           > ConsolidationCandidateTagWeight (0.5, 0.0, 0.5));
-
-}
-
 TEST_CASE ("Runtime adaptation constants derive from knobs", "[core][knobs]")
 {
   REQUIRE (BlenderRLSObservationTau (0.5) == Catch::Approx (50.0));
@@ -873,18 +825,8 @@ TEST_CASE ("Graph and memory policy constants derive from knobs",
 
   REQUIRE (GraphBuildSequentialTauSeconds (0.5, 0.5, 0.5)
            == Catch::Approx (35.0));
-  REQUIRE (GraphBuildSequentialWeight (0.5, 0.5, 0.5, 0.0, 0.0)
-           == Catch::Approx (1.0));
-  REQUIRE (GraphBuildSequentialWeight (0.5, 0.5, 0.5, 0.0, 0.5)
-           == Catch::Approx (0.5));
   REQUIRE (GraphBuildSequentialTauSeconds (0.5, 0.5, 1.0)
            > GraphBuildSequentialTauSeconds (0.5, 0.5, 0.0));
-  REQUIRE (DerivedSourceEdgeWeight (0.5, 0.5, 0.5)
-           == Catch::Approx (1.0));
-  REQUIRE (DerivedSourceEdgeWeight (0.5, 0.5, 1.0)
-           >= DerivedSourceEdgeWeight (0.5, 0.5, 0.0));
-  REQUIRE (DerivedSourceFallbackEdgeWeight (0.5, 0.5, 0.0)
-           == Catch::Approx (DerivedSourceEdgeWeight (0.5, 0.5, 0.0)));
 
   // Compatibility calibration retained without a production packet-pair
   // writer so existing public-header consumers do not break.

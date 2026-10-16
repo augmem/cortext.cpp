@@ -6,12 +6,11 @@ centroids without blobs and does not call a summarization, extraction, or
 provider backend.
 Note: This diagram emphasizes the core memory/signal/association schema. Later
 migrations also add memory eviction and reconstruction tables and soft-anchor state/link tables.
-Note: Consolidation is external-only; callers invoke C++ `Consolidate()`, C ABI
-`cortext_consolidate`, or process a maintenance signal with
-`force_consolidation`, rather than scheduling it automatically.
-Note: Shallow consolidation may attach existing LABEL nodes by embedding
-similarity, but the engine no longer seeds a static label bank or refines labels
-with an internal LLM.
+Note: Consolidation is external-only maintenance; callers invoke C++
+`Consolidate()`, C ABI `cortext_consolidate`, or process a maintenance signal
+with `force_consolidation`, rather than scheduling it automatically. It seals
+and recenters the sparse retrieval route; clustering consolidation (which wrote
+`ASSOCIATION` nodes and typed edges) was removed in the 2026-10 engine ablation.
 Note: Interrupt gating uses a sensitivity-relaxed retrieval threshold
 retrieval_thresh_interrupt(F,S) = retrieval_thresh(F) × (1 − 0.12S).
 Note: Non-boundary MU gating is relaxed by Sensitivity:

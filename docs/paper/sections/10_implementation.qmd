@@ -745,8 +745,7 @@ FeedbackStage:
   retrieval competition, reconsolidation,
   sensitivity/stability feedback,
   serial-position effects, memory strength/eviction, emotional consolidation,
-  working memory, accumulator reset, consolidation gate/cluster/shallow,
-  graph build, emotional cascade
+  working memory, accumulator reset, emotional cascade
 ```
 
 Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so replay
@@ -756,11 +755,12 @@ probes can inspect retrieval without mutating the durable store.
 
 Consolidation is explicit. The runtime does not schedule it automatically and
 does not expose mode variants. Callers invoke `Consolidate()` or inject a
-signal with `force_consolidation=true`; a signal dispatcher then runs only the
-knob-derived consolidation gate, clusterer, shallow consolidation, and graph
-builder. The normal core, storage, retrieval, feedback, episode, object-store,
-working-memory, signal-counter, and rate-observation paths are not maintenance
-steps.
+signal with `force_consolidation=true`; the signal dispatcher then runs no
+operations, and the processor seals and recenters the sparse retrieval route.
+Clustering consolidation was removed in the 2026-10 engine ablation
+(@sec-consolidation). The normal core, storage, retrieval, feedback, episode,
+object-store, working-memory, signal-counter, and rate-observation paths are not
+maintenance steps.
 
 Emotional cascade metadata is hydrated into a private, rebuildable processor
 cache keyed by memory id and base embedding id. The cache preserves the SQL
@@ -777,7 +777,7 @@ locate that prefix in work proportional to the returned limit; a history with
 many higher-intensity ineligible rows may require additional indexed filtering.
 Emotional
 consolidation overwrites the affected embedding family, cascade propagation
-applies the existing maxima, storage and shallow consolidation append rows, and
+applies the existing maxima, storage appends rows, and
 eviction removes them. Journal-aware rollback discards and rehydrates this
 database-derived cache, while arbitrary custom pipelines retain the complete
 snapshot path. This changes execution ownership only; source thresholds,
@@ -799,18 +799,6 @@ point; source changes and target-value decreases still re-arm it. A traversal
 that reaches either its update ceiling or its physical edge-visit ceiling is
 only a partial prefix and never records a fixed point, so the next event
 revisits the unresolved graph tail.
-
-Shallow consolidation is embedding-only. It clusters eligible long-term
-memories, writes an `ASSOCIATION` centroid node for each cluster, assigns source
-memories to the cluster, and emits `derived_from` edges. If durable `LABEL`
-nodes already exist, shallow consolidation can attach the closest labels to the
-association centroid with F/S/T-derived limits and similarity thresholds. It
-does not synthesize payload summaries, extract relations, create fact
-assertions, call a decoder, or attach a read-only external taxonomy.
-
-This keeps replay close to the current product target: consolidation behaves
-like low-latency sleep replay over stored embeddings and graph edges, not a
-batch semantic extraction job.
 
 ## Retrieval Implementation
 

@@ -23,27 +23,6 @@ namespace cortext
 class Store;
 class ObjectTransaction;
 
-/// @brief Information about a cluster of memories from consolidation.
-///
-/// Created by ConsolidationCluster and consumed by shallow consolidation and
-/// graph construction.
-struct ClusterInfo
-{
-  int cluster_id = 0;
-  std::vector<long long> memory_ids;
-  std::vector<long long> embedding_ids;
-  std::vector<float> centroid;
-  double avg_score = 0.0;
-};
-
-/// @brief Represents a candidate memory for consolidation.
-struct ConsolidationCandidate
-{
-  long long memory_id = 0;
-  long long embedding_id = 0;
-  double score = 0.0;
-  Eigen::VectorXf embedding;
-};
 
 
 
@@ -476,26 +455,6 @@ public:
   GetRetrievalQueueDepth () const
   {
     return retrieval_queue_depth_;
-  }
-  void
-  SetConsolidationShouldStart (bool v)
-  {
-    consolidation_should_start_ = v;
-  }
-  bool
-  GetConsolidationShouldStart () const
-  {
-    return consolidation_should_start_;
-  }
-  void
-  SetConsolidationPersisted (bool v)
-  {
-    consolidation_persisted_ = v;
-  }
-  bool
-  GetConsolidationPersisted () const
-  {
-    return consolidation_persisted_;
   }
   // Diagnostics for Algorithm 27 (for testing/telemetry)
   void
@@ -1070,36 +1029,6 @@ public:
   }
 
 
-  // ======================================================================
-  // Consolidation Cluster API (Cluster -> Summarize data passing)
-  // ======================================================================
-
-  void
-  SetConsolidationClusters (std::vector<ClusterInfo> clusters)
-  {
-    consolidation_clusters_ = std::move (clusters);
-  }
-  const std::vector<ClusterInfo> &
-  GetConsolidationClusters () const
-  {
-    return consolidation_clusters_;
-  }
-
-  // ======================================================================
-  // In-Memory Consolidation Candidates (Phase 2 Refactor)
-  // ======================================================================
-
-  void
-  SetConsolidationCandidates (std::vector<ConsolidationCandidate> candidates)
-  {
-    consolidation_candidates_ = std::move (candidates);
-  }
-  const std::vector<ConsolidationCandidate> &
-  GetConsolidationCandidates () const
-  {
-    return consolidation_candidates_;
-  }
-
   // --- Fork/Join state (see processor/operation_fork.hpp) ---
 
   /// @brief Registers an outstanding Fork. Joins pair FIFO.
@@ -1228,17 +1157,10 @@ private:
   // Algorithm 28/28b fields
   int tokens_in_flight_ = 0;
   int retrieval_queue_depth_ = 0;
-  bool consolidation_should_start_ = false;
-  bool consolidation_persisted_ = false;
 
   // Streaming Pacing fields (Section 10.4)
   bool should_check_retrieval_ = true;
   double drift_accum_snapshot_ = 0.0;
-
-  // Consolidation Cluster fields (Section 7.3)
-  std::vector<ClusterInfo> consolidation_clusters_;
-  // In-Memory Consolidation Candidates
-  std::vector<ConsolidationCandidate> consolidation_candidates_;
 
   // Memory Accumulation fields (Section 4.4)
   std::optional<double> boundary_score_;

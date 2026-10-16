@@ -11,7 +11,6 @@ using namespace cortext::core;
 
 namespace
 {
-
 double
 FocusExpected (double lo, double hi, double F)
 {
@@ -35,7 +34,6 @@ SensitivityExpectedRound (double lo, double hi, double S)
 {
   return static_cast<int> (std::round (SensitivityExpected (lo, hi, S)));
 }
-
 } // namespace
 
 // =============================================================================
@@ -370,18 +368,6 @@ TEST_CASE ("RippleDecay follows spec: lerp(0.5, 0.1, T)",
   REQUIRE (RippleDecay (0.3) > RippleDecay (0.7));
 }
 
-TEST_CASE ("ReinforcementDecay follows spec: lerp(0.9, 0.99, T)",
-           "[formula][knobs][decay]")
-{
-  // ReinforcementDecay = lerp(0.9, 0.99, T)
-  REQUIRE (ReinforcementDecay (0.0) == Catch::Approx (0.9));
-  REQUIRE (ReinforcementDecay (1.0) == Catch::Approx (0.99));
-  REQUIRE (ReinforcementDecay (0.5) == Catch::Approx (0.945));
-
-  // Monotonic
-  REQUIRE (ReinforcementDecay (0.3) < ReinforcementDecay (0.7));
-}
-
 TEST_CASE ("Reinforcement edge-maintenance calibrations remain bounded",
            "[formula][knobs][reinforcement]")
 {
@@ -406,16 +392,6 @@ TEST_CASE ("Reinforcement edge-maintenance calibrations remain bounded",
   REQUIRE (ReinforcementFanoutDamping (0.5, 0.5, 0.5, 20) < 1.0);
   REQUIRE (ReinforcementFanoutDamping (1.0, 0.5, 0.5, 20)
            < ReinforcementFanoutDamping (0.0, 0.5, 0.5, 20));
-
-  const double prune_mid = ReinforcementPruneThreshold (0.5, 0.5, 0.5);
-  REQUIRE (prune_mid > 0.08);
-  REQUIRE (prune_mid < 0.13);
-  REQUIRE (ReinforcementPruneThreshold (1.0, 0.5, 0.5)
-           > ReinforcementPruneThreshold (0.0, 0.5, 0.5));
-  REQUIRE (ReinforcementPruneThreshold (0.5, 1.0, 0.5)
-           > ReinforcementPruneThreshold (0.5, 0.0, 0.5));
-  REQUIRE (ReinforcementPruneThreshold (0.5, 0.5, 1.0)
-           < ReinforcementPruneThreshold (0.5, 0.5, 0.0));
 }
 
 TEST_CASE ("LambdaMood follows spec: exp(-ln2 * Δt / half_life)",
@@ -577,31 +553,6 @@ TEST_CASE ("BaseBandPrior follows spec: lerp(0.02, 0.25, T)",
   REQUIRE (BaseBandPrior (0.3) < BaseBandPrior (0.7));
 }
 
-TEST_CASE ("MergeThreshold follows spec: lerp(0.85, 0.95, F)",
-           "[formula][knobs][consolidation]")
-{
-  // MergeThreshold = lerp(0.85, 0.95, F)
-  REQUIRE (MergeThreshold (0.0) == Catch::Approx (0.85));
-  REQUIRE (MergeThreshold (1.0) == Catch::Approx (0.95));
-  REQUIRE (MergeThreshold (0.5)
-           == Catch::Approx (FocusExpected (0.85, 0.95, 0.5)));
-
-  // Monotonic: higher focus = stricter merging
-  REQUIRE (MergeThreshold (0.3) < MergeThreshold (0.7));
-}
-
-TEST_CASE ("MinClusterSize follows spec: lerp(3, 10, F)",
-           "[formula][knobs][consolidation]")
-{
-  // MinClusterSize = round(lerp(3, 10, F))
-  REQUIRE (MinClusterSize (0.0) == 3);
-  REQUIRE (MinClusterSize (1.0) == 10);
-  REQUIRE (MinClusterSize (0.5) == FocusExpectedRound (3.0, 10.0, 0.5));
-
-  // Monotonic
-  REQUIRE (MinClusterSize (0.3) < MinClusterSize (0.7));
-}
-
 TEST_CASE ("LabelFrequencyThreshold follows spec: lerp(5, 15, T)",
            "[formula][knobs][consolidation]")
 {
@@ -637,17 +588,6 @@ TEST_CASE ("PeripheryCutoff follows spec: lerp(0.03, 0.20, T)",
 
   // Monotonic
   REQUIRE (PeripheryCutoff (0.3) < PeripheryCutoff (0.7));
-}
-
-TEST_CASE ("CoOccurrenceThreshold equals MergeThreshold",
-           "[formula][knobs][consolidation]")
-{
-  // CoOccurrenceThreshold should equal MergeThreshold
-  for (double F : { 0.0, 0.25, 0.5, 0.75, 1.0 })
-    {
-      REQUIRE (CoOccurrenceThreshold (F)
-               == Catch::Approx (MergeThreshold (F)));
-    }
 }
 
 // =============================================================================
@@ -895,18 +835,6 @@ TEST_CASE ("LabilitySusceptibility follows spec: (1 - T) * (0.5 + 0.5 * S)",
 // 5.1.11 Knowledge Graph Functions (3 functions)
 // =============================================================================
 
-TEST_CASE ("CausalDriftThreshold follows spec: lerp(0.15, 0.35, T)",
-           "[formula][knobs][graph]")
-{
-  // CausalDriftThreshold = lerp(0.15, 0.35, T)
-  REQUIRE (CausalDriftThreshold (0.0) == Catch::Approx (0.15));
-  REQUIRE (CausalDriftThreshold (1.0) == Catch::Approx (0.35));
-  REQUIRE (CausalDriftThreshold (0.5) == Catch::Approx (0.25));
-
-  // Monotonic
-  REQUIRE (CausalDriftThreshold (0.3) < CausalDriftThreshold (0.7));
-}
-
 TEST_CASE ("MinEpisodesForConcept follows spec: lerp(2, 5, T)",
            "[formula][knobs][graph]")
 {
@@ -917,13 +845,6 @@ TEST_CASE ("MinEpisodesForConcept follows spec: lerp(2, 5, T)",
 
   // Monotonic
   REQUIRE (MinEpisodesForConcept (0.3) < MinEpisodesForConcept (0.7));
-}
-
-TEST_CASE ("ContradictionThreshold midpoint wrapper returns -0.5",
-           "[formula][knobs][graph]")
-{
-  // Legacy zero-arg wrapper returns the midpoint F/S/T threshold.
-  REQUIRE (ContradictionThreshold () == Catch::Approx (-0.5));
 }
 
 // =============================================================================
@@ -1080,7 +1001,6 @@ TEST_CASE ("High Focus + Low Sensitivity interactions",
 
   // High F: fewer results, stricter thresholds
   REQUIRE (MaxResults (F) <= 24);
-  REQUIRE (MergeThreshold (F) >= 0.93);
   REQUIRE (WMGateThreshold (F) >= 0.35);
 
   // Low S: slower mood, lower learning rates
@@ -1100,7 +1020,6 @@ TEST_CASE ("Low Focus + High Sensitivity interactions",
 
   // Low F: more results, permissive thresholds
   REQUIRE (MaxResults (F) >= 55);
-  REQUIRE (MergeThreshold (F) <= 0.86);
   REQUIRE (WMGateThreshold (F) <= 0.15);
 
   // High S: faster mood, higher learning rates
@@ -1118,13 +1037,11 @@ TEST_CASE ("Extreme stability values", "[formula][knobs][composite]")
   double T_high = 1.0;
   REQUIRE (BaseHalfLifePrior (T_high) == Catch::Approx (43200.0));
   REQUIRE (LambdaMood (30.0, T_high) > 0.95);
-  REQUIRE (ReinforcementDecay (T_high) >= 0.98);
   REQUIRE (EmotionCascadeWindowSeconds (T_high) == 3600);
 
   // Low stability: short half-lives, fast decay, responsive
   double T_low = 0.0;
   REQUIRE (BaseHalfLifePrior (T_low) == Catch::Approx (120.0));
   REQUIRE (LambdaMood (30.0, T_low) == Catch::Approx (0.5));
-  REQUIRE (ReinforcementDecay (T_low) == Catch::Approx (0.9));
   REQUIRE (EmotionCascadeWindowSeconds (T_low) == 300);
 }

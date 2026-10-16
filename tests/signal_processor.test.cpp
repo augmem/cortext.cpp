@@ -251,12 +251,8 @@ struct ConsolidationResetRetryProbeOp : IOperation
 
 struct ConsolidationSurfaceUpdateOp : IOperation
 {
-  explicit ConsolidationSurfaceUpdateOp (
-      bool invalidate_cache = false,
-      std::optional<int> consolidation_centroid_dimension = std::nullopt)
-      : invalidate_cache (invalidate_cache),
-        consolidation_centroid_dimension (
-            consolidation_centroid_dimension)
+  explicit ConsolidationSurfaceUpdateOp (bool invalidate_cache = false)
+      : invalidate_cache (invalidate_cache)
   {
   }
 
@@ -287,28 +283,14 @@ struct ConsolidationSurfaceUpdateOp : IOperation
     operations::historical_surface_search_cache_internal::UpsertCurrent (
         p_ctx,
         { 1, 1, 1001, "LONG_TERM", "seed/1", std::move (embedding), 1 });
-    if (consolidation_centroid_dimension && !centroid_emitted)
-      {
-        ClusterInfo cluster;
-        cluster.cluster_id = 1;
-        cluster.memory_ids = { 1 };
-        cluster.embedding_ids = { 1 };
-        cluster.centroid.assign (256, 0.0f);
-        cluster.centroid[static_cast<std::size_t> (
-            *consolidation_centroid_dimension)] = 1.0f;
-        ctx.SetConsolidationClusters ({ std::move (cluster) });
-        centroid_emitted = true;
-      }
   }
 
   bool invalidate_cache = false;
-  std::optional<int> consolidation_centroid_dimension;
-  mutable bool centroid_emitted = false;
   mutable ProcessorContext *captured = nullptr;
 };
 
 // Moves several indexed memories a short reconsolidation-style distance
-// during forced consolidation and emits a consolidation centroid.
+// during forced consolidation.
 struct ReconsolidationMoveOp : IOperation
 {
   explicit ReconsolidationMoveOp (std::vector<long long> moved_ids)
@@ -380,14 +362,6 @@ struct ReconsolidationMoveOp : IOperation
                      "seed/" + std::to_string (memory_id),
                      std::move (embedding), memory_id });
       }
-    ClusterInfo cluster;
-    cluster.cluster_id = 1;
-    cluster.memory_ids = moved_ids;
-    cluster.embedding_ids = moved_ids;
-    const Eigen::VectorXf centroid = Moved (moved_ids.front ());
-    cluster.centroid.assign (centroid.data (),
-                             centroid.data () + centroid.size ());
-    ctx.SetConsolidationClusters ({ std::move (cluster) });
     emitted = true;
   }
 
@@ -3948,8 +3922,7 @@ TEST_CASE ("Engine consolidation seals an incrementally current sparse route "
 
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
-  auto operation = std::make_unique<ConsolidationSurfaceUpdateOp> (
-      false, 1);
+  auto operation = std::make_unique<ConsolidationSurfaceUpdateOp> ();
   auto *capturing_operation = operation.get ();
   auto root = std::make_unique<DynamicOperationSet> (std::move (operation));
   SignalProcessor processor (
@@ -4005,7 +3978,7 @@ TEST_CASE ("Engine consolidation seals an incrementally current sparse route "
            == 0.0);
   REQUIRE (output.operation_ms.at (
                "SignalProcessor.sqlite_sparse_route_recenter_centroid_source")
-           == 1.0);
+           == 2.0);
   const double pre_activated = output.operation_ms.at (
       "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count");
   REQUIRE (pre_activated > 0.0);
@@ -4020,20 +3993,27 @@ TEST_CASE ("Engine consolidation seals an incrementally current sparse route "
   REQUIRE (state);
   REQUIRE (state->sparse_route);
   REQUIRE (state->sqlite_sparse_route);
-  REQUIRE (state->sqlite_sparse_route->ActivationEntryMemoryId () == 255);
+  REQUIRE (state->sqlite_sparse_route->ActivationEntryMemoryId () == 2);
 
   auto restarted = operations::sparse_retrieval_route_sqlite_internal::Route::
       Open (*store, 256,
             operations::sparse_retrieval_route_sqlite_internal::
                 DefaultParameters ());
   REQUIRE (restarted);
-  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
-  query[0] = 1.0f;
-  const auto result = restarted->Search (query, 512);
-  REQUIRE (result);
-  REQUIRE_FALSE (result->empty ());
-  REQUIRE (result->front () == 1);
   REQUIRE (restarted->RestartRowsLoaded () == 1);
+  // The sealed generation persisted the moved vector (memory 1, now on
+  // dimension 0) in place.
+  {
+    const auto rows = store->Execute (
+        "SELECT embedding FROM cortext_sparse_route_nodes "
+        "WHERE memory_id = 1 AND active = 1");
+    REQUIRE (rows.size () == 1);
+    const auto bytes = store::BlobFromAny (rows[0].at ("embedding"));
+    REQUIRE (bytes.size () == 256 * sizeof (float));
+    std::vector<float> persisted (256);
+    std::memcpy (persisted.data (), bytes.data (), bytes.size ());
+    REQUIRE (persisted[0] == Catch::Approx (1.0f));
+  }
 
   signal.embedding = Eigen::VectorXf::Zero (256);
   signal.timestamp = 100001;
@@ -4264,6 +4244,20 @@ TEST_CASE ("Engine consolidation relinks reconsolidated route embeddings "
   const std::vector<long long> moved_ids{ 3, 40, 97, 150, 201, 254 };
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
+  // The route recenters on the active-signal ring centroid; make the recent
+  // signal the first moved vector so the activation entry follows it.
+  {
+    const Eigen::VectorXf moved = ReconsolidationMoveOp::Moved (
+        moved_ids.front ());
+    cortext::testing::SeedSignalV2 (
+        *store, 9001, moved_ids.front (), "opaque/source", 99999);
+    auto tx = store->Begin ();
+    operations::active_signal_embedding_ring_internal::Upsert (
+        *tx, 9001,
+        std::vector<float> (moved.data (), moved.data () + moved.size ()),
+        99999, cfg.focus, cfg.sensitivity, cfg.stability);
+    tx->Commit ();
+  }
   auto operation = std::make_unique<ReconsolidationMoveOp> (moved_ids);
   auto *capturing_operation = operation.get ();
   auto root = std::make_unique<DynamicOperationSet> (std::move (operation));

@@ -29,8 +29,6 @@ ALGORITHM_GROUPS = [
         "id": "consolidation-envelope-and-detector",
         "paths": [
             "src/operations/accumulator_reset.cpp",
-            "src/operations/consolidation.cpp",
-            "src/operations/consolidation_shallow.cpp",
             "src/operations/consolidation_throughput_state_internal.hpp",
         ],
     },
