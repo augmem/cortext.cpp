@@ -78,7 +78,6 @@
 #include "cortext/operations/detect_memory_usage.hpp"
 #include "cortext/operations/drift_accumulation.hpp"
 #include "cortext/operations/streaming_pacing.hpp"
-#include "cortext/operations/synaptic_tagging.hpp"
 
 // Section 4.4: Memory Accumulation
 #include "cortext/operations/accumulator.hpp"
@@ -1904,7 +1903,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ApplyRetrievalCompetition;
   using cortext::operations::ApplySensitivityFeedback;
   using cortext::operations::ApplyStabilityFeedback;
-  using cortext::operations::ApplySynapticTagging;
   using cortext::operations::CheckSpikeBypass;
   using cortext::operations::CheckStreamingPacing;
   using cortext::operations::ComputeCoherence;
@@ -1966,7 +1964,6 @@ BuildRootOperationSet (bool probe_mode)
       DetectBoundary, CheckSpikeBypass, ComputeWriteGate>;
 
   using StorageStage = OperationSet<MemoryStorage, UpdateSoftAnchor,
-                                    ApplySynapticTagging,
                                     PersistSignalMetrics>;
 
   using RetrievalStage

@@ -132,7 +132,6 @@ write_memory ← compute_write_gate(force_write, should_flush, spike_bypass)
 # StorageStage
 stored_memory_id ← maybe_commit_memory_unit(write_memory)
 update_soft_anchor(stored_memory_id)
-apply_synaptic_tagging(stored_memory_id)
 persist_signal_metrics(stored_memory_id)
 
 # RetrievalStage (q_retrieval is captured before any accumulator reset)
@@ -158,7 +157,7 @@ The normative execution order for a single timestep t:
 
 1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
 2.  **Run CoreStage:** initialize priors, update accumulator/drift, compute uncertainty, adaptation, metrics, neuromodulators, composite score, threshold, boundary, spike bypass, and write gate.
-3.  **Run StorageStage:** write the memory unit when the write gate opens, then update Soft Anchor, synaptic tagging, and signal metric persistence from the stored memory id.
+3.  **Run StorageStage:** write the memory unit when the write gate opens, then update Soft Anchor and signal metric persistence from the stored memory id.
 4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any reset, run streaming pacing and graph retrieval, update rate state from the current write decision, compute the MNI gate, and record memory usage/reinforcement.
 5.  **Run FeedbackStage:** apply retrieval competition, reconsolidation, S/T feedback, usage counters, emotional consolidation, working memory, accumulator reset, and emotional cascade. A `force_consolidation` maintenance signal runs none of these stages; the processor only seals and recenters the sparse route.
 6.  **Interrupt Abort:** If the MNI gate marked a pending abort, the next signal compares similarity to the selected memory against the current unit and resets only when the new signal aligns more with the selected memory.

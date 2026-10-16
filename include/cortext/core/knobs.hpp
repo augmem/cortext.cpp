@@ -2625,34 +2625,6 @@ NeuromodulatorPolicyForKnobs (double F, double S, double T)
   };
 }
 
-struct SynapticTaggingPolicy
-{
-  double surprisal_threshold;
-  double arousal_threshold;
-  int tag_window;
-  int tag_decay_seconds;
-};
-
-inline SynapticTaggingPolicy
-SynapticTaggingPolicyForKnobs (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  return {
-    Clamp (Lerp (0.6, 0.4, s) * (1.0 + 0.04 * (f - f0)), 0.34, 0.66),
-    Clamp (Lerp (0.7, 0.5, s) * (1.0 + 0.03 * (f - f0)), 0.44, 0.76),
-    std::max (
-        1, static_cast<int> (std::round (
-               Lerp (2.0, 8.0, s) * Lerp (0.92, 1.08, 1.0 - f)))),
-    static_cast<int> (
-        std::round (Clamp (Lerp (300.0, 3600.0, t)
-                               * Lerp (1.05, 0.95, s),
-                           180.0, 5400.0)))
-  };
-}
-
 // --- Implicit Feedback (Memory Usage Detection) Helpers ---
 
 inline double

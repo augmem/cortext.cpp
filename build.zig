@@ -53,7 +53,6 @@ const cortext_cpp_sources = &.{
     "src/operations/write_gate.cpp",
     "src/operations/memory_storage.cpp",
     "src/operations/detect_memory_usage.cpp",
-    "src/operations/synaptic_tagging.cpp",
     "src/operations/drift_accumulation.cpp",
     "src/operations/streaming_pacing.cpp",
     "src/operations/soft_anchor.cpp",

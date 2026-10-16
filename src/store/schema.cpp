@@ -941,6 +941,14 @@ GetCoreMigrations ()
               "ALTER TABLE memories DROP COLUMN influence_factor",
           },
       },
+      {
+          39,
+          "Drop the removed synaptic-tag columns",
+          {
+              "ALTER TABLE memories DROP COLUMN tag_strength",
+              "ALTER TABLE memories DROP COLUMN tag_expires_at",
+          },
+      },
   };
 }
 

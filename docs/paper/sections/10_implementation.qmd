@@ -735,7 +735,7 @@ CoreStage:
   adaptive metric weights, thresholding, recent context, boundary/write gate
 
 StorageStage:
-  memory storage, soft-anchor update, synaptic tagging, signal metrics
+  memory storage, soft-anchor update, signal metrics
 
 RetrievalStage:
   streaming pacing, graph-augmented retrieval, rate/MNI gating,

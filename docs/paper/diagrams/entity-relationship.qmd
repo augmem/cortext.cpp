@@ -116,7 +116,6 @@ erDiagram
         int gist_components "Section 8.7"
         int cascade_radius "Section 8.7"
         real cascade_decay "Section 8.7"
-        real tag_strength "Section 8.7.1 synaptic tagging"
         int tag_expires_at "Section 8.7.1 (ms)"
     }
 

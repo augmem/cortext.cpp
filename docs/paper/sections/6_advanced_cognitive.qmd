@@ -670,27 +670,9 @@ Only flashbulb sources created within `cascade_source_window_ms` of the current
 signal participate. The explicit conversion preserves the intended five- to
 sixty-minute window while stored timestamps remain milliseconds since epoch.
 
-## Synaptic Tagging and Capture
+## Synaptic Tagging and Capture (Removed)
 
-Flashbulb events are extended with **synaptic tagging**: high surprise or arousal tags nearby memories for preferential consolidation later, even if they scored low at the time.
-
-```
-tag_trigger ← (surprisal_t > lerp(0.6, 0.4, S)) OR (arousal_t > lerp(0.7, 0.5, S))
-tag_window = round(lerp(2, 8, S))  # memories before/after current time
-tag_decay_s = lerp(300, 3600, T)   # tag lifetime (seconds)
-
-if tag_trigger:
-    for m in temporal_neighbors(now_s(), tag_window):
-        m.tagged ← true
-        m.tag_strength ← 1.0
-        m.tag_expires_at ← now_s() + tag_decay_s
-```
-
-Tagged memories receive a consolidation bonus:
-```
-if m.tagged and now_s() < m.tag_expires_at:
-    score_consolidate(m) += lerp(0.10, 0.25, S) × m.tag_strength
-```
+Earlier builds tagged the temporal neighbours of a high-surprise or high-arousal signal (`tag_strength`, `tag_expires_at`). A tagged memory got a consolidation-score bonus of `lerp(0.10, 0.25, S) × tag_strength`. That score was the tag's only consumer. Clustering consolidation was removed (@sec-consolidation), and the engine ablation study (2026-10) removed tagging and its columns with it. Phase-1 ablation left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. The June research-branch result that tagging removal hurt (@sec-experimental) was measured on a branch where consolidation was live, so it does not apply to the current engine.
 
 ## Pattern Separation Sparse Index {#sec-pattern-separation}
 
