@@ -530,14 +530,6 @@ TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
            "[core][knobs][retrieval]")
 {
   REQUIRE (HydratedSoftAnchorLimit (0.5, 0.5, 0.5) == 3);
-  REQUIRE (RetrievalLinkedHydrationCandidateLimit (0.5, 0.5, 0.5)
-           == 12);
-
-  const auto linked_weights
-      = RetrievalLinkedHydrationOrderingWeights (0.5, 0.5, 0.5);
-  REQUIRE (linked_weights.first == Catch::Approx (0.82));
-  REQUIRE (linked_weights.first + linked_weights.second
-           == Catch::Approx (1.0));
 
   REQUIRE (RetrievalDurableSourceLinkFanout (0.5, 1.0, 0.5, 4)
            > RetrievalDurableSourceLinkFanout (0.5, 0.0, 0.5, 4));

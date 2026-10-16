@@ -16,30 +16,15 @@ or short-term shadow graph. The remaining model dependency in the core loop is
 the configured multimodal embedding path.
 
 Retrieved memories are hydrated only after retrieval has selected a compact
-ranked set. Internal routing nodes such as `LABEL` or `ASSOCIATION` rows are not
-treated as user-facing payloads. When such a row reaches the retrieval surface,
-hydration resolves bounded linked source memories where possible so callers see
-concrete source-backed context instead of empty routing artifacts. A linked
-source keeps its own relevance and composite score when it was independently
-ranked. Otherwise query-backed hydration computes relevance from that source's
-own embedding and computes its composite display score from that relevance and
-the retained relationship weight. Scores therefore describe the displayed
-source result rather than borrowing the internal routing node's score. The same
-scored memory object is serialized by the C API and JavaScript addon. An
-internal hydration call without a query and without an independent source trace
-leaves both optional scores unset; it does not relabel a centroid score as
-source relevance.
-
-Linked-source selection is query-aware before truncation. SQLite computes
-cosine relevance for every eligible member of the bounded linked graph set.
-Multiple graph routes to the same memory are grouped by memory id before
-ranking, so they cannot consume several compact slots. SQLite then combines
-source relevance with the F/S/T-derived relationship weight, orders that
-complete unique set, and only then applies the knob-derived compact limit. This
-prevents either duplicate routes or a recent but weakly related fragment from
-occupying the transfer cap ahead of an older verbatim-relevant source, while
-keeping embedding decoding and application-side hydration bounded to the
-selected rows.
+ranked set. A retrieved memory without hydrated content is skipped. Earlier builds
+resolved `LABEL` and `ASSOCIATION` routing rows to linked source memories through
+`has_label` / `derived_from` routes, ranked those sources query-aware before
+truncation, and gave them their own relevance and composite scores. The engine
+ablation study (2026-10) removed clustering consolidation, which was the only
+writer of those routes (@sec-consolidation), and with it linked-source
+hydration. A displayed memory carries the relevance and composite score of its
+own retrieval trace. The C API and JavaScript addon serialize the same memory
+object.
 
 ## Durable Memory Surface
 
@@ -53,12 +38,11 @@ The current v1 runtime uses two durable graph layers plus one bounded live layer
 * **Soft anchors:** uncertainty-preserving continuity links formed at ingress
   and exposed as optional memory metadata.
 
-Long-term graph memory is the durable substrate. `memories` stores working,
-long-term, label, and association nodes; `associations` stores graph edges such
-as `derived_from`, `has_label`, `similar_to`, `co_occurs`, `causes`, and
-`reinforces`. Existing `LABEL` nodes can still participate in shallow
-consolidation and hydration, but Cortext no longer creates labels from an
-internal decoder or an attached static taxonomy.
+Long-term graph memory is the durable substrate. `memories` stores working and
+long-term nodes; `associations` stores the directional `supersedes` edges that
+memory storage writes. Older stores may still hold `LABEL`/`ASSOCIATION` nodes
+and typed edges from removed consolidation paths; the current runtime neither
+writes nor traverses them.
 
 `source_id` is treated as opaque provenance and exact-equality grouping only.
 Cortext does not infer application roles, speaker names, modalities, maintenance

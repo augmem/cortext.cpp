@@ -447,33 +447,6 @@ RetrievalDurableSourceLinkFanout (double F, double S, double T,
                    std::max (1, candidate_count) * per_candidate);
 }
 
-inline int
-RetrievalLinkedHydrationCandidateLimit (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (20.0, 8.0, f) * Lerp (1.05, 0.95, s)
-                             * Lerp (1.05, 0.92, t),
-                         6.0, 24.0)));
-}
-
-inline std::pair<double, double>
-RetrievalLinkedHydrationOrderingWeights (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  const double query_raw = 0.82 + 0.14 * (f - f0) - 0.04 * (s - s0)
-                           + 0.04 * (t - t0);
-  const double query_weight = Clamp (query_raw, 0.60, 0.92);
-  return { query_weight, 1.0 - query_weight };
-}
-
 inline double
 RetrievalDurableSourceSupportSaturationCount (double F, double T)
 {
@@ -957,15 +930,6 @@ RetrievalGraphExpandedRagMaxItems (double F, double T)
 
 inline int
 RetrievalGraphExpandedRagTemporalWindow (double F, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (4.0, 1.0, f) * Lerp (1.05, 0.90, t)));
-}
-
-inline int
-RetrievalGraphExpandedRagCompactItemLimit (double F, double T)
 {
   const double f = RetrievalFocusBias (F);
   const double t = RetrievalStabilityBias (T);

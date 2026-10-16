@@ -322,19 +322,15 @@ void
 ApplyRetrievalScore (Cortext::Context::Memory &memory,
                      const std::unordered_map<long long,
                                               operations::retrieval_trace::RankedCandidate>
-                         &ranked_by_memory_id,
-                     const operations::retrieval_trace::RankedCandidate
-                         *fallback = nullptr)
+                         &ranked_by_memory_id)
 {
   auto it = ranked_by_memory_id.find (memory.id);
-  const auto *ranked
-      = it != ranked_by_memory_id.end () ? &it->second : fallback;
-  if (!ranked)
+  if (it == ranked_by_memory_id.end ())
     {
       return;
     }
-  memory.composite_score = ranked->score;
-  memory.relevance = ranked->relevance;
+  memory.composite_score = it->second.score;
+  memory.relevance = it->second.relevance;
 }
 
 // An object-store read transaction shared by a run of hydrations, so each
@@ -837,39 +833,6 @@ StripSourceBlobsIfDisabled (Cortext::Context::Memory &memory)
     {
       memory.content.clear ();
     }
-}
-
-std::string
-LoadMemoryKind (Store *store, long long memory_id)
-{
-  if (!store || memory_id <= 0)
-    {
-      return {};
-    }
-  try
-    {
-      auto rows = store->Execute (
-          "SELECT kind FROM memories WHERE memory_id = ?",
-          { memory_id });
-      if (rows.empty ())
-        {
-          return {};
-        }
-      auto it = rows[0].find ("kind");
-      if (it != rows[0].end () && it->second.type () == typeid (std::string))
-        {
-          return std::any_cast<std::string> (it->second);
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load memory kind",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-  return {};
 }
 
 // Episodic contiguity completion for retrieved conversational turns.
@@ -1570,167 +1533,6 @@ AttachSupersededPredecessors (
   return attached;
 }
 
-struct LinkedDisplayMemory
-{
-  long long memory_id = 0;
-  std::optional<double> relevance;
-  std::optional<double> composite_score;
-};
-
-std::vector<LinkedDisplayMemory>
-ResolveDisplayMemoriesForEmptyRetrieval (Store *store, long long memory_id,
-                                         const Eigen::VectorXf *query,
-                                         int max_linked_candidates,
-                                         std::pair<double, double>
-                                             query_ordering_weights)
-{
-  if (!store || memory_id <= 0)
-    {
-      return {};
-    }
-
-  const int limit = std::max (1, max_linked_candidates);
-  const bool query_source_ordering_enabled = !internal::experimental_env::Flag (
-      "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
-  try
-    {
-      const std::string linked_query
-          = "FROM ("
-          "  SELECT routes.memory_id, MIN(routes.rel_rank) AS rel_rank, "
-          "         MAX(routes.weight) AS weight "
-          "  FROM ("
-          "  SELECT df.target_memory_id AS memory_id, 0 AS rel_rank, "
-          "         hl.weight * df.weight AS weight "
-          "  FROM associations hl "
-          "  JOIN associations df ON df.source_memory_id = hl.source_memory_id "
-          "                       AND df.edge_type = 'derived_from' "
-          "  WHERE hl.target_memory_id = ? AND hl.edge_type = 'has_label' "
-          "  UNION ALL "
-          "  SELECT hl.source_memory_id AS memory_id, 1 AS rel_rank, "
-          "         hl.weight AS weight "
-          "  FROM associations hl "
-          "  WHERE hl.target_memory_id = ? AND hl.edge_type = 'has_label' "
-          "  UNION ALL "
-          "  SELECT a.target_memory_id AS memory_id, 0 AS rel_rank, "
-          "         a.weight AS weight "
-          "  FROM associations a "
-          "  WHERE a.source_memory_id = ? AND a.edge_type = 'derived_from' "
-          "  UNION ALL "
-          "  SELECT a.source_memory_id AS memory_id, 2 AS rel_rank, "
-          "         a.weight AS weight "
-          "  FROM associations a "
-          "  WHERE a.target_memory_id = ? "
-          "    AND a.edge_type IN ('reinforces', 'derived_from') "
-          "  ) routes "
-          "  GROUP BY routes.memory_id "
-          ") linked "
-          "JOIN memories m ON m.memory_id = linked.memory_id "
-          "LEFT JOIN current_memory_embeddings cme "
-          "  ON cme.memory_id = m.memory_id "
-          "LEFT JOIN embeddings e ON e.embedding_id = m.embedding_id "
-          "WHERE m.memory_id != ? "
-          "  AND m.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') ";
-      std::vector<std::map<std::string, std::any> > rows;
-      if (query_source_ordering_enabled && query && query->size () > 0)
-        {
-          std::vector<float> query_values (
-              query->data (), query->data () + query->size ());
-          rows = store->Execute (
-              "SELECT memory_id, query_score, "
-              "       (? * query_score + ? * weight) AS composite_score "
-              "FROM ("
-              "  SELECT linked.memory_id, linked.rel_rank, linked.weight, "
-              "         COALESCE(cme.embedding, e.embedding) AS embedding, "
-              "         COALESCE(m.last_access, 0) AS last_access, "
-              "         m.created_at, "
-              "         CASE WHEN COALESCE(cme.embedding, e.embedding) IS NULL "
-              "              THEN 0.0 "
-              "              ELSE MAX(0.0, 1.0 - vec_distance_cosine("
-              "                   COALESCE(cme.embedding, e.embedding), ?)) "
-              "         END AS query_score "
-              + linked_query
-              + ") ranked_linked "
-                "ORDER BY composite_score DESC, "
-                "         rel_rank ASC, weight DESC, last_access DESC, "
-                "         created_at DESC "
-                "LIMIT ?",
-              { query_ordering_weights.first,
-                query_ordering_weights.second, query_values, memory_id,
-                memory_id, memory_id, memory_id, memory_id,
-                static_cast<long long> (limit) });
-        }
-      else
-        {
-          rows = store->Execute (
-              "SELECT linked.memory_id "
-              + linked_query
-              + "ORDER BY linked.rel_rank ASC, linked.weight DESC, "
-                "         COALESCE(m.last_access, 0) DESC, m.created_at DESC "
-                "LIMIT ?",
-              { memory_id, memory_id, memory_id, memory_id, memory_id,
-                static_cast<long long> (limit) });
-        }
-
-      std::vector<LinkedDisplayMemory> out;
-      out.reserve (rows.size ());
-      std::unordered_set<long long> seen;
-      seen.reserve (rows.size ());
-      for (const auto &row : rows)
-        {
-          auto it = row.find ("memory_id");
-          if (it == row.end ())
-            {
-              continue;
-            }
-          const long long linked_id
-              = cortext::store::AnyToLongLong (it->second).value_or (0);
-          if (linked_id > 0 && seen.insert (linked_id).second)
-            {
-              LinkedDisplayMemory linked;
-              linked.memory_id = linked_id;
-              auto read_double = [&row] (const char *key)
-                  -> std::optional<double> {
-                auto value_it = row.find (key);
-                if (value_it == row.end ())
-                  {
-                    return std::nullopt;
-                  }
-                if (value_it->second.type () == typeid (double))
-                  {
-                    return std::any_cast<double> (value_it->second);
-                  }
-                if (value_it->second.type () == typeid (float))
-                  {
-                    return static_cast<double> (
-                        std::any_cast<float> (value_it->second));
-                  }
-                return std::nullopt;
-              };
-              linked.relevance = read_double ("query_score");
-              linked.composite_score = read_double ("composite_score");
-              out.push_back (std::move (linked));
-            }
-        }
-      return out;
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to resolve display memories for retrieval node",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-  catch (...)
-    {
-      telemetry::LogWarn (
-          "Failed to resolve display memories for retrieval node (unknown error)",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id) });
-    }
-  return {};
-}
-
 void
 HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
                             std::vector<Cortext::Context::Memory> &out,
@@ -2356,12 +2158,6 @@ struct Cortext::Impl
 
 	    const int max_hydrated_soft_anchors = core::HydratedSoftAnchorLimit (
 	        cfg.focus, cfg.sensitivity, cfg.stability);
-	    const int max_linked_hydration_candidates
-	        = core::RetrievalLinkedHydrationCandidateLimit (
-	            cfg.focus, cfg.sensitivity, cfg.stability);
-	    const auto linked_hydration_ordering_weights
-	        = core::RetrievalLinkedHydrationOrderingWeights (
-	            cfg.focus, cfg.sensitivity, cfg.stability);
 	    const int max_fallback_signal_blobs
 	        = operations::sparse_retrieval_knobs_internal::
 	            HydrationFallbackSignalLimit (
@@ -2420,9 +2216,6 @@ struct Cortext::Impl
       return 0;
     };
 
-    const int max_expanded_display_memories_per_node = std::max (
-        1, core::RetrievalGraphExpandedRagCompactItemLimit (cfg.focus,
-                                                            cfg.stability));
     std::unordered_set<long long> seen_candidate_memory_ids;
     seen_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
     std::unordered_set<long long> seen_output_memory_ids;
@@ -2437,34 +2230,6 @@ struct Cortext::Impl
             ranked_by_memory_id.emplace (candidate.memory_id, candidate);
           }
       }
-
-    auto append_hydrated_memory = [&] (
-                                      long long memory_id, bool require_content,
-                                      const operations::retrieval_trace::RankedCandidate
-                                          *linked_score) -> bool {
-      if (memory_id <= 0 || !seen_output_memory_ids.insert (memory_id).second)
-        {
-          return false;
-        }
-      Cortext::Context::Memory m;
-      m.id = memory_id;
-      HydrateMemory (store.get (), object_store.get (), memory_id, m,
-                     max_hydrated_soft_anchors,
-                     max_fallback_signal_blobs,
-                     &loaded_fallback_signal_blobs);
-      // Prefer a linked memory's own ranked trace. Otherwise use the
-      // source-specific query/relationship score computed during linked
-      // selection; never relabel the routing node's score as a source score.
-      ApplyRetrievalScore (m, ranked_by_memory_id, linked_score);
-      if (require_content && !HasHydratedContent (m))
-        {
-          seen_output_memory_ids.erase (memory_id);
-          return false;
-        }
-      StripSourceBlobsIfDisabled (m);
-      result.retrieved_memory.push_back (std::move (m));
-      return true;
-    };
 
     std::vector<long long> ordered_candidate_memory_ids;
     ordered_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
@@ -2504,53 +2269,14 @@ struct Cortext::Impl
                        max_fallback_signal_blobs,
                        &loaded_fallback_signal_blobs);
         ApplyRetrievalScore (m, ranked_by_memory_id);
-        const bool has_content = HasHydratedContent (m);
-        const bool prefer_linked_sources
-            = LoadMemoryKind (store.get (), memory_id) == "ASSOCIATION";
-        if (has_content && !prefer_linked_sources)
+        // Retrieved memories without hydrated content are skipped; nothing
+        // writes the derived_from / has_label routes that used to resolve
+        // them to linked source memories.
+        if (HasHydratedContent (m)
+            && seen_output_memory_ids.insert (memory_id).second)
           {
-            if (seen_output_memory_ids.insert (memory_id).second)
-              {
-                StripSourceBlobsIfDisabled (m);
-                result.retrieved_memory.push_back (std::move (m));
-              }
-            continue;
-          }
-
-        int expanded_count = 0;
-        for (const auto &linked :
-             ResolveDisplayMemoriesForEmptyRetrieval (
-                 store.get (), memory_id, query_embedding,
-                 max_linked_hydration_candidates,
-                 linked_hydration_ordering_weights))
-          {
-            operations::retrieval_trace::RankedCandidate linked_score;
-            const operations::retrieval_trace::RankedCandidate
-                *linked_score_ptr = nullptr;
-            if (linked.relevance && linked.composite_score)
-              {
-                linked_score.memory_id = linked.memory_id;
-                linked_score.relevance = *linked.relevance;
-                linked_score.score = *linked.composite_score;
-                linked_score_ptr = &linked_score;
-              }
-            if (append_hydrated_memory (linked.memory_id, true,
-                                        linked_score_ptr))
-              {
-                ++expanded_count;
-                if (expanded_count >= max_expanded_display_memories_per_node)
-                  {
-                    break;
-                  }
-              }
-          }
-        if (expanded_count == 0 && has_content)
-          {
-            if (seen_output_memory_ids.insert (memory_id).second)
-              {
-                StripSourceBlobsIfDisabled (m);
-                result.retrieved_memory.push_back (std::move (m));
-              }
+            StripSourceBlobsIfDisabled (m);
+            result.retrieved_memory.push_back (std::move (m));
           }
       }
 

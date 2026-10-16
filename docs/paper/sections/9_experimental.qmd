@@ -975,6 +975,7 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | sensitivity feedback (`ApplySensitivityFeedback`, `memories.redundancy`, the unwritten `connectivity`) | 0/250, 0/48, 0/40 (minor-feedback group). `redundancy` only fed the consolidation score |
 | stability feedback and half-life adaptation (`ApplyStabilityFeedback`, `UpdateStability`, `memories.stability`, persisted half-life/rate-decay/drift-weight/retention state) | 0/250, 0/48, 0/40 (minor-feedback group). Their only consumers were the consolidation score and memory-strength decay |
 | emotional consolidation and cascade (`ApplyEmotionalConsolidation`, `PropagateEmotionalCascade`, emotional-metadata cache, `flashbulb`/`emotional_intensity`/`half_life_bonus`/`detail_suppression`/`gist_components`/`cascade_*` columns) | 0/250, 0/48, 0/40 (affect group). Outputs fed only memory-strength decay and the cascade |
+| linked-source hydration (`LABEL`/`ASSOCIATION` routing rows resolved through `has_label`/`derived_from` routes, query-aware linked ordering, compact-item limit) | 0/250, 0/48, 0/40 with query-aware ordering off. With clustering consolidation removed, nothing writes those routes |
 
 ## Experimental Interpretation
 
