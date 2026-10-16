@@ -179,30 +179,9 @@ candidate rank.
 
 The system tracks causal influence of retrieved memories on generation quality through contextual gain—the semantic alignment (cosine similarity) between the current signal embedding and the retrieved memory embedding.
 
-### Focus Feedback
+### Focus Feedback (Removed)
 
-```
-αF_base = 0.10; βF_base = 0.05
-weight_relevance_t ← weight_relevance
-attention_width_t ← attention_width
-for each used memory m:
-    if contextual_gain(m) > 0:
-        weight_relevance_t += αF_base × contextual_gain(m)
-        attention_width_t *= (1 − βF_base)
-    else:
-        attention_width_t *= (1 + βF_base)
-# Drift-responsive dilation + restorative pull to prior
-dilation_force ← S × (1 − T) × drift_step_t
-restoring_force ← F × (attention_width_prior − attention_width_t)
-attention_width_t ← attention_width_t + dilation_force + restoring_force
-weight_relevance ← clamp(weight_relevance_t, 0, 1)
-attention_width_t ← clamp(attention_width_t,
-                          attention_width_min, attention_width_max)
-attention_width ← attention_width_t
-```
-
-Positive contextual gain narrows attention and boosts relevance weighting; negative gain widens attention to explore alternatives.
-The drift_step_t term is the instantaneous drift signal from @sec-structural-metrics.
+Earlier builds adjusted `weight_relevance` and `attention_width` from the contextual gain of used memories. They also dilated the attention width with drift and pulled it back toward its prior every turn. The engine ablation study (2026-10) removed this step. With it switched off as part of the minor-feedback group, packets stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. `weight_relevance` and `attention_width` now stay at their knob-derived priors unless `UpdateFocus` moves them.
 
 ### Sensitivity Feedback
 

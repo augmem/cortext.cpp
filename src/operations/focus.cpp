@@ -107,9 +107,8 @@ UpdateFocus::Execute (OperationContext &context, Transaction &tx) const
   p_ctx.weight_relevance
       = core::Ewma (p_ctx.weight_relevance, mapped_cosine, alpha_f);
 
-  // Alg 2: attention_width_t ← clamp(...) - the doc doesn't specify a change,
-  // just that it should be clamped. The actual change comes from feedback in
-  // later algorithms (e.g., Alg 15). So we just ensure it stays in bounds.
+  // Alg 2: attention_width_t ← clamp(...). No later step adapts the width
+  // (focus feedback was removed), so this only keeps it in bounds.
   p_ctx.attention_width = core::Clamp (
       p_ctx.attention_width, static_cast<double> (core::kAttentionWidthMin),
       static_cast<double> (core::kAttentionWidthMax));

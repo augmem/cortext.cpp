@@ -962,6 +962,7 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | meta-learned knob priors (`ApplyMetaLearning`, `meta_learning_coeffs`) | 0/250 Eval 1, 0/48 S, 0/40 BEAM; no cost change. The priors are the closed-form F/S/T functions again |
 | predictive pre-activation (`ApplyPredictivePreActivation`, `memories.pre_activation` and its indexes) | 0/250, 0/48, 0/40. No ranker read the field |
 | influence feedback (`ApplyInfluenceFeedback`, `memories.influence/sustained_influence/mean_influence`, `state.sustained_influence`) | 0/250, 0/48, 0/40 (as part of the minor-feedback group). The columns were write-only |
+| focus feedback (`ApplyFocusFeedback`) | 0/250, 0/48, 0/40 (as part of the minor-feedback group) |
 
 ## Experimental Interpretation
 

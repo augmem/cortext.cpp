@@ -3,7 +3,6 @@
 #include "test_helpers.hpp"
 
 
-#include "cortext/operations/focus_feedback.hpp"
 #include "cortext/operations/memory_strength.hpp"
 #include "cortext/operations/sensitivity.hpp"
 #include "cortext/operations/sensitivity_feedback.hpp"
@@ -130,7 +129,7 @@ TEST_CASE ("Alg4: ΔT_sensitivity is not clamped (Alg8 clamps later)",
   REQUIRE (ctx.GetDeltaThresholdSensitivity ().has_value ());
 }
 
-TEST_CASE ("Alg15/16 use base gains (no knob scaling)", "[feedback]")
+TEST_CASE ("Alg16 uses base gains (no knob scaling)", "[feedback]")
 {
   ProcessorContext pctx;
   SignalProcessor::Config cfg{};
@@ -141,10 +140,7 @@ TEST_CASE ("Alg15/16 use base gains (no knob scaling)", "[feedback]")
   sig.embedding = Eigen::VectorXf::Ones (4);
   sig.embedding.normalize ();
   OperationContext ctx (sig, pctx, cfg);
-  pctx.weight_relevance = 0.5;
   pctx.weight_novelty = 0.5;
-  pctx.attention_width = 8.0;
-  pctx.attention_width_prior = 8.0;
   pctx.recent_context_embeddings.push_back (sig.embedding);
   ctx.SetRetrievedMemoryEmbeddings ({ { 1LL, sig.embedding } });
   // Provide usage events
@@ -152,14 +148,8 @@ TEST_CASE ("Alg15/16 use base gains (no knob scaling)", "[feedback]")
       { 1, true, +0.2 },
       { 2, true, -0.1 },
   });
-  const double relevance_before = pctx.weight_relevance;
   const double novelty_before = pctx.weight_novelty;
-  const double width_before = pctx.attention_width;
-  ApplyFocusFeedback ffb;
-  ffb.Execute (ctx, cortext::testing::GetNullTransaction ());
   ApplySensitivityFeedback sfb;
   sfb.Execute (ctx, cortext::testing::GetNullTransaction ());
-  REQUIRE (pctx.weight_relevance > relevance_before);
-  REQUIRE (pctx.attention_width < width_before);
   REQUIRE (pctx.weight_novelty < novelty_before);
 }

@@ -63,7 +63,6 @@
 #include "cortext/operations/effective_focus.hpp"
 #include "cortext/operations/emotion.hpp"
 #include "cortext/operations/focus.hpp"
-#include "cortext/operations/focus_feedback.hpp"
 #include "cortext/operations/focus_spread.hpp"
 #include "cortext/operations/interrupt_gate.hpp"
 #include "cortext/operations/memory_strength.hpp"
@@ -1909,7 +1908,6 @@ std::unique_ptr<IOperation>
 BuildRootOperationSet (bool probe_mode)
 {
   using cortext::operations::ApplyEmotionalConsolidation;
-  using cortext::operations::ApplyFocusFeedback;
   using cortext::operations::ApplyReconsolidation;
   using cortext::operations::ApplyRetrievalCompetition;
   using cortext::operations::ApplySensitivityFeedback;
@@ -1992,7 +1990,7 @@ BuildRootOperationSet (bool probe_mode)
 
   using FeedbackStage = OperationSet<
       ApplyRetrievalCompetition,
-      ApplyReconsolidation, ApplyFocusFeedback, ApplySensitivityFeedback,
+      ApplyReconsolidation, ApplySensitivityFeedback,
       ApplyStabilityFeedback, UpdateStability,
       ApplySerialPositionEffects, ApplySerialPositionMultiplier,
       UpdateMemoryStrength, ApplyEmotionalConsolidation, WorkingMemory,
