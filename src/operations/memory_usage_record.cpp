@@ -34,7 +34,6 @@ RecordMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
     {
       return;
     }
-  auto &p_ctx = context.GetProcessorContext ();
   const long long ts = static_cast<long long> (context.GetSignal ().timestamp);
   for (const auto &e : context.GetMemoryUsageEvents ())
     {
@@ -55,8 +54,6 @@ RecordMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
         {
           continue;
         }
-      const long long row_memory_id
-          = GetInt64 (rows[0], "memory_id", memory_id);
       const long long retrieved_new
           = GetInt64 (rows[0], "retrieved_count", 0) + 1;
       const long long used_new
@@ -68,17 +65,6 @@ RecordMemoryUsage::Execute (OperationContext &context, Transaction &tx) const
                   "    last_access = ? "
                   "WHERE " + lookup_column + " = ?",
                   { retrieved_new, used_new, used_flag, ts, ts, lookup_id });
-      if (row_memory_id > 0)
-        {
-          p_ctx.UpdateRetrievalSurfaceUsageByMemory (row_memory_id,
-                                                     retrieved_new, used_new,
-                                                     ts);
-        }
-      else
-        {
-          p_ctx.UpdateRetrievalSurfaceUsageByEmbedding (
-              embedding_id, retrieved_new, used_new, ts);
-        }
       context.AddOperationTiming (
           "MemoryUsage.record_sql",
           std::chrono::duration<double, std::milli> (

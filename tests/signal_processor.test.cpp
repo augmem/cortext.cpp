@@ -667,8 +667,7 @@ struct GrowRetrievalSurfaceOp : IOperation
 };
 
 using RetrievalSurfaceCapture
-    = std::map<long long, std::tuple<long long, long long, long long,
-                                     long long, long long, std::string,
+    = std::map<long long, std::tuple<long long, long long, std::string,
                                      std::vector<float>>>;
 
 RetrievalSurfaceCapture
@@ -679,8 +678,7 @@ CaptureRetrievalSurface (const ProcessorContext &context)
     capture.emplace (
         entry.memory_id,
         std::make_tuple (
-            entry.embedding_id, entry.start_ts, entry.last_access,
-            entry.retrieved_count, entry.used_count, entry.source_id,
+            entry.embedding_id, entry.start_ts, entry.source_id,
             std::vector<float> (entry.embedding.data (),
                                 entry.embedding.data ()
                                     + entry.embedding.size ())));

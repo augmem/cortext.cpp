@@ -80,8 +80,7 @@ struct Fixture
 
 } // namespace
 
-TEST_CASE ("RecordMemoryUsage counts used retrievals by memory id and "
-           "mirrors the retrieval surface",
+TEST_CASE ("RecordMemoryUsage counts used retrievals by memory id",
            "[operations][memory_usage]")
 {
   Fixture f;
@@ -97,13 +96,6 @@ TEST_CASE ("RecordMemoryUsage counts used retrievals by memory id and "
   REQUIRE (std::any_cast<long long> (row.at ("used_count")) == 1LL);
   REQUIRE (std::any_cast<long long> (row.at ("last_used")) == 100LL);
   REQUIRE (std::any_cast<long long> (row.at ("last_access")) == 100LL);
-
-  const auto cache_it = f.pctx.retrieval_surface_index.find (70LL);
-  REQUIRE (cache_it != f.pctx.retrieval_surface_index.end ());
-  const auto &cached = f.pctx.retrieval_surface_cache[cache_it->second];
-  REQUIRE (cached.retrieved_count == 1LL);
-  REQUIRE (cached.used_count == 1LL);
-  REQUIRE (cached.last_access == 100LL);
 }
 
 TEST_CASE ("RecordMemoryUsage counts an unused retrieval by embedding id",

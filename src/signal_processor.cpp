@@ -2445,16 +2445,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
           "                base_e.created_at, 0) "
           "         AS created_at, "
           "       COALESCE(m.start_ts, 0) AS start_ts, "
-          "       COALESCE(m.last_access, 0) AS last_access, "
-          "       COALESCE(m.retrieved_count, 0) AS retrieved_count, "
-          "       COALESCE(m.used_count, 0) AS used_count, "
-          "       COALESCE(NULLIF(m.start_ts, 0), m.created_at, "
-          "                CASE WHEN ?1 != 0 THEN latest_r.created_at END, "
-          "                CASE WHEN ?1 != 0 THEN cme.created_at END, "
-          "                base_e.created_at, 0) AS event_ts, "
-          "       m.context, m.source_reliability, "
-          "       m.source_contradiction_count, "
-          "       m.s_arousal_avg, m.kind, m.source_id, m.modality, "
+          "       m.kind, m.source_id, m.modality, "
           "       CASE WHEN (cme.memory_id IS NOT NULL "
           "                  OR m.embedding_id IS NOT NULL) "
           "             AND m.kind = 'LONG_TERM' "
@@ -2503,26 +2494,12 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
               = ExtractInt64 (row, "base_embedding_id", entry.embedding_id);
           entry.created_at = ExtractInt64 (row, "created_at", 0);
           entry.start_ts = ExtractInt64 (row, "start_ts", 0);
-          entry.last_access = ExtractInt64 (row, "last_access", 0);
-          entry.event_ts = ExtractInt64 (row, "event_ts", entry.created_at);
-          entry.retrieved_count = ExtractInt64 (row, "retrieved_count", 0);
-          entry.used_count = ExtractInt64 (row, "used_count", 0);
           entry.kind = ExtractString (row, "kind");
           entry.source_id = ExtractString (row, "source_id");
           entry.modality = ExtractString (row, "modality");
-          entry.source_reliability
-              = ExtractDouble (row, "source_reliability", -1.0);
-          entry.source_contradiction_count = static_cast<int> (
-              ExtractInt64 (row, "source_contradiction_count", 0));
-          entry.arousal_avg = ExtractDouble (row, "s_arousal_avg", 0.0);
           entry.vector_seed_eligible
               = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
           entry.embedding = BlobToEigen (emb_it->second);
-          auto ctx_it = row.find ("context");
-          if (ctx_it != row.end () && ctx_it->second.has_value ())
-            {
-              entry.context_embedding = BlobToEigen (ctx_it->second);
-            }
           ctx.UpsertRetrievalSurface (std::move (entry));
         }
       LoadHistoricalSurfaceSearchCache (store, ctx, &base_embedding_ids);

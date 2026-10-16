@@ -474,22 +474,13 @@ struct ProcessorContext
     long long embedding_id = 0;
     long long created_at = 0;
     long long start_ts = 0;
-    long long last_access = 0;
-    long long event_ts = 0;
-    long long retrieved_count = 0;
-    long long used_count = 0;
     std::string kind;
     std::string source_id;
     std::string modality;
-    double source_reliability = -1.0;
-    int source_contradiction_count = 0;
-    double arousal_avg = 0.0;
     bool is_association = false;
     bool vector_seed_eligible = true;
     Eigen::VectorXf embedding;
-    Eigen::VectorXf context_embedding;
     float embedding_norm = 0.0f;
-    std::uint32_t seed_visit_epoch = 0;
   };
 
   struct RetrievalSurfaceSourceIndexEntry
@@ -698,42 +689,7 @@ struct ProcessorContext
     SortRetrievalSurfaceSourceIndex (source_id);
   }
 
-  void
-  UpdateRetrievalSurfaceUsageByEmbedding (long long embedding_id,
-                                          long long retrieved_count,
-                                          long long used_count,
-                                          long long last_access)
-  {
-    auto it = retrieval_surface_embedding_index.find (embedding_id);
-    if (it == retrieval_surface_embedding_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.retrieved_count = retrieved_count;
-    entry.used_count = used_count;
-    entry.last_access = last_access;
-  }
-
-  void
-  UpdateRetrievalSurfaceUsageByMemory (long long memory_id,
-                                       long long retrieved_count,
-                                       long long used_count,
-                                       long long last_access)
-  {
-    auto it = retrieval_surface_index.find (memory_id);
-    if (it == retrieval_surface_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.retrieved_count = retrieved_count;
-    entry.used_count = used_count;
-    entry.last_access = last_access;
-  }
-
   std::vector<RetrievalSurfaceEntry> retrieval_surface_cache;
-  std::uint32_t retrieval_surface_seed_visit_epoch = 0;
   std::unordered_map<long long, size_t> retrieval_surface_index;
   std::unordered_map<long long, size_t> retrieval_surface_embedding_index;
   std::unordered_map<std::string,

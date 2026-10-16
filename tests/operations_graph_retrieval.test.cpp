@@ -1679,8 +1679,7 @@ TEST_CASE ("Graph retrieval cache rebuild uses base embedding when constructive 
   cortext::testing::RequireEncoder (cfg);
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
-      { 10, 100, 1000, 1000, 0, 0, 0, 0, "LONG_TERM", "test", "", -1.0,
-        0, 0.0, false, true, UnitVec (0) });
+      { 10, 100, 1000, 1000, "LONG_TERM", "test", "", false, true, UnitVec (0) });
   auto signal = MakeSignal (UnitVec (0), 2000);
   OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetShouldCheckRetrieval (true);
@@ -3475,9 +3474,7 @@ TEST_CASE ("Graph retrieval SQL fallback performance probe",
       const long long timestamp = 1000 + offset;
       SeedMemory (*store, memory_id, embedding_id, embedding, timestamp);
       pctx.UpsertRetrievalSurface (
-          { memory_id, embedding_id, timestamp, timestamp, 0, 0, 0, 0,
-            "LONG_TERM", "benchmark", "", -1.0, 0, 0.0,
-            false, true, embedding });
+          { memory_id, embedding_id, timestamp, timestamp, "LONG_TERM", "benchmark", "", false, true, embedding });
     }
 
   long long reconstruction_count = 0;
@@ -3505,9 +3502,7 @@ TEST_CASE ("Graph retrieval SQL fallback performance probe",
               LoadLatestReconstruction (*reconstruction_tx, memory_id);
           REQUIRE (latest.has_value ());
           pctx.UpsertRetrievalSurface (
-              { memory_id, latest->embedding_id, 1000 + offset,
-                1000 + offset, 0, 0, 0, 0, "LONG_TERM", "benchmark", "",
-                -1.0, 0, 0.0, false, true, embedding });
+              { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset, "LONG_TERM", "benchmark", "", false, true, embedding });
           ++reconstruction_count;
         }
       reconstruction_tx->Commit ();
@@ -3712,9 +3707,7 @@ TEST_CASE ("Graph retrieval bounded fallback surfaces a superseded shared vector
   cortext::testing::RequireEncoder (cfg);
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
-      { 20, 200, 2000, 2000, 0, 0, 0, 0, "LONG_TERM", "replacement", "",
-        -1.0, 0, 0.0, false, true,
-        VectorWithCosineToDim0 (0.92f) });
+      { 20, 200, 2000, 2000, "LONG_TERM", "replacement", "", false, true, VectorWithCosineToDim0 (0.92f) });
   operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
       pctx);
   auto signal = MakeSignal (UnitVec (0), 3000);
@@ -3831,9 +3824,7 @@ TEST_CASE ("Graph retrieval fallback preserves overfetch after surface refresh",
       REQUIRE (latest.has_value ());
       reconstruction_tx->Commit ();
       pctx.UpsertRetrievalSurface (
-          { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset,
-            0, 0, 0, 0, "LONG_TERM", "reconstructed-family", "", -1.0,
-            0, 0.0, false, true, UnitVec (0) });
+          { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset, "LONG_TERM", "reconstructed-family", "", false, true, UnitVec (0) });
     }
   REQUIRE_FALSE (operations::historical_surface_search_cache_internal::
                      CurrentSurfaceDatabaseCurrent (pctx));
@@ -3884,8 +3875,7 @@ TEST_CASE ("Graph retrieval fallback preserves overfetch after database reconstr
   const int seed_limit = std::max (1, core::RetrievalMaxResults (cfg.focus));
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
-      { 99999, 99999, 1, 1, 0, 0, 0, 0, "LONG_TERM", "unrelated", "",
-        -1.0, 0, 0.0, false, true, UnitVec (4) });
+      { 99999, 99999, 1, 1, "LONG_TERM", "unrelated", "", false, true, UnitVec (4) });
 
   for (int offset = 0; offset < seed_limit; ++offset)
     {
@@ -3992,9 +3982,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
       SeedMemory (*store, memory_id, embedding_id, base, 1000 + offset,
                   "stale-cache-family");
       pctx.UpsertRetrievalSurface (
-          { memory_id, embedding_id, 1000 + offset, 1000 + offset, 0, 0,
-            0, 0, "LONG_TERM", "stale-cache-family", "", -1.0, 0, 0.0,
-            false, true, base });
+          { memory_id, embedding_id, 1000 + offset, 1000 + offset, "LONG_TERM", "stale-cache-family", "", false, true, base });
       historical_entries.push_back (
           { embedding_id, memory_id, 1000 + offset, "LONG_TERM",
             "stale-cache-family", base });
@@ -4009,9 +3997,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
   SeedMemory (*store, kTargetMemoryId, kTargetEmbeddingId, target, 2000,
               "target");
   pctx.UpsertRetrievalSurface (
-      { kTargetMemoryId, kTargetEmbeddingId, 2000, 2000, 0, 0, 0, 0,
-        "LONG_TERM", "target", "", -1.0, 0, 0.0, false, true,
-        target });
+      { kTargetMemoryId, kTargetEmbeddingId, 2000, 2000, "LONG_TERM", "target", "", false, true, target });
   historical_entries.push_back (
       { kTargetEmbeddingId, kTargetMemoryId, 2000, "LONG_TERM", "target",
         target });
@@ -4041,9 +4027,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
       REQUIRE (latest.has_value ());
       reconstruction_tx->Commit ();
       pctx.UpsertRetrievalSurface (
-          { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset,
-            0, 0, 0, 0, "LONG_TERM", "stale-cache-family", "", -1.0, 0,
-            0.0, false, true, UnitVec (0) });
+          { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset, "LONG_TERM", "stale-cache-family", "", false, true, UnitVec (0) });
     }
   const auto stale_state
       = operations::historical_surface_search_cache_internal::Find (pctx);

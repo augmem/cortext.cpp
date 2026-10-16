@@ -1466,15 +1466,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           surface_entry.embedding_id = embedding_id;
           surface_entry.created_at = static_cast<long long> (end_ts);
           surface_entry.start_ts = static_cast<long long> (start_ts);
-          surface_entry.event_ts = static_cast<long long> (start_ts);
           surface_entry.kind = "LONG_TERM";
           surface_entry.source_id = signal.source_id;
           surface_entry.modality = primary_modality;
-          surface_entry.source_reliability = source_reliability;
-          if (acc.c_t.size () > 0)
-            {
-              surface_entry.context_embedding = acc.c_t;
-            }
           surface_entry.embedding = embedding_to_store;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
           retrieval_trace::RecordSurfaceUpsert (
