@@ -19,9 +19,8 @@ Note: Allowed interrupts outside flush/spike events mark a pending abort; the
 next signal drops the partial unit only if it aligns more with the selected
 memory than with the current accumulator centroid. This is operational only
 and does not alter the schema.
-Note: Emotional fields are persisted for feedback, decay, and analysis paths,
-but production graph retrieval does not currently use `emotional_intensity` or
-`s_arousal_avg` in candidate ranking. Affect still modulates interrupt gating.
+Note: Production graph retrieval does not use `s_arousal_avg` in candidate
+ranking. Affect still modulates interrupt gating.
 Note: Retrieval seeding scans LONG_TERM and ASSOCIATION embeddings, then graph
 expansion follows the production traversal subset: `co_occurs`, `similar_to`,
 `reinforces`, `causes`, `derived_from`, `next_in_episode`, `prev_in_episode`,
@@ -106,13 +105,6 @@ erDiagram
         real source_reliability "Section 8.8 reliability prior"
         int source_contradiction_count "Section 8.8"
         int source_last_verified_ts "Section 8.8 (ms)"
-        int flashbulb "Section 8.7 - boolean"
-        real emotional_intensity "Section 8.7"
-        real half_life_bonus "Section 8.7"
-        real detail_suppression "Section 8.7"
-        int gist_components "Section 8.7"
-        int cascade_radius "Section 8.7"
-        real cascade_decay "Section 8.7"
         int tag_expires_at "Section 8.7.1 (ms)"
     }
 

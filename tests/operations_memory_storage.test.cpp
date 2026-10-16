@@ -861,7 +861,7 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
       { 10, 100, 1000, 1000, 0, 0, 0, 0, "LONG_TERM", "belief/source",
-        "text", -1.0, 0, 0.0, 0.0, false, true,
+        "text", -1.0, 0, 0.0, false, true,
         stale_embedding });
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);

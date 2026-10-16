@@ -15,7 +15,6 @@
 #include "operations/bounded_activation_shadow_internal.hpp"
 #include "operations/consolidation_epoch_profile_internal.hpp"
 #include "operations/consolidation_throughput_state_internal.hpp"
-#include "operations/emotional_metadata_cache_internal.hpp"
 #include "operations/execution_cache_sidecar_internal.hpp"
 #include "operations/historical_surface_search_cache_internal.hpp"
 #include "operations/rif_state_internal.hpp"
@@ -282,14 +281,6 @@ DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
         + caches.association_fanout_cache.in_by_target.size ()
         + caches.retrieval_suppression_embedding_ids.size ()
         + caches.retrieval_suppression_memory_ids.size ();
-  if (caches.execution_cache_sidecar)
-    {
-      const auto &sidecar = *caches.execution_cache_sidecar;
-      count += sidecar.emotional_metadata.rows_by_memory.size ()
-               + sidecar.emotional_metadata.memory_ids_by_embedding.size ()
-               + sidecar.emotional_metadata.values_by_embedding.size ()
-               + sidecar.emotional_metadata.source_query_order.size ();
-    }
   for (const auto &[source_id, entries] : caches.retrieval_surface_source_index)
     {
       (void)source_id;
@@ -2549,51 +2540,6 @@ LoadHistoricalSurfaceSearchCache (
 }
 
 void
-LoadEmotionalMetadataCache (Store &store, ProcessorContext &ctx,
-                            double focus, double sensitivity,
-                            double stability)
-{
-  auto rows = store.Execute (
-      "SELECT memory_id, embedding_id, created_at, flashbulb, "
-      "       emotional_intensity, s_arousal_avg, half_life_bonus, "
-      "       cascade_radius, cascade_decay "
-      "FROM memories WHERE embedding_id IS NOT NULL AND kind != 'WORKING' "
-      "ORDER BY created_at DESC, memory_id ASC");
-  std::vector<operations::execution_cache_sidecar_internal::
-                  EmotionalMemoryMetadata>
-      metadata;
-  metadata.reserve (rows.size ());
-  for (const auto &row : rows)
-    {
-      const long long memory_id = ExtractInt64 (row, "memory_id", 0);
-      const long long embedding_id = ExtractInt64 (row, "embedding_id", 0);
-      if (memory_id <= 0 || embedding_id <= 0)
-        continue;
-      metadata.push_back (
-          { memory_id,
-            embedding_id,
-            ExtractInt64 (row, "created_at", 0),
-            ExtractInt64 (row, "flashbulb", 0) != 0,
-            ExtractDouble (row, "emotional_intensity", 0.0),
-            ExtractDouble (row, "s_arousal_avg", 0.0),
-            ExtractDouble (row, "half_life_bonus", 0.0),
-            static_cast<int> (ExtractInt64 (row, "cascade_radius", 0)),
-            ExtractDouble (row, "cascade_decay", 0.0) });
-    }
-  const std::size_t source_query_capacity
-      = internal::experimental_env::Flag (
-            "CORTEXT_EXPERIMENT_EMOTIONAL_WINNER_COLLAPSE")
-            && internal::experimental_env::Flag (
-                "CORTEXT_EXPERIMENT_EMOTIONAL_EDGE_LIMIT")
-            ? static_cast<std::size_t> (operations::
-                  sparse_retrieval_knobs_internal::PublicQueryNodeBudget (
-                      focus, sensitivity, stability))
-            : std::numeric_limits<std::size_t>::max ();
-  operations::emotional_metadata_cache_internal::Reset (
-      ctx, std::move (metadata), source_query_capacity);
-}
-
-void
 LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
                            double focus, double sensitivity,
                            double stability)
@@ -2666,7 +2612,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
           "                CASE WHEN ?1 != 0 THEN cme.created_at END, "
           "                base_e.created_at, 0) AS event_ts, "
           "       m.context, m.source_reliability, "
-          "       m.source_contradiction_count, m.emotional_intensity, "
+          "       m.source_contradiction_count, "
           "       m.s_arousal_avg, m.kind, m.source_id, m.modality, "
           "       CASE WHEN (cme.memory_id IS NOT NULL "
           "                  OR m.embedding_id IS NOT NULL) "
@@ -2727,8 +2673,6 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
               = ExtractDouble (row, "source_reliability", -1.0);
           entry.source_contradiction_count = static_cast<int> (
               ExtractInt64 (row, "source_contradiction_count", 0));
-          entry.emotional_intensity
-              = ExtractDouble (row, "emotional_intensity", 0.0);
           entry.arousal_avg = ExtractDouble (row, "s_arousal_avg", 0.0);
           entry.vector_seed_eligible
               = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
@@ -2773,7 +2717,6 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
                   historical_surface_search_cache_internal::
                       AdvanceSQLiteSparseRouteBackfill (*state, store);
           }
-      LoadEmotionalMetadataCache (store, ctx, focus, sensitivity, stability);
       operations::historical_surface_search_cache_internal::
           SetCurrentSurfaceDatabaseCurrent (
               ctx, current_surface_database_current);

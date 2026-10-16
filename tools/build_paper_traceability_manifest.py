@@ -74,9 +74,6 @@ ALGORITHM_GROUPS = [
         "id": "emotional-propagation-cache",
         "paths": [
             "src/experimental_env.hpp",
-            "src/operations/emotion.cpp",
-            "src/operations/emotion_cascade.cpp",
-            "src/operations/emotional_metadata_cache_internal.hpp",
         ],
     },
     {

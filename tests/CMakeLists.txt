@@ -45,7 +45,6 @@ add_executable(cortext_tests
   operations_reconsolidation.test.cpp
   operations_competition.test.cpp
   operations_constructive_recall.test.cpp
-  operations_emotion.test.cpp
   operations_mood.test.cpp
   operations_sensitivity.test.cpp
   operations_sensitivity_update.test.cpp
@@ -56,7 +55,6 @@ add_executable(cortext_tests
   operations_precision_modulation.test.cpp
 
   operations_graph_retrieval.test.cpp
-  operations_emotion_cascade.test.cpp
 
   operations_consolidation.test.cpp
 	  operations_write_gate.test.cpp

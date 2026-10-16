@@ -10,8 +10,8 @@
 #include <cortext/store/utils.hpp>
 #include "../src/operations/association_fanout_cache_internal.hpp"
 #include "../src/operations/active_signal_embedding_ring_internal.hpp"
+#include "../src/operations/execution_cache_sidecar_internal.hpp"
 #include "../src/operations/bounded_activation_shadow_internal.hpp"
-#include "../src/operations/emotional_metadata_cache_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "../src/operations/rif_active_epoch_cache_internal.hpp"
 #include "../src/operations/rif_state_internal.hpp"
@@ -436,7 +436,6 @@ struct CustomMutationCacheProbeOp : IOperation
     auto &p_ctx = ctx.GetProcessorContext ();
     const auto prior_sidecar = ExecutionCacheState (p_ctx);
     REQUIRE (prior_sidecar);
-    prior_sidecar->emotional_fixed_point.recent_window_ts = 999;
     tx.Execute (
         "INSERT INTO associations(source_memory_id, target_memory_id, "
         "edge_type, weight, last_reinforced) "
@@ -457,8 +456,7 @@ struct CustomMutationCacheProbeOp : IOperation
       {
         const auto sidecar = ExecutionCacheState (p_ctx);
         *sidecar_invalidated
-            = sidecar && sidecar.get () != prior_sidecar.get ()
-              && sidecar->emotional_fixed_point.recent_window_ts != 999;
+            = sidecar && sidecar.get () != prior_sidecar.get ();
       }
   }
 
@@ -621,12 +619,6 @@ struct ExerciseJournalAwareCommitFailureOp : IOperation
             = processor_context.retrieval_surface_index.contains (41LL)
               && processor_context.retrieval_surface_embedding_index.contains (
                   51LL)
-              && sidecar && sidecar->emotional_metadata.valid
-              && sidecar->emotional_metadata.rows_by_memory
-                     .contains (41LL)
-              && sidecar->emotional_metadata
-                     .memory_ids_by_embedding.at (51LL)
-                     == std::vector<long long> { 41LL }
               && processor_context.association_fanout_cache.valid
               && processor_context.association_fanout_cache.in_by_target
                      .at (41LL).front ().memory_id
@@ -681,12 +673,6 @@ struct ExerciseJournalAwareReadOnlyRollbackOp : IOperation
             = processor_context.retrieval_surface_index.contains (41LL)
               && processor_context.retrieval_surface_embedding_index.contains (
                   51LL)
-              && sidecar && sidecar->emotional_metadata.valid
-              && sidecar->emotional_metadata.rows_by_memory
-                     .contains (41LL)
-              && sidecar->emotional_metadata
-                     .memory_ids_by_embedding.at (51LL)
-                     == std::vector<long long> { 41LL }
               && processor_context.index_store.at ("stable")
                      == std::vector<long long> { 7LL, 8LL };
       }
@@ -763,16 +749,6 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
         cache_only_entry.embedding = Eigen::VectorXf::Constant (256, 0.25f);
         processor_context.UpsertRetrievalSurface (
             std::move (cache_only_entry));
-        operations::emotional_metadata_cache_internal::Upsert (
-            processor_context,
-            { 77LL, 88LL, 1500LL, true, 0.8, 0.7, 2.0, 3, 0.5 });
-        const auto sidecar
-            = operations::execution_cache_sidecar_internal::Ensure (
-                processor_context);
-        sidecar->emotional_fixed_point.valid = true;
-        sidecar->emotional_fixed_point.emotional_input_generation
-            = sidecar->emotional_metadata.cascade_input_generation;
-        sidecar->emotional_fixed_point.recent_window_ts = 1234LL;
         processor_context.index_store["stable"] = { 11LL, 12LL };
         processor_context.index_reverse[11LL] = "stable";
         processor_context.procedural_store["stable"][11LL] = 0.75;
@@ -783,13 +759,6 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
         processor_context.retrieval_surface_cache.clear ();
         processor_context.retrieval_surface_index.clear ();
         processor_context.retrieval_surface_embedding_index.clear ();
-        const auto sidecar
-            = operations::execution_cache_sidecar_internal::Ensure (
-                processor_context);
-        sidecar->emotional_metadata.rows_by_memory.clear ();
-        sidecar->emotional_metadata.source_query_order.clear ();
-        sidecar->emotional_fixed_point.valid = false;
-        sidecar->emotional_fixed_point.recent_window_ts = 9999LL;
         processor_context.index_store["stable"] = { 99LL };
         processor_context.index_reverse[11LL] = "mutated";
         processor_context.procedural_store["stable"][11LL] = 0.0;
@@ -808,22 +777,7 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
                   88LL)
               && processor_context.retrieval_surface_cache.size () == 2
               && processor_context.retrieval_surface_cache[0].memory_id == 41LL
-              && processor_context.retrieval_surface_cache[1].memory_id == 77LL
-              && sidecar && sidecar->emotional_metadata.valid
-              && sidecar->emotional_metadata.rows_by_memory
-                     .contains (41LL)
-              && sidecar->emotional_metadata.rows_by_memory
-                     .contains (77LL)
-              && sidecar->emotional_metadata
-                     .source_query_order
-                     == std::vector<long long> { 77LL }
-              && sidecar->emotional_fixed_point.valid
-              && sidecar->emotional_fixed_point
-                         .emotional_input_generation
-                     == sidecar->emotional_metadata.cascade_input_generation
-              && sidecar->emotional_fixed_point
-                         .recent_window_ts
-                     == 1234LL;
+              && processor_context.retrieval_surface_cache[1].memory_id == 77LL;
       }
     if (volatile_restored)
       {

@@ -620,55 +620,9 @@ Earlier builds kept a per-memory `pre_activation` value. An expectation state (`
 
 Earlier builds modelled primacy, recency and von Restorff distinctiveness [@murdock1962serial; @hunt1995subtlety]. They derived a per-signal multiplier from knob-dependent windows (`primacy_window = round(lerp(5, 2, F))`, `recency_window = round(lerp(7, 3, F))`, `von_restorff_multiplier = lerp(1.5, 3.0, S)` and others) and applied it to memory-strength reinforcement. Memory strength was removed (@sec-reinforcement), so nothing consumed the multiplier, and the engine ablation study (2026-10) removed the two operations. Phase-1 ablation, as part of the minor-feedback group, left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
 
-## Emotional Consolidation {#sec-emotional-consolidation}
+## Emotional Consolidation and Cascade (Removed) {#sec-emotional-consolidation}
 
-High-emotion events trigger enhanced consolidation, following @mcgaugh2004amygdala findings. As detailed in @sec-consolidation, consolidation operates on stored memory metadata:
-
-```
-θ_intensity = lerp(0.6, 0.8, 1 − S)
-θ_arousal = lerp(0.4, 0.2, S)
-# Consolidation uses stored memory emotional metadata
-trigger = (m.metadata.s_emotion_max ≥ θ_intensity) AND
-           (m.metadata.s_arousal_avg ≥ θ_arousal)
-```
-
-Flashbulb memories receive extended half-life bonuses based on the memory's peak emotional intensity:
-
-```
-flashbulb_threshold = lerp(0.97, 0.65, S)
-flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × s_emotion_max)
-                           × (1 − 0.3 × s_arousal_avg)
-# Rate stabilizer only suppresses over-frequent flashbulbs; it does not lower
-# thresholds when the recent flashbulb rate is already below target.
-flashbulb_target = lerp(0.02, 0.06, S)
-flashbulb_rate_ewma ← EWMA(flashbulb, α = lerp(0.02, 0.12, S))
-rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × max(0, flashbulb_rate_ewma − flashbulb_target),
-                    1.0, 1.2)
-# Contextual percentile gate (embedding‑only, knob‑derived)
-emo_window = round(lerp(24, 96, S) × lerp(0.8, 1.2, T))
-percentile = lerp(0.95, 0.80, S)
-flashbulb_gain = lerp(1.0, 1.1, S)
-flashbulb_threshold_adj = max(flashbulb_threshold_eff × rate_adjust,
-                              Pctl_{percentile}(recent_emotion_intensity, emo_window))
-flashbulb_arousal = lerp(0.7, 0.5, S)
-flashbulb = ((s_arousal_avg ≥ flashbulb_arousal) AND
-             ((flashbulb_gain × s_emotion_max) ≥ flashbulb_threshold_adj))
-# Half-life bonus uses stored memory emotional peak
-emotional_half_life_bonus = exp(lerp(0, ln(3), S)) ×
-                             (1 + m.metadata.s_emotion_max)
-```
-
-The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation and stored with the memory (@sec-accumulator).
-
-```
-cascade_radius = round(lerp(1, 5, S))
-cascade_decay = lerp(0.7, 0.3, S)
-cascade_source_window_ms = 1000 × consolidation_interval_seconds(T)
-```
-
-Only flashbulb sources created within `cascade_source_window_ms` of the current
-signal participate. The explicit conversion preserves the intended five- to
-sixty-minute window while stored timestamps remain milliseconds since epoch.
+Earlier builds marked high-intensity, high-arousal memories as flashbulb memories, following @mcgaugh2004amygdala. A flashbulb memory got a half-life bonus, detail suppression and gist-component settings. An emotional cascade then propagated decayed intensity and half-life bonus to graph neighbours within a knob-derived radius. The persisted outputs (`flashbulb`, `emotional_intensity`, `half_life_bonus`, `detail_suppression`, `gist_components`, `cascade_radius` and `cascade_decay`) fed memory-strength decay and the cascade itself. Retrieval never read them. The engine ablation study (2026-10) removed both operations, their private metadata cache and the columns. Phase-1 ablation of the affect group left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. Sensitivity's per-signal emotion and mood projections, and their threshold deltas, are a separate mechanism and remain.
 
 ## Synaptic Tagging and Capture (Removed)
 

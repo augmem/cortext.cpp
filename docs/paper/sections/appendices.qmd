@@ -8,7 +8,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
 
 * **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `x_pred_ema = unset`, `outcome_pred = 0`, `φ_t = 0`.
 * **Accumulator defaults (per stream):** `μ_acc = 0_vector`, `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`, `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`, `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`, `drift_accum = 0`, `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc), `prev_x = unset` (μ_acc).
-* **Per-memory defaults (on insert):** `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`, `context = 0_vector`, `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`. Application provenance remains in the separate opaque `source_id`. SQLite defaults remain migration/backstop values for legacy rows. Evidence packets live in ordered `signals` rows, and the constructive-recall ledger starts empty until the initial reconstruction row is appended in `memory_reconstructions`.
+* **Per-memory defaults (on insert):** `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`, `context = 0_vector`, `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`. Application provenance remains in the separate opaque `source_id`. SQLite defaults remain migration/backstop values for legacy rows. Evidence packets live in ordered `signals` rows, and the constructive-recall ledger starts empty until the initial reconstruction row is appended in `memory_reconstructions`.
 * **RLS defaults:** `w_* = w_bootstrap`, `P = diag(P_init(T))` with `P_init(T) = lerp(500, 2000, 1 − T)`, `blender_ready = false`, `blender_update_count = 0`.
 * **Knob-derived control parameters (initialized from priors):** `weight_relevance`, `attention_width`, `coverage_gain_floor`, `mismatch_weight`, `weight_novelty`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`, `rate_target`.
 * **Buffers:** `signal_stream` (μ_acc stream), `score_stream`, `memory_stream`, `recent_memory_centroids`, `index_store`, `procedural_store` start empty.
@@ -146,10 +146,8 @@ detect_memory_usage_and_update_reinforcement()
 update_retrieval_competition()
 apply_reconsolidation()
 record_memory_usage()
-run_emotional_consolidation()
 update_working_memory()
 reset_accumulator_after_flush_or_interrupt()
-update_emotional_cascade()
 ```
 
 The normative execution order for a single timestep t:
@@ -158,7 +156,7 @@ The normative execution order for a single timestep t:
 2.  **Run CoreStage:** initialize priors, update accumulator/drift, compute uncertainty, adaptation, metrics, neuromodulators, composite score, threshold, boundary, spike bypass, and write gate.
 3.  **Run StorageStage:** write the memory unit when the write gate opens, then update Soft Anchor and signal metric persistence from the stored memory id.
 4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any reset, run streaming pacing and graph retrieval, update rate state from the current write decision, compute the MNI gate, and record memory usage/reinforcement.
-5.  **Run FeedbackStage:** apply retrieval competition, reconsolidation, usage counters, emotional consolidation, working memory, accumulator reset, and emotional cascade. A `force_consolidation` maintenance signal runs none of these stages; the processor only seals and recenters the sparse route.
+5.  **Run FeedbackStage:** apply retrieval competition, reconsolidation, usage counters, working memory, and accumulator reset. A `force_consolidation` maintenance signal runs none of these stages; the processor only seals and recenters the sparse route.
 6.  **Interrupt Abort:** If the MNI gate marked a pending abort, the next signal compares similarity to the selected memory against the current unit and resets only when the new signal aligns more with the selected memory.
 
 Timing notes:

@@ -774,7 +774,7 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     const char *secondary;
     double fixed_bound;
   };
-  const std::array<CounterSpec, 16> kCounters { {
+  const std::array<CounterSpec, 13> kCounters { {
     { "retrieval_suppression_id_count",
       "SignalProcessor.retrieval_suppression_id_count", nullptr, 4096.0 },
     { "rollback_full_cache_copy_count",
@@ -806,18 +806,11 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     { "supersession_rows_visited",
       "MemoryStorage.supersession_current_rows_visited",
       "MemoryStorage.supersession_historical_rows_visited", 4096.0 },
-    { "emotional_source_count", "EmotionalCascade.source_count", nullptr,
-      4096.0 },
-    { "emotional_neighbor_count", "EmotionalCascade.neighbor_count", nullptr,
-      4096.0 },
-    { "emotional_update_count", "EmotionalCascade.update_count", nullptr,
-      4096.0 },
   } };
-  constexpr std::array<const char *, 4> kSharedOperations {
+  constexpr std::array<const char *, 3> kSharedOperations {
     "cortext::operations::GraphAugmentedRetrieveCandidates",
     "cortext::operations::ApplyRetrievalCompetition",
     "cortext::operations::MemoryStorage",
-    "cortext::operations::PropagateEmotionalCascade",
   };
 
   struct RunResult

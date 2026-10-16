@@ -811,10 +811,6 @@ TEST_CASE ("Reconsolidation and cascade gates derive from knobs",
   REQUIRE (ReconsolidationPrimaryReconstructionLimit (0.0, 1.0, 0.0)
            > ReconsolidationPrimaryReconstructionLimit (1.0, 0.0, 1.0));
 
-  REQUIRE (CascadeIntensityFloor (0.5, 0.5, 0.5)
-           == Catch::Approx (0.10));
-  REQUIRE (CascadeIntensityFloor (0.5, 0.0, 0.5)
-           > CascadeIntensityFloor (0.5, 1.0, 0.5));
   REQUIRE (AffectThresholdGain (0.5) == Catch::Approx (0.04));
   REQUIRE (AffectThresholdGain (1.0) > AffectThresholdGain (0.0));
   REQUIRE (ThresholdObservedQuantile (0.5, 0.5, 0.5)

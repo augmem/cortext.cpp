@@ -153,18 +153,6 @@ TEST_CASE ("WRateSeconds follows spec: lerp(60, 300, T)",
   REQUIRE (WRateSeconds (0.3) < WRateSeconds (0.7));
 }
 
-TEST_CASE ("EmotionCascadeWindowSeconds follows spec: lerp(300, 3600, T)",
-           "[formula][knobs][emotion]")
-{
-  REQUIRE (EmotionCascadeWindowSeconds (0.0) == 300);
-  REQUIRE (EmotionCascadeWindowSeconds (1.0) == 3600);
-  REQUIRE (EmotionCascadeWindowSeconds (0.5) == 1950);
-
-  // Monotonic
-  REQUIRE (EmotionCascadeWindowSeconds (0.3)
-           < EmotionCascadeWindowSeconds (0.7));
-}
-
 // =============================================================================
 // 5.1.3 Learning Rate Functions (3 functions)
 // =============================================================================
@@ -360,28 +348,6 @@ TEST_CASE ("LambdaMood follows spec: exp(-ln2 * Δt / half_life)",
   REQUIRE (LambdaMood (30.0, 0.3) < LambdaMood (30.0, 0.7));
 }
 
-TEST_CASE ("EmotionalHalfLifeBonus follows spec",
-           "[formula][knobs][decay]")
-{
-  // EmotionalHalfLifeBonus = exp(lerp(0, ln(3), S)) * (1 + emotion_intensity)
-
-  // At S=0, intensity=0: exp(0) * 1 = 1
-  REQUIRE (EmotionalHalfLifeBonus (0.0, 0.0) == Catch::Approx (1.0));
-
-  // At S=1, intensity=0: exp(ln(3)) * 1 = 3
-  REQUIRE (EmotionalHalfLifeBonus (1.0, 0.0) == Catch::Approx (3.0));
-
-  // At S=0, intensity=1: exp(0) * 2 = 2
-  REQUIRE (EmotionalHalfLifeBonus (0.0, 1.0) == Catch::Approx (2.0));
-
-  // At S=1, intensity=1: exp(ln(3)) * 2 = 6
-  REQUIRE (EmotionalHalfLifeBonus (1.0, 1.0) == Catch::Approx (6.0));
-
-  // Higher S means higher bonus
-  REQUIRE (EmotionalHalfLifeBonus (0.8, 0.5)
-           > EmotionalHalfLifeBonus (0.2, 0.5));
-}
-
 // =============================================================================
 // 5.1.6 Working Memory Functions
 // =============================================================================
@@ -522,50 +488,9 @@ TEST_CASE ("LabelFrequencyThreshold follows spec: lerp(5, 15, T)",
 // 5.1.8 Serial Position Effects (8 functions)
 // =============================================================================
 
-TEST_CASE ("GistComponents follows spec: lerp(5, 2, F)",
-           "[formula][knobs][serial]")
-{
-  // GistComponents = round(lerp(5, 2, F))
-  REQUIRE (GistComponents (0.0) == 5);
-  REQUIRE (GistComponents (1.0) == 2);
-  REQUIRE (GistComponents (0.5) == 4); // round(3.5)
-
-  // Monotonic: higher F means fewer gist components
-  REQUIRE (GistComponents (0.3) > GistComponents (0.7));
-}
-
 // =============================================================================
 // 5.1.10 Emotional Functions (10 functions)
 // =============================================================================
-
-TEST_CASE ("ThetaIntensity follows spec: lerp(0.6, 0.8, 1 - S)",
-           "[formula][knobs][emotional]")
-{
-  // ThetaIntensity = lerp(0.6, 0.8, 1 - S)
-  // At S=0: lerp(0.6, 0.8, 1) = 0.8
-  REQUIRE (ThetaIntensity (0.0) == Catch::Approx (0.8));
-  // At S=1: lerp(0.6, 0.8, 0) = 0.6
-  REQUIRE (ThetaIntensity (1.0) == Catch::Approx (0.6));
-  // At S=0.5: lerp(0.6, 0.8, 0.5) = 0.7
-  REQUIRE (ThetaIntensity (0.5)
-           == Catch::Approx (Lerp (0.6, 0.8, 1.0 - SensitivityBias (0.5))));
-
-  // Monotonic: higher S means lower threshold
-  REQUIRE (ThetaIntensity (0.3) > ThetaIntensity (0.7));
-}
-
-TEST_CASE ("ThetaArousal follows spec: lerp(0.4, 0.2, S)",
-           "[formula][knobs][emotional]")
-{
-  // ThetaArousal = lerp(0.4, 0.2, S)
-  REQUIRE (ThetaArousal (0.0) == Catch::Approx (0.4));
-  REQUIRE (ThetaArousal (1.0) == Catch::Approx (0.2));
-  REQUIRE (ThetaArousal (0.5)
-           == Catch::Approx (SensitivityExpected (0.4, 0.2, 0.5)));
-
-  // Monotonic: higher S means lower threshold
-  REQUIRE (ThetaArousal (0.3) > ThetaArousal (0.7));
-}
 
 TEST_CASE ("FlashbulbThreshold follows spec: lerp(0.97, 0.65, SensitivityBias(S))",
            "[formula][knobs][emotional]")
@@ -577,66 +502,6 @@ TEST_CASE ("FlashbulbThreshold follows spec: lerp(0.97, 0.65, SensitivityBias(S)
 
   // Monotonic: higher S means lower threshold
   REQUIRE (FlashbulbThreshold (0.3) > FlashbulbThreshold (0.7));
-}
-
-TEST_CASE ("FlashbulbThresholdEff follows spec",
-           "[formula][knobs][emotional]")
-{
-  const double base = FlashbulbThreshold (0.5);
-  const double p = Lerp (1.25, 0.85, SensitivityBias (0.5));
-  REQUIRE (FlashbulbThresholdEff (0.5, 0.0, 0.0)
-           == Catch::Approx (base));
-  REQUIRE (FlashbulbThresholdEff (0.5, 1.0, 0.0)
-           == Catch::Approx (base * 0.5));
-  REQUIRE (FlashbulbThresholdEff (0.5, 0.0, 1.0)
-           == Catch::Approx (base * std::pow (0.7, p)));
-  REQUIRE (FlashbulbThresholdEff (0.5, 1.0, 1.0)
-           == Catch::Approx (base * 0.5 * std::pow (0.7, p)));
-}
-
-TEST_CASE ("CascadeRadius follows spec: lerp(1, 5, S)",
-           "[formula][knobs][emotional]")
-{
-  // CascadeRadius = round(lerp(1, 5, S))
-  REQUIRE (CascadeRadius (0.0) == 1);
-  REQUIRE (CascadeRadius (1.0) == 5);
-  REQUIRE (CascadeRadius (0.5) == 3);
-
-  // Monotonic
-  REQUIRE (CascadeRadius (0.3) < CascadeRadius (0.7));
-}
-
-TEST_CASE ("CascadeDecay follows spec: lerp(0.7, 0.3, S)",
-           "[formula][knobs][emotional]")
-{
-  // CascadeDecay = lerp(0.7, 0.3, S)
-  REQUIRE (CascadeDecay (0.0) == Catch::Approx (0.7));
-  REQUIRE (CascadeDecay (1.0) == Catch::Approx (0.3));
-  REQUIRE (CascadeDecay (0.5)
-           == Catch::Approx (SensitivityExpected (0.7, 0.3, 0.5)));
-
-  // Monotonic: higher S means faster decay
-  REQUIRE (CascadeDecay (0.3) > CascadeDecay (0.7));
-}
-
-TEST_CASE ("DetailSuppression follows spec: S * (1 - F) * 0.5",
-           "[formula][knobs][emotional]")
-{
-  // DetailSuppression = S * (1 - F) * 0.5
-
-  // At S=0, always 0
-  REQUIRE (DetailSuppression (0.0, 0.0) == Catch::Approx (0.0));
-  REQUIRE (DetailSuppression (0.0, 1.0) == Catch::Approx (0.0));
-
-  // At F=1, always 0 (no detail suppression at high focus)
-  REQUIRE (DetailSuppression (1.0, 1.0) == Catch::Approx (0.0));
-
-  // At S=1, F=0: 1 * 1 * 0.5 = 0.5 (max suppression)
-  REQUIRE (DetailSuppression (1.0, 0.0) == Catch::Approx (0.5));
-
-  REQUIRE (DetailSuppression (0.5, 0.5)
-           == Catch::Approx (SensitivityBias (0.5)
-                             * (1.0 - FocusBias (0.5)) * 0.5));
 }
 
 TEST_CASE ("LabilitySusceptibility follows spec: (1 - T) * (0.5 + 0.5 * S)",
@@ -807,7 +672,6 @@ TEST_CASE ("High Focus + Low Sensitivity interactions",
   REQUIRE (StreamingPacingThreshold (S) > 0.25);
 
   // Multi-parameter: high F mitigates S
-  REQUIRE (DetailSuppression (S, F) < 0.01);
 }
 
 TEST_CASE ("Low Focus + High Sensitivity interactions",
@@ -826,8 +690,6 @@ TEST_CASE ("Low Focus + High Sensitivity interactions",
   REQUIRE (StreamingPacingThreshold (S) < 0.15);
 
   // Multi-parameter: high S amplified with low F
-  REQUIRE (DetailSuppression (S, F) > 0.4);
-  REQUIRE (CascadeRadius (S) >= 4);
 }
 
 TEST_CASE ("Extreme stability values", "[formula][knobs][composite]")
@@ -835,10 +697,8 @@ TEST_CASE ("Extreme stability values", "[formula][knobs][composite]")
   // High stability: long half-lives, slow decay, stable persistence
   double T_high = 1.0;
   REQUIRE (LambdaMood (30.0, T_high) > 0.95);
-  REQUIRE (EmotionCascadeWindowSeconds (T_high) == 3600);
 
   // Low stability: short half-lives, fast decay, responsive
   double T_low = 0.0;
   REQUIRE (LambdaMood (30.0, T_low) == Catch::Approx (0.5));
-  REQUIRE (EmotionCascadeWindowSeconds (T_low) == 300);
 }

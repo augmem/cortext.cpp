@@ -743,8 +743,7 @@ RetrievalStage:
 
 FeedbackStage:
   retrieval competition, reconsolidation,
-  memory usage counters, emotional consolidation,
-  working memory, accumulator reset, emotional cascade
+  memory usage counters, working memory, accumulator reset
 ```
 
 Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so replay
@@ -761,42 +760,9 @@ Clustering consolidation was removed in the 2026-10 engine ablation
 object-store, working-memory, signal-counter, and rate-observation paths are not
 maintenance steps.
 
-Emotional cascade metadata is hydrated into a private, rebuildable processor
-cache keyed by memory id and base embedding id. The cache preserves the SQL
-aggregation contract for shared embeddings by retaining every member row and
-deriving current intensity and half-life bonus with the same per-embedding
-minima. Its bounded flashbulb-source prefix is ordered by descending emotional
-intensity with ascending memory-id ties. Before each cascade, SQLite applies
-the event's intensity, arousal, and recent-window predicates and only then
-orders and truncates to the knob-derived source limit. The private cache
-therefore consumes the same eligible prefix as the SQL fallback: a stale or
-low-arousal high-intensity row cannot hide a lower-intensity eligible source.
-This is selection-equivalence evidence, not a claim that SQLite can always
-locate that prefix in work proportional to the returned limit; a history with
-many higher-intensity ineligible rows may require additional indexed filtering.
-Emotional
-consolidation overwrites the affected embedding family, cascade propagation
-applies the existing maxima, and storage appends rows. Journal-aware rollback discards and rehydrates this
-database-derived cache, while arbitrary custom pipelines retain the complete
-snapshot path. This changes execution ownership only; source thresholds,
-tie order, traversal, decay, updates, and persisted rows are unchanged.
-When multiple emotional sources require traversal, the implementation batches
-them in source-order groups of at most 64 and propagates a bit per source
-through the same breadth-first levels. Each bit retains its source-specific
-radius, and reached embeddings are emitted at the first depth observed for
-that source. Batches are processed in original source order, so the existing
-first-source-wins update rule is unchanged. This shares edge visits without
-using source identity or modality as an optimization key.
-The cache also records the memory nodes from which each source could still
-expand within its radius. An incrementally inserted association can therefore
-advance the fixed point without another traversal when neither endpoint lies
-in any source's expansion footprint. A topology rebuild invalidates the
-footprint conservatively. Ordinary unconnected non-source inserts and
-monotone increases to target emotional values likewise preserve the fixed
-point; source changes and target-value decreases still re-arm it. A traversal
-that reaches either its update ceiling or its physical edge-visit ceiling is
-only a partial prefix and never records a fixed point, so the next event
-revisits the unresolved graph tail.
+Emotional consolidation and the emotional cascade were removed in the 2026-10
+engine ablation, together with their private emotional-metadata cache, fixed
+point and topology footprint (@sec-emotional-consolidation).
 
 ## Retrieval Implementation
 

@@ -58,7 +58,6 @@
 #include "cortext/operations/coherence.hpp"
 #include "cortext/operations/competition.hpp"
 #include "cortext/operations/effective_focus.hpp"
-#include "cortext/operations/emotion.hpp"
 #include "cortext/operations/focus.hpp"
 #include "cortext/operations/focus_spread.hpp"
 #include "cortext/operations/interrupt_gate.hpp"
@@ -87,7 +86,6 @@
 #include "cortext/operations/write_gate.hpp"
 
 // Phase 4: Knowledge Graph Enhancement
-#include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext
@@ -1896,7 +1894,6 @@ private:
 std::unique_ptr<IOperation>
 BuildRootOperationSet (bool probe_mode)
 {
-  using cortext::operations::ApplyEmotionalConsolidation;
   using cortext::operations::ApplyReconsolidation;
   using cortext::operations::ApplyRetrievalCompetition;
   using cortext::operations::CheckSpikeBypass;
@@ -1918,7 +1915,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::InitializeStabilityPriors;
   using cortext::operations::MemoryStorage;
   using cortext::operations::PersistSignalMetrics;
-  using cortext::operations::PropagateEmotionalCascade;
   using cortext::operations::ResetAccumulatorAfterFlush;
   using cortext::operations::ResetAccumulatorOnInterrupt;
   using cortext::operations::UpdateAccumulator;
@@ -1969,9 +1965,8 @@ BuildRootOperationSet (bool probe_mode)
   using FeedbackStage = OperationSet<
       ApplyRetrievalCompetition,
       ApplyReconsolidation,
-      RecordMemoryUsage, ApplyEmotionalConsolidation, WorkingMemory,
-      ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
-      PropagateEmotionalCascade>;
+      RecordMemoryUsage, WorkingMemory,
+      ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt>;
 
   using ProbeRoot = OperationSet<CoreStage, RetrievalStage>;
   using FullRoot

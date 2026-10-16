@@ -383,29 +383,6 @@ TEST_CASE ("Max wait drift decreases with Focus",
 // 5.3.7 Emotional Cascade Parameters
 // =============================================================================
 
-TEST_CASE ("Emotional cascade window increases with Stability",
-           "[regression][emotion]")
-{
-  SECTION ("Low stability: 5 minutes (300s)")
-  {
-    REQUIRE (EmotionCascadeWindowSeconds (0.0) == 300);
-  }
-
-  SECTION ("High stability: 1 hour (3600s)")
-  {
-    REQUIRE (EmotionCascadeWindowSeconds (1.0) == 3600);
-  }
-
-  SECTION ("Interval increases monotonically")
-  {
-    for (double T = 0.0; T < 1.0; T += 0.1)
-      {
-        REQUIRE (EmotionCascadeWindowSeconds (T)
-                 < EmotionCascadeWindowSeconds (T + 0.1));
-      }
-  }
-}
-
 // =============================================================================
 // 5.3.8 Knowledge Graph Parameters (Phase 4 additions)
 // =============================================================================
@@ -437,7 +414,6 @@ TEST_CASE ("High Sensitivity affects all plasticity parameters consistently",
   // All should be "more responsive" / faster adaptation
   REQUIRE (AlphaMood (S) > 0.17);                // Faster mood update
   REQUIRE (StreamingPacingThreshold (S) < 0.15); // More frequent checks
-  REQUIRE (CascadeRadius (S) >= 4);              // Wider emotional cascade
   REQUIRE (FlashbulbThreshold (S) < 0.75);       // Lower flashbulb trigger
 }
 
@@ -449,5 +425,4 @@ TEST_CASE ("High Stability affects all persistence parameters consistently",
   // All should be "more persistent" / slower decay
   REQUIRE (LambdaMood (1.0, T) > 0.99);         // Slower mood decay
   REQUIRE (WRateSeconds (T) > 250);             // Longer write intervals
-  REQUIRE (EmotionCascadeWindowSeconds (T) > 3000); // Longer affect window
 }

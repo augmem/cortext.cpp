@@ -499,7 +499,6 @@ struct ProcessorContext
     std::string modality;
     double source_reliability = -1.0;
     int source_contradiction_count = 0;
-    double emotional_intensity = 0.0;
     double arousal_avg = 0.0;
     bool is_association = false;
     bool vector_seed_eligible = true;

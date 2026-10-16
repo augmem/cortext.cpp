@@ -3,7 +3,6 @@
 #include "cortext/processor/processor_context.hpp"
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
-#include "execution_cache_sidecar_internal.hpp"
 #include <algorithm>
 #include <any>
 #include <cmath>
@@ -110,7 +109,7 @@ UpsertFanoutEdge (
     std::vector<ProcessorContext::AssociationFanoutEdge> &edges,
     long long memory_id, long long embedding_id, const std::string &edge_type,
     double weight, long long last_reinforced, double *old_weight,
-    long long *old_last_reinforced, long long *old_embedding_id)
+    long long *old_last_reinforced)
 {
   for (auto &edge : edges)
     {
@@ -123,10 +122,6 @@ UpsertFanoutEdge (
           if (old_last_reinforced)
             {
               *old_last_reinforced = edge.last_reinforced;
-            }
-          if (old_embedding_id)
-            {
-              *old_embedding_id = edge.embedding_id;
             }
           edge.embedding_id = embedding_id;
           edge.weight = weight;
@@ -142,8 +137,7 @@ UpsertFanoutEdge (
 }
 
 inline void
-UpsertAssociation (ProcessorContext &p_ctx,
-                   ProcessorContext::AssociationFanoutCache &cache,
+UpsertAssociation (ProcessorContext::AssociationFanoutCache &cache,
                    long long source_memory_id, long long target_memory_id,
                    long long source_embedding_id, long long target_embedding_id,
                    const std::string &edge_type, double weight,
@@ -156,24 +150,15 @@ UpsertAssociation (ProcessorContext &p_ctx,
     }
   double old_weight = 0.0;
   long long old_last_reinforced = 0;
-  long long old_target_embedding_id = 0;
   auto &out_edges = cache.out_by_source[source_memory_id];
   const bool inserted = UpsertFanoutEdge (
       out_edges, target_memory_id, target_embedding_id, edge_type, weight,
-      last_reinforced, &old_weight, &old_last_reinforced,
-      &old_target_embedding_id);
+      last_reinforced, &old_weight, &old_last_reinforced);
 
   auto &in_edges = cache.in_by_target[target_memory_id];
   (void)UpsertFanoutEdge (in_edges, source_memory_id, source_embedding_id,
                           edge_type, weight, last_reinforced, nullptr,
-                          nullptr, nullptr);
-
-  if (inserted || old_target_embedding_id != target_embedding_id)
-    {
-      auto state = execution_cache_sidecar_internal::Ensure (p_ctx);
-      state->association_topology_changes.inserted_edges.emplace_back (
-          source_memory_id, target_memory_id);
-    }
+                          nullptr);
 
   if (inserted)
     {
@@ -203,7 +188,6 @@ Ensure (Store *store, ProcessorContext &p_ctx)
       return nullptr;
     }
   auto &cache = p_ctx.association_fanout_cache;
-  const auto sidecar = execution_cache_sidecar_internal::Ensure (p_ctx);
   if (cache.valid
       && cache.last_fingerprint_check_signal == p_ctx.signals_processed)
     {
@@ -227,10 +211,6 @@ Ensure (Store *store, ProcessorContext &p_ctx)
   cache.consolidation_count = p_ctx.consolidation_count;
   cache.out_by_source.clear ();
   cache.in_by_target.clear ();
-  auto &topology_changes = sidecar->association_topology_changes;
-  topology_changes.reset = true;
-  topology_changes.inserted_edges.clear ();
-  sidecar->emotional_cascade_topology_footprint.valid = false;
 
   auto rows = store->Execute (
       "SELECT a.source_memory_id, a.target_memory_id, a.edge_type, "

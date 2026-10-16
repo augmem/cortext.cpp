@@ -4,7 +4,6 @@
 #include "historical_surface_search_cache_internal.hpp"
 #include "retrieval_trace_state.hpp"
 #include "association_fanout_cache_internal.hpp"
-#include "emotional_metadata_cache_internal.hpp"
 #include "signal_record_rollback_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -1322,10 +1321,6 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           = mem_id_rows.empty ()
                 ? 0
                 : AnyToLongLong (mem_id_rows[0].at ("id")).value_or (0);
-      emotional_metadata_cache_internal::Upsert (
-          p_ctx,
-          { memory_id, embedding_id, static_cast<long long> (end_ts), false,
-            0.0, s_arousal_avg, 0.0, 0, 0.0 });
       std::vector<historical_surface_search_cache_internal::Entry>
           inserted_search_entries;
       inserted_search_entries.push_back (
@@ -1514,7 +1509,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                       break;
                     }
                   association_fanout_cache::UpsertAssociation (
-                      p_ctx, fanout_cache, memory_id, edge.target_memory_id,
+                      fanout_cache, memory_id, edge.target_memory_id,
                       embedding_id, target_embedding_id, "supersedes",
                       edge.weight, static_cast<long long> (end_ts));
                 }

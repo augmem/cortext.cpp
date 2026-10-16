@@ -873,16 +873,6 @@ GetCoreMigrations ()
           },
       },
       {
-          33,
-          "Index bounded emotional source reranking",
-          {
-              "CREATE INDEX IF NOT EXISTS idx_memories_flashbulb_intensity "
-              "ON memories(emotional_intensity DESC, memory_id ASC) "
-              "WHERE flashbulb = 1 AND embedding_id IS NOT NULL "
-              "AND kind != 'WORKING'",
-          },
-      },
-      {
           34,
           "Index bounded unclustered consolidation candidates",
           {
@@ -961,6 +951,20 @@ GetCoreMigrations ()
               "ALTER TABLE state DROP COLUMN drift_weight",
               "ALTER TABLE state DROP COLUMN retention_ema",
               "ALTER TABLE state DROP COLUMN delta_half_life_adj",
+          },
+      },
+      {
+          42,
+          "Drop the removed emotional-consolidation and cascade columns",
+          {
+              "DROP INDEX IF EXISTS idx_memories_flashbulb_intensity",
+              "ALTER TABLE memories DROP COLUMN flashbulb",
+              "ALTER TABLE memories DROP COLUMN emotional_intensity",
+              "ALTER TABLE memories DROP COLUMN half_life_bonus",
+              "ALTER TABLE memories DROP COLUMN detail_suppression",
+              "ALTER TABLE memories DROP COLUMN gist_components",
+              "ALTER TABLE memories DROP COLUMN cascade_radius",
+              "ALTER TABLE memories DROP COLUMN cascade_decay",
           },
       },
   };

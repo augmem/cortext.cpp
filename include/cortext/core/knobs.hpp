@@ -1927,14 +1927,6 @@ WRateSeconds (double T)
   return static_cast<int> (std::round (Lerp (60.0, 300.0, T)));
 }
 
-// Emotional-cascade lookback window (seconds)
-inline int
-EmotionCascadeWindowSeconds (double T)
-{
-  // Stable memories retain a longer affective-neighbor window.
-  return static_cast<int> (std::round (Lerp (300.0, 3600.0, T)));
-}
-
 // Escalation multiplier for consolidation urgency — Algorithm 28b
 inline double
 ConsolidationEscalationMultiplier (double T)
@@ -2136,89 +2128,11 @@ LabilitySusceptibility (double S, double T)
   return (1.0 - T) * (0.5 + 0.5 * SensitivityBias (S));
 }
 
-// --- Algorithm 23 (Emotional Consolidation Tags) Helpers ---
-inline double
-ThetaIntensity (double S)
-{
-  // θ_intensity = lerp(0.6, 0.8, 1 − S)
-  return Lerp (0.6, 0.8, 1.0 - SensitivityBias (S));
-}
-
-inline double
-ThetaArousal (double S)
-{
-  // θ_arousal = lerp(0.4, 0.2, S)
-  return Lerp (0.4, 0.2, SensitivityBias (S));
-}
-
 inline double
 FlashbulbThreshold (double S)
 {
   // flashbulb_threshold = lerp(0.97, 0.65, S)
   return Lerp (0.97, 0.65, SensitivityBias (S));
-}
-
-inline int
-CascadeRadius (double S)
-{
-  // cascade_radius = round(lerp(1, 5, S))
-  return static_cast<int> (std::round (Lerp (1.0, 5.0, SensitivityBias (S))));
-}
-
-inline double
-CascadeDecay (double S)
-{
-  // cascade_decay = lerp(0.7, 0.3, S)
-  return Lerp (0.7, 0.3, SensitivityBias (S));
-}
-
-inline double
-CascadeIntensityFloor (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.10
-                    * (1.0 + 0.08 * (f - f0) - 0.18 * (s - s0)
-                       + 0.14 * (t - 0.5)),
-                0.04, 0.18);
-}
-
-inline double
-EmotionalHalfLifeBonus (double S, double emotion_intensity)
-{
-  // emotional_half_life_bonus = exp(lerp(0, ln(3), S)) × (1 +
-  // emotion_intensity)
-  const double ln3 = std::log (3.0);
-  return std::exp (Lerp (0.0, ln3, SensitivityBias (S)))
-         * (1.0 + emotion_intensity);
-}
-
-inline double
-DetailSuppression (double S, double F)
-{
-  // detail_suppression = S × (1 − F) × 0.5
-  return SensitivityBias (S) * (1.0 - FocusBias (F)) * 0.5;
-}
-
-inline int
-GistComponents (double F)
-{
-  // gist_components = round(lerp(5, 2, F))
-  return static_cast<int> (std::round (Lerp (5.0, 2.0, FocusBias (F))));
-}
-
-inline double
-FlashbulbThresholdEff (double S, double emotion_intensity, double arousal)
-{
-  // flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × intensity)
-  //                           × (1 − 0.3 × arousal)^{p(S)}
-  const double base = FlashbulbThreshold (S);
-  const double p = Lerp (1.25, 0.85, SensitivityBias (S));
-  return base * (1.0 - 0.5 * emotion_intensity)
-         * std::pow (1.0 - 0.3 * arousal, p);
 }
 
 inline int
@@ -2228,20 +2142,6 @@ EmotionHistoryWindow (double S, double T)
   const double t = Clamp (T, 0.0, 1.0);
   const double base = Lerp (24.0, 96.0, s) * Lerp (0.8, 1.2, t);
   return static_cast<int> (std::round (Clamp (base, 16.0, 160.0)));
-}
-
-inline double
-FlashbulbPercentile (double S)
-{
-  const double s = SensitivityBias (S);
-  return Lerp (0.95, 0.80, s);
-}
-
-inline double
-FlashbulbGain (double S)
-{
-  const double s = SensitivityBias (S);
-  return Lerp (1.0, 1.1, s);
 }
 
 // --- Algorithm 4b (Mood Integrator) Helpers ---
