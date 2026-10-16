@@ -447,32 +447,6 @@ RetrievalSeedSearchK (double F, double S, double T, int seed_k)
 }
 
 inline int
-RetrievalGraphExpansionRowLimit (double F, double S, double T, int result_k)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double multiplier = Lerp (18.0, 8.0, f) * Lerp (1.08, 0.92, s)
-                            * Lerp (1.05, 0.90, t);
-  const int cap = static_cast<int> (
-      std::round (Lerp (768.0, 256.0, f) * Lerp (1.05, 0.90, t)));
-  return std::max (result_k, std::min (
-                                 cap, static_cast<int> (std::round (
-                                          std::max (1, result_k) * multiplier))));
-}
-
-inline int
-RetrievalGraphExpansionFanout (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (48.0, 16.0, f) * Lerp (0.90, 1.20, s)
-                     * Lerp (1.05, 0.85, t);
-  return static_cast<int> (std::round (Clamp (raw, 8.0, 64.0)));
-}
-
-inline int
 RetrievalDurableSourceLinkFanout (double F, double S, double T,
                                   int candidate_count)
 {
@@ -485,26 +459,6 @@ RetrievalDurableSourceLinkFanout (double F, double S, double T,
                          2.0, 16.0)));
   return std::max (std::max (1, candidate_count),
                    std::max (1, candidate_count) * per_candidate);
-}
-
-struct RetrievalGraphExpansionEvidencePolicy
-{
-  int min_association_count;
-  int min_label_count;
-};
-
-inline RetrievalGraphExpansionEvidencePolicy
-RetrievalGraphExpansionEvidenceCounts (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return { std::max (0, static_cast<int> (
-                             std::round (Lerp (3.0, 1.0, f)
-                                         * Lerp (1.0, 0.85, t)))),
-           std::max (0, static_cast<int> (
-                             std::round (Lerp (0.0, 3.0, s)
-                                         * Lerp (1.0, 0.85, f)))) };
 }
 
 inline int
@@ -1042,17 +996,6 @@ RetrievalGraphExpandedRagSeedWeight (double F, double S, double T)
   return Clamp (Lerp (0.72, 0.90, f) * Lerp (1.02, 0.96, s)
                     * Lerp (1.00, 0.96, t),
                 0.60, 0.95);
-}
-
-inline double
-RetrievalGraphExpandedRagGraphWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.16, 0.34, s) * Lerp (1.14, 0.78, f)
-                    * Lerp (1.04, 0.92, t),
-                0.08, 0.40);
 }
 
 inline double

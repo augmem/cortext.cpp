@@ -138,7 +138,7 @@ stability(m) ← clamp(stability(m), 0.0, 2.0)
 Retrieved vs used:
 
 ```
-retrieved(m) = memory returned by retrieval (vector or graph expansion)
+retrieved(m) = memory returned by vector retrieval
 used(m) = retrieved(m) AND injected into active context after gate decisions
 ```
 
@@ -167,13 +167,8 @@ co-occurrence is not evidence that two memories were used together. This also
 prevents repeated noisy packets from turning boilerplate into durable graph
 hubs.
 
-Existing *reinforces* edges remain valid association inputs for stores and
-explicit graph workflows that already contain them. They are decayed and
-pruned only during explicit consolidation cycles (triggered externally via
-`Consolidate()` or `cortext_consolidate`), matching the system's idle-time
-consolidation policy. At retrieval time their weight is degree-normalized before
-the bounded graph bonus is applied, preventing high-degree hubs from dominating
-candidate rank.
+Retrieval no longer traverses association edges, so existing *reinforces*
+edges in older stores are inert.
 
 ## Causal Feedback Loop {#sec-feedback}
 

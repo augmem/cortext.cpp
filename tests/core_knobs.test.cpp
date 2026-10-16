@@ -474,10 +474,6 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
            > RetrievalGraphExpandedRagTemporalRankScore (0.5, 0.5, 0.5, 1));
   REQUIRE (RetrievalContextReinstatementAlpha (0.5, 0.5, 1.0)
            < RetrievalContextReinstatementAlpha (0.5, 0.5, 0.0));
-  REQUIRE (RetrievalGraphExpansionFanout (1.0, 0.5, 0.5)
-           < RetrievalGraphExpansionFanout (0.0, 0.5, 0.5));
-  REQUIRE (RetrievalGraphExpansionFanout (0.5, 1.0, 0.5)
-           > RetrievalGraphExpansionFanout (0.5, 0.0, 0.5));
   REQUIRE (RetrievalProceduralSeedReserveCount (0.0, 1.0, 0.0, 2)
            >= RetrievalProceduralSeedReserveCount (1.0, 0.0, 1.0, 2));
   REQUIRE (RetrievalProceduralSeedFanout (0.5, 1.0, 0.5)
@@ -554,10 +550,6 @@ TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
 
   REQUIRE (RetrievalDurableSourceLinkFanout (0.5, 1.0, 0.5, 4)
            > RetrievalDurableSourceLinkFanout (0.5, 0.0, 0.5, 4));
-  const auto evidence_mid
-      = RetrievalGraphExpansionEvidenceCounts (0.5, 0.5, 0.5);
-  REQUIRE (evidence_mid.min_association_count == 2);
-  REQUIRE (evidence_mid.min_label_count == 0);
 
   REQUIRE (ObservedRetentionHistoryLimit (0.5, 0.5, 1.0)
            > ObservedRetentionHistoryLimit (0.5, 0.5, 0.0));

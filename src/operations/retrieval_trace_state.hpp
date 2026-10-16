@@ -9,7 +9,6 @@ namespace cortext::operations::retrieval_trace
 struct ActivationLedger
 {
   double base_level = 0.0;
-  double spreading_activation = 0.0;
   double partial_match_penalty = 0.0;
   double recent_inhibition = 0.0;
   double utility = 0.0;

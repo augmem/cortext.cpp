@@ -35,7 +35,7 @@ only the intended surfaces. The verification pass used the following gates.
 | runtime code removal | repository scans over `include/`, `src/`, `bindings/`, `CMakeLists.txt`, and runtime examples find no retained internal decoder, adapter-registry, semantic batch, static taxonomy, fact-layer, or processor-local STM-shadow production path; experiment harnesses under `scripts/` and `tools/` are explicit non-runtime tooling |
 | dependency removal | `.gitmodules` and the worktree no longer contain the removed decoder/runtime submodules; the remaining third-party tree is limited to SQLite/vector/object storage, opt-out OpenTelemetry, and build/test dependencies |
 | API removal | public consolidation mode enums and mode-specific C API calls are gone; bindings no longer expose the removed mode fields |
-| current behavior | `Cortext::Consolidate()` and `Signal::force_consolidation` drive the one retained consolidation path; graph retrieval returns source-backed memory context from vector and graph evidence |
+| current behavior | `Cortext::Consolidate()` and `Signal::force_consolidation` drive the one retained consolidation path; graph retrieval returns source-backed memory context from vector evidence |
 | paper consistency | this section, @sec-consolidation, @sec-implementation, and @sec-optimization describe the current branch rather than deleted adapter-era workflows |
 
 This is intentionally a hard cut. No compatibility aliases, deprecated enum
@@ -965,6 +965,7 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | focus feedback (`ApplyFocusFeedback`) | 0/250, 0/48, 0/40 (as part of the minor-feedback group) |
 | supersession exclusion (seed-time filter of `supersedes` targets, its eligibility sidecar and the SQL `instr()` superseded-id filter) | Not neutral: every packet changes, and recall rises. Packet gold-turn recall +0.025 on S, +0.018 on Eval 1, +0.066 on BEAM-10M conversation 7. Seed gold share +0.136, +0.158 and +0.081. Haiku judge (rubric v2) sufficiency -0.006 ± 0.051 on S and -0.005 ± 0.039 on Eval 1. Misleading 0.021 → 0.021 and 0.022 → 0.016. Instructions +2.5%. `supersedes` edges and superseded-predecessor hydration stay |
 | clustering consolidation (`EvaluateConsolidation`, scoring gate, clusterer, shallow `ASSOCIATION` replay, typed-edge graph build) | Inert at default knobs: 0 candidates per pass because stability never fell below 1.0. With a stability fix that made it fire, packet recall moved -0.012 on S, -0.010 on Eval 1 and 0 on BEAM. Judge sufficiency +0.012 ± 0.023 on S and -0.009 ± 0.023 on Eval 1. Instructions +1–2%. Packets are byte-identical to the inert pipeline after removal |
+| graph expansion (one-hop traversal of `co_occurs`/`similar_to`/`reinforces`/`causes`/`derived_from`/episode edges with a bounded graph bonus) | 0/250, 0/48, 0/40 in phase 1, where only `supersedes` edges existed. After clustering consolidation was removed, no traversable edge is written |
 
 ## Experimental Interpretation
 

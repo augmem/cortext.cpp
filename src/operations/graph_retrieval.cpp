@@ -43,11 +43,9 @@ struct Candidate
   Eigen::VectorXf embedding;
   double seed_score = 0.0;
   double source_confidence = 0.0;
-  double graph_score = 0.0;
   double temporal_score = 0.0;
   double superseded_penalty = 0.0;
   double score = 0.0;
-  bool direct_seed = false;
 };
 
 struct SeedCacheProfile
@@ -1422,14 +1420,11 @@ InsertOrBoost (std::unordered_map<long long, Candidate> &candidates,
       it->second.source_confidence
           = std::max (it->second.source_confidence,
                       candidate.source_confidence);
-      it->second.graph_score = std::max (it->second.graph_score,
-                                         candidate.graph_score);
       it->second.temporal_score = std::max (it->second.temporal_score,
                                             candidate.temporal_score);
       it->second.superseded_penalty = std::max (
           it->second.superseded_penalty, candidate.superseded_penalty);
       it->second.score = std::max (it->second.score, candidate.score);
-      it->second.direct_seed = it->second.direct_seed || candidate.direct_seed;
       if (it->second.start_ts <= 0)
         {
           it->second.start_ts = candidate.start_ts;
@@ -1450,16 +1445,6 @@ SemanticFirstScore (double semantic_score, double temporal_score)
   return semantic
          + (1.0 - semantic) * kTieBreakScale
                * core::Clamp (temporal_score, 0.0, 1.0);
-}
-
-bool
-RetrievalEdgeType (const std::string &edge_type)
-{
-  return edge_type == "co_occurs" || edge_type == "similar_to"
-         || edge_type == "reinforces" || edge_type == "causes"
-         || edge_type == "derived_from" || edge_type == "next_in_episode"
-         || edge_type == "prev_in_episode"
-         || edge_type == "within_same_event";
 }
 
 std::vector<Candidate>
@@ -1563,12 +1548,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       = core::RetrievalSeedSearchK (F, S, T, seed_limit);
   const int fallback_materialization_limit
       = core::RetrievalSeedSearchK (F, S, T, seed_search_limit);
-  const int fanout = std::max (
-      0, core::RetrievalGraphExpansionFanout (F, S, T));
   const std::uint64_t exclusion_ts
       = context.GetWriteExclusionTs ().value_or (signal.timestamp);
-  const double graph_weight
-      = core::RetrievalGraphExpandedRagGraphWeight (F, S, T);
   const double duplicate_threshold
       = core::SupersessionDuplicateThreshold (F, S, T);
   const int embedding_dim = static_cast<int> (signal.embedding.size ());
@@ -1623,8 +1604,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   auto &p_ctx = context.GetProcessorContext ();
 
   start_profile_timing ();
-  auto *fanout_cache
-      = association_fanout_cache::Ensure (context.GetStore (), p_ctx);
+  // Retrieval no longer expands over association edges, but it keeps the
+  // fanout cache current once per signal for reconsolidation, the emotional
+  // cascade and incremental supersedes upserts in the next MemoryStorage.
+  (void)association_fanout_cache::Ensure (context.GetStore (), p_ctx);
   profile_timing ("GraphRetrieve.family_index", section_start);
 
   std::vector<std::map<std::string, std::any>> rows;
@@ -1927,7 +1910,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
             signal.timestamp, candidate.start_ts, F, S, T);
         candidate.score = SemanticFirstScore (
             candidate.seed_score, candidate.temporal_score);
-        candidate.direct_seed = true;
         result.push_back (std::move (candidate));
       }
     if (rows_are_current)
@@ -1975,210 +1957,33 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   profile_timing ("GraphRetrieve.seed_rank", section_start);
 
   std::unordered_map<long long, Candidate> candidates;
-  candidates.reserve (seeded.size ()
-                      + static_cast<std::size_t> (std::max (0, fanout)));
+  candidates.reserve (seeded.size ());
   for (const auto &candidate : seeded)
     {
       InsertOrBoost (candidates, candidate);
     }
 
-  if (fanout_cache && fanout > 0 && !seeded.empty ())
-    {
-      start_profile_timing ();
-      auto reinforces_degree = [fanout_cache] (long long memory_id) {
-        std::size_t result = 0;
-        if (auto it = fanout_cache->out_by_source.find (memory_id);
-            it != fanout_cache->out_by_source.end ())
-          {
-            result += static_cast<std::size_t> (std::count_if (
-                it->second.begin (), it->second.end (), [] (const auto &edge) {
-                  return edge.edge_type == "reinforces";
-                }));
-          }
-        if (auto it = fanout_cache->in_by_target.find (memory_id);
-            it != fanout_cache->in_by_target.end ())
-          {
-            result += static_cast<std::size_t> (std::count_if (
-                it->second.begin (), it->second.end (), [] (const auto &edge) {
-                  return edge.edge_type == "reinforces";
-                }));
-          }
-        return std::max<std::size_t> (1, result);
-      };
-      auto expand_edge = [&] (
-                             const Candidate &seed,
-                             const ProcessorContext::AssociationFanoutEdge &edge,
-                             int &expanded) {
-        if (expanded >= fanout || !RetrievalEdgeType (edge.edge_type)
-            || edge.memory_id <= 0 || edge.memory_id == seed.memory_id)
-          {
-            return;
-          }
-        const auto surface_it = p_ctx.retrieval_surface_index.find (
-            edge.memory_id);
-        if (surface_it == p_ctx.retrieval_surface_index.end ()
-            || surface_it->second >= p_ctx.retrieval_surface_cache.size ())
-          {
-            return;
-          }
-        const auto &surface
-            = p_ctx.retrieval_surface_cache[surface_it->second];
-        if (surface.memory_id <= 0 || surface.embedding_id <= 0
-            || surface.start_ts >= static_cast<long long> (exclusion_ts)
-            || (surface.kind != "LONG_TERM" && surface.kind != "ASSOCIATION")
-            || surface.embedding.size () != embedding_dim)
-          {
-            return;
-          }
-        Candidate candidate;
-        candidate.memory_id = surface.memory_id;
-        candidate.embedding_id = surface.embedding_id;
-        candidate.start_ts = surface.start_ts;
-        candidate.embedding = surface.embedding;
-        candidate.seed_score = core::Map01 (
-            Cosine (signal.embedding, candidate.embedding));
-        candidate.source_confidence = candidate.seed_score;
-        candidate.temporal_score = TemporalScore (
-            signal.timestamp, candidate.start_ts, F, S, T);
-        candidate.graph_score = core::Clamp (edge.weight, 0.0, 1.0);
-        if (edge.edge_type == "reinforces")
-          {
-            const double normalization = std::sqrt (
-                static_cast<double> (reinforces_degree (seed.memory_id))
-                * static_cast<double> (
-                    reinforces_degree (candidate.memory_id)));
-            candidate.graph_score /= std::max (1.0, normalization);
-          }
-        const double semantic_score = SemanticFirstScore (
-            candidate.seed_score, candidate.temporal_score);
-        const double graph_bonus = std::min (
-            0.08, graph_weight * candidate.graph_score);
-        candidate.score = semantic_score
-                          + (1.0 - semantic_score) * graph_bonus;
-        InsertOrBoost (candidates, std::move (candidate));
-        ++expanded;
-      };
-
-      for (const auto &seed : seeded)
-        {
-          int expanded = 0;
-          if (auto it = fanout_cache->out_by_source.find (seed.memory_id);
-              it != fanout_cache->out_by_source.end ())
-            {
-              for (const auto &edge : it->second)
-                {
-                  expand_edge (seed, edge, expanded);
-                }
-            }
-          if (auto it = fanout_cache->in_by_target.find (seed.memory_id);
-              it != fanout_cache->in_by_target.end ())
-            {
-              for (const auto &edge : it->second)
-                {
-                  expand_edge (seed, edge, expanded);
-                }
-            }
-        }
-      profile_timing ("GraphRetrieve.association_expansion", section_start);
-    }
-
   start_profile_timing ();
-  std::vector<Candidate> direct_candidates;
-  std::vector<Candidate> expanded_candidates;
-  direct_candidates.reserve (seeded.size ());
-  expanded_candidates.reserve (candidates.size ());
+  // Candidates are the already family-collapsed seed set.
+  std::vector<Candidate> ranked_all;
+  ranked_all.reserve (candidates.size ());
   for (auto &[memory_id, candidate] : candidates)
     {
       (void)memory_id;
-      if (candidate.direct_seed)
-        {
-          direct_candidates.push_back (std::move (candidate));
-        }
-      else
-        {
-          expanded_candidates.push_back (std::move (candidate));
-        }
+      ranked_all.push_back (std::move (candidate));
     }
-  // Direct candidates came from the already family-collapsed seed set. Graph
-  // boosts can update their scores but cannot introduce another direct family.
-  SortCandidates (direct_candidates);
-  expanded_candidates = SelectFamilyRepresentatives (
-      std::move (expanded_candidates), duplicate_threshold,
-      static_cast<int> (candidates.size ()));
+  SortCandidates (ranked_all);
 
-  std::vector<Candidate> ranked_all;
-  ranked_all.reserve (direct_candidates.size ()
-                      + expanded_candidates.size ());
-  ranked_all.insert (ranked_all.end (), direct_candidates.begin (),
-                     direct_candidates.end ());
-  ranked_all.insert (ranked_all.end (), expanded_candidates.begin (),
-                     expanded_candidates.end ());
-  if (!expanded_candidates.empty ())
-    {
-      SortCandidates (ranked_all);
-    }
-
-  std::vector<Candidate> ranked;
-  ranked.reserve (std::min<std::size_t> (
-      ranked_all.size (), static_cast<std::size_t> (output_limit)));
+  const auto direct_count = std::min<std::size_t> (
+      ranked_all.size (), static_cast<std::size_t> (output_limit));
+  std::vector<Candidate> ranked (
+      ranked_all.begin (),
+      ranked_all.begin () + static_cast<std::ptrdiff_t> (direct_count));
   std::unordered_set<long long> selected_memory_ids;
-  selected_memory_ids.reserve (static_cast<std::size_t> (output_limit));
-  if (expanded_candidates.empty ())
+  selected_memory_ids.reserve (direct_count);
+  for (const auto &candidate : ranked)
     {
-      const auto direct_count = std::min<std::size_t> (
-          direct_candidates.size (), static_cast<std::size_t> (output_limit));
-      ranked.insert (ranked.end (), direct_candidates.begin (),
-                     direct_candidates.begin ()
-                         + static_cast<std::ptrdiff_t> (direct_count));
-      for (const auto &candidate : ranked)
-        {
-          selected_memory_ids.insert (candidate.memory_id);
-        }
-    }
-  else
-    {
-      const int direct_anchor_limit = std::max (
-          1, output_limit - std::max (1, output_limit / 4));
-      FamilyRepresentativeIndex selected_families (duplicate_threshold);
-      std::size_t direct_index = 0;
-      for (; direct_index < direct_candidates.size ()
-             && static_cast<int> (ranked.size ()) < direct_anchor_limit;
-           ++direct_index)
-        {
-          const auto &candidate = direct_candidates[direct_index];
-          selected_memory_ids.insert (candidate.memory_id);
-          selected_families.Add (BuildFamilyEmbeddingFeatures (
-              candidate.embedding));
-          ranked.push_back (candidate);
-        }
-
-      std::vector<Candidate> remaining;
-      remaining.reserve (direct_candidates.size () - direct_index
-                         + expanded_candidates.size ());
-      remaining.insert (remaining.end (),
-                        direct_candidates.begin ()
-                            + static_cast<std::ptrdiff_t> (direct_index),
-                        direct_candidates.end ());
-      remaining.insert (remaining.end (), expanded_candidates.begin (),
-                        expanded_candidates.end ());
-      SortCandidates (remaining);
-      for (const auto &candidate : remaining)
-        {
-          if (static_cast<int> (ranked.size ()) >= output_limit)
-            {
-              break;
-            }
-          auto features = BuildFamilyEmbeddingFeatures (candidate.embedding);
-          if (selected_families.IsDuplicate (features))
-            {
-              continue;
-            }
-          if (selected_memory_ids.insert (candidate.memory_id).second)
-            {
-              selected_families.Add (std::move (features));
-              ranked.push_back (candidate);
-            }
-        }
+      selected_memory_ids.insert (candidate.memory_id);
     }
 
   std::vector<retrieval_trace::RejectedCandidate> rejected_trace;
@@ -2207,7 +2012,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       trace.relevance = candidate.seed_score;
       trace.temporal_score = candidate.temporal_score;
       trace.activation.base_level = candidate.seed_score;
-      trace.activation.spreading_activation = candidate.graph_score;
       trace.activation.partial_match_penalty = candidate.superseded_penalty;
       trace.activation.activation_total = candidate.score;
       retrieval_trace::RejectedCandidate rejected;
@@ -2359,7 +2163,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       trace.relevance = candidate.seed_score;
       trace.temporal_score = candidate.temporal_score;
       trace.activation.base_level = candidate.seed_score;
-      trace.activation.spreading_activation = candidate.graph_score;
       trace.activation.partial_match_penalty = candidate.superseded_penalty;
       trace.activation.activation_total = candidate.score;
       trace_ranked.push_back (trace);

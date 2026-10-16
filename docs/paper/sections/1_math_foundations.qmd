@@ -214,13 +214,16 @@ selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
 
 Vector relevance is the primary rank. Event-time recency is restricted to a
 bounded tie-break so an old semantic match cannot be displaced by a recent but
-unrelated memory. Graph evidence contributes only a bounded residual bonus:
+unrelated memory:
 
 ```
 semantic(m) = map01(cos(q, embedding(m)))
-base(m) = semantic(m) + (1 - semantic(m)) * 10^-6 * temporal_rank(m)
-score(m) = base(m) + (1 - base(m)) * min(0.08, w_graph * graph(m))
+score(m) = semantic(m) + (1 - semantic(m)) * 10^-6 * temporal_rank(m)
 ```
+
+Earlier builds added a bounded graph bonus from one-hop association expansion.
+It was removed with clustering consolidation (@sec-experimental), because no
+traversable edges remained.
 
 New source-backed memories also receive a knob-derived source reliability prior
 instead of relying on a fixed storage default:
@@ -237,7 +240,7 @@ application prompt bounded by a compact final surface. The intermediate graph
 breadth and score weights are likewise derived from Focus, Sensitivity, and
 Stability in the implementation rather than exposed as additional user
 settings. Neither `source_id` nor modality participates in candidate discovery,
-family collapse, scoring, graph expansion, or final selection. The stored `source_reliability` and
+family collapse, scoring, or final selection. The stored `source_reliability` and
 `source_contradiction_count` fields are not currently consumed by production
 ranking; @sec-advanced distinguishes that metadata from the proposed confidence
 gate.

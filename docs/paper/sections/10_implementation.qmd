@@ -388,7 +388,7 @@ quantity is a hard routing-inspection ceiling, not the activated working set;
 the cache's node map and FIFO order are bounded together, and a successful
 seal clears both so invalidated rows cannot leave accumulating order entries.
 After exact reranking, no more than $A$ identities may proceed into eligibility,
-family collapse, graph expansion, and final ranking. Exact cosine
+family collapse, and final ranking. Exact cosine
 family checks have a separate $2C$ per-event ceiling. The breadth-first adjacency fetch
 batch is $max(8,\lfloor B/4\rfloor)$. The larger query and bounded cache
 coefficients were selected by copied-late quality probes: $2C/C$ and
@@ -534,7 +534,7 @@ completion---is exactly reranked. The independently persisted consolidation
 snapshot then contributes at most $A$ additional rows to the same exact union,
 after which the operation returns at most $A$
 memory identities to the existing downstream path. Timestamp eligibility, current-surface membership,
-supersession, long-term kind, cosine-family collapse, graph expansion, final
+long-term kind, cosine-family collapse, final
 scoring, and deterministic ties remain authoritative. This sparse activation
 route fixes disconnected-node blindness without introducing a second retrieval
 or write path; HNSW controls locality while the derived envelope controls exact
@@ -912,30 +912,25 @@ asymptotic order or the historical window partition's internal sort and
 materialization work.
 Ephemeral retrieval uses the fallback without installing volatile registry
 state.
-It then expands through retained structural graph edges and returns a compact
-selected set. Vector similarity owns the rank; recency is a tie-break and graph
-activation is a bounded residual bonus. `source_id` and modality are metadata,
-not ranking inputs. Direct vector seeds are source `LONG_TERM` memories;
-derived `ASSOCIATION` centroids enter through graph expansion. Direct families
-are ranked and the protected direct prefix is committed before expanded
-families are admitted; expanded candidates are then deduplicated against those
-protected representatives. When a current
+It returns a compact selected set from those seeds. Vector similarity owns the
+rank and recency is a tie-break. Graph expansion over association edges was
+removed in the 2026-10 engine ablation: once clustering consolidation was gone,
+no traversable edge type was ever written. `source_id` and modality are metadata,
+not ranking inputs. When a current
 embedding exists, its redundant historical base embedding is omitted from the
 historical seed search because the authoritative surface was already searched.
 Current
 writes are excluded by timestamp, and working-memory overlap filters prevent the
-retrieval result from echoing the active memory tail. Association edges are used
-as graph evidence; they do not bypass final scoring or output caps.
+retrieval result from echoing the active memory tail.
 One dispatch exposes at most one actually used retrieval candidate, so
-retrieval does not synthesize reinforcement pair edges from the packet. Existing
-`reinforces` edges remain eligible for decay, pruning, degree normalization, and
-graph evidence. Historical public knob helpers for the removed packet-pair
+retrieval does not synthesize reinforcement pair edges from the packet.
+Historical public knob helpers for the removed packet-pair
 writer remain source-compatible calibrations; only the step calibration still
 feeds the production pruning floor.
 
 The retrieval trace path records a ranking ledger for selected and rejected
 candidates. Production graph retrieval populates composite score, seed
-relevance, temporal score, and the base/spreading fields of the
+relevance, temporal score, and the base field of the
 activation ledger. The shared trace structure still contains reserved
 processor, durable-source, and evidence fields, but
 this path leaves them at zero; their presence is not evidence that those terms
@@ -1082,8 +1077,7 @@ The dominant per-signal cost is exact candidate discovery over the durable
 embedding and association surface. With `N` stored memories and embedding
 dimension `d`, the current write path computes exact current/base distances in
 `O(Nd)` and performs `O(N)` bounded-top-k selection before writing a
-knob-capped number of supersession edges. Graph expansion after seed discovery
-is bounded by F/S/T-derived row and fanout limits. Working-memory and
+knob-capped number of supersession edges. Working-memory and
 soft-anchor updates operate over bounded live state and remain independent of
 total store size.
 
