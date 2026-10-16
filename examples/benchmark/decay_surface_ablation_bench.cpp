@@ -114,10 +114,10 @@ SeedMemory (cortext::Store &store, long long memory_id,
       "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
       "s_max, s_avg, strength, trace_fast, trace_med, trace_slow, trace_ultra, "
       "use_frequency, stability, connectivity, drift_mag, influence, sustained_influence, "
-      "contextual_gain, redundancy, pre_activation, lability_state, suppression_count, "
+      "contextual_gain, redundancy, lability_state, suppression_count, "
       "created_at) "
       "VALUES(?, ?, ?, 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, ?, "
-      "0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+      "0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
       { memory_id, memory_id, std::string ("chat/user"), created_at, strength,
         strength, strength * 0.5, strength * 0.2, strength * 0.05, created_at });
 }

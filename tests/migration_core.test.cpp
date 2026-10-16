@@ -632,7 +632,8 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     REQUIRE(has_index("idx_memories_created_desc"));
     REQUIRE(has_index("idx_memories_ltm_strength_created"));
     REQUIRE(has_index("idx_memories_ltm_unclustered_strength_created"));
-    REQUIRE(has_index("idx_memories_pre_activation_embedding_active"));
+    REQUIRE_FALSE(has_index("idx_memories_pre_activation_embedding"));
+    REQUIRE_FALSE(has_index("idx_memories_pre_activation_embedding_active"));
     REQUIRE(has_index("idx_memories_flashbulb_intensity"));
     REQUIRE_FALSE(has_index("idx_memories_strength"));
     REQUIRE_FALSE(has_index("idx_memories_working"));
@@ -660,16 +661,6 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
     auto recent_view_sql = std::any_cast<std::string>(
         recent_view_rows[0].at("sql"));
     REQUIRE(recent_view_sql.find("kind != 'WORKING'") != std::string::npos);
-
-    auto preactivation_sql_rows = store->Execute(
-        "SELECT sql FROM sqlite_master WHERE type='index' "
-        "AND name='idx_memories_pre_activation_embedding_active'",
-        {});
-    REQUIRE(preactivation_sql_rows.size() == 1);
-    auto preactivation_sql = std::any_cast<std::string>(
-        preactivation_sql_rows[0].at("sql"));
-    REQUIRE(preactivation_sql.find("embedding_id") != std::string::npos);
-    REQUIRE(preactivation_sql.find("pre_activation > 0.0") != std::string::npos);
 }
 
 TEST_CASE("Migrations normalize role-derived source metadata",

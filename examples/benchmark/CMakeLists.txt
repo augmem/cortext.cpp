@@ -9,10 +9,6 @@ add_executable(cortext_eviction_ablation_bench
   eviction_ablation_bench.cpp
 )
 
-add_executable(cortext_predictive_ablation_bench
-  predictive_ablation_bench.cpp
-)
-
 add_executable(cortext_constructive_recall_ablation_bench
   constructive_recall_ablation_bench.cpp
 )
@@ -72,9 +68,6 @@ target_include_directories(cortext_text_encoder_bench PRIVATE
 target_include_directories(cortext_eviction_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_predictive_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
 target_include_directories(cortext_constructive_recall_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -119,9 +112,6 @@ target_link_libraries(cortext_text_encoder_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_eviction_ablation_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_predictive_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_constructive_recall_ablation_bench PRIVATE

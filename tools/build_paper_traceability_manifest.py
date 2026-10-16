@@ -89,7 +89,6 @@ ALGORITHM_GROUPS = [
             "src/operations/detect_memory_usage.cpp",
             "src/operations/eviction_policy.hpp",
             "src/operations/memory_storage.cpp",
-            "src/operations/predictive.cpp",
             "src/operations/reconsolidation.cpp",
             "src/operations/stability.cpp",
         ],

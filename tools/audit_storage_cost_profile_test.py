@@ -68,7 +68,6 @@ def fixture_operation_ms(counters: dict[str, float]) -> dict[str, float]:
         "cortext::operations::ApplyRetrievalCompetition": 0.1,
         "Competition.rif_recovery_active_sql": 0.1,
         "Competition.score_candidates": 0.1,
-        "Predictive.decay_active_sql": 0.1,
         "cortext::operations::MemoryStorage": 0.1,
         "MemoryStorage.supersession_edges": 0.1,
         "MemoryStorage.supersession_candidate_load": 0.1,

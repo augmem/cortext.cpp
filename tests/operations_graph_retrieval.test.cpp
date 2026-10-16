@@ -1524,7 +1524,7 @@ TEST_CASE ("Supersession eligibility index updates only affected targets",
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
       { 20, 200, 5000, 5000, 0, 0, 0, 0, "LONG_TERM", "replacement",
-        "text", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+        "text", -1.0, 0, 0.0, 0.0, false, true, UnitVec (0) });
   auto &cache = pctx.association_fanout_cache;
   cache.valid = true;
   cache.out_by_source[20].push_back (
@@ -1541,12 +1541,12 @@ TEST_CASE ("Supersession eligibility index updates only affected targets",
 
   pctx.UpsertRetrievalSurface (
       { 30, 300, 6000, 6000, 0, 0, 0, 0, "LONG_TERM", "unrelated",
-        "audio", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (1) });
+        "audio", -1.0, 0, 0.0, 0.0, false, true, UnitVec (1) });
   REQUIRE (sidecar->supersession_eligibility.valid);
 
   pctx.UpsertRetrievalSurface (
       { 20, 200, 7000, 7000, 0, 0, 0, 0, "LONG_TERM", "replacement",
-        "image", -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+        "image", -1.0, 0, 0.0, 0.0, false, true, UnitVec (0) });
   operations::association_fanout_cache::NotifyRetrievalSurfaceChanged (
       pctx, 20);
   REQUIRE (sidecar->supersession_eligibility.valid);
@@ -1883,7 +1883,7 @@ TEST_CASE ("Graph retrieval cache rebuild uses base embedding when constructive 
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
       { 10, 100, 1000, 1000, 0, 0, 0, 0, "LONG_TERM", "test", "", -1.0,
-        0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+        0, 0.0, 0.0, false, true, UnitVec (0) });
   auto signal = MakeSignal (UnitVec (0), 2000);
   OperationContext ctx (signal, pctx, cfg, store.get ());
   ctx.SetShouldCheckRetrieval (true);
@@ -3679,7 +3679,7 @@ TEST_CASE ("Graph retrieval SQL fallback performance probe",
       SeedMemory (*store, memory_id, embedding_id, embedding, timestamp);
       pctx.UpsertRetrievalSurface (
           { memory_id, embedding_id, timestamp, timestamp, 0, 0, 0, 0,
-            "LONG_TERM", "benchmark", "", -1.0, 0, 0.0, 0.0, 0.0,
+            "LONG_TERM", "benchmark", "", -1.0, 0, 0.0, 0.0,
             false, true, embedding });
     }
 
@@ -3710,7 +3710,7 @@ TEST_CASE ("Graph retrieval SQL fallback performance probe",
           pctx.UpsertRetrievalSurface (
               { memory_id, latest->embedding_id, 1000 + offset,
                 1000 + offset, 0, 0, 0, 0, "LONG_TERM", "benchmark", "",
-                -1.0, 0, 0.0, 0.0, 0.0, false, true, embedding });
+                -1.0, 0, 0.0, 0.0, false, true, embedding });
           ++reconstruction_count;
         }
       reconstruction_tx->Commit ();
@@ -3916,7 +3916,7 @@ TEST_CASE ("Graph retrieval bounded fallback keeps eligible shared sibling",
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
       { 20, 200, 2000, 2000, 0, 0, 0, 0, "LONG_TERM", "replacement", "",
-        -1.0, 0, 0.0, 0.0, 0.0, false, true,
+        -1.0, 0, 0.0, 0.0, false, true,
         VectorWithCosineToDim0 (0.92f) });
   operations::historical_surface_search_cache_internal::MarkRecoveryFailed (
       pctx);
@@ -4038,7 +4038,7 @@ TEST_CASE ("Graph retrieval fallback preserves overfetch after surface refresh",
       pctx.UpsertRetrievalSurface (
           { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset,
             0, 0, 0, 0, "LONG_TERM", "reconstructed-family", "", -1.0,
-            0, 0.0, 0.0, 0.0, false, true, UnitVec (0) });
+            0, 0.0, 0.0, false, true, UnitVec (0) });
     }
   REQUIRE_FALSE (operations::historical_surface_search_cache_internal::
                      CurrentSurfaceDatabaseCurrent (pctx));
@@ -4090,7 +4090,7 @@ TEST_CASE ("Graph retrieval fallback preserves overfetch after database reconstr
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
       { 99999, 99999, 1, 1, 0, 0, 0, 0, "LONG_TERM", "unrelated", "",
-        -1.0, 0, 0.0, 0.0, 0.0, false, true, UnitVec (4) });
+        -1.0, 0, 0.0, 0.0, false, true, UnitVec (4) });
 
   for (int offset = 0; offset < seed_limit; ++offset)
     {
@@ -4199,7 +4199,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
       pctx.UpsertRetrievalSurface (
           { memory_id, embedding_id, 1000 + offset, 1000 + offset, 0, 0,
             0, 0, "LONG_TERM", "stale-cache-family", "", -1.0, 0, 0.0,
-            0.0, 0.0, false, true, base });
+            0.0, false, true, base });
       historical_entries.push_back (
           { embedding_id, memory_id, 1000 + offset, "LONG_TERM",
             "stale-cache-family", base });
@@ -4215,7 +4215,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
               "target");
   pctx.UpsertRetrievalSurface (
       { kTargetMemoryId, kTargetEmbeddingId, 2000, 2000, 0, 0, 0, 0,
-        "LONG_TERM", "target", "", -1.0, 0, 0.0, 0.0, 0.0, false, true,
+        "LONG_TERM", "target", "", -1.0, 0, 0.0, 0.0, false, true,
         target });
   historical_entries.push_back (
       { kTargetEmbeddingId, kTargetMemoryId, 2000, "LONG_TERM", "target",
@@ -4248,7 +4248,7 @@ TEST_CASE ("Graph retrieval bypasses stale valid cache for latest reconstruction
       pctx.UpsertRetrievalSurface (
           { memory_id, latest->embedding_id, 1000 + offset, 1000 + offset,
             0, 0, 0, 0, "LONG_TERM", "stale-cache-family", "", -1.0, 0,
-            0.0, 0.0, 0.0, false, true, UnitVec (0) });
+            0.0, 0.0, false, true, UnitVec (0) });
     }
   const auto stale_state
       = operations::historical_surface_search_cache_internal::Find (pctx);

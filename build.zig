@@ -39,7 +39,6 @@ const cortext_cpp_sources = &.{
     "src/operations/influence.cpp",
     "src/operations/reconsolidation.cpp",
     "src/operations/competition.cpp",
-    "src/operations/predictive.cpp",
     "src/operations/emotion.cpp",
     "src/operations/working_memory.cpp",
     "src/operations/serial_position.cpp",

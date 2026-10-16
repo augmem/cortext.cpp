@@ -48,7 +48,6 @@ add_executable(cortext_tests
   operations_influence_feedback.test.cpp
   operations_reconsolidation.test.cpp
   operations_competition.test.cpp
-  operations_predictive.test.cpp
   operations_constructive_recall.test.cpp
   operations_emotion.test.cpp
   operations_mood.test.cpp

@@ -20,10 +20,9 @@ Note: Allowed interrupts outside flush/spike events mark a pending abort; the
 next signal drops the partial unit only if it aligns more with the selected
 memory than with the current accumulator centroid. This is operational only
 and does not alter the schema.
-Note: Emotional and predictive fields are persisted for feedback, decay, and
-analysis paths, but production graph retrieval does not currently use
-`emotional_intensity`, `s_arousal_avg`, or `pre_activation` in candidate
-ranking. Affect still modulates interrupt gating.
+Note: Emotional fields are persisted for feedback, decay, and analysis paths,
+but production graph retrieval does not currently use `emotional_intensity` or
+`s_arousal_avg` in candidate ranking. Affect still modulates interrupt gating.
 Note: Strength-based eviction only applies to LONG_TERM memories; ASSOCIATION
 and LABEL nodes are retained unless explicitly pruned.
 Note: Retrieval seeding scans LONG_TERM and ASSOCIATION embeddings, then graph
@@ -101,7 +100,6 @@ erDiagram
         real sustained_influence "Section 5.4 EWMA"
         real contextual_gain "Section 5.2"
         real redundancy "Section 7.2"
-        real pre_activation "Section 6.5"
         real lability_state "Section 6.3"
         int suppression_count "Section 6.4 RIF"
         int cluster_id FK "Section 7.3, IDX partial NOT NULL"

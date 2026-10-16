@@ -781,11 +781,9 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     const char *secondary;
     double fixed_bound;
   };
-  const std::array<CounterSpec, 17> kCounters { {
+  const std::array<CounterSpec, 16> kCounters { {
     { "retrieval_suppression_id_count",
       "SignalProcessor.retrieval_suppression_id_count", nullptr, 4096.0 },
-    { "predictive_id_count", "SignalProcessor.predictive_id_count", nullptr,
-      4096.0 },
     { "rollback_full_cache_copy_count",
       "SignalProcessor.snapshot_full_cache_copy_count", nullptr, 0.0 },
     { "rollback_cache_entry_copy_count",

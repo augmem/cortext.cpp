@@ -607,37 +607,9 @@ recovery_time_RIF = lerp(300, 1800, T)  # seconds
 
 High Focus produces narrow winner-take-all dynamics; low Focus permits broader activation.
 
-## Predictive Pre-activation
+## Predictive Pre-activation (Removed)
 
-The system pre-activates memories predicted to be relevant based on the EMA expectation state (`x_pred_ema`) and recent context:
-
-```
-prediction_horizon = round(lerp(2, 8, F))
-pre_activation_decay = lerp(0.7, 0.3, T)
-prediction_conf_threshold = lerp(0.3, 0.7, F)
-surprise_sensitivity = S × lerp(2.0, 0.5, T)
-```
-
-When predictions fail (high surprise), the system increases the refresh rate of pre-activation:
-
-```
-update_rate_on_surprise = lerp(0.2, 0.02, T) × S
-```
-
-Current implementation note: the shipped pipeline updates and decays the
-persisted `pre_activation` field, but production graph retrieval does not read
-that field. The following bounded retrieval prior describes the experimental
-ranking variant, not current runtime behavior:
-
-```
-predictive_weight(F,T) = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T)
-predictive_bonus = predictive_weight × pre_activation
-```
-
-In the current runtime, high-surprise updates refresh latent predictive state
-without changing the next retrieval score. The historical ablation in
-@sec-experimental evaluates the earlier research variant and must not be read as
-a measurement of this hard-cutover implementation.
+Earlier builds kept a per-memory `pre_activation` value. An expectation state (`x_pred_ema`) and recent context raised it, it decayed at `lerp(0.7, 0.3, T)` per turn, and high surprise refreshed it faster. After the hard cutover, graph retrieval no longer read the field. The research ranking prior `predictive_bonus = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T) × pre_activation` was never part of the production ranker. The engine ablation study (2026-10) removed the operation, the column and its indexes. Skipping the operation left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. Instructions retired changed by -1%, +3% and -1%, which is noise.
 
 ## Serial Position Effects
 

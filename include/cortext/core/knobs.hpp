@@ -593,17 +593,6 @@ RetrievalSparseKeySize (double F, double S, double T)
 }
 
 inline double
-RetrievalPredictiveBonusWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Lerp (0.05, 0.20, f) * Lerp (1.0, 0.85, t)
-         * Clamp (1.0 + 0.12 * (s - s0), 0.90, 1.12);
-}
-
-inline double
 RetrievalCompetitionSuppressionBase (double F, double S, double T)
 {
   const double f = FocusBias (F);
@@ -2037,57 +2026,6 @@ PredictionHorizon (double F)
   return std::max (
       1, static_cast<int> (
              std::round (Lerp (2.0, 8.0, FocusBias (F)))));
-}
-
-inline double
-PredictionConfidenceThreshold (double F)
-{
-  return Lerp (0.3, 0.7, FocusBias (F));
-}
-
-inline double
-PredictivePreActivationDecay (double T)
-{
-  return Lerp (0.7, 0.3, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-PredictiveSurpriseSensitivity (double S, double T)
-{
-  return SensitivityBias (S) * Lerp (2.0, 0.5, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-PredictiveBaseDelta (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double pad = PredictivePreActivationDecay (T);
-  return Clamp (0.02 * (1.0 - (pad - 0.3))
-                    * (1.0 - 0.06 * (f - f0) + 0.08 * (s - s0)),
-                0.006, 0.030);
-}
-
-inline double
-PredictiveSurpriseUpdateRate (double S, double T)
-{
-  return Lerp (0.2, 0.02, Clamp (T, 0.0, 1.0)) * SensitivityBias (S);
-}
-
-inline double
-PredictiveDeltaCap (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.20
-                    * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)
-                       - 0.08 * (t - 0.5)),
-                0.10, 0.28);
 }
 
 // Rate observation window (seconds)

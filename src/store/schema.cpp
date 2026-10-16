@@ -692,18 +692,6 @@ GetCoreMigrations ()
           },
       },
       {
-          16,
-          "Predictive pre-activation lookup index",
-          {
-              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding "
-              "ON memories(pre_activation, embedding_id) "
-              "WHERE pre_activation > 0.0",
-              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding_active "
-              "ON memories(embedding_id) "
-              "WHERE pre_activation > 0.0",
-          },
-      },
-      {
           17,
           "Association fanout order indexes",
           {
@@ -768,15 +756,6 @@ GetCoreMigrations ()
               "CREATE INDEX IF NOT EXISTS idx_memories_last_access "
               "ON memories(last_access DESC) "
               "WHERE last_access IS NOT NULL AND kind != 'WORKING'",
-          },
-      },
-      {
-          23,
-          "Predictive pre-activation active embedding lookup",
-          {
-              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding_active "
-              "ON memories(embedding_id) "
-              "WHERE pre_activation > 0.0",
           },
       },
       {
@@ -960,6 +939,15 @@ GetCoreMigrations ()
           "Drop the removed meta-learning coefficient store from older stores",
           {
               "DROP TABLE IF EXISTS meta_learning_coeffs",
+          },
+      },
+      {
+          36,
+          "Drop the removed predictive pre-activation column and indexes",
+          {
+              "DROP INDEX IF EXISTS idx_memories_pre_activation_embedding",
+              "DROP INDEX IF EXISTS idx_memories_pre_activation_embedding_active",
+              "ALTER TABLE memories DROP COLUMN pre_activation",
           },
       },
   };

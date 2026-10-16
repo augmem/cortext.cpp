@@ -742,7 +742,7 @@ RetrievalStage:
   memory-usage detection
 
 FeedbackStage:
-  retrieval competition, predictive pre-activation, reconsolidation,
+  retrieval competition, reconsolidation,
   focus/sensitivity/stability feedback, influence feedback,
   serial-position effects, memory strength/eviction, emotional consolidation,
   working memory, accumulator reset, consolidation gate/cluster/shallow,
@@ -953,7 +953,7 @@ The retrieval trace path records a ranking ledger for selected and rejected
 candidates. Production graph retrieval populates composite score, seed
 relevance, temporal score, and the base/spreading fields of the
 activation ledger. The shared trace structure still contains reserved
-processor, predictive, pre-activation, durable-source, and evidence fields, but
+processor, durable-source, and evidence fields, but
 this path leaves them at zero; their presence is not evidence that those terms
 participate in ranking. Deleted label-graph and fact-layer fields are not
 emitted.

@@ -41,7 +41,6 @@ constexpr double kEmbeddingInfluenceDefault = 0.0;
 constexpr double kEmbeddingSustainedInfluenceDefault = 0.0;
 constexpr double kEmbeddingContextualGainDefault = 0.0;
 constexpr double kEmbeddingRedundancyDefault = 0.0;
-constexpr double kEmbeddingPreActivationDefault = 0.0;
 constexpr double kEmbeddingLabilityStateDefault = 0.0;
 constexpr int kEmbeddingSuppressionCountDefault = 0;
 

@@ -288,8 +288,6 @@ struct DetachedProcessorCaches
   ProcessorContext::AssociationFanoutCache association_fanout_cache;
   std::shared_ptr<operations::execution_cache_sidecar_internal::State>
       execution_cache_sidecar;
-  std::unordered_set<long long> predictive_pre_activation_embedding_ids;
-  std::unordered_set<long long> predictive_pre_activation_memory_ids;
   std::unordered_set<long long> retrieval_suppression_embedding_ids;
   std::unordered_set<long long> retrieval_suppression_memory_ids;
   std::unordered_map<std::string, std::vector<long long>> index_store;
@@ -322,8 +320,6 @@ DetachedProcessorCacheEntryCount (const DetachedProcessorCaches &caches)
         + caches.retrieval_surface_source_index_dirty.size ()
         + caches.association_fanout_cache.out_by_source.size ()
         + caches.association_fanout_cache.in_by_target.size ()
-        + caches.predictive_pre_activation_embedding_ids.size ()
-        + caches.predictive_pre_activation_memory_ids.size ()
         + caches.retrieval_suppression_embedding_ids.size ()
         + caches.retrieval_suppression_memory_ids.size ();
   if (caches.execution_cache_sidecar)
@@ -380,8 +376,6 @@ ClearDbDerivedProcessorCaches (ProcessorContext &ctx)
   ctx.retrieval_surface_source_index_dirty = {};
   ctx.association_fanout_cache = {};
   operations::execution_cache_sidecar_internal::Erase (ctx);
-  ctx.predictive_pre_activation_embedding_ids = {};
-  ctx.predictive_pre_activation_memory_ids = {};
   ctx.retrieval_suppression_embedding_ids = {};
   ctx.retrieval_suppression_memory_ids = {};
 }
@@ -413,10 +407,6 @@ DetachRebuildableProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.association_fanout_cache);
   caches.execution_cache_sidecar
       = operations::execution_cache_sidecar_internal::Detach (ctx);
-  caches.predictive_pre_activation_embedding_ids
-      = std::move (ctx.predictive_pre_activation_embedding_ids);
-  caches.predictive_pre_activation_memory_ids
-      = std::move (ctx.predictive_pre_activation_memory_ids);
   caches.retrieval_suppression_embedding_ids
       = std::move (ctx.retrieval_suppression_embedding_ids);
   caches.retrieval_suppression_memory_ids
@@ -445,10 +435,6 @@ RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
   ctx.association_fanout_cache = std::move (caches.association_fanout_cache);
   operations::execution_cache_sidecar_internal::Restore (
       ctx, std::move (caches.execution_cache_sidecar));
-  ctx.predictive_pre_activation_embedding_ids
-      = std::move (caches.predictive_pre_activation_embedding_ids);
-  ctx.predictive_pre_activation_memory_ids
-      = std::move (caches.predictive_pre_activation_memory_ids);
   ctx.retrieval_suppression_embedding_ids
       = std::move (caches.retrieval_suppression_embedding_ids);
   ctx.retrieval_suppression_memory_ids
@@ -2536,35 +2522,6 @@ LoadRecentScores (Store &store, ProcessorContext &ctx,
 }
 
 void
-LoadPredictivePreActivationIds (Store &store, ProcessorContext &ctx)
-{
-  try
-    {
-      ctx.predictive_pre_activation_embedding_ids.clear ();
-      ctx.predictive_pre_activation_memory_ids.clear ();
-      auto rows = store.Execute (
-          "SELECT memory_id FROM memories "
-          "WHERE COALESCE(pre_activation, 0.0) > 1e-6");
-      ctx.predictive_pre_activation_memory_ids.reserve (rows.size ());
-      for (const auto &row : rows)
-        {
-          const long long memory_id = ExtractInt64 (row, "memory_id", 0);
-          if (memory_id > 0)
-            {
-              ctx.predictive_pre_activation_memory_ids.insert (memory_id);
-            }
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load predictive pre-activation ids",
-          { telemetry::Attribute::String ("component", "signal_processor"),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-}
-
-void
 LoadRetrievalSuppressionIds (Store &store, ProcessorContext &ctx)
 {
   (void)store;
@@ -2792,7 +2749,6 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
           "       m.context, m.source_reliability, "
           "       m.source_contradiction_count, m.emotional_intensity, "
           "       m.s_arousal_avg, m.kind, m.source_id, m.modality, "
-          "       COALESCE(m.pre_activation, 0.0) AS pre_activation, "
           "       CASE WHEN (cme.memory_id IS NOT NULL "
           "                  OR m.embedding_id IS NOT NULL) "
           "             AND m.kind = 'LONG_TERM' "
@@ -2855,7 +2811,6 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
           entry.emotional_intensity
               = ExtractDouble (row, "emotional_intensity", 0.0);
           entry.arousal_avg = ExtractDouble (row, "s_arousal_avg", 0.0);
-          entry.pre_activation = ExtractDouble (row, "pre_activation", 0.0);
           entry.vector_seed_eligible
               = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
           entry.embedding = BlobToEigen (emb_it->second);
@@ -3394,7 +3349,6 @@ SignalProcessor::SignalProcessor (const Config &config,
 
       // Load persisted state for algorithm resumption (v2 schema)
       loaded_state = LoadState (*store_, *context_, config_);      // Unified state
-      LoadPredictivePreActivationIds (*store_, *context_);
       LoadRetrievalSuppressionIds (*store_, *context_);
       LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
                                  config_.sensitivity, config_.stability);
@@ -3640,7 +3594,6 @@ SignalProcessor::Process (const Signal &signal)
       {
         if (rollback_snapshot.full_cache_snapshot)
           {
-            LoadPredictivePreActivationIds (*store_, *context_);
             LoadRetrievalSuppressionIds (*store_, *context_);
             LoadHistoricalSurfaceSearchCache (*store_, *context_);
           }
@@ -3649,7 +3602,6 @@ SignalProcessor::Process (const Signal &signal)
             LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
                                        config_.sensitivity,
                                        config_.stability);
-            LoadPredictivePreActivationIds (*store_, *context_);
             LoadRetrievalSuppressionIds (*store_, *context_);
           }
       }
@@ -3671,7 +3623,6 @@ SignalProcessor::Process (const Signal &signal)
             LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
                                        config_.sensitivity,
                                        config_.stability);
-            LoadPredictivePreActivationIds (*store_, *context_);
             LoadRetrievalSuppressionIds (*store_, *context_);
           }
       }
@@ -4431,17 +4382,6 @@ SignalProcessor::Process (const Signal &signal)
     }
   if (ProfileWorkCountersEnabled ())
     {
-      op_context.AddOperationTiming (
-          "SignalProcessor.predictive_id_count",
-          static_cast<double> (
-              context_->predictive_pre_activation_embedding_ids.size ()
-              + context_->predictive_pre_activation_memory_ids.size ()));
-      op_context.AddOperationTiming (
-          "SignalProcessor.predictive_id_activity",
-          context_->predictive_pre_activation_embedding_ids.empty ()
-                  && context_->predictive_pre_activation_memory_ids.empty ()
-              ? 0.0
-              : 1.0);
     }
   if (read_only_output.has_value ())
     {

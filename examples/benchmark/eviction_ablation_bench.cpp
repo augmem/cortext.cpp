@@ -62,10 +62,10 @@ SeedMemory (cortext::Store &store, BenchEncoder &encoder, long long id,
       "s_max, s_avg, strength, trace_fast, trace_med, trace_slow, trace_ultra, "
       "use_frequency, stability, connectivity, drift_mag, "
       "influence, sustained_influence, contextual_gain, redundancy, "
-      "pre_activation, lability_state, suppression_count, "
+      "lability_state, suppression_count, "
       "flashbulb, half_life_bonus, created_at, last_access) "
       "VALUES(?, ?, 'bench', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-      "?, ?, ?, ?, ?, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "
+      "?, ?, ?, ?, ?, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "
       "?, ?, ?, ?)",
       { id, id, created_at, strength, strength, strength * 0.5,
         strength * 0.2, strength * 0.05, flashbulb, half_life_bonus,

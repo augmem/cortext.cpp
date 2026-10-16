@@ -593,11 +593,6 @@ TEST_CASE ("Retrieval candidate blend scoring policies derive from knobs",
   REQUIRE (blend_high.procedural > blend_low.procedural);
   REQUIRE (blend_high.label_boost > blend_low.label_boost);
 
-  REQUIRE (RetrievalPredictiveBonusWeight (1.0, 0.5, 0.5)
-           > RetrievalPredictiveBonusWeight (0.0, 0.5, 0.5));
-  REQUIRE (RetrievalPredictiveBonusWeight (0.5, 1.0, 0.5)
-           > RetrievalPredictiveBonusWeight (0.5, 0.0, 0.5));
-
   REQUIRE (RetrievalCompetitionSuppressionBase (0.5, 0.5, 0.5)
            == Catch::Approx (0.055));
   REQUIRE (RetrievalCompetitionSuppressionBase (1.0, 0.5, 0.5)
@@ -868,20 +863,6 @@ TEST_CASE ("Runtime adaptation constants derive from knobs", "[core][knobs]")
   REQUIRE (BlenderOutcomeAlpha (0.0) > BlenderOutcomeAlpha (1.0));
 
   REQUIRE (PredictionHorizon (0.5) == 4);
-  REQUIRE (PredictionConfidenceThreshold (0.5) == Catch::Approx (0.46));
-  REQUIRE (PredictivePreActivationDecay (0.5) == Catch::Approx (0.50));
-  REQUIRE (PredictiveBaseDelta (0.5, 0.5, 0.5)
-           == Catch::Approx (0.016));
-  REQUIRE (PredictiveSurpriseSensitivity (0.5, 0.5)
-           == Catch::Approx (0.50));
-  REQUIRE (PredictiveSurpriseUpdateRate (0.5, 0.5)
-           == Catch::Approx (0.044));
-  REQUIRE (PredictiveDeltaCap (0.5, 0.5, 0.5)
-           == Catch::Approx (0.20));
-  REQUIRE (PredictionConfidenceThreshold (1.0)
-           > PredictionConfidenceThreshold (0.0));
-  REQUIRE (PredictiveSurpriseUpdateRate (1.0, 0.5)
-           > PredictiveSurpriseUpdateRate (0.0, 0.5));
 }
 
 TEST_CASE ("Graph and memory policy constants derive from knobs",

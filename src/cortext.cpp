@@ -70,7 +70,6 @@
 #include "cortext/operations/memory_strength.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/operations/neuromodulators.hpp"
-#include "cortext/operations/predictive.hpp"
 #include "cortext/operations/recent_context.hpp"
 #include "cortext/operations/reconsolidation.hpp"
 #include "cortext/operations/sensitivity_feedback.hpp"
@@ -1913,7 +1912,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ApplyEmotionalConsolidation;
   using cortext::operations::ApplyFocusFeedback;
   using cortext::operations::ApplyInfluenceFeedback;
-  using cortext::operations::ApplyPredictivePreActivation;
   using cortext::operations::ApplyReconsolidation;
   using cortext::operations::ApplyRetrievalCompetition;
   using cortext::operations::ApplySensitivityFeedback;
@@ -1995,7 +1993,7 @@ BuildRootOperationSet (bool probe_mode)
                      DetectMemoryUsage>;
 
   using FeedbackStage = OperationSet<
-      ApplyRetrievalCompetition, ApplyPredictivePreActivation,
+      ApplyRetrievalCompetition,
       ApplyReconsolidation, ApplyFocusFeedback, ApplySensitivityFeedback,
       ApplyStabilityFeedback, UpdateStability, ApplyInfluenceFeedback,
       ApplySerialPositionEffects, ApplySerialPositionMultiplier,

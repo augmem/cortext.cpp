@@ -35,7 +35,6 @@ LOGICAL_TABLES = {
 }
 REQUIRED_WORK_COUNTERS = (
     "retrieval_suppression_id_count",
-    "predictive_id_count",
     "rollback_full_cache_copy_count",
     "rollback_cache_entry_copy_count",
     "graph_candidate_count",
@@ -116,7 +115,6 @@ COUNTER_ACTIVITY_OPERATIONS = {
     "retrieval_suppression_id_count": (
         "SignalProcessor.retrieval_suppression_id_activity",
     ),
-    "predictive_id_count": ("SignalProcessor.predictive_id_activity",),
     "rollback_full_cache_copy_count": (
         "SignalProcessor.snapshot_full_cache_copy_activity",
     ),
@@ -149,7 +147,6 @@ COUNTER_SOURCE_OPERATIONS = {
     "retrieval_suppression_id_count": (
         "SignalProcessor.retrieval_suppression_id_count",
     ),
-    "predictive_id_count": ("SignalProcessor.predictive_id_count",),
     "rollback_full_cache_copy_count": (
         "SignalProcessor.snapshot_full_cache_copy_count",
     ),

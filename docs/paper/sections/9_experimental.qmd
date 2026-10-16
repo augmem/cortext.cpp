@@ -747,9 +747,10 @@ ranker.
 
 In the June research branch, temporal retrieval and predictive pre-activation
 stayed because their removal cost measurable packet quality or packet size.
-The hard-cutover production graph ranker retains temporal scoring but no longer
-reads `pre_activation`, so that predictive verdict does not describe current
-runtime behavior. Removing
+The hard-cutover production graph ranker retains temporal scoring but stopped
+reading `pre_activation`, and the 2026-10 engine ablation removed predictive
+pre-activation entirely (see the removal table below), so that predictive
+verdict does not describe current runtime behavior. Removing
 the metacognitive layer was mildly positive and had no long-horizon story to
 defer to, which supported cutting it in v1. Removing daily consolidation was
 also mildly positive at this horizon, but we deferred that arm because
@@ -959,6 +960,7 @@ A leave-one-out study switched off each engine subsystem in turn. It used a buil
 | Removed | Ablation evidence (packets changed; recall deltas) |
 |---|---|
 | meta-learned knob priors (`ApplyMetaLearning`, `meta_learning_coeffs`) | 0/250 Eval 1, 0/48 S, 0/40 BEAM; no cost change. The priors are the closed-form F/S/T functions again |
+| predictive pre-activation (`ApplyPredictivePreActivation`, `memories.pre_activation` and its indexes) | 0/250, 0/48, 0/40. No ranker read the field |
 
 ## Experimental Interpretation
 

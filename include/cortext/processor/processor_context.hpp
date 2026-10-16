@@ -272,12 +272,6 @@ struct ProcessorContext
   double mismatch_weight = 0.5;
   std::deque<Eigen::VectorXf> recent_context_embeddings;
 
-  /// @brief Embedding ids whose persisted memories currently have non-zero
-  /// predictive pre-activation and therefore need per-turn decay.
-  std::unordered_set<long long> predictive_pre_activation_embedding_ids;
-  /// @brief Memory ids whose persisted memories currently have non-zero
-  /// predictive pre-activation and therefore need per-turn decay.
-  std::unordered_set<long long> predictive_pre_activation_memory_ids;
   /// @brief Embedding ids whose persisted memories currently carry retrieval
   /// induced forgetting suppression and therefore need recovery updates.
   std::unordered_set<long long> retrieval_suppression_embedding_ids;
@@ -545,7 +539,6 @@ struct ProcessorContext
     int source_contradiction_count = 0;
     double emotional_intensity = 0.0;
     double arousal_avg = 0.0;
-    double pre_activation = 0.0;
     bool is_association = false;
     bool vector_seed_eligible = true;
     Eigen::VectorXf embedding;
@@ -819,91 +812,6 @@ struct ProcessorContext
         return;
       }
     SortRetrievalSurfaceSourceIndex (source_id);
-  }
-
-  void
-  UpdateRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
-                                                  double pre_activation)
-  {
-    auto it = retrieval_surface_embedding_index.find (embedding_id);
-    if (it == retrieval_surface_embedding_index.end ())
-      {
-        return;
-      }
-    retrieval_surface_cache[it->second].pre_activation = pre_activation;
-  }
-
-  void
-  UpdateRetrievalSurfacePreActivationByMemory (long long memory_id,
-                                               double pre_activation)
-  {
-    auto it = retrieval_surface_index.find (memory_id);
-    if (it == retrieval_surface_index.end ())
-      {
-        return;
-      }
-    retrieval_surface_cache[it->second].pre_activation = pre_activation;
-  }
-
-  void
-  DecayRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
-                                                 double pad)
-  {
-    auto it = retrieval_surface_embedding_index.find (embedding_id);
-    if (it == retrieval_surface_embedding_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.pre_activation = std::max (0.0, entry.pre_activation * pad);
-    if (entry.pre_activation <= 1e-6)
-      {
-        entry.pre_activation = 0.0;
-      }
-  }
-
-  void
-  DecayRetrievalSurfacePreActivationByMemory (long long memory_id, double pad)
-  {
-    auto it = retrieval_surface_index.find (memory_id);
-    if (it == retrieval_surface_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.pre_activation = std::max (0.0, entry.pre_activation * pad);
-    if (entry.pre_activation <= 1e-6)
-      {
-        entry.pre_activation = 0.0;
-      }
-  }
-
-  void
-  BoostRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
-                                                 double pad, double delta)
-  {
-    auto it = retrieval_surface_embedding_index.find (embedding_id);
-    if (it == retrieval_surface_embedding_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.pre_activation = std::min (
-        1.0, std::max (0.0, entry.pre_activation) * pad + delta);
-  }
-
-  void
-  BoostRetrievalSurfacePreActivationByMemory (long long memory_id, double pad,
-                                              double delta)
-  {
-    auto it = retrieval_surface_index.find (memory_id);
-    if (it == retrieval_surface_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.pre_activation = std::min (
-        1.0, std::max (0.0, entry.pre_activation) * pad + delta);
   }
 
   void
