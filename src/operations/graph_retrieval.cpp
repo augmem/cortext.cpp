@@ -74,6 +74,7 @@ struct SeedCacheProfile
   std::size_t sqlite_sparse_route_dirty_rows = 0;
   int sqlite_sparse_route_search_failure_code = 0;
   bool sparse_route_used = false;
+  bool sparse_exact_fallback = false;
 };
 
 struct FamilyExactComparisonBudget
@@ -704,7 +705,7 @@ LoadHistoricalSeedRowsFromCache (
 }
 
 std::optional<std::vector<std::map<std::string, std::any>>>
-LoadCurrentSeedRowsFromCache (
+LoadCurrentSeedRowsFromCacheRoute (
     Store *store, const ProcessorContext &p_ctx,
     const Eigen::VectorXf &query_embedding,
     long long exclusion_ts, int candidate_limit,
@@ -922,6 +923,40 @@ LoadCurrentSeedRowsFromCache (
     }
   AddSeedCachePhaseTime (profile, &SeedCacheProfile::rows_ms, rows_started);
   return rows;
+}
+
+/// Seed rows from the authoritative current-surface cache. Sparse
+/// activation is candidate generation: when it cannot certify a complete
+/// seed set (dirty journal overflow, no published route while a backfill
+/// runs, search miss, or eligibility/family underfill), the fail-closed
+/// answer is the exact scan over the same in-memory current entries. The
+/// caller's SQL seed path stays reserved for an unusable cache; reopening it
+/// here re-scanned the whole store, with per-row superseded-id string
+/// membership, on every ingest once underfill became routine.
+std::optional<std::vector<std::map<std::string, std::any>>>
+LoadCurrentSeedRowsFromCache (
+    Store *store, const ProcessorContext &p_ctx,
+    const Eigen::VectorXf &query_embedding,
+    long long exclusion_ts, int candidate_limit,
+    const auto &superseded_memory_ids,
+    double duplicate_threshold, SeedCacheProfile *profile,
+    bool sparse_route_enabled,
+    bool sqlite_sparse_route_enabled,
+    std::size_t sparse_route_capacity)
+{
+  auto rows = LoadCurrentSeedRowsFromCacheRoute (
+      store, p_ctx, query_embedding, exclusion_ts, candidate_limit,
+      superseded_memory_ids, duplicate_threshold, profile,
+      sparse_route_enabled, sqlite_sparse_route_enabled,
+      sparse_route_capacity);
+  if (rows || !sparse_route_enabled)
+    return rows;
+  if (profile)
+    profile->sparse_exact_fallback = true;
+  return LoadCurrentSeedRowsFromCacheRoute (
+      store, p_ctx, query_embedding, exclusion_ts, candidate_limit,
+      superseded_memory_ids, duplicate_threshold, profile, false, false,
+      sparse_route_capacity);
 }
 
 std::optional<std::vector<std::map<std::string, std::any>>>
@@ -1796,6 +1831,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       context.AddOperationTiming (
           "GraphRetrieve.seed_sparse_route_active",
           seed_cache_profile.sparse_route_used ? 1.0 : 0.0);
+      context.AddOperationTiming (
+          "GraphRetrieve.seed_sparse_exact_fallback",
+          seed_cache_profile.sparse_exact_fallback ? 1.0 : 0.0);
     }
 
   if (!cache_search_available && surface_search_state

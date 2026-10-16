@@ -2225,7 +2225,9 @@ TEST_CASE ("Graph retrieval falls back when associations underfill sparse "
   REQUIRE (std::find (output.candidate_memory_ids.begin (),
                       output.candidate_memory_ids.end (), kEligibleTarget)
            != output.candidate_memory_ids.end ());
-  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 1);
+  // Underfill fails closed to the exact scan over the in-memory current
+  // surface, not to a full SQL seed scan.
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 0);
 }
 
 TEST_CASE ("Graph retrieval falls back when sparse candidates collapse below "
@@ -2293,8 +2295,13 @@ TEST_CASE ("Graph retrieval falls back when sparse candidates collapse below "
            == 1.0);
   REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_cache_ranked_rows")
            >= static_cast<double> (seed_search_limit));
+  // The sparse pass certifies nothing; the exact in-memory pass selects the
+  // single surviving family.
+  REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_sparse_exact_fallback")
+           == 1.0);
   REQUIRE (output.operation_ms.at ("GraphRetrieve.seed_cache_selected_rows")
-           == 0.0);
+           <= static_cast<double> (seed_limit));
+  REQUIRE (operations::retrieval_trace::GetLastSqlFallbackQueryCount () == 0);
   const auto exact_fallback
       = operations::retrieval_trace::GetLastSeedCandidates ();
   REQUIRE_FALSE (exact_fallback.empty ());
