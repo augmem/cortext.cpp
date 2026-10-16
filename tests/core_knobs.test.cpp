@@ -657,34 +657,6 @@ TEST_CASE ("Neuromodulator and serial floor policies derive from knobs",
 TEST_CASE ("Memory trace policy derives from knobs with neutral midpoint",
            "[core][knobs]")
 {
-  const auto tau = MemoryTraceTauPolicy (0.5, 0.5, 0.5);
-  REQUIRE (tau.fast == Catch::Approx (0.10));
-  REQUIRE (tau.medium == Catch::Approx (0.50));
-  REQUIRE (tau.slow == Catch::Approx (2.00));
-  REQUIRE (tau.ultra == Catch::Approx (8.00));
-  REQUIRE (MemoryTraceTauPolicy (0.5, 0.5, 1.0).slow > tau.slow);
-  REQUIRE (MemoryTraceTauPolicy (0.5, 1.0, 0.5).fast > tau.fast);
-
-  REQUIRE (MemoryTraceCoupling (0.5, 0.5, 0.5)
-           == Catch::Approx (0.10));
-  REQUIRE (MemoryTraceCoupling (0.5, 0.5, 1.0)
-           > MemoryTraceCoupling (0.5, 0.5, 0.0));
-
-  const auto weights = MemoryTraceWeightPolicy (0.5, 0.5, 0.5);
-  REQUIRE (weights.fast == Catch::Approx (0.275));
-  REQUIRE (weights.medium == Catch::Approx (0.25));
-  REQUIRE (weights.slow == Catch::Approx (0.275));
-  REQUIRE (weights.ultra == Catch::Approx (0.20));
-  REQUIRE (MemoryTraceWeightPolicy (0.5, 0.5, 1.0).slow
-           > MemoryTraceWeightPolicy (0.5, 0.5, 0.0).slow);
-
-  const auto initial = MemoryInitialTracePolicy (0.5, 0.5, 0.5);
-  REQUIRE (initial.fast == Catch::Approx (1.0));
-  REQUIRE (initial.medium == Catch::Approx (0.0));
-  REQUIRE (initial.slow == Catch::Approx (0.0));
-  REQUIRE (initial.ultra == Catch::Approx (0.0));
-  REQUIRE (MemoryInitialTracePolicy (0.5, 0.5, 1.0).slow
-           > initial.slow);
   REQUIRE (MemoryInitialStrengthPolicy (0.5, 0.5, 0.5)
            == Catch::Approx (1.0));
   REQUIRE (MemoryInitialStabilityPolicy (0.5, 0.5, 0.5)
@@ -804,17 +776,6 @@ TEST_CASE ("Runtime adaptation constants derive from knobs", "[core][knobs]")
 TEST_CASE ("Graph and memory policy constants derive from knobs",
            "[core][knobs]")
 {
-  REQUIRE (MemoryContextualGainWindow (0.5, 0.5, 0.5)
-           == Catch::Approx (20.0));
-  REQUIRE (MemoryTraceCount (0.5, 0.5, 0.5) == 3);
-  const auto trace_fallback = MemoryStoredTraceFallbackPolicy (0.5, 0.5, 0.5);
-  REQUIRE (trace_fallback.fast == Catch::Approx (1.0));
-  REQUIRE (trace_fallback.medium == Catch::Approx (0.50));
-  REQUIRE (trace_fallback.slow == Catch::Approx (0.20));
-  REQUIRE (trace_fallback.ultra == Catch::Approx (0.05));
-  REQUIRE (MemoryTraceCount (0.5, 0.5, 1.0)
-           > MemoryTraceCount (0.5, 0.5, 0.0));
-
   REQUIRE (GraphBuildSequentialTauSeconds (0.5, 0.5, 0.5)
            == Catch::Approx (35.0));
   REQUIRE (GraphBuildSequentialTauSeconds (0.5, 0.5, 1.0)

@@ -62,7 +62,7 @@
 #include "cortext/operations/focus.hpp"
 #include "cortext/operations/focus_spread.hpp"
 #include "cortext/operations/interrupt_gate.hpp"
-#include "cortext/operations/memory_strength.hpp"
+#include "cortext/operations/memory_usage_record.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/operations/neuromodulators.hpp"
 #include "cortext/operations/recent_context.hpp"
@@ -1936,7 +1936,7 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::UpdateDriftAccumulation;
   using cortext::operations::UpdateEmbeddingPredictionError;
   using cortext::operations::UpdateFocus;
-  using cortext::operations::UpdateMemoryStrength;
+  using cortext::operations::RecordMemoryUsage;
   using cortext::operations::UpdateMood;
   using cortext::operations::UpdateNeuromodulators;
   using cortext::operations::UpdatePrecisionDelta;
@@ -1983,7 +1983,7 @@ BuildRootOperationSet (bool probe_mode)
       ApplyReconsolidation, ApplySensitivityFeedback,
       ApplyStabilityFeedback, UpdateStability,
       ApplySerialPositionEffects, ApplySerialPositionMultiplier,
-      UpdateMemoryStrength, ApplyEmotionalConsolidation, WorkingMemory,
+      RecordMemoryUsage, ApplyEmotionalConsolidation, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
       PropagateEmotionalCascade>;
 

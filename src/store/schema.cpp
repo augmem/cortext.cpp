@@ -464,39 +464,6 @@ GetCoreMigrations ()
           },
       },
       {
-          3,
-          "Long-term memory eviction audit log",
-          {
-              "CREATE TABLE IF NOT EXISTS memory_evictions ("
-              "  eviction_id INTEGER PRIMARY KEY,"
-              "  memory_id INTEGER NOT NULL,"
-              "  embedding_id INTEGER,"
-              "  source_id TEXT NOT NULL,"
-              "  kind TEXT NOT NULL,"
-              "  label TEXT,"
-              "  start_ts INTEGER NOT NULL,"
-              "  end_ts INTEGER,"
-              "  created_at INTEGER NOT NULL,"
-              "  last_access INTEGER,"
-              "  strength REAL NOT NULL DEFAULT 0.0,"
-              "  use_frequency REAL NOT NULL DEFAULT 0.0,"
-              "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
-              "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
-              "  used_count INTEGER NOT NULL DEFAULT 0,"
-              "  n_signals INTEGER NOT NULL DEFAULT 0,"
-              "  modality TEXT NOT NULL DEFAULT 'text',"
-              "  eviction_reason TEXT NOT NULL,"
-              "  evicted_at INTEGER NOT NULL"
-              ")",
-              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_time "
-              "ON memory_evictions(evicted_at DESC, eviction_id DESC)",
-              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_memory "
-              "ON memory_evictions(memory_id)",
-              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_reason "
-              "ON memory_evictions(eviction_reason, kind)",
-          },
-      },
-      {
           4,
           "Constructive recall reconstruction ledger",
           {
@@ -958,6 +925,20 @@ GetCoreMigrations ()
               "ALTER TABLE memories DROP COLUMN sustained_influence",
               "ALTER TABLE memories DROP COLUMN mean_influence",
               "ALTER TABLE state DROP COLUMN sustained_influence",
+          },
+      },
+      {
+          38,
+          "Drop the removed memory-strength traces and eviction audit log",
+          {
+              "DROP TABLE IF EXISTS memory_evictions",
+              "ALTER TABLE memories DROP COLUMN trace_fast",
+              "ALTER TABLE memories DROP COLUMN trace_med",
+              "ALTER TABLE memories DROP COLUMN trace_slow",
+              "ALTER TABLE memories DROP COLUMN trace_ultra",
+              "ALTER TABLE memories DROP COLUMN use_frequency",
+              "ALTER TABLE memories DROP COLUMN contextual_gain",
+              "ALTER TABLE memories DROP COLUMN influence_factor",
           },
       },
   };

@@ -5,7 +5,7 @@ Note: Consolidation is shallow and embedding-only. It creates ASSOCIATION
 centroids without blobs and does not call a summarization, extraction, or
 provider backend.
 Note: This diagram emphasizes the core memory/signal/association schema. Later
-migrations also add memory eviction and reconstruction tables and soft-anchor state/link tables.
+migrations also add reconstruction tables and soft-anchor state/link tables.
 Note: Consolidation is external-only maintenance; callers invoke C++
 `Consolidate()`, C ABI `cortext_consolidate`, or process a maintenance signal
 with `force_consolidation`, rather than scheduling it automatically. It seals
@@ -22,8 +22,6 @@ and does not alter the schema.
 Note: Emotional fields are persisted for feedback, decay, and analysis paths,
 but production graph retrieval does not currently use `emotional_intensity` or
 `s_arousal_avg` in candidate ranking. Affect still modulates interrupt gating.
-Note: Strength-based eviction only applies to LONG_TERM memories; ASSOCIATION
-and LABEL nodes are retained unless explicitly pruned.
 Note: Retrieval seeding scans LONG_TERM and ASSOCIATION embeddings, then graph
 expansion follows the production traversal subset: `co_occurs`, `similar_to`,
 `reinforces`, `causes`, `derived_from`, `next_in_episode`, `prev_in_episode`,
@@ -86,16 +84,10 @@ erDiagram
         real boundary_score "Section 3.1.3 change-point probability"
         blob emotion "6d vector - Section 2.2.2"
         blob ambient_mood "6d vector - Section 2.2.4"
-        real strength "Section 5.1, IDX with last_access"
-        real trace_fast "Section 5.1.1 multi-timescale trace"
-        real trace_med "Section 5.1.1 multi-timescale trace"
-        real trace_slow "Section 5.1.1 multi-timescale trace"
-        real trace_ultra "Section 5.1.1 multi-timescale trace"
-        real use_frequency "Section 5.1 EWMA"
+        real strength "initial strength; RIF suppression (Section 6.4)"
         real stability "Section 5.3.3"
         real connectivity "Section 7.2 graph metric"
         real drift_mag "Section 3.1.3"
-        real contextual_gain "Section 5.2"
         real redundancy "Section 7.2"
         real lability_state "Section 6.3"
         int suppression_count "Section 6.4 RIF"

@@ -2,7 +2,6 @@
 #include "test_helpers.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/core/knobs.hpp>
-#include <cortext/operations/memory_strength.hpp>
 #include <cortext/operations/metrics.hpp>
 #include <cortext/operations/serial_position.hpp>
 #include <cortext/operations/serial_position_apply.hpp>
@@ -12,7 +11,6 @@
 using namespace cortext;
 using cortext::operations::ApplySerialPositionEffects;
 using cortext::operations::ApplySerialPositionMultiplier;
-using cortext::operations::UpdateMemoryStrength;
 
 TEST_CASE ("Serial position multiplier reflects primacy/recency zones",
            "[operations][serial_position_apply]")

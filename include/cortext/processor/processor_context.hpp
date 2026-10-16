@@ -362,24 +362,10 @@ struct ProcessorContext
   int memories_since_consolidation = 0;
   bool is_processing_signal = false;
 
-  // Eviction frontier scans are corpus-size-sensitive maintenance work. They
-  // are still run after consolidation and under pressure, but not every turn.
-  int last_eviction_scan_signal = -1;
-  uint64_t last_eviction_scan_consolidation_ts = 0;
-
   // Retention aggregates scan the memory table. Keep them periodic so
   // stability adaptation does not add a corpus-size term to every signal.
   int last_retention_scan_signal = -1;
   uint64_t last_retention_scan_consolidation_ts = 0;
-
-  // Storage pressure reads touch filesystem/SQLite metadata and are used by
-  // multiple operations in one turn. Cache briefly to avoid per-signal jitter.
-  bool storage_pressure_cache_valid = false;
-  int storage_pressure_cache_signal = -1;
-  std::string storage_pressure_cache_key;
-  bool storage_pressure_cache_active = false;
-  long long storage_pressure_cache_used_bytes = 0;
-  long long storage_pressure_cache_threshold_bytes = 0;
 
   // ======================================================================
   // Episode Tracking State (Algorithm 12)

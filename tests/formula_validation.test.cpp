@@ -187,24 +187,6 @@ TEST_CASE ("AlphaT follows spec: α_min_T + (1−T)×α_span_T×u", "[formula][k
   REQUIRE (AlphaT (0.2, 0.8) > AlphaT (0.8, 0.8));
 }
 
-TEST_CASE ("AlphaS follows spec: α_min_S + S×α_span_S×u", "[formula][knobs][alpha]")
-{
-  // AlphaS = 0.05 + S*0.35*u_t
-
-  // At u_t=0, reduces to α_min_S
-  REQUIRE (AlphaS (0.0, 0.0) == Catch::Approx (0.05));
-  REQUIRE (AlphaS (1.0, 0.0) == Catch::Approx (0.05));
-
-  // At u_t=1, S=1: 0.40
-  REQUIRE (AlphaS (1.0, 1.0) == Catch::Approx (0.40));
-
-  // At u_t=1, S=0: 0.05
-  REQUIRE (AlphaS (0.0, 1.0) == Catch::Approx (0.05));
-
-  // Higher S means higher alpha (faster adaptation)
-  REQUIRE (AlphaS (0.8, 0.8) > AlphaS (0.2, 0.8));
-}
-
 TEST_CASE ("AlphaMood follows spec: lerp(0.01, 0.20, S)",
            "[formula][knobs][alpha]")
 {

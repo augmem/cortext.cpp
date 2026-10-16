@@ -1,114 +1,12 @@
 # Reinforcement and Decay Dynamics {#sec-reinforcement}
 
-## Memory Strength Model {#sec-memory-strength}
+## Memory Strength and Eviction (Removed) {#sec-memory-strength}
 
-Each memory maintains **multi-timescale traces** rather than a single leaky bucket. A mixture of fast/medium/slow/ultra-slow traces yields a power-law forgetting curve while preserving plasticity.
+Earlier builds kept multi-timescale strength traces per memory (fast, medium, slow and ultra-slow, mixed into `strength`). Every retrieval reinforced or decayed them, and memories whose effective strength fell below `PeripheryCutoff(T)` were evicted. Eviction waited for two gates. The first was a consolidation watermark: a memory had to predate `last_consolidation_ts`. The second was a storage floor, by default 500 MB per file-backed store.
 
-Let `f = FocusBias(F)`, `s = SensitivityBias(S)`, and let `f0` and `s0` be
-their values at the neutral knobs. The active trace count is:
+The engine ablation study (2026-10) removed the traces, the reinforcement and decay update, eviction, its storage-pressure gate and its `memory_evictions` audit log. At the default knobs eviction never ran. The consolidation watermark was never set, because clustering consolidation never produced a candidate (@sec-consolidation). Phase-1 ablation of the strength update left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. A fix that made consolidation fire also opened the eviction gate. With the storage floor at 0, eviction then deleted 94% of LongMemEval-S memories, 92% of Eval 1 memories and 99.7% of a 22.6k-turn BEAM-10M conversation. Packet gold-turn recall fell from 0.630 to 0.086, from 0.587 to 0.084, and from 0.103 to 0. Turn timestamps span weeks to months, and strength decayed against a half-life of minutes to hours, so almost every memory looked "weak" once the gate opened.
 
-```
-N_traces(F,S,T) = clamp(round((2 + 2T) ×
-                         (1 + 0.08(f-f0) + 0.06(s-s0))), 1, 4)
-```
-
-The familiar `0.10/0.50/2.00/8.00` half-life multipliers are the neutral
-baseline, not universal constants. Production applies bounded F/S/T policy
-scales:
-
-```
-reactive = 1 + 0.14(s-s0) - 0.08(f-f0) + 0.06(T-0.5)
-stable   = 1 + 0.24(T-0.5) - 0.06(s-s0)
-τ_fast  = clamp(0.10 × reactive, 0.05, 0.20) × half_life
-τ_med   = clamp(0.50 × (1 + 0.12(T-0.5) - 0.06(f-f0)), 0.30, 0.80) × half_life
-τ_slow  = clamp(2.00 × stable, 1.20, 3.20) × half_life
-τ_ultra = clamp(8.00 × stable × (1 + 0.10(f-f0)), 4.00, 12.00) × half_life
-τ_list = [τ_fast, τ_med, τ_slow, τ_ultra]
-
-α_min_S = 0.05; α_span_S = 0.35
-α_S(t) = α_min_S + SensitivityBias(S) × α_span_S × u(t)
-used_flag(m) = 1 if m was retrieved and used in current step, else 0
-```
-
-Trace updates combine exponential decay, EWMA learning, and knob-scaled reinforcement (for i in 1..N_traces):
-```
-λ_i ← ln(2) / τ_list[i]
-reinforcement ← clamp((S_eff × used_flag(m) +
-                       F_eff × clamp(influence_factor, 0, 1))
-                       × serial_position_mult, 0, 1)
-increment_i ← (α_S(t) × used_flag(m) + reinforcement) / N_traces
-trace_i ← clamp(trace_i × exp(−λ_i × Δt) + increment_i, 0, 1)
-```
-
-The reinforcement term distributes S- and F-scaled retrieval feedback uniformly across all active traces. This avoids front-loading reinforcement into the fast trace (which decays quickly) and instead strengthens the entire trace ensemble when a memory is retrieved and used.
-
-Trace coupling encourages long-lived knowledge without freezing plasticity:
-```
-coupling = clamp((0.05 + 0.10T) ×
-                 (1 - 0.10(f-f0) + 0.12(s-s0)), 0.02, 0.20)
-trace_{i+1} ← clamp(trace_{i+1} + coupling × trace_i, 0, 1)
-```
-
-Combined strength uses a knob-shaped mixture that favors slow traces as Stability increases:
-```
-w_fast  = clamp((0.40 - 0.25T) ×
-                (1 - 0.08(f-f0) - 0.10(s-s0)), 0.05, 0.50)
-w_med   = clamp(0.25 × (1 - 0.04(f-f0) - 0.04(T-0.5)), 0.12, 0.35)
-w_slow  = clamp((0.20 + 0.15T) ×
-                (1 + 0.08(f-f0) + 0.06(s-s0)), 0.12, 0.45)
-w_ultra = clamp((0.15 + 0.10T) ×
-                (1 + 0.10(f-f0) + 0.06(s-s0)), 0.08, 0.35)
-w_raw ← [w_fast, w_med, w_slow, w_ultra]
-w ← normalize(w_raw[1..N_traces])
-strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
-```
-
-Δt is measured per memory using its last access timestamp:
-
-```
-Δt(m) ← now_s() − to_s(m.last_access); if last_access is unset, use created_at
-```
-
-Memories falling below the periphery cutoff are candidates for eviction. **Only
-LONG_TERM memories are evicted**; association and other graph-scaffold rows are
-not evicted by the per-memory decay pass and are pruned during explicit
-consolidation.
-
-```
-periphery_cutoff(T) = lerp(0.03, 0.20, T)
-storage_budget_floor = max(
-  min_db_bytes,
-  db_avail_fraction × available_disk_bytes
-)
-
-if m.kind == LONG_TERM
-   AND db_used_bytes ≥ storage_budget_floor
-   AND strength_t < periphery_cutoff(T)
-   AND m.created_at < last_consolidation_ts:
-     evict(m)
-```
-
-Eviction removes the memory's signal rows, reconstruction rows, graph edges,
-and object payloads in the same transaction. The cleanup candidate set includes
-the representative embedding and every embedding owned by its signals and
-reconstructions; an embedding is deleted only when no surviving row references
-it. This makes storage-pressure eviction reclaim the dominant vector payloads
-without a later global orphan sweep.
-
-The v1 hard cut removed the structured fact-evidence floor. Retention now
-depends on the trace strength, the storage-pressure gate, and the consolidation
-watermark. Source provenance remains attached to episodic rows, but it no
-longer creates a separate eviction exemption through fact tables.
-
-**Current implementation note:** the runtime now includes a storage gate ahead of the usual strength-based eviction test. For file-backed stores, eviction is skipped entirely until the on-disk database footprint reaches a configurable floor. The default fixed floor is `500 MB`, and an internal percentage-of-available-space floor can also be applied; the active threshold is the maximum of the two. This keeps long chat sessions from prematurely evicting weak but still useful traces simply because they have decayed below `periphery_cutoff(T)` while the database is still tiny. Deterministic file-backed sweeps in @sec-experimental showed three useful regimes. Under the raw storage-growth sweep, budgets up to `256 MB` still behaved like ordinary decay, `500 MB` was the first tested budget that materially delayed eviction, and `1 GB` extended that delay further. Under the synthetic human-sleep clock, that translated into an interpretable retention boundary: `256 MB` was enough for infant/toddler/preschool-style frequent consolidation, but it still missed school-age, teen, adult, and older-adult nightly consolidation. `500 MB` was the first tested floor that reliably preserved labels for once-per-day adult-style consolidation, while `1 GB` added safety margin rather than a new qualitative retention regime. In-memory stores keep the historical behavior unless the gate is explicitly forced on for studies.
-
-Ablation studies in @sec-experimental confirm that the retained components of
-this model contribute to selective eviction behavior. Disabling coupling or
-reducing to a single trace collapses the power-law forgetting curve into rapid
-indiscriminate eviction, flashbulb bonuses provide the expected protective
-effect, the storage gate prevents premature pruning of small databases, and
-uniform reinforcement distribution makes S and F visibly effective in the
-eviction dynamics.
+`strength` now holds only its knob-derived initial value, adjusted by retrieval-induced suppression (@sec-advanced). A slim `RecordMemoryUsage` step keeps the retrieval counters that hydrated memories expose: `retrieved_count`, `used_count`, `last_used` and `last_access`. Store growth is unbounded again. A bounded store needs a forgetting policy that is measured against recall first.
 
 ## Contextual Gain and Per-Memory Stability (Definitions)
 
@@ -119,13 +17,7 @@ contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and us
 contextual_gain_t(m) ← undefined                # otherwise
 ```
 
-When undefined, treat contextual_gain_t(m) as 0 in downstream updates. Persisted per-memory gain is tracked as a smoothed value:
-
-```
-L_cg = round(lerp(8, 32, T))
-α_cg = 2 / (L_cg + 1)
-contextual_gain(m) ← EWMA(contextual_gain(m), contextual_gain_t(m), α_cg)
-```
+When undefined, treat contextual_gain_t(m) as 0 in downstream updates. It is not persisted (the smoothed per-memory column was removed with memory strength).
 
 Per-memory stability initializes at creation and is bounded:
 
@@ -143,20 +35,6 @@ used(m) = retrieved(m) AND injected into active context after gate decisions
 ```
 
 Contextual gain is only measured for used memories.
-
-## Influence-Weighted Updates
-
-When contextual gain signals are available, influence factors enter the reinforcement term that is distributed uniformly across traces (see trace update above):
-
-```
-influence_factor ← (used_count / max(retrieved_count, 1)) ×
-                    clamp(contextual_gain(m), −1, +1)
-reinforcement ← clamp(S_eff × used_flag(m) +
-                       F_eff × clamp(influence_factor, 0, 1), 0, 1)
-                × serial_position_mult
-```
-
-This replaces the earlier front-loaded boost that applied 60%/30%/10% to fast/med/slow traces. Ablation studies showed the front-loaded distribution had no measurable effect on eviction dynamics because its contribution was absorbed by trace clamping. Uniform distribution ensures all active traces receive meaningful reinforcement, improving long-term retention for used memories.
 
 ## Reinforcement Graph Maintenance
 
@@ -217,4 +95,4 @@ This factor is consumed by the Stability update (@sec-stability-update), avoidin
 
 ## Influence Feedback (Removed)
 
-Earlier builds ran an influence-feedback operation (Algorithm 19). It blended contextual gain with neutral generation-similarity and drift terms into per-memory `influence`, `sustained_influence` and `mean_influence` columns. Nothing downstream read those columns. The `influence_factor` used by memory strength (below) is computed separately from usage counts and contextual gain. The engine ablation study (2026-10) removed the operation and its columns. With it switched off as part of the minor-feedback group, packets stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
+Earlier builds ran an influence-feedback operation (Algorithm 19). It blended contextual gain with neutral generation-similarity and drift terms into per-memory `influence`, `sustained_influence` and `mean_influence` columns. Nothing downstream read those columns. The engine ablation study (2026-10) removed the operation and its columns. With it switched off as part of the minor-feedback group, packets stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.

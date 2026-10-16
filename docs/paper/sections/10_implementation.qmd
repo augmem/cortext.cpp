@@ -48,7 +48,7 @@ The current v1 runtime uses two durable graph layers plus one bounded live layer
 * **Working memory:** active coherent memories used for recent-turn continuity,
   overlap suppression, and prompt reconstruction.
 * **Long-term graph memory:** persisted `memories`, `signals`, `embeddings`,
-  `associations`, reconstruction rows, eviction audit rows, and optional
+  `associations`, reconstruction rows, and optional
   soft-anchor state.
 * **Soft anchors:** uncertainty-preserving continuity links formed at ingress
   and exposed as optional memory metadata.
@@ -744,7 +744,7 @@ RetrievalStage:
 FeedbackStage:
   retrieval competition, reconsolidation,
   sensitivity/stability feedback,
-  serial-position effects, memory strength/eviction, emotional consolidation,
+  serial-position effects, memory usage counters, emotional consolidation,
   working memory, accumulator reset, emotional cascade
 ```
 
@@ -777,8 +777,7 @@ locate that prefix in work proportional to the returned limit; a history with
 many higher-intensity ineligible rows may require additional indexed filtering.
 Emotional
 consolidation overwrites the affected embedding family, cascade propagation
-applies the existing maxima, storage appends rows, and
-eviction removes them. Journal-aware rollback discards and rehydrates this
+applies the existing maxima, and storage appends rows. Journal-aware rollback discards and rehydrates this
 database-derived cache, while arbitrary custom pipelines retain the complete
 snapshot path. This changes execution ownership only; source thresholds,
 tie order, traversal, decay, updates, and persisted rows are unchanged.

@@ -1833,14 +1833,6 @@ AlphaF (double F, double u_t)
   return kAlphaMinF + FocusBias (F) * kAlphaSpanF * u_t;
 }
 
-inline double
-AlphaS (double S, double u_t)
-{
-  const double kAlphaMinS = 0.05;
-  const double kAlphaSpanS = 0.35;
-  return kAlphaMinS + SensitivityBias (S) * kAlphaSpanS * u_t;
-}
-
 // Uncertainty variance normalization ceiling
 inline double
 VarScoreMax (double S)
@@ -2008,107 +2000,6 @@ RecentRetrievedIdWindow (double F, double S, double T)
 	                         256.0, 2048.0)));
 }
 
-struct MemoryTraceTauMultipliers
-{
-  double fast;
-  double medium;
-  double slow;
-  double ultra;
-};
-
-inline MemoryTraceTauMultipliers
-MemoryTraceTauPolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double reactive_scale = 1.0 + 0.14 * (s - s0) - 0.08 * (f - f0)
-                                + 0.06 * (t - 0.5);
-  const double stable_scale = 1.0 + 0.24 * (t - 0.5) - 0.06 * (s - s0);
-  return {
-    Clamp (0.10 * reactive_scale, 0.05, 0.20),
-    Clamp (0.50 * (1.0 + 0.12 * (t - 0.5) - 0.06 * (f - f0)), 0.30, 0.80),
-    Clamp (2.00 * stable_scale, 1.20, 3.20),
-    Clamp (8.00 * stable_scale * (1.0 + 0.10 * (f - f0)), 4.00,
-           12.00)
-  };
-}
-
-inline double
-MemoryTraceCoupling (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp ((0.05 + 0.10 * t)
-                    * (1.0 - 0.10 * (f - f0) + 0.12 * (s - s0)),
-                0.02, 0.20);
-}
-
-struct MemoryTraceWeights
-{
-  double fast;
-  double medium;
-  double slow;
-  double ultra;
-};
-
-inline MemoryTraceWeights
-MemoryTraceWeightPolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return {
-    Clamp ((0.40 - 0.25 * t)
-               * (1.0 - 0.08 * (f - f0) - 0.10 * (s - s0)),
-           0.05, 0.50),
-    Clamp (0.25 * (1.0 - 0.04 * (f - f0) - 0.04 * (t - 0.5)),
-           0.12, 0.35),
-    Clamp ((0.20 + 0.15 * t)
-               * (1.0 + 0.08 * (f - f0) + 0.06 * (s - s0)),
-           0.12, 0.45),
-    Clamp ((0.15 + 0.10 * t)
-               * (1.0 + 0.10 * (f - f0) + 0.06 * (s - s0)),
-           0.08, 0.35)
-  };
-}
-
-inline MemoryTraceWeights
-MemoryInitialTracePolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double stable_seed = Clamp ((t - 0.5) * 2.0, 0.0, 1.0);
-  const double slow_seed = Clamp (0.04 * stable_seed
-                                      * (1.0 - 0.10 * (f - f0)
-                                         + 0.10 * (s - s0)),
-                                  0.0, 0.08);
-  const double ultra_seed = Clamp (0.02 * stable_seed
-                                       * (1.0 - 0.06 * (f - f0)
-                                          + 0.08 * (s - s0)),
-                                   0.0, 0.04);
-  const double medium_seed = Clamp (0.08 * stable_seed
-                                        * (1.0 - 0.12 * (f - f0)
-                                           + 0.08 * (s - s0)),
-                                    0.0, 0.14);
-  return {
-    Clamp (1.0 - 0.5 * medium_seed - slow_seed - ultra_seed, 0.80, 1.0),
-    medium_seed,
-    slow_seed,
-    ultra_seed
-  };
-}
-
 inline double
 MemoryInitialStrengthPolicy (double F, double S, double T)
 {
@@ -2143,52 +2034,6 @@ MemoryInitialStabilityPolicy (double F, double S, double T)
                           * (1.0 + 0.25 * sensitivity_pressure
                              + 0.15 * diffuse_pressure),
                 0.82, 1.0);
-}
-
-inline MemoryTraceWeights
-MemoryStoredTraceFallbackPolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return {
-    1.0,
-    Clamp (0.50 * (1.0 - 0.08 * (f - f0) + 0.08 * (s - s0)
-                   + 0.10 * (t - 0.5)),
-           0.30, 0.70),
-    Clamp (0.20 * (1.0 + 0.08 * (f - f0) + 0.06 * (s - s0)
-                   + 0.18 * (t - 0.5)),
-           0.10, 0.35),
-    Clamp (0.05 * (1.0 + 0.10 * (f - f0) + 0.06 * (s - s0)
-                   + 0.25 * (t - 0.5)),
-           0.02, 0.12)
-  };
-}
-
-inline double
-MemoryContextualGainWindow (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (Lerp (8.0, 32.0, Clamp (T, 0.0, 1.0))
-                    * (1.0 - 0.06 * (f - f0) + 0.08 * (s - s0)),
-                4.0, 48.0);
-}
-
-inline int
-MemoryTraceCount (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double raw = (2.0 + 2.0 * Clamp (T, 0.0, 1.0))
-                     * (1.0 + 0.08 * (f - f0) + 0.06 * (s - s0));
-  return std::max (1, std::min (4, static_cast<int> (std::round (raw))));
 }
 
 // Periphery cutoff — Algorithm 0.2

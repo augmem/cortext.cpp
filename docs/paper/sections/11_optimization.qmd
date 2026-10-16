@@ -1789,7 +1789,7 @@ unrecorded algorithm or experiment implementation fails closed.
 | `TRACE[algorithm:lazy-rif-active-epoch]` | Lazy RIF clock/generation state, active-epoch SQLite, memory-strength integration, store compatibility, and migration. |
 | `TRACE[algorithm:bounded-graph-retrieval]` | Bounded activation observation, graph retrieval, historical search cache, evaluated embedding-family features, and explicitly enabled public-seed tracing. |
 | `TRACE[algorithm:emotional-propagation-cache]` | Emotional state, fixed-point propagation, and rebuildable metadata cache. |
-| `TRACE[algorithm:memory-storage-and-graph-maintenance]` | Supersession storage, association fanout, eviction, predictive/stability updates, and usage detection. |
+| `TRACE[algorithm:memory-storage-and-graph-maintenance]` | Supersession storage, association fanout, stability updates, and usage detection (eviction removed 2026-10). |
 | `TRACE[algorithm:runtime-composition]` | Engine pipeline composition and hydration/routing integration. |
 | `TRACE[algorithm:bounded-work-instrumentation]` | Consolidation-epoch and mutation-ownership counters used by the acceptance audit. |
 | `TRACE[algorithm:experiment-harness-and-audit]` | Owner-authorized session extraction, Natural/Durable replay, public-surface export and control capture, row-addressed SQLite experiment, and fail-closed performance/quality audit implementation. |
@@ -2565,9 +2565,11 @@ it is not a Durable plateau claim. The production cutover is therefore scoped
 to the knob-derived retrieval envelope and shared operation path, not to
 bounded whole-engine restart, production-wide latency, release, or deployment.
 
-## Standard Eviction-Frontier Estimate
+## Standard Eviction-Frontier Estimate (Historical)
 
-The standard file-backed pressure gate is 500,000,000 bytes. Exact databases
+Strength-based eviction and its storage gate were removed in the 2026-10
+engine ablation (@sec-reinforcement); this estimate is kept as history. The
+standard file-backed pressure gate is 500,000,000 bytes. Exact databases
 occupied 10,014,720 bytes at 500 messages, 18,169,856 bytes at 1,000, and
 48,857,088 bytes at 2,636. The full-span storage slope projects the gate at
 approximately 27,445 messages; the observed interval slopes give a planning

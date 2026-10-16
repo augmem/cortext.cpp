@@ -332,9 +332,9 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   auto sig_blob_id = BlobFromAny (sig_rows[0].at ("blob_id"));
   REQUIRE (!sig_blob_id.empty ());
 
-  // v2: Verify memories has all expected columns (strength, use_frequency now on memories)
+  // v2: Verify memories carries the initial strength and stability
   auto fb_rows = store->Execute (
-      "SELECT strength, stability, use_frequency FROM memories "
+      "SELECT strength, stability FROM memories "
       "WHERE embedding_id = ?", { *stored_id });
   REQUIRE (fb_rows.size () == 1);
   REQUIRE (std::any_cast<double> (fb_rows[0].at ("strength"))

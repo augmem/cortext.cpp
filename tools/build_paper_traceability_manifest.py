@@ -47,7 +47,7 @@ ALGORITHM_GROUPS = [
         "paths": [
             "src/operations/competition.cpp",
             "src/operations/execution_cache_sidecar_internal.hpp",
-            "src/operations/memory_strength.cpp",
+            "src/operations/memory_usage_record.cpp",
             "src/operations/rif_active_epoch_cache_internal.hpp",
             "src/operations/rif_state_internal.hpp",
             "src/store.cpp",
@@ -85,7 +85,6 @@ ALGORITHM_GROUPS = [
             "src/operations/active_signal_embedding_ring_internal.hpp",
             "src/operations/association_fanout_cache_internal.hpp",
             "src/operations/detect_memory_usage.cpp",
-            "src/operations/eviction_policy.hpp",
             "src/operations/memory_storage.cpp",
             "src/operations/reconsolidation.cpp",
             "src/operations/stability.cpp",
