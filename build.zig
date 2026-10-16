@@ -36,7 +36,6 @@ const cortext_cpp_sources = &.{
     "src/operations/focus_feedback.cpp",
     "src/operations/sensitivity_feedback.cpp",
     "src/operations/stability_feedback.cpp",
-    "src/operations/influence.cpp",
     "src/operations/reconsolidation.cpp",
     "src/operations/competition.cpp",
     "src/operations/emotion.cpp",

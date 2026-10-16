@@ -117,10 +117,10 @@ SeedLongTermMemory (cortext::Store &store, long long id, long long created_at)
       "INSERT OR REPLACE INTO memories("
       "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
       "s_max, s_avg, strength, trace_fast, trace_med, trace_slow, trace_ultra, "
-      "use_frequency, stability, connectivity, drift_mag, influence, sustained_influence, "
+      "use_frequency, stability, connectivity, drift_mag, "
       "contextual_gain, redundancy, lability_state, suppression_count, "
       "created_at, last_access) "
-      "VALUES(?, ?, 'bench', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, ?, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?, ?)",
+      "VALUES(?, ?, 'bench', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, ?, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?, ?)",
       { id, id, created_at, 0.1, 0.1, 0.05, 0.02, 0.005, created_at,
         created_at });
 }

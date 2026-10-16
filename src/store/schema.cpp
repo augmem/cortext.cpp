@@ -950,6 +950,16 @@ GetCoreMigrations ()
               "ALTER TABLE memories DROP COLUMN pre_activation",
           },
       },
+      {
+          37,
+          "Drop the removed influence-feedback columns",
+          {
+              "ALTER TABLE memories DROP COLUMN influence",
+              "ALTER TABLE memories DROP COLUMN sustained_influence",
+              "ALTER TABLE memories DROP COLUMN mean_influence",
+              "ALTER TABLE state DROP COLUMN sustained_influence",
+          },
+      },
   };
 }
 

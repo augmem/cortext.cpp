@@ -55,10 +55,10 @@ public:
             "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
             "s_max, s_avg, strength, trace_fast, trace_med, trace_slow, trace_ultra, "
             "use_frequency, stability, connectivity, drift_mag, "
-            "influence, sustained_influence, contextual_gain, redundancy, "
+            "contextual_gain, redundancy, "
             "lability_state, suppression_count, created_at) "
             "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-            "?, ?, ?, ?, ?, ?, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+            "?, ?, ?, ?, ?, ?, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
             { id, id, now_ts, strength_, strength_, strength_ * 0.5,
               strength_ * 0.2, strength_ * 0.05, use_frequency_, now_ts });
       }

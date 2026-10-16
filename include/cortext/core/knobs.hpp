@@ -757,35 +757,6 @@ RetrievalEvidenceBlendMaxMembers (double F, double S, double T)
                                       * Lerp (0.95, 1.10, t))));
 }
 
-struct InfluenceFeedbackPolicy
-{
-  double sustain_window;
-  double sustain_alpha;
-  double contextual_gain_weight;
-  double predictive_similarity_weight;
-  double drift_weight;
-};
-
-inline InfluenceFeedbackPolicy
-InfluenceFeedbackPolicyForKnobs (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double sustain_window = std::round (Lerp (3.0, 5.0, t));
-  const double sustain_alpha
-      = (sustain_window > 0.0) ? (2.0 / (sustain_window + 1.0)) : 1.0;
-  return { sustain_window,
-           sustain_alpha,
-           Clamp (0.50 * (1.0 + 0.08 * (f - f0) + 0.04 * (t - 0.5)),
-                  0.35, 0.65),
-           Clamp (0.40 * (1.0 - 0.05 * (s - s0)), 0.25, 0.55),
-           Clamp (0.30 * (1.0 + 0.08 * (s - s0) - 0.10 * (t - 0.5)),
-                  0.15, 0.45) };
-}
-
 struct RetrievalCandidateBlendWeights
 {
   double context;

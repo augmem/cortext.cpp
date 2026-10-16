@@ -241,31 +241,6 @@ adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
 
 This factor is consumed by the Stability update (@sec-stability-update), avoiding conflicting adjustments between feedback mechanisms.
 
-## Generation Influence Tracking
+## Influence Feedback (Removed)
 
-When generation embeddings are wired into the runtime, influence can incorporate output trajectory. The current implementation keeps generation-similarity and generation-drift terms neutral unless such embeddings are available:
-
-```
-Δḡ ← l2_normalize(ḡ_t) − l2_normalize(ḡ_{t−1})
-drift_mag_gen ← ‖Δḡ‖
-drift_contribution(m) ← (drift_mag_gen / 2) ×
-                         max(0, cos(m.embedding, l2_normalize(Δḡ)))
-```
-
-The intended full influence blend is:
-
-```
-λ₁ = 0.5; λ₂ = 0.4; λ₃ = 0.3
-influence(m) ← λ₁ × contextual_gain(m) +
-                λ₂ × cos(m.embedding, ḡ_t) −
-                λ₃ × drift_contribution(m)
-```
-
-Sustained influence accumulates over a stability-dependent horizon:
-
-```
-L_sustain(T) = round(lerp(3, 5, T))
-sustained_influence ← EWMA(sustained_influence,
-                           influence(m),
-                           α = 2 / (L_sustain(T) + 1))
-```
+Earlier builds ran an influence-feedback operation (Algorithm 19). It blended contextual gain with neutral generation-similarity and drift terms into per-memory `influence`, `sustained_influence` and `mean_influence` columns. Nothing downstream read those columns. The `influence_factor` used by memory strength (below) is computed separately from usage counts and contextual gain. The engine ablation study (2026-10) removed the operation and its columns. With it switched off as part of the minor-feedback group, packets stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.

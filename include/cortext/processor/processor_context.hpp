@@ -54,7 +54,6 @@ struct BoundaryDiagnostics
 /// - Threshold: T_dynamic, recent_scores, rate control (Alg 8)
 /// - Blender: metric weights, RLS state (Alg 7)
 /// - Consolidation: last_consolidation_ts, last_retrieval_ts (Alg 28)
-/// - Influence: sustained_influence (Alg 19)
 /// - Working Memory: wm_slots, acceptance state (Alg 24)
 ///
 /// Note: This struct could be refactored into smaller sub-structs (e.g.,
@@ -386,11 +385,6 @@ struct ProcessorContext
   // Episode Tracking State (Algorithm 12)
   // ======================================================================
   uint64_t episode_start_ts = 0;
-
-  // ======================================================================
-  // Influence Feedback State (Algorithm 19)
-  // ======================================================================
-  double sustained_influence = 0.0;
 
   // ======================================================================
   // Working Memory State (Algorithm 24, Section 6.1)

@@ -65,7 +65,6 @@
 #include "cortext/operations/focus.hpp"
 #include "cortext/operations/focus_feedback.hpp"
 #include "cortext/operations/focus_spread.hpp"
-#include "cortext/operations/influence.hpp"
 #include "cortext/operations/interrupt_gate.hpp"
 #include "cortext/operations/memory_strength.hpp"
 #include "cortext/operations/metrics.hpp"
@@ -1911,7 +1910,6 @@ BuildRootOperationSet (bool probe_mode)
 {
   using cortext::operations::ApplyEmotionalConsolidation;
   using cortext::operations::ApplyFocusFeedback;
-  using cortext::operations::ApplyInfluenceFeedback;
   using cortext::operations::ApplyReconsolidation;
   using cortext::operations::ApplyRetrievalCompetition;
   using cortext::operations::ApplySensitivityFeedback;
@@ -1995,7 +1993,7 @@ BuildRootOperationSet (bool probe_mode)
   using FeedbackStage = OperationSet<
       ApplyRetrievalCompetition,
       ApplyReconsolidation, ApplyFocusFeedback, ApplySensitivityFeedback,
-      ApplyStabilityFeedback, UpdateStability, ApplyInfluenceFeedback,
+      ApplyStabilityFeedback, UpdateStability,
       ApplySerialPositionEffects, ApplySerialPositionMultiplier,
       UpdateMemoryStrength, ApplyEmotionalConsolidation, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,

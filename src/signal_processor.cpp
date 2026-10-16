@@ -2248,8 +2248,6 @@ LoadState (Store &store, ProcessorContext &ctx,
           true);
       ctx.delta_half_life_adj
           = ExtractDouble (row, "delta_half_life_adj", 0.0);
-      ctx.sustained_influence
-          = ExtractDouble (row, "sustained_influence", 0.0);
       ctx.last_signal_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_timestamp", 0));
       ctx.episode_start_ts
@@ -4693,7 +4691,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "u_uncertainty, "
       "outcome_pred, neuromod_ach, neuromod_ne, neuromod_da, osc_phase, "
       // Embedding prediction
-      "last_embedding, x_pred_ema, delta_half_life_adj, sustained_influence, "
+      "last_embedding, x_pred_ema, delta_half_life_adj, "
       // Working memory
       "wm_maintenance_cost, wm_slot_count, wm_last_accepted, wm_last_chunked, "
       // Consolidation
@@ -4716,7 +4714,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, ?, ?, "  // Stability
       "?, ?, ?, ?, ?, ?, "  // Rate control
       "?, ?, ?, ?, ?, ?, "  // Uncertainty + modulators
-      "?, ?, ?, ?, "  // Embedding prediction
+      "?, ?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
       "?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Consolidation
       "?, ?, ?, ?, ?, "  // Episode tracking + write_rate_timestamps
@@ -4763,7 +4761,7 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->x_pred_ema.has_value ()
             ? std::any (ToFloatVector (*context_->x_pred_ema))
             : std::any (std::vector<float> ()),
-        context_->delta_half_life_adj, context_->sustained_influence,
+        context_->delta_half_life_adj,
         // Working memory
         wm_maintenance_cost,
         wm_slot_count,

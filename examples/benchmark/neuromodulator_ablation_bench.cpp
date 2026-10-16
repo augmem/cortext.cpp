@@ -260,10 +260,10 @@ public:
             "INSERT OR REPLACE INTO memories("
             "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
             "s_max, s_avg, strength, use_frequency, stability, connectivity, drift_mag, "
-            "influence, sustained_influence, contextual_gain, redundancy, "
+            "contextual_gain, redundancy, "
             "lability_state, suppression_count, created_at) "
             "VALUES(?, ?, 'bench', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-            "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
+            "1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, ?)",
             { id, id, now_ts, now_ts });
       }
   }

@@ -612,14 +612,6 @@ TEST_CASE ("Retrieval candidate blend scoring policies derive from knobs",
            == Catch::Approx (1050.0));
   REQUIRE (RetrievalCompetitionRecoverySeconds (1.0)
            > RetrievalCompetitionRecoverySeconds (0.0));
-  const auto influence_mid = InfluenceFeedbackPolicyForKnobs (0.5, 0.5, 0.5);
-  REQUIRE (influence_mid.sustain_window == Catch::Approx (4.0));
-  REQUIRE (influence_mid.sustain_alpha == Catch::Approx (0.4));
-  REQUIRE (influence_mid.contextual_gain_weight == Catch::Approx (0.50));
-  REQUIRE (influence_mid.predictive_similarity_weight == Catch::Approx (0.40));
-  REQUIRE (influence_mid.drift_weight == Catch::Approx (0.30));
-  REQUIRE (InfluenceFeedbackPolicyForKnobs (0.5, 0.5, 1.0).sustain_window
-           > InfluenceFeedbackPolicyForKnobs (0.5, 0.5, 0.0).sustain_window);
 
   const auto affect_mid = AffectDriveWeights (0.5);
   REQUIRE (affect_mid.arousal_weight
