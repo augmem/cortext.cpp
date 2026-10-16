@@ -985,8 +985,6 @@ RetrievalTraceJson ()
         { "activation",
           {
               { "base_level", candidate.activation.base_level },
-              { "partial_match_penalty",
-                candidate.activation.partial_match_penalty },
               { "recent_inhibition", candidate.activation.recent_inhibition },
               { "utility", candidate.activation.utility },
               { "exploration_noise", candidate.activation.exploration_noise },
@@ -1015,8 +1013,6 @@ RetrievalTraceJson ()
         { "activation",
           {
               { "base_level", candidate.activation.base_level },
-              { "partial_match_penalty",
-                candidate.activation.partial_match_penalty },
               { "recent_inhibition", candidate.activation.recent_inhibition },
               { "utility", candidate.activation.utility },
               { "exploration_noise", candidate.activation.exploration_noise },
@@ -1046,8 +1042,6 @@ RetrievalTraceJson ()
 	            { "activation",
               {
                   { "base_level", member.activation.base_level },
-                  { "partial_match_penalty",
-                    member.activation.partial_match_penalty },
                   { "recent_inhibition",
                     member.activation.recent_inhibition },
                   { "utility", member.activation.utility },

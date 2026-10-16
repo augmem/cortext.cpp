@@ -43,7 +43,6 @@ struct Candidate
   double seed_score = 0.0;
   double source_confidence = 0.0;
   double temporal_score = 0.0;
-  double superseded_penalty = 0.0;
   double score = 0.0;
 };
 
@@ -1413,8 +1412,6 @@ InsertOrBoost (std::unordered_map<long long, Candidate> &candidates,
                       candidate.source_confidence);
       it->second.temporal_score = std::max (it->second.temporal_score,
                                             candidate.temporal_score);
-      it->second.superseded_penalty = std::max (
-          it->second.superseded_penalty, candidate.superseded_penalty);
       it->second.score = std::max (it->second.score, candidate.score);
       if (it->second.start_ts <= 0)
         {
@@ -1996,7 +1993,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       trace.relevance = candidate.seed_score;
       trace.temporal_score = candidate.temporal_score;
       trace.activation.base_level = candidate.seed_score;
-      trace.activation.partial_match_penalty = candidate.superseded_penalty;
       trace.activation.activation_total = candidate.score;
       retrieval_trace::RejectedCandidate rejected;
       rejected.candidate = trace;
@@ -2147,7 +2143,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       trace.relevance = candidate.seed_score;
       trace.temporal_score = candidate.temporal_score;
       trace.activation.base_level = candidate.seed_score;
-      trace.activation.partial_match_penalty = candidate.superseded_penalty;
       trace.activation.activation_total = candidate.score;
       trace_ranked.push_back (trace);
     }
