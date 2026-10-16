@@ -789,22 +789,11 @@ supersession predicates to that subset before evaluating vector distance, so
 signal-only historical embeddings do not enter the distance kernel. This is an
 execution-only index: it does not change the eligible set, distance expression,
 tie order, family collapse, or source and modality semantics.
-An internal execution sidecar maintains, for each supersession target, the earliest start timestamp of an
-eligible replacement. Retrieval tests that timestamp directly instead of
-rebuilding a target set by scanning every incoming edge. Memory storage
-recomputes only the affected target's eligibility after it commits a
-supersession decision. A current-surface change
-likewise recomputes only targets reached by that memory's outgoing
-`supersedes` edges. Missing target metadata invalidates the cache and returns
-to authoritative SQLite rehydration. The sidecar is not part of
-the public processor layout. The strict replacement-before-query predicate and
-base embedding identity remain unchanged.
-The emotional-metadata portion of the sidecar is trusted only by the
-engine-owned operation root that maintains it. A caller-supplied root's
-transaction view invalidates that sidecar before forwarding its first SQL
-statement, so a custom transaction that updates emotional columns directly
-cannot leave a valid-looking stale fixed point for a later operation in the
-same transaction. Cache-only custom roots retain their exact rollback snapshot.
+An internal execution sidecar, keyed by processor-context identity and not
+part of the public processor layout, now holds only the retrieval-inhibition
+active epoch described below. Its earlier supersession-target and
+emotional-metadata portions served supersession exclusion and the emotional
+cascade, both removed by the ablation study.
 The fallback executes a demand-driven sequence of ordered SQL pages
 over the current and historical vector surfaces. Each page joins memory
 metadata and applies kind and timestamp eligibility before
