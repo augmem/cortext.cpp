@@ -61,6 +61,7 @@ constexpr std::uintmax_t kWalPassiveCheckpointMinBytes
 #if defined(CORTEXT_TESTING)
 std::atomic<bool> g_sqlite_checkpoint_failure_once { false };
 std::atomic<bool> g_retrieval_surface_reload_failure_once { false };
+std::atomic<std::size_t> g_retrieval_surface_reload_count { 0 };
 #endif
 
 bool
@@ -327,6 +328,70 @@ ClearDbDerivedProcessorCaches (ProcessorContext &ctx)
   operations::execution_cache_sidecar_internal::Erase (ctx);
   ctx.retrieval_suppression_embedding_ids = {};
   ctx.retrieval_suppression_memory_ids = {};
+}
+
+// Moves the DB-derived caches ClearDbDerivedProcessorCaches drops, except the
+// execution-cache sidecar, which is keyed by context identity and survives a
+// context reassignment in place.
+DetachedProcessorCaches
+DetachDbDerivedProcessorCaches (ProcessorContext &ctx)
+{
+  DetachedProcessorCaches caches;
+  caches.association_cache = std::move (ctx.association_cache);
+  caches.association_cache_index = std::move (ctx.association_cache_index);
+  caches.retrieval_surface_cache = std::move (ctx.retrieval_surface_cache);
+  caches.retrieval_surface_index = std::move (ctx.retrieval_surface_index);
+  caches.retrieval_surface_embedding_index
+      = std::move (ctx.retrieval_surface_embedding_index);
+  caches.retrieval_surface_source_index
+      = std::move (ctx.retrieval_surface_source_index);
+  caches.retrieval_surface_source_index_dirty
+      = std::move (ctx.retrieval_surface_source_index_dirty);
+  caches.association_fanout_cache
+      = std::move (ctx.association_fanout_cache);
+  caches.retrieval_suppression_embedding_ids
+      = std::move (ctx.retrieval_suppression_embedding_ids);
+  caches.retrieval_suppression_memory_ids
+      = std::move (ctx.retrieval_suppression_memory_ids);
+  return caches;
+}
+
+struct RetrievalSurfaceShape
+{
+  std::size_t surface = 0;
+  std::size_t memory_index = 0;
+  std::size_t embedding_index = 0;
+
+  bool operator== (const RetrievalSurfaceShape &) const = default;
+};
+
+RetrievalSurfaceShape
+CaptureRetrievalSurfaceShape (const ProcessorContext &ctx)
+{
+  return { ctx.retrieval_surface_cache.size (),
+           ctx.retrieval_surface_index.size (),
+           ctx.retrieval_surface_embedding_index.size () };
+}
+
+void
+RestoreDbDerivedProcessorCaches (ProcessorContext &ctx,
+                                 DetachedProcessorCaches &caches)
+{
+  ctx.association_cache = std::move (caches.association_cache);
+  ctx.association_cache_index = std::move (caches.association_cache_index);
+  ctx.retrieval_surface_cache = std::move (caches.retrieval_surface_cache);
+  ctx.retrieval_surface_index = std::move (caches.retrieval_surface_index);
+  ctx.retrieval_surface_embedding_index
+      = std::move (caches.retrieval_surface_embedding_index);
+  ctx.retrieval_surface_source_index
+      = std::move (caches.retrieval_surface_source_index);
+  ctx.retrieval_surface_source_index_dirty
+      = std::move (caches.retrieval_surface_source_index_dirty);
+  ctx.association_fanout_cache = std::move (caches.association_fanout_cache);
+  ctx.retrieval_suppression_embedding_ids
+      = std::move (caches.retrieval_suppression_embedding_ids);
+  ctx.retrieval_suppression_memory_ids
+      = std::move (caches.retrieval_suppression_memory_ids);
 }
 
 void
@@ -2561,6 +2626,8 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
       operations::execution_cache_sidecar_internal::Erase (ctx);
       restore_rif_epoch ();
 #if defined(CORTEXT_TESTING)
+      g_retrieval_surface_reload_count.fetch_add (1,
+                                                  std::memory_order_relaxed);
       if (g_retrieval_surface_reload_failure_once.exchange (
               false, std::memory_order_relaxed))
         throw std::runtime_error (
@@ -3113,6 +3180,12 @@ SetSQLiteCheckpointFailureOnceForTest ()
   g_sqlite_checkpoint_failure_once.store (true, std::memory_order_relaxed);
 }
 
+std::size_t
+RetrievalSurfaceReloadCountForTest ()
+{
+  return g_retrieval_surface_reload_count.load (std::memory_order_relaxed);
+}
+
 void
 SetRetrievalSurfaceReloadFailureOnceForTest ()
 {
@@ -3337,6 +3410,16 @@ SignalProcessor::Process (const Signal &signal)
     RestoreRebuildableProcessorCaches (*context_, detached_caches);
   }
   const auto snapshot_end = std::chrono::steady_clock::now ();
+  // Engine operations leave the DB-derived caches untouched on an ephemeral
+  // signal: retrieval-time surface writes (reconsolidation, constructive
+  // recall, storage, usage) all skip Ephemeral, and the store transaction is
+  // rolled back. A read-only engine signal therefore keeps those caches
+  // instead of reloading the whole surface from SQL. The surface shape is
+  // recorded so an unexpected insert or removal still forces the reload.
+  std::optional<RetrievalSurfaceShape> read_only_surface_shape;
+  if (read_only && !full_cache_snapshot && snapshot_owner.IsEngineOwned ()
+      && store_)
+    read_only_surface_shape = CaptureRetrievalSurfaceShape (*context_);
 
   std::unique_ptr<CustomOperationStore> custom_operation_store;
   Store *operation_store = store_.get ();
@@ -3427,6 +3510,10 @@ SignalProcessor::Process (const Signal &signal)
       }
   };
   auto restore_read_only_context_snapshot = [&] {
+    std::optional<DetachedProcessorCaches> db_derived_caches;
+    if (!rollback_snapshot.full_cache_snapshot && read_only_surface_shape
+        && *read_only_surface_shape == CaptureRetrievalSurfaceShape (*context_))
+      db_derived_caches = DetachDbDerivedProcessorCaches (*context_);
     signal_record_journal.RestoreRecordsInto (rollback_snapshot.context);
     *context_ = std::move (rollback_snapshot.context);
     operations::consolidation_throughput_state_internal::Reset (
@@ -3434,6 +3521,10 @@ SignalProcessor::Process (const Signal &signal)
     if (rollback_snapshot.full_cache_snapshot)
       {
         RestoreRebuildableProcessorCaches (*context_, rollback_snapshot.caches);
+      }
+    else if (db_derived_caches)
+      {
+        RestoreDbDerivedProcessorCaches (*context_, *db_derived_caches);
       }
     else
       {

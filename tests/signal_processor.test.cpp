@@ -3,6 +3,10 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cortext/clock.hpp>
+#include <cortext/operations/competition.hpp>
+#include <cortext/operations/graph_retrieval.hpp>
+#include <cortext/operations/memory_usage_record.hpp>
+#include <cortext/operations/reconsolidation.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
@@ -20,7 +24,9 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <thread>
+#include <tuple>
 #include <unordered_set>
 
 using namespace cortext;
@@ -36,6 +42,7 @@ void SetRifActiveEpochPublishFailureStageForTest (int stage);
 void SetRifActiveEpochPublishFailureMaskForTest (unsigned int mask);
 void SetSQLiteCheckpointFailureOnceForTest ();
 void SetRetrievalSurfaceReloadFailureOnceForTest ();
+std::size_t RetrievalSurfaceReloadCountForTest ();
 }
 
 namespace cortext::store
@@ -680,6 +687,79 @@ struct ExerciseJournalAwareReadOnlyRollbackOp : IOperation
 
   bool *restored = nullptr;
   mutable int call_count = 0;
+};
+
+struct PrimeQueryFeedbackOp : IOperation
+{
+  explicit PrimeQueryFeedbackOp (Eigen::VectorXf embedding)
+      : embedding (std::move (embedding))
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    ctx.GetProcessorContext ().recent_context_embeddings = { embedding };
+    ctx.SetRetrievedMemoryCandidates ({ { 42LL, 52LL, embedding, 1.0 } });
+  }
+
+  Eigen::VectorXf embedding;
+};
+
+// Simulates an operation that grows the retrieval surface during a read-only
+// signal, which the rollback must not keep.
+struct GrowRetrievalSurfaceOp : IOperation
+{
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &p_ctx = ctx.GetProcessorContext ();
+    ProcessorContext::RetrievalSurfaceEntry entry;
+    entry.memory_id = 999LL;
+    entry.embedding_id = 999LL;
+    p_ctx.retrieval_surface_index[entry.memory_id]
+        = p_ctx.retrieval_surface_cache.size ();
+    p_ctx.retrieval_surface_cache.push_back (std::move (entry));
+  }
+};
+
+using RetrievalSurfaceCapture
+    = std::map<long long, std::tuple<long long, long long, long long,
+                                     long long, long long, std::string,
+                                     std::vector<float>>>;
+
+RetrievalSurfaceCapture
+CaptureRetrievalSurface (const ProcessorContext &context)
+{
+  RetrievalSurfaceCapture capture;
+  for (const auto &entry : context.retrieval_surface_cache)
+    capture.emplace (
+        entry.memory_id,
+        std::make_tuple (
+            entry.embedding_id, entry.start_ts, entry.last_access,
+            entry.retrieved_count, entry.used_count, entry.source_id,
+            std::vector<float> (entry.embedding.data (),
+                                entry.embedding.data ()
+                                    + entry.embedding.size ())));
+  return capture;
+}
+
+struct CaptureRetrievalSurfaceOp : IOperation
+{
+  explicit CaptureRetrievalSurfaceOp (
+      std::vector<RetrievalSurfaceCapture> *captures)
+      : captures (captures)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    captures->push_back (
+        CaptureRetrievalSurface (ctx.GetProcessorContext ()));
+  }
+
+  std::vector<RetrievalSurfaceCapture> *captures = nullptr;
 };
 
 struct CaptureAccumulatorCountOp : IOperation
@@ -3390,6 +3470,131 @@ TEST_CASE ("SignalProcessor journal-aware read-only rollback rebuilds DB "
   signal.timestamp = 4000;
   processor.Process (signal);
   REQUIRE (restored);
+}
+
+namespace
+{
+std::shared_ptr<Store>
+MakeReadOnlySurfaceStore (const Eigen::VectorXf &query)
+{
+  auto uniq = SQLiteStore::Create (":memory:");
+  std::shared_ptr<Store> store (std::move (uniq));
+  cortext::testing::InitializeCoreSchema (*store);
+  Eigen::VectorXf other = Eigen::VectorXf::Zero (256);
+  other[1] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 51LL, other, 1000LL);
+  cortext::testing::SeedMemoryV2 (*store, 41LL, 51LL, "seed/other",
+                                  "LONG_TERM", 1.0, 1000LL);
+  cortext::testing::SeedEmbeddingV2 (*store, 52LL, query, 1100LL);
+  cortext::testing::SeedMemoryV2 (*store, 42LL, 52LL, "seed/match",
+                                  "LONG_TERM", 1.0, 1100LL);
+  return store;
+}
+
+Signal
+MakeReadOnlyQuery (const Eigen::VectorXf &query, double timestamp)
+{
+  Signal signal;
+  signal.embedding = query;
+  signal.source_id = "eval/query";
+  signal.retention = Retention::Ephemeral;
+  signal.timestamp = timestamp;
+  return signal;
+}
+
+RetrievalSurfaceCapture
+FreshRetrievalSurface (const SignalProcessor::Config &cfg,
+                       const std::shared_ptr<Store> &store,
+                       const Signal &signal)
+{
+  std::vector<RetrievalSurfaceCapture> fresh;
+  SignalProcessor fresh_processor (
+      cfg, store,
+      std::make_unique<DynamicOperationSet> (
+          std::make_unique<CaptureRetrievalSurfaceOp> (&fresh)));
+  fresh_processor.Process (signal);
+  REQUIRE (fresh.size () == 1);
+  return fresh[0];
+}
+} // namespace
+
+TEST_CASE ("SignalProcessor engine read-only rollback keeps the retrieval "
+           "surface without reloading it",
+           "[processor][rollback][cache][journal][read_only]")
+{
+  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
+  query[0] = 1.0f;
+  auto store = MakeReadOnlySurfaceStore (query);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  std::vector<RetrievalSurfaceCapture> before;
+  std::vector<RetrievalSurfaceCapture> after;
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<CaptureRetrievalSurfaceOp> (&before),
+      std::make_unique<PrimeQueryFeedbackOp> (query),
+      std::make_unique<operations::ApplyRetrievalCompetition> (),
+      std::make_unique<operations::ApplyReconsolidation> (),
+      std::make_unique<operations::RecordMemoryUsage> (),
+      std::make_unique<CaptureRetrievalSurfaceOp> (&after));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (pipeline)));
+
+  const auto reloads_before
+      = cortext::testing::RetrievalSurfaceReloadCountForTest ();
+  processor.Process (MakeReadOnlyQuery (query, 2000));
+  processor.Process (MakeReadOnlyQuery (query, 3000));
+  REQUIRE (cortext::testing::RetrievalSurfaceReloadCountForTest ()
+           == reloads_before);
+
+  REQUIRE (before.size () == 2);
+  REQUIRE (after.size () == 2);
+  REQUIRE (before[0].size () == 2);
+  // The kept surface is what the query saw, and what a fresh processor
+  // loads from the committed store.
+  REQUIRE (after[0] == before[0]);
+  REQUIRE (before[1] == before[0]);
+  REQUIRE (before[1]
+           == FreshRetrievalSurface (cfg, store,
+                                     MakeReadOnlyQuery (query, 4000)));
+}
+
+TEST_CASE ("SignalProcessor engine read-only rollback reloads a surface the "
+           "signal reshaped",
+           "[processor][rollback][cache][journal][read_only]")
+{
+  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
+  query[0] = 1.0f;
+  auto store = MakeReadOnlySurfaceStore (query);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  std::vector<RetrievalSurfaceCapture> before;
+  std::vector<RetrievalSurfaceCapture> after;
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<CaptureRetrievalSurfaceOp> (&before),
+      std::make_unique<GrowRetrievalSurfaceOp> (),
+      std::make_unique<CaptureRetrievalSurfaceOp> (&after));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (pipeline)));
+
+  processor.Process (MakeReadOnlyQuery (query, 2000));
+  const auto reloads_before
+      = cortext::testing::RetrievalSurfaceReloadCountForTest ();
+  processor.Process (MakeReadOnlyQuery (query, 3000));
+  REQUIRE (cortext::testing::RetrievalSurfaceReloadCountForTest ()
+           == reloads_before + 1);
+
+  REQUIRE (before.size () == 2);
+  REQUIRE (after[1].contains (999LL));
+  REQUIRE_FALSE (before[1].contains (999LL));
+  REQUIRE (before[1]
+           == FreshRetrievalSurface (cfg, store,
+                                     MakeReadOnlyQuery (query, 4000)));
 }
 
 TEST_CASE ("SignalProcessor rollback preserves pending Natural record storage",
