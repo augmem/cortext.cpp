@@ -68,7 +68,7 @@ struct AccumulatorState
 
   // v2 aggregated blob tracking (working-memory.plan.md Section 2)
   std::vector<std::vector<unsigned char>> blob_ids;  ///< Aggregated objstore refs
-  std::string primary_modality;                       ///< "text"|"audio"|"image"
+  std::string memory_modality;  ///< shared signal modality, or "mixed"
 
   // Streaming integration (Section 10)
   Eigen::VectorXf prev_x;           ///< Previous accumulator centroid for refractory
@@ -113,7 +113,7 @@ struct AccumulatorState
     signals.clear ();
     // Clear v2 blob tracking
     blob_ids.clear ();
-    primary_modality.clear ();
+    memory_modality.clear ();
     acc_signals_window.clear ();
     pending_interrupt_abort = false;
     pending_interrupt_embedding = Eigen::VectorXf ();
@@ -149,7 +149,7 @@ struct AccumulatorState
     s_arousal_sum = 0.0;
     signals.clear ();
     blob_ids.clear ();
-    primary_modality.clear ();
+    memory_modality.clear ();
     acc_signals_window.clear ();
     pending_interrupt_abort = false;
     pending_interrupt_embedding = Eigen::VectorXf ();

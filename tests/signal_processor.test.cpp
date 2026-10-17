@@ -643,7 +643,7 @@ struct ExerciseWholeContextRollbackOp : IOperation
         AccumulatorState foreign;
         foreign.n_signals = 7;
         foreign.mu_acc = Eigen::VectorXf::Constant (256, 0.125f);
-        foreign.primary_modality = "audio";
+        foreign.memory_modality = "audio";
         processor_context.accumulator_states["foreign/source"]
             = std::move (foreign);
         processor_context.recent_scores = { 0.25, 0.75 };
@@ -672,7 +672,7 @@ struct ExerciseWholeContextRollbackOp : IOperation
               && accumulator_it->second.n_signals == 7
               && accumulator_it->second.mu_acc.size () == 256
               && accumulator_it->second.mu_acc[0] == 0.125f
-              && accumulator_it->second.primary_modality == "audio"
+              && accumulator_it->second.memory_modality == "audio"
               && processor_context.accumulator_states.at ("test")
                          .signals.front ().payload
                      == std::vector<unsigned char> (8, 0x11)

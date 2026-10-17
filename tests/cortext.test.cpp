@@ -2186,3 +2186,98 @@ TEST_CASE ("Sparse route growth recommends consolidation and recenters the "
   REQUIRE (recentered >= 3);
   REQUIRE (consolidations <= turns / (route_capacity / 2));
 }
+
+namespace
+{
+const std::vector<std::uint8_t> kFakeJpeg = { 0xFF, 0xD8, 0xFF, 0xE0, 0x00,
+                                              0x10, 'J',  'F',  'I',  'F',
+                                              0x00, 0xFF, 0xD9 };
+
+const cortext::Cortext::Context::Memory *
+FindMemoryWithText (const std::vector<cortext::Cortext::Context::Memory> &mems,
+                    const std::string &needle)
+{
+  for (const auto &memory : mems)
+    {
+      for (const auto &blob : memory.content)
+        {
+          if (std::string (blob.begin (), blob.end ()).find (needle)
+              != std::string::npos)
+            return &memory;
+        }
+    }
+  return nullptr;
+}
+
+std::vector<std::string>
+ContentMimes (const cortext::Cortext::Context::Memory &memory)
+{
+  std::vector<std::string> out;
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
+    {
+      out.push_back (i < memory.content_mimetypes.size ()
+                         ? memory.content_mimetypes[i]
+                         : memory.mimetype);
+    }
+  return out;
+}
+} // namespace
+
+TEST_CASE ("Cortext multi-modality memory keeps and returns every signal",
+           "[cortext][media][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+
+  // One turn = one source: a text signal and the photo sent with it, as
+  // peers. The turn's last signal commits it.
+  (void)ctx->ProcessTextAt ("The parking garage ticket says level 4 spot 27.",
+                            "chat/user/turn1", 1000ULL,
+                            cortext::Retention::Natural);
+  std::vector<std::uint8_t> pixels (8 * 8 * 3, 128);
+  cortext::Cortext::Media photo;
+  photo.data = kFakeJpeg.data ();
+  photo.size = kFakeJpeg.size ();
+  photo.mimetype = "image/jpeg";
+  auto commit = ctx->ProcessImage (pixels.data (), 8, 8, 3, "chat/user/turn1",
+                                   photo, cortext::Retention::Durable);
+  REQUIRE (commit.output.stored_memory_id.has_value ());
+  const long long memory_id = *commit.output.stored_memory_id;
+  const auto signals = store->Execute (
+      "SELECT COUNT(*) AS n FROM signals WHERE memory_id = ?", { memory_id });
+  REQUIRE (AnyToLongLong (signals[0].at ("n")) == 2);
+  const auto rows = store->Execute (
+      "SELECT modality FROM memories WHERE memory_id = ?", { memory_id });
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("modality")) == "mixed");
+  // The text signal is keyword-indexed without making the memory "text".
+  const auto fts = store->Execute (
+      "SELECT rowid FROM memory_text_fts WHERE memory_text_fts MATCH 'garage'");
+  REQUIRE (fts.size () == 1);
+
+  auto recalled = ctx->ProcessTextAt ("parking garage level spot",
+                                      "query/public", 2000ULL,
+                                      cortext::Retention::Ephemeral);
+  const auto *memory
+      = FindMemoryWithText (recalled.retrieved_memory, "level 4 spot 27");
+  REQUIRE (memory != nullptr);
+  REQUIRE (memory->modality == "mixed");
+  const auto mimes = ContentMimes (*memory);
+  REQUIRE (std::count (mimes.begin (), mimes.end (), "text/plain") == 1);
+  REQUIRE (std::count (mimes.begin (), mimes.end (), "image/jpeg") == 1);
+  bool photo_returned = false;
+  for (const auto &blob : memory->content)
+    photo_returned = photo_returned
+                     || blob == std::vector<unsigned char> (kFakeJpeg.begin (),
+                                                            kFakeJpeg.end ());
+  REQUIRE (photo_returned);
+
+  const auto *slot
+      = FindMemoryWithText (recalled.working_memory, "level 4 spot 27");
+  REQUIRE (slot != nullptr);
+  const auto slot_mimes = ContentMimes (*slot);
+  REQUIRE (std::count (slot_mimes.begin (), slot_mimes.end (), "image/jpeg")
+           == 1);
+}

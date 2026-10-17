@@ -74,8 +74,12 @@ public:
       long long retrieved_count = 0;
       long long used_count = 0;
       std::vector<std::vector<unsigned char>> content;  ///< Blobs from signals (one per signal in slot)
-      std::string modality;
-      std::string mimetype;
+      /// MIME type of each content blob, in content order. A memory whose
+      /// signals had different modalities (modality "mixed", for example a
+      /// turn's text and its photo) returns every signal's payload.
+      std::vector<std::string> content_mimetypes;
+      std::string modality;  ///< shared signal modality, or "mixed"
+      std::string mimetype;  ///< MIME type of the memory's first signal
 
       // Flattened metrics (formerly HistoricalMetrics)
       double relevance = 0.0;

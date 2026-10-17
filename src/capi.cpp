@@ -953,10 +953,14 @@ nlohmann::json
 memory_to_json (const cortext::Cortext::Context::Memory &memory)
 {
   nlohmann::json content = nlohmann::json::array ();
-  for (const auto &blob : memory.content)
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
     {
+      const auto &blob = memory.content[i];
       content.push_back ({
           { "size_bytes", blob.size () },
+          { "mimetype", i < memory.content_mimetypes.size ()
+                            ? memory.content_mimetypes[i]
+                            : memory.mimetype },
           { "base64", encode_base64 (blob) },
       });
     }

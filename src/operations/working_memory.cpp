@@ -522,9 +522,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
 
   // v2 persistence fields (working-memory.plan.md Section 4)
   slot.source_id = signal.source_id;
-  if (!acc.primary_modality.empty ())
+  if (!acc.memory_modality.empty ())
     {
-      slot.modality = acc.primary_modality;
+      slot.modality = acc.memory_modality;
     }
   else
     {

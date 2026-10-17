@@ -109,10 +109,10 @@ UpdateAccumulator::Execute (OperationContext &context,
               CreateSignalRecord (signal, 0.0, 0));
         }
 
-      // Track primary modality (v2: first modality wins)
+      // A fresh unit takes the first signal's modality.
       if (track_storable_signal)
         {
-          state.primary_modality = signal.modality;
+          state.memory_modality = signal.modality;
         }
       if (state.mu_acc.size () > 0)
         {
@@ -212,10 +212,10 @@ UpdateAccumulator::Execute (OperationContext &context,
               CreateSignalRecord (signal, 0.0, 0));
         }
 
-      // Track primary modality (v2: first modality wins)
+      // A fresh unit takes the first signal's modality.
       if (track_storable_signal)
         {
-          acc.primary_modality = signal.modality;
+          acc.memory_modality = signal.modality;
         }
       if (acc.mu_acc.size () > 0)
         {
@@ -272,10 +272,13 @@ UpdateAccumulator::Execute (OperationContext &context,
           CreateSignalRecord (signal, 0.0, serial_pos));
     }
 
-  // Track primary modality (v2: first modality wins)
-  if (track_storable_signal && acc.primary_modality.empty ())
+  // Signals of different modalities in one unit are peers: "mixed".
+  if (track_storable_signal)
     {
-      acc.primary_modality = signal.modality;
+      if (acc.memory_modality.empty ())
+        acc.memory_modality = signal.modality;
+      else if (acc.memory_modality != signal.modality)
+        acc.memory_modality = "mixed";
     }
 
   telemetry::RecordHistogram ("cortext.accumulator.n_signals",

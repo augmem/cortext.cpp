@@ -439,10 +439,15 @@ LoadSignalBlobs (Store *store, long long memory_id,
                  int max_signal_blobs,
                  std::size_t *loaded_signal_blobs,
                  std::vector<std::vector<unsigned char>> &out,
+                 std::vector<std::string> &out_mimetypes,
                  SharedObjectReads *shared = nullptr)
 {
   if (!store || memory_id <= 0)
     return false;
+  // A mixed memory returns the payloads of all its signals.
+  const bool mixed = memory_modality == "mixed";
+  const std::string modality_filter = mixed ? std::string () : memory_modality;
+  const std::string mime_filter = mixed ? std::string () : memory_mime;
 
   try
     {
@@ -450,6 +455,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
       long long cursor_position = std::numeric_limits<long long>::max ();
       long long cursor_signal_id = std::numeric_limits<long long>::max ();
       std::vector<std::vector<unsigned char>> matched_payloads;
+      std::vector<std::string> matched_mimetypes;
       matched_payloads.reserve (static_cast<std::size_t> (limit));
       while (static_cast<long long> (matched_payloads.size ()) < limit)
         {
@@ -464,7 +470,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
               "           AND signal_id < ?)) "
               "ORDER BY sort_position DESC, signal_id DESC "
               "LIMIT ?",
-              { memory_id, memory_modality, memory_modality,
+              { memory_id, modality_filter, modality_filter,
                 cursor_position, cursor_position, cursor_signal_id, limit });
           if (rows.empty ())
             break;
@@ -496,11 +502,12 @@ LoadSignalBlobs (Store *store, long long memory_id,
                           const std::string signal_mime
                               = RowString (row, "mime");
                           if (PayloadMatchesMemorySurface (
-                                  memory_modality, memory_mime,
+                                  modality_filter, mime_filter,
                                   signal_modality, signal_mime, payload))
                             {
                               matched_payloads.push_back (
                                   std::move (payload));
+                              matched_mimetypes.push_back (signal_mime);
                               if (static_cast<long long> (
                                       matched_payloads.size ())
                                   == limit)
@@ -514,11 +521,15 @@ LoadSignalBlobs (Store *store, long long memory_id,
             break;
         }
       std::reverse (matched_payloads.begin (), matched_payloads.end ());
+      std::reverse (matched_mimetypes.begin (), matched_mimetypes.end ());
       if (loaded_signal_blobs)
         *loaded_signal_blobs += matched_payloads.size ();
       out.insert (out.end (),
                   std::make_move_iterator (matched_payloads.begin ()),
                   std::make_move_iterator (matched_payloads.end ()));
+      out_mimetypes.insert (out_mimetypes.end (),
+                            std::make_move_iterator (matched_mimetypes.begin ()),
+                            std::make_move_iterator (matched_mimetypes.end ()));
       return !out.empty ();
     }
   catch (const std::exception &e)
@@ -545,6 +556,7 @@ LoadContentBlob (Store *store, ObjectStore *object_store,
                  const std::string &memory_modality,
                  const std::string &memory_mime,
                  std::vector<std::vector<unsigned char>> &out,
+                 std::vector<std::string> &out_mimetypes,
                  SharedObjectReads *shared = nullptr)
 {
   if (!store || blob_id.empty ())
@@ -556,6 +568,7 @@ LoadContentBlob (Store *store, ObjectStore *object_store,
                                       memory_modality, memory_mime, payload))
     {
       out.push_back (std::move (payload));
+      out_mimetypes.push_back (memory_mime);
       return true;
     }
   return false;
@@ -658,6 +671,7 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
                       m.modality, m.mimetype, m.modality, m.mimetype, payload))
                 {
                   m.content.push_back (std::move (payload));
+                  m.content_mimetypes.push_back (m.mimetype);
                 }
             }
 
@@ -665,7 +679,8 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             {
               const auto blob_id = get_blob ("blob_id");
               LoadContentBlob (store, object_store, blob_id, m.modality,
-                               m.mimetype, m.content, shared);
+                               m.mimetype, m.content, m.content_mimetypes,
+                               shared);
             }
 
           if (m.content.empty ())
@@ -674,7 +689,7 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
               LoadSignalBlobs (store, memory_id, object_store, m.modality,
                                m.mimetype, max_fallback_signal_blobs,
                                loaded_fallback_signal_blobs,
-                               m.content, shared);
+                               m.content, m.content_mimetypes, shared);
             }
 
           // v2: Counts are inline on memories table
@@ -735,6 +750,7 @@ StripSourceBlobsIfDisabled (Cortext::Context::Memory &memory)
   if (SourceBlobsDisabled ())
     {
       memory.content.clear ();
+      memory.content_mimetypes.clear ();
     }
 }
 
@@ -763,10 +779,33 @@ constexpr long long kContiguityIdScanSpan = 16;
 constexpr long long kContiguityMaxGapMs = 30LL * 60LL * 1000LL;
 
 bool
-IsTextSurface (const std::string &modality, const std::string &mimetype)
+IsTextMime (const std::string &mimetype)
 {
-  return modality == "text"
-         && (mimetype.empty () || mimetype.rfind ("text/", 0) == 0);
+  return mimetype.empty () || mimetype.rfind ("text/", 0) == 0;
+}
+
+// True when the memory carries text among its content (a text memory, or a
+// mixed memory with text signals); index i of content is text when its MIME
+// type is text/*.
+bool
+HasTextContent (const Cortext::Context::Memory &memory)
+{
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
+    {
+      const std::string mime = i < memory.content_mimetypes.size ()
+                                   ? memory.content_mimetypes[i]
+                                   : memory.mimetype;
+      if (!memory.content[i].empty () && IsTextMime (mime))
+        return true;
+    }
+  return false;
+}
+
+// Before inserting attached blobs: one MIME type per existing content blob.
+void
+AlignContentMimetypes (Cortext::Context::Memory &memory)
+{
+  memory.content_mimetypes.resize (memory.content.size (), memory.mimetype);
 }
 
 std::string
@@ -833,15 +872,18 @@ public:
   AttachedText (long long memory_id, std::size_t max_bytes)
   {
     const Hydrated &memory = Hydrate (memory_id);
-    if (!IsTextSurface (memory.modality, memory.mimetype)
-        || !memory.has_content)
+    if (!memory.has_content)
       {
         return {};
       }
     std::vector<unsigned char> text;
-    for (const auto &blob : memory.content)
+    for (std::size_t i = 0; i < memory.content.size (); ++i)
       {
-        if (blob.empty ())
+        const auto &blob = memory.content[i];
+        const std::string &mime = i < memory.content_mimetypes.size ()
+                                      ? memory.content_mimetypes[i]
+                                      : memory.mimetype;
+        if (blob.empty () || !IsTextMime (mime))
           {
             continue;
           }
@@ -864,6 +906,7 @@ private:
     std::string modality;
     std::string mimetype;
     std::vector<std::vector<unsigned char> > content;
+    std::vector<std::string> content_mimetypes;
     bool has_content = false;
     std::size_t fallback_signal_blobs = 0;
   };
@@ -882,8 +925,9 @@ private:
         Hydrated hydrated;
         hydrated.modality = std::move (memory.modality);
         hydrated.mimetype = std::move (memory.mimetype);
-        hydrated.has_content = HasHydratedContent (memory);
+        hydrated.has_content = HasTextContent (memory);
         hydrated.content = std::move (memory.content);
+        hydrated.content_mimetypes = std::move (memory.content_mimetypes);
         hydrated.fallback_signal_blobs = fallback_signal_blobs;
         it = cache_.emplace (memory_id, std::move (hydrated)).first;
       }
@@ -1015,7 +1059,8 @@ FindContiguousTurns (Store *store, const std::vector<ContiguityProbe> &probes)
         }
       auto &turn = turns[static_cast<std::size_t> (k)];
       turn.position_id = neighbor_id;
-      if (RowString (row, "modality") == "text"
+      const std::string neighbor_modality = RowString (row, "modality");
+      if ((neighbor_modality == "text" || neighbor_modality == "mixed")
           && RowLongLong (row, "corrected") == 0)
         {
           turn.memory_id = neighbor_id;
@@ -1127,10 +1172,18 @@ AttachContiguousTurns (Store *store,
       {
         auto &anchor = retrieved[walk.index];
         budget -= text.size ();
+        AlignContentMimetypes (anchor);
         if (forward)
-          anchor.content.push_back (std::move (text));
+          {
+            anchor.content.push_back (std::move (text));
+            anchor.content_mimetypes.push_back ("text/plain");
+          }
         else
-          anchor.content.insert (anchor.content.begin (), std::move (text));
+          {
+            anchor.content.insert (anchor.content.begin (), std::move (text));
+            anchor.content_mimetypes.insert (anchor.content_mimetypes.begin (),
+                                             "text/plain");
+          }
         excluded_ids.insert (turn.memory_id);
         attached_ids.insert (turn.memory_id);
         ++attached;
@@ -1144,7 +1197,7 @@ AttachContiguousTurns (Store *store,
       for (std::size_t i = 0; i < anchors; ++i)
         {
           const auto &anchor = retrieved[i];
-          if (anchor.id <= 0 || !IsTextSurface (anchor.modality, anchor.mimetype)
+          if (anchor.id <= 0 || !HasTextContent (anchor)
               || !HasHydratedContent (anchor))
             {
               continue;
@@ -1311,7 +1364,8 @@ LoadSupersededTargets (Store *store, const std::vector<long long> &anchor_ids,
       "      JOIN memories m ON m.memory_id = a.target_memory_id "
       "      WHERE a.source_memory_id IN (" + placeholders + ") "
       "        AND a.edge_type = 'supersedes' "
-      "        AND m.kind = 'LONG_TERM' AND m.modality = 'text') r "
+      "        AND m.kind = 'LONG_TERM' "
+      "        AND m.modality IN ('text', 'mixed')) r "
       "WHERE r.edge_rank <= ? "
       "ORDER BY r.anchor_id, r.edge_rank",
       params);
@@ -1355,7 +1409,7 @@ AttachSupersededPredecessors (
         {
           const auto &anchor = retrieved[i];
           if (anchor.id <= 0
-              || !IsTextSurface (anchor.modality, anchor.mimetype)
+              || !HasTextContent (anchor)
               || !HasHydratedContent (anchor)
               || anchor_rows.find (anchor.id) == anchor_rows.end ())
             {
@@ -1406,6 +1460,9 @@ AttachSupersededPredecessors (
             }
           // Strongest edge first in rank, but oldest-to-newest in the packet:
           // the recalled predecessors precede the anchor's own content.
+          AlignContentMimetypes (anchor);
+          anchor.content_mimetypes.insert (anchor.content_mimetypes.begin (),
+                                           recalled.size (), "text/plain");
           anchor.content.insert (
               anchor.content.begin (),
               std::make_move_iterator (recalled.rbegin ()),
@@ -1515,10 +1572,12 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           const auto reconstruction_blob_id
               = get_blob ("reconstruction_blob_id");
           if (!LoadContentBlob (store, object_store, reconstruction_blob_id,
-                                m.modality, m.mimetype, m.content))
+                                m.modality, m.mimetype, m.content,
+                                m.content_mimetypes))
             {
               LoadContentBlob (store, object_store, get_blob ("blob_id"),
-                               m.modality, m.mimetype, m.content);
+                               m.modality, m.mimetype, m.content,
+                               m.content_mimetypes);
             }
           if (m.content.empty ())
             {
@@ -1526,7 +1585,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
               LoadSignalBlobs (store, m.id, object_store, m.modality,
                                m.mimetype, max_fallback_signal_blobs,
                                loaded_fallback_signal_blobs,
-                               m.content);
+                               m.content, m.content_mimetypes);
             }
           StripSourceBlobsIfDisabled (m);
 

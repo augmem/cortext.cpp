@@ -45,33 +45,23 @@ ElapsedMillis (SteadyClock::time_point start)
       .count ();
 }
 
-/// @brief Determine primary modality from signal records (majority vote)
+/// @brief A memory's modality: the one its signals share, or "mixed" when
+/// signals of different modalities were stored together as peers.
 std::string
-GetPrimaryModality (const std::vector<SignalRecord> &signals,
-                    const std::string &fallback_modality)
+GetMemoryModality (const std::vector<SignalRecord> &signals,
+                   const std::string &fallback_modality)
 {
   if (signals.empty ())
     {
       return fallback_modality;
     }
-
-  std::unordered_map<std::string, int> counts;
-  for (const auto &sig : signals)
-    {
-      counts[sig.modality]++;
-    }
-
-  std::string primary = signals[0].modality;
-  int max_count = 0;
-  for (const auto &kv : counts)
-    {
-      if (kv.second > max_count)
-        {
-          max_count = kv.second;
-          primary = kv.first;
-        }
-    }
-  return primary;
+  const std::string &first = signals[0].modality;
+  const bool uniform
+      = std::all_of (signals.begin (), signals.end (),
+                     [&first] (const SignalRecord &sig) {
+                       return sig.modality == first;
+                     });
+  return uniform ? first : std::string ("mixed");
 }
 
 /// @brief Serialize 6d emotion/mood vector to blob
@@ -1126,9 +1116,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const std::vector<char> emotion_blob = SerializeEmotionVector (emotion_probs);
       const std::vector<char> mood_blob = SerializeEmotionVector (mood_vec);
 
-      // 3. Determine primary modality from tracked signals
-      const std::string primary_modality
-          = GetPrimaryModality (acc.signals, signal.modality);
+      // 3. Determine the memory's modality from tracked signals
+      const std::string memory_modality
+          = GetMemoryModality (acc.signals, signal.modality);
 
       const std::string origin = SourceOriginFor ();
       const double source_reliability
@@ -1299,7 +1289,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
-            static_cast<long long> (n_signals), primary_modality,
+            static_cast<long long> (n_signals), memory_modality,
             s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score,
             drift_mag, emotion_blob, mood_blob, episode_id_any,
             content_blob_id.empty () ? std::any () : std::any (content_blob_id),
@@ -1422,7 +1412,20 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       // Keyword index (FTS5): the memory's text content, written in this
       // savepoint so it commits and rolls back with the memory.
       std::string memory_text;
-      if (text_mode)
+      if (!text_mode)
+        {
+          // Text signals of a mixed memory are keyword-indexed too; this is
+          // an extra channel and does not change the memory's modality.
+          for (const auto *rec : ordered_signals)
+            {
+              if (!rec || rec->modality != "text" || rec->payload.empty ())
+                continue;
+              if (!memory_text.empty ())
+                memory_text.push_back ('\n');
+              memory_text.append (rec->payload.begin (), rec->payload.end ());
+            }
+        }
+      else
         {
           if (!content_payload.empty ())
             memory_text.assign (content_payload.begin (),
@@ -1501,7 +1504,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           surface_entry.start_ts = static_cast<long long> (start_ts);
           surface_entry.kind = "LONG_TERM";
           surface_entry.source_id = signal.source_id;
-          surface_entry.modality = primary_modality;
+          surface_entry.modality = memory_modality;
           surface_entry.embedding = embedding_to_store;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
           retrieval_trace::RecordSurfaceUpsert (
@@ -1533,7 +1536,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           { telemetry::Attribute::Bool ("stored", true),
             telemetry::Attribute::Int64 ("embedding_id", embedding_id),
             telemetry::Attribute::Int64 ("n_signals", n_signals),
-            telemetry::Attribute::String ("primary_modality", primary_modality),
+            telemetry::Attribute::String ("memory_modality", memory_modality),
             telemetry::Attribute::Double ("s_max", s_max),
             telemetry::Attribute::Double ("s_avg", s_avg) });
     }
