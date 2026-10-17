@@ -8,6 +8,8 @@
 #include <exception>
 #include <iterator>
 #include <string_view>
+#include <any>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace cortext::store::memory_text_index_internal
@@ -57,8 +59,8 @@ IsWordByte (unsigned char c)
 
 } // namespace
 
-std::string
-BuildMatchQuery (std::string_view text, std::size_t max_terms)
+std::vector<std::string>
+QueryWords (std::string_view text, std::size_t max_terms)
 {
   std::vector<std::string> words;
   std::unordered_set<std::string> seen;
@@ -74,8 +76,7 @@ BuildMatchQuery (std::string_view text, std::size_t max_terms)
         ++i;
       if (i == start)
         continue;
-      std::string word (text.substr (start, i - start));
-      std::string lower = word;
+      std::string lower (text.substr (start, i - start));
       std::transform (lower.begin (), lower.end (), lower.begin (),
                       [] (unsigned char c) {
                         return static_cast<char> (
@@ -85,6 +86,12 @@ BuildMatchQuery (std::string_view text, std::size_t max_terms)
         continue;
       words.push_back (std::move (lower));
     }
+  return words;
+}
+
+std::string
+BuildMatchQuery (const std::vector<std::string> &words)
+{
   std::string query;
   for (const auto &word : words)
     {
@@ -97,18 +104,98 @@ BuildMatchQuery (std::string_view text, std::size_t max_terms)
   return query;
 }
 
+namespace
+{
+
+// Drops words whose index term is too common, using the connection-local
+// helper tables created with the schema (see ApplyMigrations). Without them
+// the words are kept unfiltered.
+std::vector<std::string>
+DropCommonWords (Transaction &tx, std::vector<std::string> words,
+                 std::size_t max_df)
+{
+  if (words.empty ())
+    return words;
+  try
+    {
+      tx.Execute ("INSERT INTO memory_query_terms(memory_query_terms) "
+                  "VALUES ('delete-all')",
+                  {});
+      for (std::size_t k = 0; k < words.size (); ++k)
+        tx.Execute ("INSERT INTO memory_query_terms(rowid, text) "
+                    "VALUES (?, ?)",
+                    { static_cast<long long> (k + 1), words[k] });
+      // word index -> index terms of that word (unicode61 may split one).
+      std::vector<std::vector<std::string>> terms (words.size ());
+      std::vector<std::any> params;
+      std::string placeholders;
+      for (const auto &row : tx.Execute (
+               "SELECT doc, term FROM memory_query_term_stems", {}))
+        {
+          const auto doc = AnyToLongLong (row.at ("doc")).value_or (0);
+          if (doc <= 0 || doc > static_cast<long long> (words.size ()))
+            continue;
+          auto term = std::any_cast<std::string> (row.at ("term"));
+          terms[static_cast<std::size_t> (doc - 1)].push_back (term);
+          if (!placeholders.empty ())
+            placeholders += ", ";
+          placeholders += "?";
+          params.emplace_back (std::move (term));
+        }
+      std::unordered_map<std::string, long long> df;
+      if (!params.empty ())
+        for (const auto &row : tx.Execute (
+                 "SELECT term, doc FROM memory_text_vocab WHERE term IN ("
+                     + placeholders + ")",
+                 params))
+          df[std::any_cast<std::string> (row.at ("term"))]
+              = AnyToLongLong (row.at ("doc")).value_or (0);
+      std::vector<std::string> kept;
+      for (std::size_t k = 0; k < words.size (); ++k)
+        {
+          bool useful = false;
+          for (const auto &term : terms[k])
+            {
+              const auto it = df.find (term);
+              const long long n = it == df.end () ? 0 : it->second;
+              useful = useful
+                       || (n > 0 && n <= static_cast<long long> (max_df));
+            }
+          if (useful)
+            kept.push_back (std::move (words[k]));
+        }
+      return kept;
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogDebug (
+          "cortext.memory_text_fts.term_filter_unavailable",
+          { telemetry::Attribute::String ("error", e.what ()) });
+      return words;
+    }
+}
+
+} // namespace
+
 std::vector<Hit>
-Search (Transaction &tx, std::string_view query_text, std::size_t limit,
-        std::size_t max_terms)
+Search (Transaction &tx, std::string_view query_text, std::size_t documents,
+        const SearchParams &params)
 {
   std::vector<Hit> hits;
-  const std::string match = BuildMatchQuery (query_text, max_terms);
-  if (match.empty () || limit == 0)
+  if (params.limit == 0)
+    return hits;
+  const auto max_df = std::max (
+      params.max_df_floor,
+      static_cast<std::size_t> (params.max_df_ratio
+                                * static_cast<double> (documents)));
+  const std::string match = BuildMatchQuery (
+      DropCommonWords (tx, QueryWords (query_text, params.max_terms), max_df));
+  if (match.empty ())
     return hits;
   const auto rows = tx.Execute (
       "SELECT rowid AS memory_id, rank AS score FROM memory_text_fts "
       "WHERE memory_text_fts MATCH ? ORDER BY rank LIMIT ?",
-      { match, static_cast<long long> (limit) });
+      { match, static_cast<long long> (params.limit) });
   hits.reserve (rows.size ());
   for (const auto &row : rows)
     {

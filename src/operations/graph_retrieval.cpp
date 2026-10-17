@@ -1374,7 +1374,7 @@ struct LexicalSeedConfig
 {
   bool enabled = true;
   std::size_t limit = 20;
-  std::size_t max_terms = 16;
+  store::memory_text_index_internal::SearchParams search;
   double rrf_k = 60.0;
   double weight = 1.0;
 };
@@ -1389,8 +1389,18 @@ LoadLexicalSeedConfig ()
   cfg.enabled = env::Int ("CORTEXT_LEXICAL_SEEDS").value_or (1) != 0;
   cfg.limit = static_cast<std::size_t> (
       std::max (0, env::Int ("CORTEXT_LEXICAL_LIMIT").value_or (20)));
-  cfg.max_terms = static_cast<std::size_t> (
-      std::max (1, env::Int ("CORTEXT_LEXICAL_MAX_TERMS").value_or (16)));
+  cfg.search.max_terms = static_cast<std::size_t> (std::max (
+      1, env::Int ("CORTEXT_LEXICAL_MAX_TERMS")
+             .value_or (static_cast<int> (cfg.search.max_terms))));
+  cfg.search.max_df_ratio
+      = env::Int ("CORTEXT_LEXICAL_MAX_DF_PERMILLE")
+            .value_or (static_cast<int> (cfg.search.max_df_ratio * 1000))
+        / 1000.0;
+  cfg.search.max_df_floor = static_cast<std::size_t> (std::max (
+      0, env::Int ("CORTEXT_LEXICAL_MAX_DF_FLOOR")
+             .value_or (static_cast<int> (cfg.search.max_df_floor))));
+  // Over-fetch: hits at or after the exclusion time are not seeds.
+  cfg.search.limit = cfg.limit * 2 + 4;
   cfg.rrf_k = env::Int ("CORTEXT_LEXICAL_RRF_K").value_or (60);
   cfg.weight = env::Int ("CORTEXT_LEXICAL_WEIGHT_PERMILLE").value_or (1000)
                / 1000.0;
@@ -1902,13 +1912,12 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       std::vector<store::memory_text_index_internal::Hit> hits;
       try
         {
-          // Over-fetch: hits at or after the exclusion time are not seeds.
           hits = store::memory_text_index_internal::Search (
               tx,
               std::string_view (
                   reinterpret_cast<const char *> (signal.payload->data ()),
                   signal.payload->size ()),
-              lexical_cfg.limit * 2 + 4, lexical_cfg.max_terms);
+              p_ctx.retrieval_surface_cache.size (), lexical_cfg.search);
         }
       catch (const std::exception &e)
         {

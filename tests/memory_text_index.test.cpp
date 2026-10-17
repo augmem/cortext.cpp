@@ -56,7 +56,10 @@ SearchIds (cortext::Store &store, const std::string &query)
 {
   auto tx = store.Begin ();
   std::vector<long long> ids;
-  for (const auto &hit : fts::Search (*tx, query, 10, 16))
+  fts::SearchParams params;
+  params.limit = 10;
+  params.max_df_ratio = 1.0;
+  for (const auto &hit : fts::Search (*tx, query, 100, params))
     ids.push_back (hit.memory_id);
   tx->Commit ();
   return ids;
@@ -113,17 +116,17 @@ const std::vector<std::string> kDistractors = {
 TEST_CASE ("memory text match query quotes words and drops stopwords",
            "[fts]")
 {
-  REQUIRE (fts::BuildMatchQuery ("What is the Garage door code?", 16)
+  REQUIRE (fts::BuildMatchQuery (fts::QueryWords ("What is the Garage door code?", 16))
            == "\"garage\" OR \"door\" OR \"code\"");
   // FTS5 syntax in user text is inert inside quoted strings.
-  REQUIRE (fts::BuildMatchQuery ("NEAR(a b) OR x* -y \"z\"", 16)
+  REQUIRE (fts::BuildMatchQuery (fts::QueryWords ("NEAR(a b) OR x* -y \"z\"", 16))
            == "\"near\" OR \"b\" OR \"x\" OR \"y\" OR \"z\"");
-  REQUIRE (fts::BuildMatchQuery ("door Door DOOR", 16) == "\"door\"");
-  REQUIRE (fts::BuildMatchQuery ("one two three", 2)
+  REQUIRE (fts::BuildMatchQuery (fts::QueryWords ("door Door DOOR", 16)) == "\"door\"");
+  REQUIRE (fts::BuildMatchQuery (fts::QueryWords ("one two three", 2))
            == "\"one\" OR \"two\"");
-  REQUIRE (fts::BuildMatchQuery ("?! -- the and", 16).empty ());
+  REQUIRE (fts::QueryWords ("?! -- the and", 16).empty ());
   // Non-ASCII words pass through for the FTS5 tokenizer to fold.
-  REQUIRE (fts::BuildMatchQuery ("Café Москва", 16)
+  REQUIRE (fts::BuildMatchQuery (fts::QueryWords ("Café Москва", 16))
            == "\"café\" OR \"Москва\"");
 }
 
@@ -145,6 +148,34 @@ TEST_CASE ("memory text index ranks, stems and folds unicode", "[fts]")
   REQUIRE (SearchIds (*store, "東京") == std::vector<long long>{ 4 });
   REQUIRE (SearchIds (*store, "groceries").empty ());
   REQUIRE (SearchIds (*store, "— …").empty ());
+}
+
+TEST_CASE ("memory text search drops words common across the index",
+           "[fts]")
+{
+  TempDbPath db;
+  auto store = OpenStore (db.path ());
+  cortext::store::ApplyMigrations (*store);
+  for (long long id = 1; id <= 40; ++id)
+    Index (*store, id, "meeting notes number " + std::to_string (id));
+  Index (*store, 41, "meetings about the Zanzibar budget");
+  auto search = [&store] (std::size_t floor) {
+    auto tx = store->Begin ();
+    fts::SearchParams params;
+    params.limit = 50;
+    params.max_df_ratio = 0.05;
+    params.max_df_floor = floor;
+    auto hits = fts::Search (*tx, "zanzibar meeting", 41, params);
+    tx->Commit ();
+    return hits;
+  };
+  // "meeting" (stem shared by 41 memories) is over the cap; "zanzibar" is
+  // kept, so only memory 41 matches.
+  const auto filtered = search (2);
+  REQUIRE (filtered.size () == 1);
+  REQUIRE (filtered.front ().memory_id == 41);
+  // Under a cap above its frequency the common word is searched too.
+  REQUIRE (search (100).size () == 41);
 }
 
 TEST_CASE ("memory text index rolls back and deletes with its memory",

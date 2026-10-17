@@ -1080,6 +1080,27 @@ ApplyMigrationsThrough (Store &store, int64_t maximum_id)
           ApplySingleMigrationInTransaction (store, m);
         }
 
+      const auto memory_text_fts = store.Execute (
+          "SELECT 1 FROM sqlite_master "
+          "WHERE type = 'table' AND name = 'memory_text_fts' LIMIT 1");
+      if (!memory_text_fts.empty ())
+        {
+          // Connection-local helpers for keyword queries: a scratch FTS5
+          // table with the index's tokenizer maps query words to index terms,
+          // and vocabularies give those terms' document frequencies
+          // (memory_text_index_internal::Search).
+          store.Execute (
+              "CREATE VIRTUAL TABLE IF NOT EXISTS temp.memory_query_terms "
+              "USING fts5(text, content='',"
+              "  tokenize='porter unicode61 remove_diacritics 2')");
+          store.Execute (
+              "CREATE VIRTUAL TABLE IF NOT EXISTS temp.memory_query_term_stems "
+              "USING fts5vocab(temp, memory_query_terms, 'instance')");
+          store.Execute (
+              "CREATE VIRTUAL TABLE IF NOT EXISTS temp.memory_text_vocab "
+              "USING fts5vocab(main, memory_text_fts, 'row')");
+        }
+
       store.Execute ("COMMIT");
       committed = true;
     }
