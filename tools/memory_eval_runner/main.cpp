@@ -52,6 +52,11 @@ struct Options
   bool stream_clock = false;
   // Engine default is on; "off" measures images the change detector drops.
   bool image_filter = true;
+  // "on": a turn is one multi-signal unit. Image signals whose source_id is
+  // "<text source>/<suffix>" and that directly follow that text signal are
+  // sent under the text's source id; the text goes in as Natural and the
+  // turn's last signal as Durable, so the engine stores them as one memory.
+  bool turn_signals = false;
   std::filesystem::path ingest_log_path;
 };
 
@@ -204,6 +209,12 @@ Options ParseArgs (int argc, char **argv)
           if (*v != "on" && *v != "off")
             throw std::runtime_error ("--image-filter must be on or off");
           opts.image_filter = *v == "on";
+        }
+      else if (auto v = TakeArg (arg, "--turn-signals="))
+        {
+          if (*v != "on" && *v != "off")
+            throw std::runtime_error ("--turn-signals must be on or off");
+          opts.turn_signals = *v == "on";
         }
       else if (auto v = TakeArg (arg, "--ingest-log="))
         {
@@ -424,18 +435,21 @@ MemoryTextAndMedia (const cortext::Cortext::Context::Memory &memory,
 {
   cortext::Cortext::Context::Memory text_only;
   nlohmann::json media = nlohmann::json::array ();
-  for (const auto &blob : memory.content)
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
     {
+      const auto &blob = memory.content[i];
+      const std::string &mime = i < memory.content_mimetypes.size ()
+                                    ? memory.content_mimetypes[i]
+                                    : memory.mimetype;
       const auto it = registry.find (Fnv1a64 (blob.data (), blob.size ()));
       if (it != registry.end ())
         {
           media.push_back (it->second);
         }
       else if (LooksLikeEncodedImage (blob)
-               || (memory.modality != "text"
-                   && memory.mimetype.rfind ("text/", 0) != 0))
+               || (!mime.empty () && mime.rfind ("text/", 0) != 0))
         {
-          media.push_back ({{"mimetype", memory.mimetype},
+          media.push_back ({{"mimetype", mime},
                             {"bytes", blob.size ()},
                             {"unregistered", true}});
         }
@@ -1034,8 +1048,40 @@ int Run (const Options &opts)
             }.dump () << "\n";
           }
       };
-      for (const auto &signal : episode.signals)
+      // Per-signal source id and retention (multi-signal turns, see
+      // Options::turn_signals).
+      std::vector<std::string> turn_source;
+      turn_source.reserve (episode.signals.size ());
+      for (const auto &s : episode.signals)
+        turn_source.push_back (s.source_id);
+      std::vector<cortext::Retention> turn_retention (
+          episode.signals.size (), cortext::Retention::Durable);
+      for (std::size_t i = 0; i < episode.signals.size (); ++i)
         {
+          if (!opts.turn_signals || episode.signals[i].modality != "text")
+            continue;
+          const std::string prefix = episode.signals[i].source_id + "/";
+          std::size_t last = i;
+          for (std::size_t j = i + 1; j < episode.signals.size (); ++j)
+            {
+              const auto &next = episode.signals[j];
+              if (next.modality == "text"
+                  || next.source_id.rfind (prefix, 0) != 0)
+                break;
+              last = j;
+            }
+          for (std::size_t j = i + 1; j <= last; ++j)
+            {
+              turn_source[j] = episode.signals[i].source_id;
+              turn_retention[j - 1] = cortext::Retention::Natural;
+            }
+        }
+      for (std::size_t signal_index = 0; signal_index < episode.signals.size ();
+           ++signal_index)
+        {
+          const auto &signal = episode.signals[signal_index];
+          const auto &source_id = turn_source[signal_index];
+          const auto retention = turn_retention[signal_index];
           signal_modality_counts[signal.modality] += 1;
           if (clock && signal.timestamp_ms > 0)
             {
@@ -1055,16 +1101,14 @@ int Run (const Options &opts)
                   last_timestamp_ms
                       = std::max (last_timestamp_ms, signal.timestamp_ms);
                   const auto ctx = engine->ProcessTextAt (
-                      signal.text, signal.source_id, last_timestamp_ms,
-                      cortext::Retention::Durable);
+                      signal.text, source_id, last_timestamp_ms, retention);
                   record (signal, ctx, signal_start);
                   settle (ctx);
                 }
               else
                 {
                   const auto ctx = engine->ProcessText (
-                      signal.text, signal.source_id,
-                      cortext::Retention::Durable);
+                      signal.text, source_id, retention);
                   record (signal, ctx, signal_start);
                   settle (ctx);
                 }
@@ -1116,7 +1160,7 @@ int Run (const Options &opts)
               const auto image_start = std::chrono::steady_clock::now ();
               const auto ctx = engine->ProcessImage (
                   pixels.data (), signal.width, signal.height, signal.channels,
-                  signal.source_id, media, cortext::Retention::Durable);
+                  source_id, media, retention);
               record (signal, ctx, image_start);
               settle (ctx);
               ++image_signals;
@@ -1135,7 +1179,7 @@ int Run (const Options &opts)
               media.mimetype = signal.mimetype;
               const auto ctx = engine->ProcessAudio (
                   signal.samples.data (), signal.samples.size (),
-                  signal.source_id, media, cortext::Retention::Durable);
+                  source_id, media, retention);
               record (signal, ctx, signal_start);
               settle (ctx);
               ++audio_signals;
@@ -1289,6 +1333,7 @@ int Run (const Options &opts)
       {"query_rows", opts.out_path.string ()},
       {"stream_clock", opts.stream_clock},
       {"image_filter", opts.image_filter},
+      {"turn_signals", opts.turn_signals},
       {"query_ms", Percentiles (query_ms_all)},
       {"media_bytes_ingested", media_bytes_by_modality},
       {"filtered_signals", filtered_by_modality},
