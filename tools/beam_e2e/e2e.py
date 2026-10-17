@@ -3,7 +3,7 @@
 
 usage:
   e2e.py run --data <split dir> --packets <packets.jsonl> --out <dir>
-             --protocol exabase|amb --arm full|r8k|r2k
+             --protocol exabase|amb --arm full|r8k|r2k|none|oracle
              [--answer-model claude-haiku-5-5] [--judge-model claude-haiku-5-5]
              [--concurrency 8] [--limit N] [--queries qid,...]
   e2e.py summary <out dir> [...]
@@ -13,7 +13,10 @@ Arms (what the answerer reads; the packet is the only memory context):
   full  engine packet as returned: retrieved (R1..) then working memory (W1..)
   r8k   retrieved items only, in rank order, cut at 8,000 tokens (past.dev recall maxTokens)
   r2k   retrieved items only, cut at 2,000 tokens (past.dev DolphinBench budget)
-Token budget uses 4 chars/token; the answer call's real input tokens are recorded.
+  oracle  only the question's gold turns (answer-side ceiling; abstention gets nothing)
+  none  no memory at all (control: how much a protocol scores from its prompt alone)
+Token budget uses 2.8 chars/token (measured Claude tokenizer rate on this text); the
+answer call's real input tokens are recorded.
 
 Models run through `claude -p` (no tools, no settings, no session) with thinking off
 (MAX_THINKING_TOKENS=0, matching past.dev's reasoning-effort none). Every call is cached
@@ -42,7 +45,10 @@ import protocols as P  # noqa: E402
 
 ANSWER_SYSTEM = "You are a helpful assistant."
 JUDGE_SYSTEM = "You are a careful, impartial evaluator. Follow the instructions exactly."
-BUDGET_CHARS = {"r8k": 8000 * 4, "r2k": 2000 * 4}
+# Claude tokenizer on BEAM packet text measures 2.81 chars/token (100K fit: tokens =
+# 4279 + 0.356 * chars), so a budget of N tokens is N * 2.8 chars of evidence.
+CHARS_PER_TOKEN = 2.8
+BUDGET_CHARS = {"r8k": int(8000 * CHARS_PER_TOKEN), "r2k": int(2000 * CHARS_PER_TOKEN)}
 MAX_ATTEMPTS = 5
 _lock = threading.Lock()
 _cache: dict[str, dict] = {}
@@ -79,7 +85,9 @@ def claude(prompt: str, model: str, system: str, schema: dict | None, kind: str,
            "--no-session-persistence", "--system-prompt", system, "--output-format", "json"]
     if schema:
         cmd += ["--json-schema", json.dumps(schema)]
-    env = dict(os.environ, MAX_THINKING_TOKENS="0")
+    # thinking off (past.dev: reasoning none); no prompt-cache writes (each prompt is unique,
+    # and 1h cache creation bills ~2x input)
+    env = dict(os.environ, MAX_THINKING_TOKENS="0", DISABLE_PROMPT_CACHING="1")
     last = ""
     with tempfile.TemporaryDirectory(prefix="beam_e2e_") as cwd:
         for attempt in range(MAX_ATTEMPTS):
@@ -115,7 +123,12 @@ def claude(prompt: str, model: str, system: str, schema: dict | None, kind: str,
 
 # --- packet -> context -----------------------------------------------------------------------
 
-def context_items(packet: dict, arm: str) -> list[tuple[str, str]]:
+def context_items(packet: dict, arm: str, q: dict | None = None) -> list[tuple[str, str]]:
+    if arm == "oracle":  # answer-side ceiling: exactly the gold turns, in stream order
+        turns = sorted(q["gold_turns"], key=lambda g: g["depth"]) if q else []
+        return [(f"G{i + 1}", g["text"]) for i, g in enumerate(turns)]
+    if arm == "none":  # memory-free control: what the protocol scores with no packet at all
+        return []
     items = [(f"R{i + 1}", m["text"]) for i, m in enumerate(packet.get("retrieved", []))]
     if arm == "full":
         return items + [(f"W{i + 1}", m["text"]) for i, m in enumerate(packet.get("working", []))]
@@ -164,7 +177,7 @@ def gold_recall(q: dict, ctx: str) -> tuple[float | None, list[int]]:
 def run_question(q: dict, packet: dict, a) -> dict:
     cat, raw = q["category"], q["raw"]
     meta = P.annotations(cat, raw)
-    items = context_items(packet, a.arm)
+    items = context_items(packet, a.arm, q)
     ctx = context_text(items)
     recall, found = gold_recall(q, ctx)
     row = {"query_id": q["query_id"], "conversation_id": q["conversation_id"], "category": cat,
@@ -335,7 +348,13 @@ def summarize(out: Path) -> dict:
     for c in sorted({r["category"] for r in rows}):
         rs = [r for r in rows if r["category"] == c]
         cm, clo, chi = boot_ci(rs)
-        cats[c] = {"n": len(rs), "mean": round(cm, 4), "ci95": [round(clo, 4), round(chi, 4)]}
+        rc = [r["gold_recall"] for r in rs if r.get("gold_recall") is not None]
+        closs = defaultdict(float)
+        for r in rs:
+            closs[failure_class(r)] += 1 - r["score"]
+        cats[c] = {"n": len(rs), "mean": round(cm, 4), "ci95": [round(clo, 4), round(chi, 4)],
+                   "gold_recall": round(sum(rc) / len(rc), 3) if rc else None,
+                   "loss": {k: round(v / len(rs), 3) for k, v in sorted(closs.items())}}
     loss = defaultdict(float)
     fails = defaultdict(int)
     for r in rows:
@@ -366,7 +385,7 @@ def summarize(out: Path) -> dict:
 
 def cmd_estimate(a) -> None:
     qs, packets = load_inputs(a)
-    chars = [len(context_text(context_items(packets[q["query_id"]], a.arm))) for q in qs]
+    chars = [len(context_text(context_items(packets[q["query_id"]], a.arm, q))) for q in qs]
     judge_calls = 0
     for q in qs:
         meta = P.annotations(q["category"], q["raw"])
@@ -386,7 +405,7 @@ def main() -> None:
         p = sub.add_parser(name)
         p.add_argument("--data", type=Path, required=True)
         p.add_argument("--packets", type=Path, required=True)
-        p.add_argument("--arm", choices=["full", "r8k", "r2k"], default="full")
+        p.add_argument("--arm", choices=["full", "r8k", "r2k", "none", "oracle"], default="full")
         p.add_argument("--limit", type=int, default=0)
         p.add_argument("--queries", default="")
         if name == "run":

@@ -56,7 +56,7 @@ def main() -> None:
                 if r["conversation_id"] == ep_id:
                     fh.write(json.dumps(r) + "\n")
         store = d / "store.sqlite"
-        for p in d.glob("store.sqlite*"):
+        for p in d.glob("store*.sqlite*"):
             p.unlink()
         cmd = [str(args.runner), f"--episodes={d / 'episodes.jsonl'}",
                f"--answer-key={d / 'answer_key.jsonl'}", f"--out={d / 'rows.jsonl'}",
@@ -67,11 +67,11 @@ def main() -> None:
             proc = subprocess.run(["/usr/bin/time", "-l", *cmd], env=env,
                                   stdout=subprocess.DEVNULL, stderr=err)
         wall = time.time() - t0
-        store_bytes = sum(p.stat().st_size for p in d.glob("store.sqlite*"))
+        store_bytes = sum(p.stat().st_size for p in d.glob("store*.sqlite*"))
         (d / "run.json").write_text(json.dumps({"wall_s": round(wall, 1), "exit": proc.returncode,
                                                 "signals": sizes[ep_id], "store_bytes": store_bytes}) + "\n")
         if not args.keep_stores:
-            for p in d.glob("store.sqlite*"):
+            for p in d.glob("store*.sqlite*"):
                 p.unlink()
         if proc.returncode != 0 and (d / "rows.summary.json").exists():
             (d / "rows.summary.json").unlink()
