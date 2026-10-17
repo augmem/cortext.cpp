@@ -21,11 +21,6 @@ struct Signal
   // The universal representation of the input data.
   Eigen::VectorXf embedding;
 
-  // Optional higher-dimensional signal representation for engine-side
-  // continuity policies such as SoftAnchor. Retrieval/storage may consume a
-  // compact embedding while ingress policies consume this richer signal.
-  std::optional<Eigen::VectorXf> soft_anchor_embedding;
-
   // Core metadata.
   uint64_t timestamp = 0;
   // Opaque provenance/grouping key. Core code may compare it for exact stream

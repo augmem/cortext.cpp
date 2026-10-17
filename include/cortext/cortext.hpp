@@ -60,14 +60,6 @@ public:
     double signal_filter_score = 0.0;
     double signal_filter_threshold = 0.0;
     double signal_filter_quiet_seconds = 0.0;
-    bool soft_anchor_enabled = false;
-    int soft_anchor_state_count = 0;
-    int soft_anchor_link_count = 0;
-    int soft_anchor_create_count = 0;
-    int soft_anchor_update_count = 0;
-    int soft_anchor_none_count = 0;
-    double soft_anchor_last_update_us = 0.0;
-    double soft_anchor_mean_update_us = 0.0;
   };
   
   /// @brief Context returned from processing calls, containing hydrated
@@ -76,18 +68,6 @@ public:
   {
     struct Memory
     {
-      struct SoftAnchor
-      {
-        std::string id;
-        double strength = 0.0;
-        double likelihood = 0.0;
-        std::string label;
-        std::string tier;
-        double score = 0.0;
-        double margin = 0.0;
-        double entropy = 0.0;
-      };
-
       std::string source_id;
       long long id = 0;
       std::uint64_t timestamp = 0;
@@ -112,7 +92,6 @@ public:
       double arousal = 0.0;
       double composite_score = 0.0;
       double threshold_t = 0.0;
-      std::vector<SoftAnchor> soft_anchors;
     };
 
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)

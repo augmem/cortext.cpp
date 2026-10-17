@@ -647,7 +647,7 @@ struct ExerciseWholeContextRollbackOp : IOperation
         processor_context.accumulator_states["foreign/source"]
             = std::move (foreign);
         processor_context.recent_scores = { 0.25, 0.75 };
-        processor_context.soft_anchor_next_id = 17;
+        processor_context.memories_since_consolidation = 17;
         return;
       }
     if (call_count == 2)
@@ -659,7 +659,7 @@ struct ExerciseWholeContextRollbackOp : IOperation
         processor_context.accumulator_states["unexpected/source"].n_signals
             = 99;
         processor_context.recent_scores.clear ();
-        processor_context.soft_anchor_next_id = 99;
+        processor_context.memories_since_consolidation = 99;
         throw std::runtime_error ("force whole-context rollback");
       }
 
@@ -680,7 +680,7 @@ struct ExerciseWholeContextRollbackOp : IOperation
                   "unexpected/source")
               && processor_context.recent_scores
                      == std::deque<double> { 0.25, 0.75 }
-              && processor_context.soft_anchor_next_id == 17;
+              && processor_context.memories_since_consolidation == 17;
       }
   }
 

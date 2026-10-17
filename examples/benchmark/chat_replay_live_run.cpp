@@ -732,19 +732,6 @@ PublicMemoryBehaviorJson (
               { { "bytes", blob.size () },
                 { "blake3", PrivateValueDigest (blob) } });
         }
-      nlohmann::json soft_anchors = nlohmann::json::array ();
-      for (const auto &anchor : memory.soft_anchors)
-        {
-          soft_anchors.push_back (
-              { { "id_blake3", PrivateValueDigest (anchor.id) },
-                { "strength", anchor.strength },
-                { "likelihood", anchor.likelihood },
-                { "label_blake3", PrivateValueDigest (anchor.label) },
-                { "tier_blake3", PrivateValueDigest (anchor.tier) },
-                { "score", anchor.score },
-                { "margin", anchor.margin },
-                { "entropy", anchor.entropy } });
-        }
       out.push_back (
           { { "source_id_blake3", PrivateValueDigest (memory.source_id) },
             { "id", memory.id },
@@ -767,8 +754,7 @@ PublicMemoryBehaviorJson (
             { "valence", memory.valence },
             { "arousal", memory.arousal },
             { "composite_score", memory.composite_score },
-            { "threshold_t", memory.threshold_t },
-            { "soft_anchors", std::move (soft_anchors) } });
+            { "threshold_t", memory.threshold_t } });
     }
   return out;
 }
@@ -877,12 +863,6 @@ PublicBehaviorJson (const cortext::Cortext::Context &ctx,
         { "signal_filter_threshold", ctx.output.signal_filter_threshold },
         { "signal_filter_quiet_seconds",
           ctx.output.signal_filter_quiet_seconds },
-        { "soft_anchor_enabled", ctx.output.soft_anchor_enabled },
-        { "soft_anchor_state_count", ctx.output.soft_anchor_state_count },
-        { "soft_anchor_link_count", ctx.output.soft_anchor_link_count },
-        { "soft_anchor_create_count", ctx.output.soft_anchor_create_count },
-        { "soft_anchor_update_count", ctx.output.soft_anchor_update_count },
-        { "soft_anchor_none_count", ctx.output.soft_anchor_none_count },
       } },
   };
 }

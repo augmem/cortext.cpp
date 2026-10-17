@@ -1011,6 +1011,14 @@ GetCoreMigrations ()
               "ALTER TABLE state DROP COLUMN neuromod_ne",
           },
       },
+      {
+          48,
+          "Drop the removed Soft Anchor state and links",
+          {
+              "DROP TABLE IF EXISTS soft_anchor_links",
+              "DROP TABLE IF EXISTS soft_anchors",
+          },
+      },
   };
 }
 

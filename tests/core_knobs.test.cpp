@@ -233,15 +233,6 @@ TEST_CASE ("Signal filter adaptive policy derives from knobs",
                  .focus_pressure);
 }
 
-TEST_CASE ("Soft anchor hard boundary retention derives from knobs",
-           "[core][knobs]")
-{
-  REQUIRE (SoftAnchorHardBoundaryRetainSteps (1.0, 0.5, 0.5)
-           <= SoftAnchorHardBoundaryRetainSteps (0.0, 0.5, 0.5));
-  REQUIRE (SoftAnchorHardBoundaryRetainSteps (0.5, 0.5, 1.0)
-           >= SoftAnchorHardBoundaryRetainSteps (0.5, 0.5, 0.0));
-}
-
 TEST_CASE ("Boundary evidence weights derive from all knobs", "[core][knobs]")
 {
   const auto mid = BoundaryEvidenceScoringWeights (0.5, 0.5, 0.5);
@@ -333,69 +324,6 @@ TEST_CASE ("Interrupt gate policy helpers preserve midpoint and use knobs",
                  .surprise_raw);
   REQUIRE (InterruptRefractoryTau (0.5, 1.0)
            > InterruptRefractoryTau (0.5, 0.0));
-}
-
-TEST_CASE ("Soft Anchor continuity gates derive from knobs", "[core][knobs]")
-{
-  REQUIRE (SoftAnchorActiveTTLSteps (1.0) > SoftAnchorActiveTTLSteps (0.0));
-  REQUIRE (SoftAnchorRecentMemoryLimit (0.5, 0.5, 0.5) >= 24);
-  REQUIRE (SoftAnchorRecentMemoryLimit (0.5, 0.5, 0.5) <= 40);
-
-  REQUIRE (SoftAnchorSupportRawThreshold (1.0, 0.5, 0.5)
-           > SoftAnchorSupportRawThreshold (0.0, 0.5, 0.5));
-  REQUIRE (SoftAnchorSupportRawThreshold (0.5, 1.0, 0.5)
-           < SoftAnchorSupportRawThreshold (0.5, 0.0, 0.5));
-  REQUIRE (SoftAnchorSupportMarginThreshold (1.0, 0.5, 0.5)
-           > SoftAnchorSupportMarginThreshold (0.0, 0.5, 0.5));
-  REQUIRE (SoftAnchorSupportEntropyMax (1.0, 0.5, 0.5)
-           < SoftAnchorSupportEntropyMax (0.0, 0.5, 0.5));
-
-  REQUIRE (SoftAnchorContradictionSemanticThreshold (1.0, 0.5, 0.5)
-           > SoftAnchorContradictionSemanticThreshold (0.0, 0.5, 0.5));
-  REQUIRE (SoftAnchorContradictionEntityMax (1.0, 0.5, 0.5)
-           < SoftAnchorContradictionEntityMax (0.0, 0.5, 0.5));
-
-  REQUIRE (SoftAnchorDurableMarginThreshold (1.0, 0.5, 0.5)
-           > SoftAnchorDurableMarginThreshold (0.0, 0.5, 0.5));
-  REQUIRE (SoftAnchorDurableEntropyMax (1.0, 0.5, 0.5)
-           < SoftAnchorDurableEntropyMax (0.0, 0.5, 0.5));
-
-  const auto view_weights = SoftAnchorViewScoringWeights (
-      0.5, 0.5, 0.5, 1.0, 0.5, 1.0);
-  REQUIRE (view_weights.semantic + view_weights.entity + view_weights.full
-           == Catch::Approx (1.0));
-  const auto candidate_weights = SoftAnchorCandidateScoringWeights (
-      0.5, 0.5, 0.5);
-  REQUIRE (candidate_weights.view > 0.0);
-  REQUIRE (candidate_weights.source > 0.0);
-  REQUIRE (candidate_weights.recency > 0.0);
-  REQUIRE (candidate_weights.support > 0.0);
-  REQUIRE (candidate_weights.boundary > 0.0);
-  REQUIRE (candidate_weights.contradiction > 0.0);
-  REQUIRE (SoftAnchorSourceAffinity (0.5, 0.5, 0.5, true)
-           == Catch::Approx (1.0));
-  REQUIRE (SoftAnchorSourceAffinity (0.5, 1.0, 0.5, false)
-           > SoftAnchorSourceAffinity (0.5, 0.0, 0.5, false));
-  REQUIRE (SoftAnchorSingleViewEntityQuality (0.5, 0.5, 0.5)
-           == Catch::Approx (0.5));
-  REQUIRE (SoftAnchorActiveDecayMultiplier (0.5, 0.5, 0.5)
-           == Catch::Approx (2.0));
-  REQUIRE (SoftAnchorActiveDecayMultiplier (0.5, 0.5, 1.0)
-           > SoftAnchorActiveDecayMultiplier (0.5, 0.5, 0.0));
-  REQUIRE (SoftAnchorGenericScore (0.5, 0.5, 0.5, 0.5, 0.2, 0.8)
-           == Catch::Approx (0.32));
-  REQUIRE (SoftAnchorNoneScore (0.5, 0.5, 0.5, 0.3, 0.2, 0.4, 0.1)
-           == Catch::Approx (0.5));
-  REQUIRE (SoftAnchorNewScore (0.5, 0.5, 0.5, 0.8, 0.4, 0.6, 0.2)
-           == Catch::Approx (0.62));
-
-  const auto decision_mid = SoftAnchorDecisionPolicyForKnobs (0.5, 0.5, 0.5);
-  REQUIRE (decision_mid.keep_count >= 2);
-  REQUIRE (decision_mid.durable_support_required >= 2);
-  REQUIRE (SoftAnchorDecisionPolicyForKnobs (0.5, 1.0, 0.5)
-               .durable_support_required
-           <= SoftAnchorDecisionPolicyForKnobs (0.5, 0.0, 0.5)
-                  .durable_support_required);
 }
 
 TEST_CASE ("Graph build thresholds derive from knobs", "[core][knobs]")
@@ -512,8 +440,6 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
 TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
            "[core][knobs][retrieval]")
 {
-  REQUIRE (HydratedSoftAnchorLimit (0.5, 0.5, 0.5) == 3);
-
   REQUIRE (RetrievalDurableSourceLinkFanout (0.5, 1.0, 0.5, 4)
            > RetrievalDurableSourceLinkFanout (0.5, 0.0, 0.5, 4));
 

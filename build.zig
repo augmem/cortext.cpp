@@ -49,7 +49,6 @@ const cortext_cpp_sources = &.{
     "src/operations/detect_memory_usage.cpp",
     "src/operations/drift_accumulation.cpp",
     "src/operations/streaming_pacing.cpp",
-    "src/operations/soft_anchor.cpp",
     "src/operations/accumulator_scores.cpp",
     "src/operations/accumulator.cpp",
     "src/operations/accumulator_reset.cpp",

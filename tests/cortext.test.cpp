@@ -837,7 +837,6 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
         cortext::Signal signal;
         signal.embedding = Eigen::VectorXf::Zero (256);
         signal.embedding[event % 256] = 1.0f;
-        signal.soft_anchor_embedding = signal.embedding;
         signal.source_id = source;
         signal.timestamp = timestamp;
         signal.retention = retention;
@@ -1655,82 +1654,6 @@ TEST_CASE ("Fallback hydration applies its bound after surface filtering",
   REQUIRE (hydrated.output.operation_ms.at (
                "Cortext.fallback_hydration_signal_rows")
            == 1.0);
-}
-
-TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
-           "[cortext][hydration][soft_anchor][aist]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto store = cortext::SQLiteStore::Create (db_path);
-  cortext::testing::InitializeCoreSchema (*store);
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> embedding (kEmbeddingDim, 0.0f);
-  embedding[0] = 1.0f;
-
-  const std::string source_text = "I went to Jared's house yesterday.";
-  const std::vector<unsigned char> payload (source_text.begin (),
-                                            source_text.end ());
-  auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                   { payload });
-  REQUIRE (blob_rows.size () == 1);
-  const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
-  REQUIRE (!blob_id.empty ());
-
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?)",
-      { 501LL, embedding, 1000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
-      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
-      "0.5, 0.5, 1.0, 1000)",
-      { 501LL, 501LL, blob_id });
-  store->Execute (
-      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-      "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000)",
-      { 501LL, 501LL, blob_id });
-
-  store->Execute (
-      "INSERT INTO soft_anchor_links "
-      "(memory_id, anchor_id, anchor_strength, anchor_label, memory_tier, "
-      " score, margin, entropy, support_count, contradiction_count, "
-      " created_step, updated_step, created_at) "
-      "VALUES "
-      "(501, 'anchor-low', 0.20, 'tentative', 'STM', 0.30, 0.04, 0.70, "
-      " 1, 0, 1, 1, 1000),"
-      "(501, 'anchor-top', 1.20, 'durable', 'WM', -0.40, 0.22, 1.80, "
-      " 3, 0, 1, 3, 1000),"
-      "(501, 'anchor-mid', 0.73, 'ambiguous', 'STM', 0.64, 0.02, 0.51, "
-      " 2, 0, 1, 2, 1000),"
-      "(501, 'anchor-third', 0.42, 'tentative', 'LTM', 0.44, 0.01, 0.62, "
-      " 1, 0, 1, 2, 1000),"
-      "(501, 'anchor-rejected', 0.99, 'rejected', 'WM', 0.99, 0.60, 0.10, "
-      " 1, 1, 1, 4, 1000)");
-
-  cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
-  auto hydrated = ctx->DebugHydrateForTest ({ 501LL }, {});
-  REQUIRE (hydrated.retrieved_memory.size () == 1);
-  const auto &memory = hydrated.retrieved_memory.front ();
-  REQUIRE (TextFromMemory (memory) == source_text);
-  REQUIRE (memory.soft_anchors.size () == 3);
-
-  REQUIRE (memory.soft_anchors[0].id == "anchor-top");
-  REQUIRE (memory.soft_anchors[0].strength == 1.0);
-  REQUIRE (memory.soft_anchors[0].likelihood == 1.0);
-  REQUIRE (memory.soft_anchors[0].label == "durable");
-  REQUIRE (memory.soft_anchors[0].tier == "WM");
-  REQUIRE (memory.soft_anchors[0].score == 0.0);
-  REQUIRE (memory.soft_anchors[0].entropy == 1.0);
-
-  REQUIRE (memory.soft_anchors[1].id == "anchor-mid");
-  REQUIRE (memory.soft_anchors[2].id == "anchor-third");
 }
 
 TEST_CASE ("Cortext hides unresolved internal retrieval nodes",

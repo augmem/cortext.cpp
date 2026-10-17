@@ -67,7 +67,6 @@
 #include "cortext/operations/signal_metrics_persistence.hpp"
 #include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
-#include "cortext/operations/soft_anchor.hpp"
 #include "cortext/operations/memory_storage.hpp"
 #include "cortext/operations/working_memory.hpp"
 #include "cortext/operations/detect_memory_usage.hpp"
@@ -93,12 +92,6 @@ namespace
 {
 
 constexpr const char *kMaintenanceSourceId = "cortext/maintenance";
-
-double
-Clamp01 (double value)
-{
-  return std::clamp (value, 0.0, 1.0);
-}
 
 bool
 SourceBlobsDisabled ()
@@ -252,18 +245,6 @@ RetrievalEmbeddingView (const std::vector<float> &encoded)
       NormalizeVector (out);
     }
   return out;
-}
-
-std::optional<Eigen::VectorXf>
-SoftAnchorEmbeddingView (const std::vector<float> &encoded)
-{
-  if (encoded.size () >= 1536)
-    {
-      std::vector<float> out (encoded.begin (), encoded.begin () + 1536);
-      NormalizeVector (out);
-      return ToEigen (out);
-    }
-  return std::nullopt;
 }
 
 std::vector<float>
@@ -581,83 +562,10 @@ LoadContentBlob (Store *store, ObjectStore *object_store,
 }
 
 void
-LoadSoftAnchors (
-    Store *store, long long memory_id,
-    std::vector<Cortext::Context::Memory::SoftAnchor> &out,
-    int max_hydrated_soft_anchors)
-{
-  out.clear ();
-  if (!store || memory_id <= 0)
-    return;
-  const int limit = std::max (1, max_hydrated_soft_anchors);
-
-  try
-    {
-      auto rows = store->Execute (
-          "SELECT anchor_id, anchor_strength, anchor_label, memory_tier, "
-          "       score, margin, entropy "
-          "FROM soft_anchor_links "
-          "WHERE memory_id = ? "
-          "  AND anchor_label NOT IN ('none', 'rejected') "
-          "ORDER BY anchor_strength DESC, score DESC, updated_step DESC "
-          "LIMIT ?",
-          { memory_id, static_cast<long long> (limit) });
-
-      out.reserve (rows.size ());
-      for (const auto &row : rows)
-        {
-          auto get_s = [&row] (const char *k) -> std::string {
-            auto it = row.find (k);
-            if (it == row.end () || !it->second.has_value ())
-              return {};
-            if (it->second.type () == typeid (std::string))
-              return std::any_cast<std::string> (it->second);
-            return {};
-          };
-
-          auto get_dbl = [&row] (const char *k, double def = 0.0) -> double {
-            auto it = row.find (k);
-            if (it == row.end () || !it->second.has_value ())
-              return def;
-            return store::AnyToDouble (it->second, def);
-          };
-
-          Cortext::Context::Memory::SoftAnchor anchor;
-          anchor.id = get_s ("anchor_id");
-          anchor.strength = Clamp01 (get_dbl ("anchor_strength"));
-          anchor.likelihood = anchor.strength;
-          anchor.label = get_s ("anchor_label");
-          anchor.tier = get_s ("memory_tier");
-          anchor.score = Clamp01 (get_dbl ("score"));
-          anchor.margin = get_dbl ("margin");
-          anchor.entropy = Clamp01 (get_dbl ("entropy"));
-          out.push_back (std::move (anchor));
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load soft anchors",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-  catch (...)
-    {
-      telemetry::LogWarn (
-          "Failed to load soft anchors (unknown error)",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id) });
-    }
-}
-
-void
 HydrateMemory (Store *store, ObjectStore *object_store, long long id,
                Cortext::Context::Memory &m,
-               int max_hydrated_soft_anchors,
                int max_fallback_signal_blobs,
                std::size_t *loaded_fallback_signal_blobs,
-               bool load_soft_anchors = true,
                SharedObjectReads *shared = nullptr)
 {
   if (!store)
@@ -789,9 +697,6 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           m.arousal = 0.0;
           m.composite_score = 0.0;
           m.threshold_t = 0.0;
-          if (load_soft_anchors)
-            LoadSoftAnchors (store, memory_id, m.soft_anchors,
-                             max_hydrated_soft_anchors);
         }
     }
   catch (const std::exception &e)
@@ -923,7 +828,7 @@ public:
 
   // Text of a memory to attach to another memory's content: its content
   // blobs joined by spaces and clipped to max_bytes, or empty when the
-  // memory has no text surface. Soft anchors are not loaded.
+  // memory has no text surface.
   std::vector<unsigned char>
   AttachedText (long long memory_id, std::size_t max_bytes)
   {
@@ -971,9 +876,9 @@ private:
       {
         Cortext::Context::Memory memory;
         std::size_t fallback_signal_blobs = 0;
-        HydrateMemory (store_, object_store_, memory_id, memory, 1,
+        HydrateMemory (store_, object_store_, memory_id, memory,
                        max_fallback_signal_blobs_, &fallback_signal_blobs,
-                       false, shared_);
+                       shared_);
         Hydrated hydrated;
         hydrated.modality = std::move (memory.modality);
         hydrated.mimetype = std::move (memory.mimetype);
@@ -1521,7 +1426,6 @@ AttachSupersededPredecessors (
 void
 HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
                             std::vector<Cortext::Context::Memory> &out,
-                            int max_hydrated_soft_anchors,
                             int max_fallback_signal_blobs,
                             std::size_t *loaded_fallback_signal_blobs)
 {
@@ -1625,8 +1529,6 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
                                m.content);
             }
           StripSourceBlobsIfDisabled (m);
-          LoadSoftAnchors (store, m.id, m.soft_anchors,
-                           max_hydrated_soft_anchors);
 
           out.push_back (std::move (m));
         }
@@ -1713,7 +1615,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::UpdateRateState;
   using cortext::operations::UpdateRecentContext;
   using cortext::operations::UpdateSensitivity;
-  using cortext::operations::UpdateSoftAnchor;
   using cortext::operations::UpdateThreshold;
   using cortext::operations::UpdateUncertainty;
   using cortext::operations::WorkingMemory;
@@ -1738,8 +1639,7 @@ BuildRootOperationSet (bool probe_mode)
 
       DetectBoundary, CheckSpikeBypass, ComputeWriteGate>;
 
-  using StorageStage = OperationSet<MemoryStorage, UpdateSoftAnchor,
-                                    PersistSignalMetrics>;
+  using StorageStage = OperationSet<MemoryStorage, PersistSignalMetrics>;
 
   using RetrievalStage
       = OperationSet<CheckStreamingPacing, GraphAugmentedRetrieveCandidates,
@@ -1973,7 +1873,6 @@ struct Cortext::Impl
 
     cortext::Signal s;
     s.embedding = ToEigen (RetrievalEmbeddingView (encoded));
-    s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp != 0 ? timestamp : NowMillis ();
     s.source_id = source_id;
     s.retention = retention;
@@ -2010,7 +1909,6 @@ struct Cortext::Impl
     const auto encoded = ToStdVector (embedding);
     cortext::Signal s;
     s.embedding = ToEigen (RetrievalEmbeddingView (encoded));
-    s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp;
     s.source_id = source_id;
     s.force_consolidation = force_consolidation;
@@ -2122,22 +2020,12 @@ struct Cortext::Impl
   result.output.stored_embedding_id = out.stored_embedding_id;
   result.output.stored_memory_id = out.stored_memory_id;
   result.output.stored_signal_id = out.stored_signal_id;
-  result.output.soft_anchor_enabled = out.soft_anchor_enabled;
-  result.output.soft_anchor_state_count = out.soft_anchor_state_count;
-  result.output.soft_anchor_link_count = out.soft_anchor_link_count;
-  result.output.soft_anchor_create_count = out.soft_anchor_create_count;
-  result.output.soft_anchor_update_count = out.soft_anchor_update_count;
-  result.output.soft_anchor_none_count = out.soft_anchor_none_count;
-  result.output.soft_anchor_last_update_us = out.soft_anchor_last_update_us;
-  result.output.soft_anchor_mean_update_us = out.soft_anchor_mean_update_us;
     
 	    if (!store)
 	      {
 	        return result;
 	      }
 
-	    const int max_hydrated_soft_anchors = core::HydratedSoftAnchorLimit (
-	        cfg.focus, cfg.sensitivity, cfg.stability);
 	    const int max_fallback_signal_blobs
 	        = operations::sparse_retrieval_knobs_internal::
 	            HydrationFallbackSignalLimit (
@@ -2148,7 +2036,6 @@ struct Cortext::Impl
 	      {
 	        HydrateWorkingMemoryFromDB (store.get (), object_store.get (),
 	                                    result.working_memory,
-	                                    max_hydrated_soft_anchors,
 	                                    max_fallback_signal_blobs,
 	                                    &loaded_fallback_signal_blobs);
 	      }
@@ -2245,7 +2132,6 @@ struct Cortext::Impl
         Cortext::Context::Memory m;
         m.id = memory_id;
         HydrateMemory (store.get (), object_store.get (), memory_id, m,
-                       max_hydrated_soft_anchors,
                        max_fallback_signal_blobs,
                        &loaded_fallback_signal_blobs);
         ApplyRetrievalScore (m, ranked_by_memory_id);
@@ -2457,7 +2343,6 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
@@ -2511,7 +2396,6 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp;
   s.source_id = source_id;
   s.retention = retention;
@@ -2578,7 +2462,6 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
@@ -2653,7 +2536,6 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
@@ -2721,7 +2603,6 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
@@ -2797,7 +2678,6 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
@@ -2922,7 +2802,6 @@ internal::ReplayIngress::ProcessTextAt (Cortext &cortext,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
@@ -2993,7 +2872,6 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
@@ -3068,7 +2946,6 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
@@ -3266,7 +3143,6 @@ struct StreamingTextProbeSession::Impl
 
     cortext::Signal signal;
     signal.embedding = ToEigen (RetrievalEmbeddingView (embedding));
-    signal.soft_anchor_embedding = SoftAnchorEmbeddingView (embedding);
     signal.timestamp = timestamp != 0 ? timestamp
                                       : cortext->impl_->NowMillis ();
     signal.source_id = source_id;

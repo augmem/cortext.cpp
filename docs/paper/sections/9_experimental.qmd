@@ -11,7 +11,7 @@ The evaluated system is the embedding-first runtime described in
 @sec-implementation and @sec-consolidation. It contains:
 
 * online memory storage, boundary detection, graph construction, retrieval,
-  reconsolidation, working memory, and soft anchors;
+  reconsolidation, and working memory;
 * explicit maintenance (sparse-route seal and recenter); and
 * C, C++, Python, Go, Dart, JavaScript, and WebAssembly entry points that expose only the
   retained processing, retrieval, consolidation, reset, and embedding APIs.
@@ -1034,7 +1034,7 @@ judged only packets that changed. Instruction counts come from
 | working-memory chunking | 0/48, 0/250, 0/20, MSC 0/39 | never merged a slot | — | kept pending a workload where it fires |
 | family collapse in retrieval | 5/48, 18/250, 10/20 | recall within one case | −1% to −5% off | kept (candidate: wired through the sparse-route cache) |
 | usage detection and usage counters | 0/48, 0/250, 0/20 | identical | −1% each | kept: they feed the public `retrieved_count`/`used_count` fields |
-| soft anchors | 0/48, 0/250, 0/20 | identical | −0.5% to −1% | kept: public API |
+| soft anchors | 0/48, 0/250, 0/20 | identical | −0.5% to −1% | removed (public API, user-approved) |
 | working-memory packet hydration | 48/48, 250/250, 20/20 | −0.012 / −0.015 / 0 recall; judge +0.012 ± 0.053 / −0.008 ± 0.016 | packets −66% / −60% / −84% | kept: public API, flagged |
 | SQLite sparse route at 111,527 turns (five BEAM conversations chained) | 94/99 | off: recall 0.076 vs 0.062, judge +0.020 ± 0.052 | off: +26% instructions, ingest 170 vs 95 ms/turn past 100k, query median 45 vs 33 ms, RSS 7.4 vs 6.7 GB | kept |
 

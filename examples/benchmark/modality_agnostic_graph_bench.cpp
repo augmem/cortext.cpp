@@ -1023,61 +1023,6 @@ TemporalEdges (const std::string &scenario, const std::string &variant,
   return edges;
 }
 
-std::vector<Edge>
-SoftAnchorEdges (const std::string &scenario, const std::string &variant,
-                 cortext::Store &store,
-                 const std::unordered_map<long long, MemoryNode> &node_by_id)
-{
-  std::vector<Edge> edges;
-  const auto rows = store.Execute (
-      "SELECT anchor_id, memory_id, anchor_strength, anchor_label "
-      "FROM soft_anchor_links "
-      "WHERE anchor_label NOT IN ('none', 'rejected') "
-      "ORDER BY anchor_id, anchor_strength DESC",
-      {});
-  std::map<std::string, std::vector<std::pair<long long, double>>> by_anchor;
-  for (const auto &row : rows)
-    {
-      const long long memory_id = AnyLong (row.at ("memory_id"));
-      if (node_by_id.count (memory_id) == 0)
-        {
-          continue;
-        }
-      by_anchor[AnyString (row.at ("anchor_id"))].push_back (
-          { memory_id, AnyDouble (row.at ("anchor_strength")) });
-    }
-  for (const auto &[anchor_id, links] : by_anchor)
-    {
-      (void)anchor_id;
-      for (std::size_t i = 0; i < links.size (); ++i)
-        {
-          for (std::size_t j = i + 1; j < links.size (); ++j)
-            {
-              const auto &a = node_by_id.at (links[i].first);
-              const auto &b = node_by_id.at (links[j].first);
-              Edge edge;
-              edge.scenario = scenario;
-              edge.variant = variant;
-              edge.source_memory_id = a.memory_id;
-              edge.target_memory_id = b.memory_id;
-              edge.edge_type = "same_soft_anchor";
-              edge.weight = std::min (links[i].second, links[j].second);
-              edge.same_offline_group = Intersects (a.offline_groups,
-                                                    b.offline_groups);
-              edge.cross_offline_group
-                  = !edge.same_offline_group && !a.offline_groups.empty ()
-                    && !b.offline_groups.empty ();
-              edge.touches_mixed_node = a.mixed_offline_groups
-                                        || b.mixed_offline_groups;
-              edge.source_groups = JoinStrings (a.offline_groups);
-              edge.target_groups = JoinStrings (b.offline_groups);
-              edges.push_back (std::move (edge));
-            }
-        }
-    }
-  return edges;
-}
-
 std::vector<ClusterRow>
 BuildClusters (const std::string &scenario, const std::string &variant,
                const std::vector<MemoryNode> &nodes,
@@ -1637,7 +1582,6 @@ main (int argc, char **argv)
             "memory_embedding_similarity_strict",
             "memory_similarity_temporal",
             "signal_aware_temporal",
-            "soft_anchor_continuity",
           };
 
           for (const auto &variant : variants)
@@ -1683,11 +1627,6 @@ main (int argc, char **argv)
               else if (variant == "signal_aware_temporal")
                 {
                   edges = TemporalEdges (scenario.name, variant, variant_nodes);
-                }
-              else if (variant == "soft_anchor_continuity")
-                {
-                  edges = SoftAnchorEdges (scenario.name, variant, *store,
-                                           node_by_id);
                 }
               int variant_signal_evidence_edges = 0;
               for (const auto &node : variant_nodes)
@@ -1914,8 +1853,7 @@ main (int argc, char **argv)
                       "memory_embedding_similarity_loose",
                       "memory_embedding_similarity_strict",
                       "memory_similarity_temporal",
-                      "signal_aware_temporal",
-                      "soft_anchor_continuity" } },
+                      "signal_aware_temporal" } },
                   { "consolidation_variants",
                     { "memory_row_units",
                       "signal_evidence_units",
@@ -1924,8 +1862,7 @@ main (int argc, char **argv)
                       "cluster_memory_embedding_similarity_loose",
                       "cluster_memory_embedding_similarity_strict",
                       "cluster_memory_similarity_temporal",
-                      "cluster_signal_aware_temporal",
-                      "cluster_soft_anchor_continuity" } },
+                      "cluster_signal_aware_temporal" } },
                   { "embedding_surface_rows_file",
                     "modality_agnostic_graph_embedding_rows.csv" },
                   { "embedding_surface_vectors_file",

@@ -134,7 +134,7 @@ Cortext is built around a local feedback loop:
   derive thresholds, decay, storage cadence, consolidation, and retrieval
   behavior.
 - **Graph-native context:** memories are connected by reinforcement,
-  sequence, soft anchors, consolidation, and supersession edges.
+  sequence, consolidation, and supersession edges.
 - **Small native surface:** C++ facade, stable C ABI, and bindings for Python,
   Go, JavaScript/TypeScript, Dart, and WebAssembly.
 - **Research traceability:** experiments, ablations, and manuscript sections
@@ -293,7 +293,7 @@ Top-level fields include:
 - `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
 
 Each memory entry includes provenance, modality, stored content, retrieval
-scores, usage counts, and optional soft-anchor metadata:
+scores, and usage counts:
 
 ```json
 {
@@ -312,8 +312,7 @@ scores, usage counts, and optional soft-anchor metadata:
   "salience": 0.0,
   "contradiction": 0.0,
   "retrieved_count": 1,
-  "used_count": 0,
-  "soft_anchors": []
+  "used_count": 0
 }
 ```
 
@@ -539,7 +538,7 @@ flowchart TD
 
 The production loop is composed from small operations in `src/operations/`.
 Retrieval combines embedding similarity, graph edges, temporal scoring,
-supersession demotion, soft anchors, and working-memory state. Feedback updates
+supersession demotion, and working-memory state. Feedback updates
 F/S/T so later writes, decay, thresholds, attention width, and consolidation
 cadence adapt to the stream.
 

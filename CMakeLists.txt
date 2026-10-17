@@ -327,7 +327,6 @@ add_library(cortext
     src/operations/detect_memory_usage.cpp
     src/operations/drift_accumulation.cpp
     src/operations/streaming_pacing.cpp
-    src/operations/soft_anchor.cpp
     # Section 4.4: Accumulator operations
     src/operations/accumulator_scores.cpp
     src/operations/accumulator.cpp

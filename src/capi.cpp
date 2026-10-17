@@ -962,21 +962,6 @@ memory_to_json (const cortext::Cortext::Context::Memory &memory)
       });
     }
 
-  nlohmann::json soft_anchors = nlohmann::json::array ();
-  for (const auto &anchor : memory.soft_anchors)
-    {
-      soft_anchors.push_back ({
-          { "id", anchor.id },
-          { "strength", anchor.strength },
-          { "likelihood", anchor.likelihood },
-          { "label", anchor.label },
-          { "tier", anchor.tier },
-          { "score", anchor.score },
-          { "margin", anchor.margin },
-          { "entropy", anchor.entropy },
-      });
-    }
-
   return {
     { "source_id", memory.source_id },
     { "id", memory.id },
@@ -1000,7 +985,6 @@ memory_to_json (const cortext::Cortext::Context::Memory &memory)
     { "arousal", memory.arousal },
     { "composite_score", memory.composite_score },
     { "threshold_t", memory.threshold_t },
-    { "soft_anchors", std::move (soft_anchors) },
   };
 }
 
@@ -1070,16 +1054,6 @@ context_to_json (const cortext::Cortext::Context &ctx,
     { "signal_filter_threshold", ctx.output.signal_filter_threshold },
     { "signal_filter_quiet_seconds",
       ctx.output.signal_filter_quiet_seconds },
-    { "soft_anchor_enabled", ctx.output.soft_anchor_enabled },
-    { "soft_anchor_state_count", ctx.output.soft_anchor_state_count },
-    { "soft_anchor_link_count", ctx.output.soft_anchor_link_count },
-    { "soft_anchor_create_count", ctx.output.soft_anchor_create_count },
-    { "soft_anchor_update_count", ctx.output.soft_anchor_update_count },
-    { "soft_anchor_none_count", ctx.output.soft_anchor_none_count },
-    { "soft_anchor_last_update_us",
-      ctx.output.soft_anchor_last_update_us },
-    { "soft_anchor_mean_update_us",
-      ctx.output.soft_anchor_mean_update_us },
   };
 
   nlohmann::json result = {

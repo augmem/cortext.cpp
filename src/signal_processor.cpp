@@ -1355,21 +1355,6 @@ AssembleOutputFields (const OperationContext &op_context,
   out.stored_embedding_id = op_context.GetStoredEmbeddingId ();
   out.stored_memory_id = op_context.GetStoredMemoryId ();
   out.stored_signal_id = op_context.GetStoredSignalId ();
-  const auto &processor_context = op_context.GetProcessorContext ();
-  out.soft_anchor_enabled = processor_context.soft_anchor_enabled;
-  out.soft_anchor_state_count = processor_context.soft_anchor_last_state_count;
-  out.soft_anchor_link_count = processor_context.soft_anchor_last_link_count;
-  out.soft_anchor_create_count = processor_context.soft_anchor_last_create_count;
-  out.soft_anchor_update_count = processor_context.soft_anchor_last_update_count;
-  out.soft_anchor_none_count = processor_context.soft_anchor_last_none_count;
-  out.soft_anchor_last_update_us
-      = processor_context.soft_anchor_last_update_us;
-  out.soft_anchor_mean_update_us
-      = processor_context.soft_anchor_update_count > 0
-            ? processor_context.soft_anchor_total_update_us
-                  / static_cast<double> (
-                      processor_context.soft_anchor_update_count)
-            : 0.0;
 }
 
 void
@@ -1730,28 +1715,6 @@ ExtractString (const std::map<std::string, std::any> &row,
   if (it->second.type () == typeid (std::string))
     return std::any_cast<std::string> (it->second);
   return default_val;
-}
-
-std::deque<long long>
-ParseMemoryIds (const std::string &text)
-{
-  std::deque<long long> ids;
-  std::stringstream stream (text);
-  std::string item;
-  while (std::getline (stream, item, ','))
-    {
-      try
-        {
-          if (!item.empty ())
-            {
-              ids.push_back (std::stoll (item));
-            }
-        }
-      catch (...)
-        {
-        }
-    }
-  return ids;
 }
 
 void
@@ -2580,96 +2543,6 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
     }
 }
 
-void
-LoadSoftAnchors (Store &store, ProcessorContext &ctx)
-{
-  try
-    {
-      auto rows = store.Execute (
-          "SELECT anchor_id, status, semantic_centroid, entity_centroid, "
-          "       full_centroid, semantic_radius, entity_radius, full_radius, "
-          "       source_id, first_step, last_step, first_ts, last_ts, "
-          "       last_boundary_id, anchor_strength, support_count, "
-          "       contradiction_count, recent_memory_ids "
-          "FROM soft_anchors "
-          "WHERE status IN ('provisional', 'active', 'durable', 'decayed') "
-          "ORDER BY last_step ASC");
-      int max_numeric_id = 0;
-      for (const auto &row : rows)
-        {
-          ProcessorContext::SoftAnchorState anchor;
-          anchor.anchor_id = ExtractString (row, "anchor_id");
-          if (anchor.anchor_id.empty ())
-            {
-              continue;
-            }
-          anchor.status = ExtractString (row, "status", "provisional");
-          anchor.last_source_id = ExtractString (row, "source_id");
-          auto semantic_it = row.find ("semantic_centroid");
-          if (semantic_it != row.end () && semantic_it->second.has_value ())
-            {
-              anchor.semantic_centroid = BlobToEigen (semantic_it->second);
-            }
-          auto entity_it = row.find ("entity_centroid");
-          if (entity_it != row.end () && entity_it->second.has_value ())
-            {
-              anchor.entity_centroid = BlobToEigen (entity_it->second);
-            }
-          auto full_it = row.find ("full_centroid");
-          if (full_it != row.end () && full_it->second.has_value ())
-            {
-              anchor.full_centroid = BlobToEigen (full_it->second);
-            }
-          anchor.semantic_radius = ExtractDouble (row, "semantic_radius", 0.0);
-          anchor.entity_radius = ExtractDouble (row, "entity_radius", 0.0);
-          anchor.full_radius = ExtractDouble (row, "full_radius", 0.0);
-          anchor.first_step
-              = static_cast<int> (ExtractInt64 (row, "first_step", 0));
-          anchor.last_step
-              = static_cast<int> (ExtractInt64 (row, "last_step", 0));
-          anchor.first_ts
-              = static_cast<uint64_t> (ExtractInt64 (row, "first_ts", 0));
-          anchor.last_ts
-              = static_cast<uint64_t> (ExtractInt64 (row, "last_ts", 0));
-          anchor.last_boundary_id = ExtractInt64 (row, "last_boundary_id", 0);
-          anchor.anchor_strength = ExtractDouble (row, "anchor_strength", 0.0);
-          anchor.support_count
-              = static_cast<int> (ExtractInt64 (row, "support_count", 0));
-          anchor.contradiction_count = static_cast<int> (
-              ExtractInt64 (row, "contradiction_count", 0));
-          anchor.recent_memory_ids = ParseMemoryIds (
-              ExtractString (row, "recent_memory_ids"));
-
-          const std::string prefix = "soft_anchor_";
-          if (anchor.anchor_id.rfind (prefix, 0) == 0)
-            {
-              try
-                {
-                  max_numeric_id = std::max (
-                      max_numeric_id,
-                      std::stoi (anchor.anchor_id.substr (prefix.size ())));
-                }
-              catch (...)
-                {
-                }
-            }
-
-          ctx.soft_anchor_states.push_back (std::move (anchor));
-        }
-      ctx.soft_anchor_next_id = std::max (ctx.soft_anchor_next_id,
-                                          max_numeric_id + 1);
-      ctx.soft_anchor_last_state_count
-          = static_cast<int> (ctx.soft_anchor_states.size ());
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load soft anchors",
-          { telemetry::Attribute::String ("component", "signal_processor"),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-}
-
 } // namespace
 
 #if defined(CORTEXT_TESTING)
@@ -2786,7 +2659,6 @@ SignalProcessor::SignalProcessor (const Config &config,
       LoadRecentScores (*store_, *context_, config_);
       LoadWorkingMemory (*store_, *context_, config_,
                          now_ms);                                  // From MEMORIES
-      LoadSoftAnchors (*store_, *context_);
       operations::bounded_activation_shadow_internal::Initialize (
           *context_, store_.get (), config_.focus, config_.sensitivity,
           config_.stability);

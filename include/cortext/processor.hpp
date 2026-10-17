@@ -121,18 +121,6 @@ public:
 
     // Per-operation timings (ms) for this signal
     std::unordered_map<std::string, double> operation_ms;
-
-    // Soft Anchor diagnostics. Formation runs at ingress; retrieval/chat
-    // consumption is not changed by these fields.
-    bool soft_anchor_enabled = false;
-    int soft_anchor_state_count = 0;
-    int soft_anchor_link_count = 0;
-    int soft_anchor_create_count = 0;
-    int soft_anchor_update_count = 0;
-    int soft_anchor_none_count = 0;
-    double soft_anchor_last_update_us = 0.0;
-    double soft_anchor_mean_update_us = 0.0;
-
   };
 
   /// @brief Processes a single signal by executing the instruction set.

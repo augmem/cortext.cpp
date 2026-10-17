@@ -405,62 +405,6 @@ struct ProcessorContext
   std::deque<Eigen::VectorXf> recent_memory_centroids;
 
   // ======================================================================
-  // Soft Anchor State (ingress-time formation)
-  // ======================================================================
-  struct SoftAnchorState
-  {
-    std::string anchor_id;
-    std::string status = "provisional";
-    std::string last_source_id;
-    Eigen::VectorXf semantic_centroid;
-    Eigen::VectorXf entity_centroid;
-    Eigen::VectorXf full_centroid;
-    double semantic_radius = 0.0;
-    double entity_radius = 0.0;
-    double full_radius = 0.0;
-    double anchor_strength = 0.0;
-    int support_count = 0;
-    int contradiction_count = 0;
-    int first_step = 0;
-    int last_step = 0;
-    uint64_t first_ts = 0;
-    uint64_t last_ts = 0;
-    int64_t last_boundary_id = 0;
-    std::deque<long long> recent_memory_ids;
-  };
-
-  struct SoftAnchorLink
-  {
-    long long memory_id = 0;
-    std::string anchor_id;
-    double anchor_strength = 0.0;
-    std::string anchor_label = "none";
-    std::string evidence_kind = "unknown";
-    std::string memory_tier = "WM";
-    double score = 0.0;
-    double margin = 0.0;
-    double entropy = 0.0;
-    int support_count = 0;
-    int contradiction_count = 0;
-    int created_step = 0;
-    int updated_step = 0;
-  };
-
-  std::vector<SoftAnchorState> soft_anchor_states;
-  std::vector<SoftAnchorLink> soft_anchor_last_links;
-  bool soft_anchor_enabled = false;
-  int soft_anchor_next_id = 1;
-  int soft_anchor_update_count = 0;
-  int soft_anchor_last_link_count = 0;
-  int soft_anchor_last_state_count = 0;
-  int soft_anchor_last_create_count = 0;
-  int soft_anchor_last_update_count = 0;
-  int soft_anchor_last_none_count = 0;
-  double soft_anchor_last_update_us = 0.0;
-  double soft_anchor_total_update_us = 0.0;
-  std::deque<double> soft_anchor_recent_update_us;
-
-  // ======================================================================
   // Index and Procedural Stores (CLS extensions)
   // ======================================================================
   struct RetrievalSurfaceEntry

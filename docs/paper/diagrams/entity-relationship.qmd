@@ -5,7 +5,7 @@ Note: Consolidation is shallow and embedding-only. It creates ASSOCIATION
 centroids without blobs and does not call a summarization, extraction, or
 provider backend.
 Note: This diagram emphasizes the core memory/signal/association schema. Later
-migrations also add reconstruction tables and soft-anchor state/link tables.
+migrations also add reconstruction tables.
 Note: Consolidation is external-only maintenance; callers invoke C++
 `Consolidate()`, C ABI `cortext_consolidate`, or process a maintenance signal
 with `force_consolidation`, rather than scheduling it automatically. It seals

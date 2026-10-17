@@ -4,7 +4,7 @@
 
 The current runtime is embedding- and graph-first. Online scoring, boundary
 detection, write gating, graph updates, retrieval, working-memory maintenance,
-and soft-anchor formation all operate over embeddings, bounded processor state,
+all operate over embeddings, bounded processor state,
 and SQLite graph rows. Raw text, audio, and image payloads are used to produce
 embeddings and to hydrate returned memories for applications; hydrated payloads
 do not feed back into online ranking.
@@ -47,10 +47,7 @@ The current v1 runtime uses two durable graph layers plus one bounded live layer
 * **Working memory:** active coherent memories used for recent-turn continuity,
   overlap suppression, and prompt reconstruction.
 * **Long-term graph memory:** persisted `memories`, `signals`, `embeddings`,
-  `associations`, reconstruction rows, and optional
-  soft-anchor state.
-* **Soft anchors:** uncertainty-preserving continuity links formed at ingress
-  and exposed as optional memory metadata.
+  `associations`, and reconstruction rows.
 
 Long-term graph memory is the durable substrate. `memories` stores working and
 long-term nodes; `associations` stores the directional `supersedes` edges that
@@ -593,7 +590,7 @@ CoreStage:
   adaptive metric weights, thresholding, recent context, boundary/write gate
 
 StorageStage:
-  memory storage, soft-anchor update, signal metrics
+  memory storage, signal metrics
 
 RetrievalStage:
   streaming pacing, graph-augmented retrieval, rate/MNI gating,
@@ -771,40 +768,6 @@ Empty replay is acknowledged, while a rolled-back request restores the exact
 prior latch and range. State-row restoration does not depend on a nonzero
 processed-signal counter, so a maintenance-only disarmed state survives restart.
 
-## Soft Anchor Implementation Status
-
-Soft Anchor (@sec-soft-anchor) is wired into the engine as an always-on ingress
-formation path. It is not a hard referent resolver and it is not a retrieval-time
-reranker. The operation runs after memory storage, consumes the stored memory id
-and current representative embedding, and compares the current signal only
-against prior soft-anchor state.
-
-When a model exposes a 1536-dimensional soft-anchor embedding, the runtime uses
-the semantic/entity/full slices described in @sec-soft-anchor. When only the
-standard 256-dimensional retrieval embedding is available, it falls back to a
-single normalized view for all three centroids and lowers entity quality with a
-knob-derived prior.
-
-Schema migration 6 adds:
-
-```text
-soft_anchors(anchor_id, status, semantic_centroid, entity_centroid,
-             full_centroid, semantic_radius, entity_radius, full_radius,
-             source_id, first_step, last_step, last_boundary_id,
-             first_ts, last_ts, anchor_strength, support_count,
-             contradiction_count, recent_memory_ids, updated_at)
-
-soft_anchor_links(memory_id, anchor_id, anchor_strength, anchor_label,
-                  evidence_kind, memory_tier, score, margin, entropy,
-                  support_count, contradiction_count, created_step,
-                  updated_step, created_at)
-```
-
-Hydrated memories expose up to three soft-anchor entries through
-`Context::Memory::soft_anchors`, and the C API JSON mirrors those entries under
-each returned memory. Production retrieval does not use those links as ranking
-features, and no bundled chat renderer is part of this claim.
-
 ## Computational Complexity
 
 ### Bounded Active Signal-Vector Snapshot
@@ -886,9 +849,8 @@ The dominant per-signal cost is exact candidate discovery over the durable
 embedding and association surface. With `N` stored memories and embedding
 dimension `d`, the current write path computes exact current/base distances in
 `O(Nd)` and performs `O(N)` bounded-top-k selection before writing a
-knob-capped number of supersession edges. Working-memory and
-soft-anchor updates operate over bounded live state and remain independent of
-total store size.
+knob-capped number of supersession edges. Working-memory updates operate over
+bounded live state and remain independent of total store size.
 
 For an open Natural unit containing `U` signal records, the ordinary rollback
 snapshot performs constant-time accumulator-map ownership transfer plus

@@ -57,7 +57,6 @@ add_executable(cortext_tests
   operations_consolidation.test.cpp
 	  operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
-  operations_soft_anchor.test.cpp
   operations_detect_memory_usage.test.cpp
   operations_streaming_pacing.test.cpp
   operations_accumulator.test.cpp

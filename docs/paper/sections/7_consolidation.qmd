@@ -9,7 +9,7 @@ for the product:
 
 * **Fast episodic write path:** coherent memories are written immediately with
   source payloads, embeddings, timestamps, and graph metadata.
-* **Bounded live state:** working memory and soft-anchor state support immediate
+* **Bounded live state:** working memory supports immediate
   continuity without scanning the whole store.
 * **Slow maintenance:** explicit `Consolidate()` calls, made during observed throughput troughs, seal the incremental sparse-route epoch and recenter its activation entry.
 
