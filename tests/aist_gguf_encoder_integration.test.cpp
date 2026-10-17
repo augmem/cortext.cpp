@@ -181,3 +181,26 @@ TEST_CASE ("AIST GGUF text graph memory stays bounded across lengths",
     }
   CHECK (max_abs_diff < 1.0e-5);
 }
+
+TEST_CASE ("AIST native image tower output is pinned",
+           "[aist][gguf][integration]")
+{
+  // Values recorded from the scalar single-threaded native image path; the
+  // vectorized, row-parallel kernels must reproduce them.
+  cortext::AistGgufConfig config;
+  config.model_path = AistModelPath ().string ();
+  cortext::AistGgufEncoder encoder (config);
+  REQUIRE (encoder.IsRuntimeAvailable ());
+  std::vector<std::uint8_t> pixels (768 * 512 * 3);
+  for (std::size_t i = 0; i < pixels.size (); ++i)
+    pixels[i] = static_cast<std::uint8_t> ((i * 2654435761u) >> 24);
+  std::vector<float> v;
+  encoder.EncodeImage (pixels.data (), 768, 512, 3, v);
+  REQUIRE (v.size () == 1280);
+  double sum = 0.0;
+  for (float x : v)
+    sum += x;
+  CHECK (std::abs (v[0] - 0.0423770249) < 1.0e-6);
+  CHECK (std::abs (v[1] - 0.0298241284) < 1.0e-6);
+  CHECK (std::abs (sum - -0.047651531) < 1.0e-5);
+}

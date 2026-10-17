@@ -19,6 +19,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#endif
+#include <thread>
+
 #if defined(__APPLE__) && __has_include(<Accelerate/Accelerate.h>)
 #ifndef ACCELERATE_NEW_LAPACK
 #define ACCELERATE_NEW_LAPACK
@@ -1067,6 +1072,48 @@ private:
   std::unordered_map<std::string, RuntimeTensor> tensors_;
 };
 
+// Runs body(begin, end) over [0, n) split into a few contiguous chunks on
+// the system work queue (Apple) or short-lived threads. Image layers are
+// large enough that this pays for itself; small n runs inline.
+template <typename Body>
+void
+ParallelRanges (int n, Body &&body)
+{
+  constexpr int kMaxChunks = 4;
+  const int hw = static_cast<int> (std::max (1u, std::thread::hardware_concurrency ()));
+  const int chunks = std::min ({ kMaxChunks, hw, std::max (1, n / 8) });
+  if (chunks <= 1)
+    {
+      body (0, n);
+      return;
+    }
+  struct Ctx
+  {
+    Body *body;
+    int n;
+    int chunks;
+  } ctx{ &body, n, chunks };
+  auto run = [] (void *raw, std::size_t i) {
+    auto *c = static_cast<Ctx *> (raw);
+    const int begin = static_cast<int> (i) * c->n / c->chunks;
+    const int end = (static_cast<int> (i) + 1) * c->n / c->chunks;
+    (*c->body) (begin, end);
+  };
+#if defined(__APPLE__)
+  dispatch_apply_f (static_cast<std::size_t> (chunks),
+                    dispatch_get_global_queue (QOS_CLASS_USER_INITIATED, 0),
+                    &ctx, run);
+#else
+  std::vector<std::thread> workers;
+  workers.reserve (static_cast<std::size_t> (chunks - 1));
+  for (int i = 1; i < chunks; ++i)
+    workers.emplace_back (run, &ctx, static_cast<std::size_t> (i));
+  run (&ctx, 0);
+  for (auto &w : workers)
+    w.join ();
+#endif
+}
+
 struct HwcTensor
 {
   int height = 0;
@@ -1296,7 +1343,8 @@ StandardConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
   const int col_count = in_channels * kh * kw;
   std::vector<float> patches (
       static_cast<std::size_t> (row_count * col_count), 0.0F);
-  for (int oy = 0; oy < out_h; ++oy)
+  ParallelRanges (out_h, [&] (int oy_begin, int oy_end) {
+  for (int oy = oy_begin; oy < oy_end; ++oy)
     {
       for (int ox = 0; ox < out_w; ++ox)
         {
@@ -1324,6 +1372,7 @@ StandardConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
             }
         }
     }
+  });
   std::vector<float> out_rows = MulRowsByWeightTranspose (
       patches, row_count, col_count, weight, out_channels);
   HwcTensor out (out_h, out_w, out_channels);
@@ -1351,36 +1400,41 @@ DepthwiseConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
   const int out_h = (input.height + 2 * pad - kh) / stride + 1;
   const int out_w = (input.width + 2 * pad - kw) / stride + 1;
   HwcTensor out (out_h, out_w, channels);
-  for (int oy = 0; oy < out_h; ++oy)
-    {
-      for (int ox = 0; ox < out_w; ++ox)
-        {
-          for (int c = 0; c < channels; ++c)
-            {
-              float sum = 0.0F;
-              for (int ky = 0; ky < kh; ++ky)
-                {
-                  const int iy = oy * stride + ky - pad;
-                  if (iy < 0 || iy >= input.height)
-                    {
+  // Taps-major weights ([ky][kx][c]) so the channel loop is contiguous in
+  // both input and weights and vectorizes.
+  std::vector<float> taps (static_cast<std::size_t> (kh * kw * channels));
+  for (int c = 0; c < channels; ++c)
+    for (int k = 0; k < kh * kw; ++k)
+      taps[static_cast<std::size_t> (k * channels + c)]
+          = weight.data[static_cast<std::size_t> (c * kh * kw + k)];
+  ParallelRanges (out_h, [&] (int oy_begin, int oy_end) {
+    for (int oy = oy_begin; oy < oy_end; ++oy)
+      {
+        for (int ox = 0; ox < out_w; ++ox)
+          {
+            float *acc = &out.data[static_cast<std::size_t> (
+                (oy * out_w + ox) * channels)];
+            for (int ky = 0; ky < kh; ++ky)
+              {
+                const int iy = oy * stride + ky - pad;
+                if (iy < 0 || iy >= input.height)
+                  continue;
+                for (int kx = 0; kx < kw; ++kx)
+                  {
+                    const int ix = ox * stride + kx - pad;
+                    if (ix < 0 || ix >= input.width)
                       continue;
-                    }
-                  for (int kx = 0; kx < kw; ++kx)
-                    {
-                      const int ix = ox * stride + kx - pad;
-                      if (ix < 0 || ix >= input.width)
-                        {
-                          continue;
-                        }
-                      const auto w_idx = static_cast<std::size_t> (
-                          ((c * multiplier) * kh + ky) * kw + kx);
-                      sum += input (iy, ix, c) * weight.data[w_idx];
-                    }
-                }
-              out (oy, ox, c) = sum;
-            }
-        }
-    }
+                    const float *in = &input.data[static_cast<std::size_t> (
+                        (iy * input.width + ix) * channels)];
+                    const float *w = &taps[static_cast<std::size_t> (
+                        (ky * kw + kx) * channels)];
+                    for (int c = 0; c < channels; ++c)
+                      acc[c] += in[c] * w[c];
+                  }
+              }
+          }
+      }
+  });
   return out;
 }
 
