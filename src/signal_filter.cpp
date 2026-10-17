@@ -170,14 +170,15 @@ SignalFilter::DecideAdaptive (const std::string &modality, double mean_delta,
 }
 
 SignalFilterDecision
-SignalFilter::EvaluateAudio (const float *pcm, std::size_t num_samples,
-                             int sample_rate)
+SignalFilter::EvaluateAudio (const std::string &source_id, const float *pcm,
+                             std::size_t num_samples, int sample_rate)
 {
   if (!config_.audio_enabled)
     {
       return DisabledDecision ("audio");
     }
 
+  AudioState &audio = audio_streams_.For (source_id);
   constexpr std::size_t kBins = 32;
   double bins[kBins] = {};
   int counts[kBins] = {};
@@ -202,40 +203,41 @@ SignalFilter::EvaluateAudio (const float *pcm, std::size_t num_samples,
   double deltas[kBins] = {};
   double mean_delta = 0.0;
   double max_delta = 0.0;
-  if (audio_.has_previous_bins)
+  if (audio.has_previous_bins)
     {
       for (std::size_t i = 0; i < kBins; ++i)
         {
-          deltas[i] = std::abs (bins[i] - audio_.previous_bins[i]);
+          deltas[i] = std::abs (bins[i] - audio.previous_bins[i]);
           mean_delta += deltas[i];
           max_delta = std::max (max_delta, deltas[i]);
         }
       mean_delta /= static_cast<double> (kBins);
     }
   const double entropy = Entropy01 (deltas, kBins);
-  const double velocity = mean_delta - audio_.previous_delta;
+  const double velocity = mean_delta - audio.previous_delta;
   const double chunk_seconds
       = sample_rate > 0 ? static_cast<double> (num_samples)
                               / static_cast<double> (sample_rate)
                         : 0.0;
-  const double current_seconds = audio_.stream_seconds;
+  const double current_seconds = audio.stream_seconds;
 
   auto decision = DecideAdaptive (
       "audio", mean_delta, max_delta, entropy, velocity, current_seconds,
-      audio_.index, audio_.initialized, audio_.last_accept_index,
-      audio_.last_accept_seconds, audio_.ema_delta, audio_.ema_abs_dev,
+      audio.index, audio.initialized, audio.last_accept_index,
+      audio.last_accept_seconds, audio.ema_delta, audio.ema_abs_dev,
       core::SignalFilterAudioMinAcceptSeconds (
           config_.focus, config_.sensitivity, config_.stability));
-  std::copy (bins, bins + kBins, audio_.previous_bins);
-  audio_.has_previous_bins = true;
-  audio_.previous_delta = mean_delta;
-  audio_.stream_seconds += chunk_seconds;
-  ++audio_.index;
+  std::copy (bins, bins + kBins, audio.previous_bins);
+  audio.has_previous_bins = true;
+  audio.previous_delta = mean_delta;
+  audio.stream_seconds += chunk_seconds;
+  ++audio.index;
   return decision;
 }
 
 SignalFilterDecision
-SignalFilter::EvaluateImage (const std::uint8_t *data, int width, int height,
+SignalFilter::EvaluateImage (const std::string &source_id,
+                             const std::uint8_t *data, int width, int height,
                              int channels)
 {
   if (!config_.image_enabled)
@@ -252,23 +254,24 @@ SignalFilter::EvaluateImage (const std::uint8_t *data, int width, int height,
       return decision;
     }
 
+  ImageState &image = image_streams_.For (source_id);
   constexpr int kGridX = 32;
   constexpr int kGridY = 24;
   constexpr int kSamplesPerAxis = 4;
   constexpr double kAssumedVideoFps = 30.0;
   constexpr std::size_t kBlockCount
       = static_cast<std::size_t> (kGridX * kGridY);
-  if (image_.width != width || image_.height != height
-      || image_.channels != channels
-      || image_.previous_blocks.size () != kBlockCount)
+  if (image.width != width || image.height != height
+      || image.channels != channels
+      || image.previous_blocks.size () != kBlockCount)
     {
-      image_.width = width;
-      image_.height = height;
-      image_.channels = channels;
-      image_.previous_blocks.assign (kBlockCount, 0.0);
-      image_.has_previous_blocks = false;
-      image_.initialized = false;
-      image_.previous_delta = 0.0;
+      image.width = width;
+      image.height = height;
+      image.channels = channels;
+      image.previous_blocks.assign (kBlockCount, 0.0);
+      image.has_previous_blocks = false;
+      image.initialized = false;
+      image.previous_delta = 0.0;
     }
 
   double blocks[kBlockCount] = {};
@@ -305,31 +308,31 @@ SignalFilter::EvaluateImage (const std::uint8_t *data, int width, int height,
   double deltas[kBlockCount] = {};
   double mean_delta = 0.0;
   double max_delta = 0.0;
-  if (image_.has_previous_blocks)
+  if (image.has_previous_blocks)
     {
       for (std::size_t i = 0; i < kBlockCount; ++i)
         {
-          deltas[i] = std::abs (blocks[i] - image_.previous_blocks[i]);
+          deltas[i] = std::abs (blocks[i] - image.previous_blocks[i]);
           mean_delta += deltas[i];
           max_delta = std::max (max_delta, deltas[i]);
         }
       mean_delta /= static_cast<double> (kBlockCount);
     }
   const double entropy = Entropy01 (deltas, kBlockCount);
-  const double velocity = mean_delta - image_.previous_delta;
-  const double current_seconds = image_.stream_seconds;
+  const double velocity = mean_delta - image.previous_delta;
+  const double current_seconds = image.stream_seconds;
   auto decision = DecideAdaptive (
       "image", mean_delta, max_delta, entropy, velocity, current_seconds,
-      image_.index, image_.initialized, image_.last_accept_index,
-      image_.last_accept_seconds, image_.ema_delta, image_.ema_abs_dev,
+      image.index, image.initialized, image.last_accept_index,
+      image.last_accept_seconds, image.ema_delta, image.ema_abs_dev,
       core::SignalFilterImageMinAcceptSeconds (
           config_.focus, config_.sensitivity, config_.stability));
 
-  image_.previous_blocks.assign (blocks, blocks + kBlockCount);
-  image_.has_previous_blocks = true;
-  image_.previous_delta = mean_delta;
-  image_.stream_seconds += 1.0 / kAssumedVideoFps;
-  ++image_.index;
+  image.previous_blocks.assign (blocks, blocks + kBlockCount);
+  image.has_previous_blocks = true;
+  image.previous_delta = mean_delta;
+  image.stream_seconds += 1.0 / kAssumedVideoFps;
+  ++image.index;
   return decision;
 }
 

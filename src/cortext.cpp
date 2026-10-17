@@ -2441,7 +2441,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+      = impl_->signal_filter.EvaluateAudio (source_id, pcm, num_samples, 16000);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetAttribute ("cortext.signal_filter.modality",
@@ -2516,7 +2516,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+      = impl_->signal_filter.EvaluateAudio (source_id, pcm, num_samples, 16000);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetAttribute ("cortext.signal_filter.modality",
@@ -2586,7 +2586,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   telemetry::ScopedSpan span ("cortext.api.process_image");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = impl_->signal_filter.EvaluateImage (data, width, height, channels);
+      = impl_->signal_filter.EvaluateImage (source_id, data, width,
+                                            height, channels);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetStatusOk ();
@@ -2662,7 +2663,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   telemetry::ScopedSpan span ("cortext.api.process_image");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = impl_->signal_filter.EvaluateImage (data, width, height, channels);
+      = impl_->signal_filter.EvaluateImage (source_id, data, width,
+                                            height, channels);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetStatusOk ();
@@ -2856,7 +2858,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   telemetry::ScopedSpan span ("cortext.internal.replay.process_audio_at");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = cortext.impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+      = cortext.impl_->signal_filter.EvaluateAudio (source_id, pcm, num_samples, 16000);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetStatusOk ();
@@ -2930,7 +2932,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   telemetry::ScopedSpan span ("cortext.internal.replay.process_image_at");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision = cortext.impl_->signal_filter.EvaluateImage (
-      data, width, height, channels);
+      source_id, data, width, height, channels);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetStatusOk ();
