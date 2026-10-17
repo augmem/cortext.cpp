@@ -782,7 +782,19 @@ artifact is
 | encode_retrieve_oscillator removed | 39/117 | 3.08 | 1.21 | 755 | -0.49 | 0.28 | removal hurts; retained |
 | emotion_mood_threshold_cascade removed | 45/117 | 3.44 | 1.16 | 751 | -0.14 | 0.32 | null/deferred; no cut |
 
-The confirmation reverses the preliminary oscillator-null read. Removing the
+A 2026-10 rerun of this protocol on the pruned engine (same 25 validation
+dialogs, warmup 20, probe stride 30, capacity 21; 1,190 turns, 39 probes)
+compared the packets themselves before judging. With the oscillator off, all
+39 probe packets were byte-identical to the control under both Durable and
+Natural retention. With effect scales off, 7/39 differed: five only in order
+and two in which contiguous turns were attached. A sufficiency delta cannot
+come from identical packets, so the July oscillator delta was judge variance
+(the July arm's mean packet tokens, 755, also matched the control). The
+oscillator was removed (artifacts:
+`.claude/hillclimb/ablation/ablate3/msc/`). The July reading follows for the
+record.
+
+The July confirmation reverses the preliminary oscillator-null read. Removing the
 encode/retrieve oscillator costs 0.49 sufficiency, the largest July
 neuromodulator loss, and all three matched repetition deltas are negative, so
 that per-signal fast dynamic stays. Synaptic tagging also clears the 0.15 signal
@@ -986,7 +998,7 @@ Five subsystems changed packets when switched off but did not clearly help or hu
 | embedding movement (reconsolidation drift) | S -0.048 ± 0.045, Eval 1 -0.032 ± 0.029; misleading +0.012 on Eval 1 | packet recall -0.025 / -0.008; instructions -18%, store 380 → 265 MB | kept: switching it off hurts |
 | `supersedes` edges and superseded hydration | S -0.036 ± 0.052 (sufficient -0.095 ± 0.090), Eval 1 -0.016 ± 0.013 | packet recall -0.037 / -0.025; instructions -6% | kept: switching it off hurts |
 | working memory | S 0.000 ± 0.047 (sufficient -0.024), Eval 1 -0.014 ± 0.015 (sufficient -0.018) | packet recall -0.012 / -0.015; instructions -25% | kept: every sign is negative, though only just inside the noise |
-| neuromodulator effect scales and encode/retrieve oscillator | S 0.000, Eval 1 0.000 ± 0.009, BEAM +0.028 ± 0.054 | packet recall -0.003 on Eval 1; no cost change | kept for now: neutral here, but the July MSC confirmation (n = 117) measured -0.49 sufficiency for removing the oscillator. That conflict needs an MSC rerun before removal |
+| neuromodulator effect scales and encode/retrieve oscillator | S 0.000, Eval 1 0.000 ± 0.009, BEAM +0.028 ± 0.054 | packet recall -0.003 on Eval 1; no cost change | oscillator removed after the MSC rerun below; effect scales kept pending the round-3 leave-one-out |
 | SQLite sparse route (BEAM only; S and Eval 1 packets are identical with it off) | BEAM +0.042 ± 0.059 (n = 18) | recall equal; instructions -22%, store 372 → 279 MB, query p95 906 → 811 ms | kept and flagged: neutral on quality and cheaper off, but it was built for stores past BEAM length, and scaling past 22k turns is untested without it |
 
 ## Experimental Interpretation

@@ -975,6 +975,13 @@ GetCoreMigrations ()
               "ALTER TABLE state DROP COLUMN neuromod_da",
           },
       },
+      {
+          44,
+          "Drop the removed encode/retrieve oscillator phase",
+          {
+              "ALTER TABLE state DROP COLUMN osc_phase",
+          },
+      },
   };
 }
 

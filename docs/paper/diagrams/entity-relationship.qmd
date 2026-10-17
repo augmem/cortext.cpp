@@ -285,7 +285,6 @@ erDiagram
         int updated_at "timestamp (ms)"
         real neuromod_ach "Section 4.1 neuromodulator state"
         real neuromod_ne "Section 4.1 neuromodulator state"
-        real osc_phase "Section 4.1 oscillatory gating"
         blob write_rate_timestamps "Section 2.2"
         real w_relevance "Section 3.2 blender"
         real w_mismatch "Section 3.2 blender"

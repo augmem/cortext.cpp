@@ -2000,7 +2000,6 @@ LoadState (Store &store, ProcessorContext &ctx,
       ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
       ctx.neuromod_ach = ExtractDouble (row, "neuromod_ach", 0.0);
       ctx.neuromod_ne = ExtractDouble (row, "neuromod_ne", 0.0);
-      ctx.osc_phase = ExtractDouble (row, "osc_phase", 0.0);
       ctx.weight_relevance = ExtractPolicyDouble (
           row, "weight_relevance", 0.5, ctx.weight_relevance,
           true);
@@ -4326,7 +4325,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "m_rate, rho_hat_prev, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
       // Uncertainty
       "u_uncertainty, "
-      "neuromod_ach, neuromod_ne, osc_phase, "
+      "neuromod_ach, neuromod_ne, "
       // Embedding prediction
       "last_embedding, x_pred_ema, "
       // Working memory
@@ -4349,7 +4348,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
       "?, ?, ?, ?, ?, ?, "  // Emotion
       "?, ?, ?, ?, ?, ?, "  // Rate control
-      "?, ?, ?, ?, "  // Uncertainty + modulators
+      "?, ?, ?, "  // Uncertainty + modulators
       "?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
       "?, ?, ?, ?, ?, ?, ?, ?, ?, "  // Consolidation
@@ -4382,7 +4381,6 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->u_t,
         context_->neuromod_ach,
         context_->neuromod_ne,
-        context_->osc_phase,
         // Embedding prediction
         context_->last_embedding.has_value ()
             ? std::any (ToFloatVector (*context_->last_embedding))

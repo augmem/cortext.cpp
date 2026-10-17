@@ -20,7 +20,7 @@ JUDGE_MAX_OUTPUT_TOKENS="${JUDGE_MAX_OUTPUT_TOKENS:-384}"
 JUDGE_LIMIT="${JUDGE_LIMIT:--1}"
 BOOTSTRAP_SAMPLES="${BOOTSTRAP_SAMPLES:-2000}"
 ENV_FILE="${CORTEXT_EVAL_ENV_FILE:-${ENV_FILE:-}}"
-ARMS="${ARMS:-neuromodulator_effect_scales,synaptic_tagging,encode_retrieve_oscillator,emotion_mood_threshold_cascade}"
+ARMS="${ARMS:-neuromodulator_effect_scales}"
 REQUIRE_JUDGE_PROMPT_FIT="${REQUIRE_JUDGE_PROMPT_FIT:-0}"
 
 mkdir -p "${ROOT}"
@@ -67,9 +67,6 @@ arm_env_name() {
   case "$1" in
     control) echo "" ;;
     neuromodulator_effect_scales) echo "CORTEXT_DISABLE_NEUROMODULATOR_EFFECT_SCALES=1" ;;
-    synaptic_tagging) echo "CORTEXT_DISABLE_SYNAPTIC_TAGGING=1" ;;
-    encode_retrieve_oscillator) echo "CORTEXT_DISABLE_ENCODE_RETRIEVE_OSCILLATOR=1" ;;
-    emotion_mood_threshold_cascade) echo "CORTEXT_DISABLE_EMOTION_MOOD_THRESHOLD_CASCADE=1" ;;
     *)
       echo "Unknown arm: $1" >&2
       return 1

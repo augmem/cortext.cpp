@@ -6,16 +6,9 @@
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
-#include "../experimental_env.hpp"
-#include <cmath>
 
 namespace cortext::operations
 {
-
-namespace
-{
-constexpr double kTwoPi = 6.283185307179586;
-}
 
 void
 UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) const
@@ -51,30 +44,11 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
                          + policy.ne_arousal_gain * arousal,
                      0.0, 1.0);
 
-  // Oscillatory gating (no discrete modes)
-  const uint64_t now_ts = context.GetSignal ().timestamp;
-  double delta_t = 0.0;
-  if (p_ctx.last_signal_timestamp > 0 && now_ts > p_ctx.last_signal_timestamp)
-    {
-      delta_t = static_cast<double> (now_ts - p_ctx.last_signal_timestamp) / 1000.0;
-    }
-  const double omega = policy.oscillation_rate;
-  p_ctx.osc_phase = std::fmod (p_ctx.osc_phase + omega * delta_t, kTwoPi);
-  const double osc_t = 0.5 + 0.5 * std::sin (p_ctx.osc_phase);
-  const bool oscillator_disabled = internal::experimental_env::Flag (
-      "CORTEXT_DISABLE_ENCODE_RETRIEVE_OSCILLATOR");
-
-  const double encode_bias
-      = p_ctx.neuromod_ach
-        * (policy.encode_sensitivity_floor
-           + policy.encode_sensitivity_gain * S_eff);
-  const double oscillation_multiplier
-      = oscillator_disabled
-            ? 1.0
-            : (policy.encode_oscillation_floor
-               + policy.encode_oscillation_gain * osc_t);
-  p_ctx.encode_bias = encode_bias * oscillation_multiplier;
-  p_ctx.encode_bias = core::Clamp (p_ctx.encode_bias, 0.0, 1.0);
+  p_ctx.encode_bias = core::Clamp (
+      p_ctx.neuromod_ach
+          * (policy.encode_sensitivity_floor
+             + policy.encode_sensitivity_gain * S_eff),
+      0.0, 1.0);
   p_ctx.retrieval_bias = core::Clamp (1.0 - p_ctx.encode_bias, 0.0, 1.0);
   const double write_threshold_scale
       = neuromodulation::WriteThresholdScale (p_ctx.neuromod_ne);
@@ -93,8 +67,7 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
     telemetry::Attribute::Double ("reconsolidation_scale",
                                   reconsolidation_scale),
     telemetry::Attribute::Double ("retrieval_competition_scale",
-                                  retrieval_competition_scale),
-    telemetry::Attribute::Double ("osc_phase", p_ctx.osc_phase)
+                                  retrieval_competition_scale)
   });
 }
 

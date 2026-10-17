@@ -195,20 +195,9 @@ In the current implementation, these latent scales are applied at three concrete
 
 Earlier builds also kept a DA-like modulator, `DA_t = clamp(DA_base + max(0, δ_reward_t), 0, 1)`, driven by a reward prediction error `δ_reward_t = outcome_t − EWMA(outcome_t)` from the metric blender. Its only consumer was `value_update_gain` for the procedural value table (@sec-pattern-separation). The engine ablation study (2026-10) removed that table, then the DA modulator, the reward prediction error and their persisted state, with no packet change.
 
-## Oscillatory Gating (No Discrete Modes)
+## Oscillatory Gating (Removed)
 
-To reduce interference without introducing hard modes, Cortext adds a continuous oscillatory gate that gently alternates encode- vs retrieve-bias over time.
-
-```
-ω(F,S,T) = lerp(0.03, 0.12, S) × lerp(1.2, 0.8, T)  # rad/s
-φ_t ← (φ_{t−1} + ω × Δt) mod 2π
-osc_t ← 0.5 + 0.5 × sin(φ_t)
-
-encode_bias_t ← encode_bias × (0.6 + 0.4 × osc_t)
-retrieve_bias_t ← 1 − encode_bias_t
-```
-
-The oscillator is continuous and **never** switches modes; it merely biases thresholds and competition in a time-varying, biologically plausible manner.
+Earlier builds multiplied `encode_bias` by a slow oscillator, `0.6 + 0.4 × (0.5 + 0.5 × sin φ_t)` with `φ_t` advancing at `ω(S,T) = lerp(0.03, 0.12, S) × lerp(1.2, 0.8, T)` rad/s. Its only effect was on `retrieve_bias`, which the streaming pacer consults only between boundaries; accepted boundaries, forced checks and queries bypass it. The 2026-10 MSC rerun on the current engine (25 validation dialogs, 1,190 turns, 39 probes, capacity 21) left every probe packet byte-identical with the oscillator off, under both Durable and Natural retention, so the engine ablation study removed it and its persisted phase (@sec-experimental).
 
 ## Knob-to-Parameter Priors (Meta-Learning Removed)
 

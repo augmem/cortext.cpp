@@ -233,7 +233,6 @@ struct ProcessorContext
   double neuromod_ne = 0.0;
   double encode_bias = 0.5;
   double retrieval_bias = 0.5;
-  double osc_phase = 0.0;
   double last_used_rate = 0.0;
   double last_used_flag = 0.0;
   bool focus_priors_initialized = false;

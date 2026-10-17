@@ -2291,9 +2291,6 @@ struct NeuromodulatorPolicy
   double ne_arousal_gain;
   double encode_sensitivity_floor;
   double encode_sensitivity_gain;
-  double oscillation_rate;
-  double encode_oscillation_floor;
-  double encode_oscillation_gain;
 };
 
 inline NeuromodulatorPolicy
@@ -2320,12 +2317,7 @@ NeuromodulatorPolicyForKnobs (double F, double S, double T)
     Clamp (0.70 - 0.06 * (s - s0) + 0.04 * (t - 0.5), 0.58,
            0.80),
     Clamp (0.30 + 0.06 * (s - s0) - 0.04 * (t - 0.5), 0.20,
-           0.42),
-    Lerp (0.03, 0.12, s) * Lerp (1.2, 0.8, t),
-    Clamp (0.60 - 0.03 * (s - s0) + 0.04 * (t - 0.5), 0.50,
-           0.70),
-    Clamp (0.40 + 0.03 * (s - s0) - 0.04 * (t - 0.5), 0.30,
-           0.50)
+           0.42)
   };
 }
 

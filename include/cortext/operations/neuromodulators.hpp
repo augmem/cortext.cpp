@@ -6,7 +6,7 @@
 namespace cortext::operations
 {
 
-/// @brief Computes neuromodulator-like control signals and oscillatory gating.
+/// @brief Computes neuromodulator-like control signals.
 class UpdateNeuromodulators
     : public Operation<Requires<tags::MetricValues, tags::Arousal>, Satisfies<> >
 {
