@@ -2186,3 +2186,80 @@ TEST_CASE ("C API handles NULL inputs correctly",
              == "handle, text, and source_id must all be non-NULL");
   }
 }
+
+TEST_CASE ("Sparse route growth recommends consolidation and recenters the "
+           "route repeatedly on a long stream",
+           "[cortext][consolidation][sparse-route][long]")
+{
+  // F = S = T = 0 gives the smallest route capacity C, so the SQLite
+  // sparse route publishes and then outgrows its activation centroid
+  // several times within a short stream. The caller follows the engine's
+  // hint like a host would: consolidate whenever it is not None.
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+  auto engine = cortext::Cortext::Create (cfg, temp_db.path ());
+  REQUIRE (engine != nullptr);
+  const auto route_capacity = static_cast<std::size_t> (
+      cortext::operations::sparse_retrieval_knobs_internal::RouteCapacity (
+          cfg.focus, cfg.sensitivity, cfg.stability));
+
+  static const std::array<const char *, 12> kSubjects
+      = { "Maya",   "the courier", "Dr. Okafor", "my landlord",
+          "Priya",  "the vet",     "Tomas",      "our neighbor",
+          "Lena",   "the plumber", "Grandpa Joe", "the tutor" };
+  static const std::array<const char *, 12> kActions
+      = { "repaired the bicycle",     "booked a flight to Lisbon",
+          "planted tomatoes",         "lost the spare key",
+          "baked sourdough bread",    "renewed the passport",
+          "painted the fence blue",   "adopted a grey kitten",
+          "sold the old piano",       "fixed the leaking sink",
+          "started learning Korean",  "ran a half marathon" };
+  static const std::array<const char *, 10> kWhen
+      = { "on Monday",     "last winter",   "after lunch",
+          "in March",      "at dawn",       "before the storm",
+          "during the trip", "on my birthday", "late at night",
+          "this weekend" };
+
+  const std::size_t turns = 4 * route_capacity;
+  std::size_t consolidations = 0;
+  std::size_t recentered = 0;
+  std::size_t first_recenter_turn = 0;
+  std::uint64_t ts = 1'700'000'000'000ULL;
+  for (std::size_t i = 0; i < turns; ++i)
+    {
+      const std::string text
+          = std::string (kSubjects[i % kSubjects.size ()]) + " "
+            + kActions[(i / kSubjects.size ()) % kActions.size ()] + " "
+            + kWhen[(i * 7) % kWhen.size ()] + ", note "
+            + std::to_string (i) + " with code " + std::to_string (i * 7919 % 10007)
+            + ".";
+      ts += 60'000;
+      const auto context = cortext::internal::ReplayIngress::ProcessTextAt (
+          *engine, text, "stream", ts, cortext::Retention::Durable, false);
+      if (context.consolidation_state == cortext::ConsolidationState::None)
+        continue;
+      ts += 1'000;
+      const auto maintenance
+          = cortext::internal::ReplayIngress::ConsolidateAt (*engine, ts);
+      ++consolidations;
+      const auto it = maintenance.output.operation_ms.find (
+          "SignalProcessor.sqlite_sparse_route_recenter_succeeded");
+      if (it != maintenance.output.operation_ms.end () && it->second == 1.0)
+        {
+          if (recentered == 0)
+            first_recenter_turn = i;
+          ++recentered;
+        }
+    }
+  INFO ("route capacity " << route_capacity << ", consolidations "
+                          << consolidations << ", recentered " << recentered
+                          << ", first recenter at turn "
+                          << first_recenter_turn);
+  // Once the route is published, every C new memories must earn a
+  // recentering consolidation: at least two more after the first.
+  REQUIRE (recentered >= 3);
+  REQUIRE (consolidations <= turns / (route_capacity / 2));
+}

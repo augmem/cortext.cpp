@@ -1382,13 +1382,31 @@ ApplyConsolidationHint (const Signal &signal, const SignalProcessor::Config &cfg
       out.consolidation_state = ConsolidationState::None;
       return;
     }
-  const auto rate_state
-      = operations::consolidation_throughput_state_internal::Find (ctx);
-  out.consolidation_state
-      = operations::consolidation_throughput_state_internal::Classify (
-          rate_state, ctx.m_rate,
-          std::max (0, ctx.memories_since_consolidation), cfg.focus,
-          cfg.sensitivity, cfg.stability);
+  namespace throughput = operations::consolidation_throughput_state_internal;
+  const auto rate_state = throughput::Find (ctx);
+  out.consolidation_state = throughput::Classify (
+      rate_state, ctx.m_rate, std::max (0, ctx.memories_since_consolidation),
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  // The SQLite sparse route exists only once the surface outgrew C; its
+  // growth since the last recentering pass drives the route-state hint.
+  const auto surface
+      = operations::historical_surface_search_cache_internal::Find (ctx);
+  if (surface && surface->sqlite_sparse_route
+      && surface->sparse_route_parameters.route_capacity > 0)
+    {
+      const auto capacity = surface->sparse_route_parameters.route_capacity;
+      // Unlabelled histogram: route growth in units of C since the last
+      // recentering pass (the sawtooth phase). No attributes, so cardinality
+      // is one series per process.
+      telemetry::RecordHistogram (
+          "cortext.consolidation.route_growth",
+          static_cast<double> (std::max (0, ctx.memories_since_consolidation))
+              / static_cast<double> (capacity));
+      out.consolidation_state = throughput::MoreUrgent (
+          out.consolidation_state,
+          throughput::ClassifyRouteGrowth (ctx.memories_since_consolidation,
+                                           capacity, cfg.stability));
+    }
 }
 
 const char *
@@ -3125,6 +3143,9 @@ SignalProcessor::Process (const Signal &signal)
             {
               operations::consolidation_throughput_state_internal::Acknowledge (
                   *context_, context_->m_rate);
+              // The pass sealed and recentered the route: route growth and
+              // the throughput backlog restart from this commit.
+              context_->memories_since_consolidation = 0;
             }
           op_context.SetCurrentOperationType ("PersistState");
           op_start = std::chrono::steady_clock::now ();

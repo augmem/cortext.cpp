@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <mutex>
 #include <unordered_map>
@@ -246,6 +247,33 @@ Classify (const State &state, double current_rate, long long backlog,
       return ConsolidationState::Recommended;
     }
   return ConsolidationState::None;
+}
+
+/// Route-state trigger. A published sparse route is recentered only by an
+/// explicit consolidation; between passes every new memory lands outside the
+/// activation neighborhood the last pass centered, so query work drifts up
+/// until the next recenter. Once the memories written since the last
+/// consolidation reach the route capacity C, a pass is Recommended; at the
+/// stability escalation multiple of C it is Required.
+inline ConsolidationState
+ClassifyRouteGrowth (long long memories_since_consolidation,
+                     std::size_t route_capacity, double stability)
+{
+  if (route_capacity == 0 || memories_since_consolidation <= 0)
+    return ConsolidationState::None;
+  const double growth = static_cast<double> (memories_since_consolidation)
+                        / static_cast<double> (route_capacity);
+  if (growth >= core::ConsolidationEscalationMultiplier (stability))
+    return ConsolidationState::Required;
+  if (growth >= 1.0)
+    return ConsolidationState::Recommended;
+  return ConsolidationState::None;
+}
+
+inline ConsolidationState
+MoreUrgent (ConsolidationState a, ConsolidationState b)
+{
+  return static_cast<int> (a) >= static_cast<int> (b) ? a : b;
 }
 
 } // namespace cortext::operations::consolidation_throughput_state_internal
