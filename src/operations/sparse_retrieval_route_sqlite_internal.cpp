@@ -467,7 +467,9 @@ FetchNodes (Store &store, int embedding_dim,
     params.emplace_back (memory_id);
   const auto rows = store.Execute (
       "SELECT memory_id, embedding, level, links, active "
-      "FROM cortext_sparse_route_nodes WHERE generation = ? AND memory_id IN ("
+      // Unary + keeps the planner on the rowid: one table seek per row
+      // instead of a generation-index seek plus a table seek.
+      "FROM cortext_sparse_route_nodes WHERE +generation = ? AND memory_id IN ("
           + Placeholders (memory_ids.size ()) + ")",
       params);
   std::vector<NodeRow> decoded;
@@ -528,6 +530,21 @@ struct Route::Impl
   mutable int last_search_failure_code = 0;
   mutable int last_seal_failure_code = 0;
   mutable std::mutex mutex;
+
+  /// Drop only the rows a seal rewrote. Unchanged rows stay valid within the
+  /// generation, so the next queries keep their locality instead of
+  /// refetching the whole envelope. The FIFO order is compacted with the
+  /// cache so no stale order entry survives.
+  void InvalidateCachedRows (const std::vector<long long> &memory_ids)
+  {
+    for (const long long memory_id : memory_ids)
+      node_cache.erase (memory_id);
+    std::deque<long long> kept;
+    for (const long long memory_id : node_cache_order)
+      if (node_cache.count (memory_id) != 0)
+        kept.push_back (memory_id);
+    node_cache_order.swap (kept);
+  }
 };
 
 Route::Route (std::unique_ptr<Impl> impl) : impl_ (std::move (impl)) {}
@@ -1991,11 +2008,7 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               impl_->activation_centroid.clear ();
               impl_->activation_identity_ids.clear ();
             }
-          // A seal can invalidate cached rows out of FIFO order. Clear the
-          // bookkeeping with the cache so stale order entries cannot grow
-          // across repeated update/search cycles.
-          impl_->node_cache.clear ();
-          impl_->node_cache_order.clear ();
+          impl_->InvalidateCachedRows (update_ids);
           impl_->delta_embeddings.clear ();
           impl_->removed.clear ();
           return true;
@@ -2130,11 +2143,13 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
           impl_->activation_centroid.clear ();
           impl_->activation_identity_ids.clear ();
         }
-      // A seal can invalidate cached rows out of FIFO order. Clear the
-      // bookkeeping with the cache so stale order entries cannot grow
-      // across repeated update/search cycles.
-      impl_->node_cache.clear ();
-      impl_->node_cache_order.clear ();
+      {
+        std::vector<long long> written;
+        written.reserve (snapshot->nodes.size ());
+        for (const auto &node : snapshot->nodes)
+          written.push_back (node.memory_id);
+        impl_->InvalidateCachedRows (written);
+      }
       impl_->delta_embeddings.clear ();
       impl_->removed.clear ();
       return true;

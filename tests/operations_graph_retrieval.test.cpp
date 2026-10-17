@@ -264,8 +264,17 @@ TEST_CASE ("SQLite sparse route restart and query work stay row bounded",
   store->Execute ("DROP TRIGGER fail_sparse_route_seal");
   REQUIRE (restarted->Seal (hnsw.get ()));
   REQUIRE (restarted->DeltaSize () == 0);
-  REQUIRE (restarted->CachedNodeRows () == 0);
-  REQUIRE (restarted->CacheOrderRows () == 0);
+  // The seal drops only rewritten rows; the order keeps no stale entry.
+  REQUIRE (restarted->CacheOrderRows () == restarted->CachedNodeRows ());
+  REQUIRE (restarted->CachedNodeRows () <= parameters.shadow_node_capacity);
+  {
+    const auto sealed = restarted->Search (UnitVec (0), 32);
+    REQUIRE (sealed);
+    REQUIRE (std::find (sealed->begin (), sealed->end (), 1)
+             == sealed->end ());
+    REQUIRE (std::find (sealed->begin (), sealed->end (), 1000)
+             != sealed->end ());
+  }
 
   restarted = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
   REQUIRE (restarted != nullptr);
