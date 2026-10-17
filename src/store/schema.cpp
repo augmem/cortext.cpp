@@ -982,6 +982,19 @@ GetCoreMigrations ()
               "ALTER TABLE state DROP COLUMN osc_phase",
           },
       },
+      {
+          45,
+          "Drop the removed retrieval-induced forgetting state",
+          {
+              "DROP TABLE IF EXISTS rif_active_state",
+              "DROP TABLE IF EXISTS rif_generation_resets",
+              "DROP TABLE IF EXISTS rif_recovery_clock",
+              "ALTER TABLE memories DROP COLUMN suppression",
+              "ALTER TABLE memories DROP COLUMN suppression_ts",
+              "ALTER TABLE memories DROP COLUMN suppression_count",
+              "ALTER TABLE memories DROP COLUMN recovery_time_start",
+          },
+      },
   };
 }
 
@@ -1018,39 +1031,6 @@ ApplyMigrationsThrough (Store &store, int64_t maximum_id)
               continue;
             }
           ApplySingleMigrationInTransaction (store, m);
-        }
-
-      const auto rif_tables = store.Execute (
-          "SELECT 1 FROM sqlite_master "
-          "WHERE type = 'table' AND name = 'rif_active_state' LIMIT 1");
-      if (!rif_tables.empty ())
-        {
-          // The approved migration contains only the three persistent tables
-          // and one index. Keep the derived-value seam connection-local.
-          store.Execute ("DROP VIEW IF EXISTS temp.rif_effective_memories");
-          store.Execute (
-              "CREATE TEMP VIEW rif_effective_memories AS "
-              "SELECT m.memory_id, "
-              "CASE WHEN a.memory_id IS NULL THEN m.strength "
-              "     WHEN a.generation = c.generation THEN "
-              "       MAX(0.0, a.recovery_total - "
-              "           a.anchor_suppression * "
-              "           exp(c.log_factor - a.anchor_log_factor)) "
-              "     ELSE a.recovery_total END AS strength, "
-              "CASE WHEN a.memory_id IS NULL THEN m.suppression "
-              "     WHEN a.generation = c.generation THEN "
-              "       a.anchor_suppression * "
-              "       exp(c.log_factor - a.anchor_log_factor) "
-              "     ELSE 0.0 END AS suppression, "
-              "CASE WHEN a.memory_id IS NULL THEN m.suppression_ts "
-              "     WHEN a.generation = c.generation THEN c.last_ts "
-              "     ELSE COALESCE(r.reset_ts, c.last_ts) "
-              "END AS suppression_ts "
-              "FROM memories m "
-              "CROSS JOIN rif_recovery_clock c "
-              "LEFT JOIN rif_active_state a ON a.memory_id = m.memory_id "
-              "LEFT JOIN rif_generation_resets r "
-              "  ON r.generation = a.generation");
         }
 
       store.Execute ("COMMIT");

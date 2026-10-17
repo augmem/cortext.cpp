@@ -54,8 +54,6 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
       = neuromodulation::WriteThresholdScale (p_ctx.neuromod_ne);
   const double reconsolidation_scale
       = neuromodulation::ReconsolidationScale (p_ctx.neuromod_ach);
-  const double retrieval_competition_scale
-      = neuromodulation::RetrievalCompetitionScale (p_ctx.neuromod_ne);
 
   telemetry::LogDebug ("cortext.neuromodulators", {
     telemetry::Attribute::Double ("ACh", p_ctx.neuromod_ach),
@@ -65,9 +63,7 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
     telemetry::Attribute::Double ("write_threshold_scale",
                                   write_threshold_scale),
     telemetry::Attribute::Double ("reconsolidation_scale",
-                                  reconsolidation_scale),
-    telemetry::Attribute::Double ("retrieval_competition_scale",
-                                  retrieval_competition_scale)
+                                  reconsolidation_scale)
   });
 }
 

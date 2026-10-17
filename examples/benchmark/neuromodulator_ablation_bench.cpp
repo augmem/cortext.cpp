@@ -1,7 +1,6 @@
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/utils.hpp>
 #include <cortext/encoder/encoder.hpp>
-#include <cortext/operations/competition.hpp>
 #include <cortext/operations/detect_memory_usage.hpp>
 #include <cortext/operations/reconsolidation.hpp>
 #include <cortext/operations/write_gate.hpp>
@@ -186,30 +185,6 @@ private:
   double ne_ = 0.0;
 };
 
-class SetupCompetitionInputsOp : public cortext::IOperation
-{
-public:
-  SetupCompetitionInputsOp (Eigen::VectorXf cur,
-                            std::unordered_map<long long, Eigen::VectorXf> retrieved)
-      : cur_ (std::move (cur)), retrieved_ (std::move (retrieved))
-  {
-  }
-
-  void
-  Execute (cortext::OperationContext &ctx,
-           cortext::Transaction & /*tx*/) const override
-  {
-    auto &pctx = ctx.GetProcessorContext ();
-    pctx.recent_context_embeddings.clear ();
-    pctx.recent_context_embeddings.push_back (cur_);
-    ctx.SetRetrievedMemoryEmbeddings (retrieved_);
-  }
-
-private:
-  Eigen::VectorXf cur_;
-  std::unordered_map<long long, Eigen::VectorXf> retrieved_;
-};
-
 class SetupReconInputsOp : public cortext::IOperation
 {
 public:
@@ -232,42 +207,6 @@ public:
 private:
   Eigen::VectorXf cur_;
   std::unordered_map<long long, Eigen::VectorXf> retrieved_;
-};
-
-class SeedCompetitionMemoriesOp : public cortext::IOperation
-{
-public:
-  explicit SeedCompetitionMemoriesOp (
-      std::unordered_map<long long, Eigen::VectorXf> embeddings)
-      : embeddings_ (std::move (embeddings))
-  {
-  }
-
-  void
-  Execute (cortext::OperationContext &ctx,
-           cortext::Transaction & /*tx*/) const override
-  {
-    auto *store = ctx.GetStore ();
-    const long long now_ts = 1;
-    for (const auto &[id, emb] : embeddings_)
-      {
-        store->Execute (
-            "INSERT OR REPLACE INTO embeddings(embedding_id, embedding, created_at) "
-            "VALUES(?, ?, ?)",
-            { id, ToFloatVec (emb), now_ts });
-        store->Execute (
-            "INSERT OR REPLACE INTO memories("
-            "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
-            "s_max, s_avg, strength, drift_mag, "
-            "lability_state, suppression_count, created_at) "
-            "VALUES(?, ?, 'bench', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-            "1.0, 0.0, 0.0, 0, ?)",
-            { id, id, now_ts, now_ts });
-      }
-  }
-
-private:
-  std::unordered_map<long long, Eigen::VectorXf> embeddings_;
 };
 
 long long
@@ -318,48 +257,6 @@ RunWriteStudy (bool disable_scale)
   NullTransaction tx;
   op.Execute (ctx, tx);
   return ctx.GetAccumulatorWriteDecision () ? 1.0 : 0.0;
-}
-
-double
-RunCompetitionStudy (bool disable_scale)
-{
-  auto unique_store = cortext::SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
-  cortext::store::ApplyMigrations (*store);
-
-  const Eigen::VectorXf ctx = MakeVec ({ { 0, 1.0f } });
-  const Eigen::VectorXf w1 = MakeVec ({ { 0, 0.99f }, { 1, 0.05f } });
-  const Eigen::VectorXf w2 = MakeVec ({ { 0, 0.98f }, { 1, 0.06f } });
-  const Eigen::VectorXf w3 = MakeVec ({ { 0, 0.95f }, { 1, 0.10f } });
-  const Eigen::VectorXf loser = MakeVec ({ { 0, 0.88f }, { 1, 0.47f } });
-  std::unordered_map<long long, Eigen::VectorXf> retrieved{
-    { 10LL, w1 }, { 11LL, w2 }, { 12LL, w3 }, { 13LL, loser }
-  };
-
-  cortext::SignalProcessor::Config cfg;
-  cfg.encoder = &GetBenchEncoder ();
-  cfg.focus = 1.0;
-  cfg.sensitivity = 1.0;
-  cfg.stability = 0.0;
-
-  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
-      std::make_unique<SeedCompetitionMemoriesOp> (retrieved),
-      std::make_unique<SetupCompetitionInputsOp> (ctx, retrieved),
-      std::make_unique<SetNeuromodOp> (0.0, 1.0),
-      std::make_unique<cortext::operations::ApplyRetrievalCompetition> ());
-  cortext::SignalProcessor processor (cfg, store, std::move (pipeline));
-  std::optional<ScopedEnvVar> disable_guard;
-  if (disable_scale)
-    {
-      disable_guard.emplace ("CORTEXT_DISABLE_NEUROMOD_COMPETITION_SCALE", "1");
-    }
-  processor.Process (MakeSignal (ctx, 100));
-  processor.Flush ();
-
-  auto rows = store->Execute (
-      "SELECT strength FROM memories WHERE memory_id = ?",
-      { 13LL });
-  return rows.empty () ? 0.0 : std::any_cast<double> (rows[0].at ("strength"));
 }
 
 double
@@ -424,21 +321,15 @@ main ()
 {
   const double write_on = RunWriteStudy (false);
   const double write_off = RunWriteStudy (true);
-  const double loser_strength_on = RunCompetitionStudy (false);
-  const double loser_strength_off = RunCompetitionStudy (true);
   const double recon_on = RunReconStudy (false);
   const double recon_off = RunReconStudy (true);
 
   std::cout << "neuromod_write_accept_on=" << write_on
             << " neuromod_write_accept_off=" << write_off << "\n";
-  std::cout << "neuromod_competition_loser_strength_on=" << loser_strength_on
-            << " neuromod_competition_loser_strength_off="
-            << loser_strength_off << "\n";
   std::cout << "neuromod_recon_similarity_on=" << recon_on
             << " neuromod_recon_similarity_off=" << recon_off << "\n";
 
   const bool pass = write_on > write_off
-                    && loser_strength_on < loser_strength_off
                     && recon_on > recon_off;
   std::cout << "neuromodulator_bench_passed=" << (pass ? "1" : "0") << "\n";
   return pass ? 0 : 1;

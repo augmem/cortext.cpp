@@ -3,7 +3,6 @@
 #include "../src/cortext_pipeline_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
 #include "../src/operations/bounded_activation_shadow_internal.hpp"
-#include "../src/operations/rif_active_epoch_cache_internal.hpp"
 #include "../src/operations/sparse_retrieval_knobs_internal.hpp"
 #include <algorithm>
 #include <array>
@@ -111,7 +110,6 @@ struct DurableRetrievalState
   long long used = 0;
   long long accessed = 0;
   long long lability_nanos = 0;
-  long long suppression_nanos = 0;
   long long strength_nanos = 0;
   long long associations = 0;
   long long association_weight_nanos = 0;
@@ -135,8 +133,6 @@ SnapshotDurableRetrievalState (cortext::Store &store)
       "  AS accessed, "
       "COALESCE(CAST(ROUND(SUM(lability_state) * 1000000000.0) AS INTEGER), 0) "
       "  AS lability_nanos, "
-      "COALESCE(CAST(ROUND(SUM(suppression) * 1000000000.0) AS INTEGER), 0) "
-      "  AS suppression_nanos, "
       "COALESCE(CAST(ROUND(SUM(strength) * 1000000000.0) AS INTEGER), 0) "
       "  AS strength_nanos FROM memories");
   REQUIRE (memories.size () == 1);
@@ -145,8 +141,6 @@ SnapshotDurableRetrievalState (cortext::Store &store)
   out.used = AnyToLongLong (memories[0].at ("used"));
   out.accessed = AnyToLongLong (memories[0].at ("accessed"));
   out.lability_nanos = AnyToLongLong (memories[0].at ("lability_nanos"));
-  out.suppression_nanos
-      = AnyToLongLong (memories[0].at ("suppression_nanos"));
   out.strength_nanos = AnyToLongLong (memories[0].at ("strength_nanos"));
 
   const auto associations = store.Execute (
@@ -774,9 +768,7 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     const char *secondary;
     double fixed_bound;
   };
-  const std::array<CounterSpec, 13> kCounters { {
-    { "retrieval_suppression_id_count",
-      "SignalProcessor.retrieval_suppression_id_count", nullptr, 4096.0 },
+  const std::array<CounterSpec, 9> kCounters { {
     { "rollback_full_cache_copy_count",
       "SignalProcessor.snapshot_full_cache_copy_count", nullptr, 0.0 },
     { "rollback_cache_entry_copy_count",
@@ -791,12 +783,6 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     { "graph_cache_rebuild_count", "GraphRetrieve.cache_rebuild_count",
       nullptr, 1.0 },
     { "graph_rows_visited", "GraphRetrieve.rows_visited", nullptr, 4096.0 },
-    { "competition_candidate_count", "Competition.candidate_count", nullptr,
-      4096.0 },
-    { "competition_rows_visited", "Competition.rows_visited", nullptr,
-      4096.0 },
-    { "competition_rows_touched", "Competition.rows_touched", nullptr,
-      4096.0 },
     { "supersession_current_candidate_count",
       "MemoryStorage.supersession_current_candidate_count", nullptr,
       4096.0 },
@@ -807,9 +793,8 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
       "MemoryStorage.supersession_current_rows_visited",
       "MemoryStorage.supersession_historical_rows_visited", 4096.0 },
   } };
-  constexpr std::array<const char *, 3> kSharedOperations {
+  constexpr std::array<const char *, 2> kSharedOperations {
     "cortext::operations::GraphAugmentedRetrieveCandidates",
-    "cortext::operations::ApplyRetrievalCompetition",
     "cortext::operations::MemoryStorage",
   };
 
@@ -829,9 +814,6 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     cfg.sensitivity = 0.5;
     cfg.stability = 0.5;
     cortext::testing::RequireEncoder (cfg);
-    const auto active_epoch_limits
-        = cortext::operations::rif_active_epoch_cache_internal::DeriveLimits (
-            cfg.focus, cfg.sensitivity, cfg.stability);
     const int supersession_candidate_limit
         = cortext::core::SupersessionCandidateLimit (
             cfg.focus, cfg.sensitivity, cfg.stability);
@@ -912,18 +894,6 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
         REQUIRE (snapshot.metrics.allocation_after_initialization_count == 0);
         result.shadow_sequence.push_back (snapshot);
 
-        REQUIRE (output.operation_ms.at (
-                     "SignalProcessor.rif_active_epoch_event_count")
-                 <= static_cast<double> (active_epoch_limits.event_count));
-        REQUIRE (output.operation_ms.at (
-                     "SignalProcessor.rif_active_epoch_mutation_count")
-                 <= static_cast<double> (
-                     active_epoch_limits.mutation_count));
-        REQUIRE (output.operation_ms.at (
-                     "SignalProcessor.rif_active_epoch_allocated_bytes")
-                 <= static_cast<double> (
-                     active_epoch_limits.allocated_bytes));
-
         for (const auto *operation : kSharedOperations)
           REQUIRE (output.operation_ms.contains (operation));
         if (retention == cortext::Retention::Durable)
@@ -965,16 +935,7 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     maintenance.timestamp = 1700000013000ULL;
     maintenance.retention = retention;
     maintenance.force_consolidation = true;
-    const auto reset = processor.Process (maintenance);
-    REQUIRE (reset.operation_ms.at (
-                 "SignalProcessor.rif_active_epoch_event_count")
-             == 0.0);
-    REQUIRE (reset.operation_ms.at (
-                 "SignalProcessor.rif_active_epoch_mutation_count")
-             == 0.0);
-    REQUIRE (reset.operation_ms.at (
-                 "SignalProcessor.rif_active_epoch_allocated_bytes")
-             < static_cast<double> (active_epoch_limits.allocated_bytes));
+    (void)processor.Process (maintenance);
     const auto after_maintenance = shadow::SnapshotsForTest ();
     REQUIRE (after_maintenance.size () == 1);
     REQUIRE (after_maintenance.front ().generation

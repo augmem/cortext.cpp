@@ -24,9 +24,9 @@ SeedMemory (Store &store, long long id)
       "INSERT OR REPLACE INTO memories("
       "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
       "s_max, s_avg, strength, drift_mag, "
-      "lability_state, suppression_count, created_at) "
+      "lability_state, created_at) "
       "VALUES(?, ?, 'test', 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, "
-      "1.0, 0.0, 0.0, 0, ?)",
+      "1.0, 0.0, 0.0, ?)",
       { id, id, now_ts, now_ts });
 }
 } // namespace

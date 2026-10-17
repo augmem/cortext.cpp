@@ -490,38 +490,6 @@ RetrievalVectorDistanceScore (double distance, double F, double S, double T)
 }
 
 inline double
-RetrievalCompetitionSuppressionBase (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double base = Lerp (0.10, 0.01, t);
-  return Clamp (base * (1.0 - 0.10 * (f - f0) + 0.10 * (s - s0)),
-                0.005, 0.12);
-}
-
-inline int
-RetrievalCompetitionWinnerCount (double F)
-{
-  return std::max (1, static_cast<int> (
-                          std::round (Lerp (7.0, 3.0, FocusBias (F)))));
-}
-
-inline double
-RetrievalCompetitionInhibitionRadius (double F)
-{
-  return Lerp (0.50, 0.85, FocusBias (F));
-}
-
-inline double
-RetrievalCompetitionRecoverySeconds (double T)
-{
-  return Lerp (300.0, 1800.0, Clamp (T, 0.0, 1.0));
-}
-
-inline double
 RetrievalRecentInhibitionWeight (double F, double S, double T)
 {
   const double f = FocusBias (F);

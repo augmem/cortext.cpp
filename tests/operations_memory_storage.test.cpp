@@ -12,7 +12,6 @@
 #include <cortext/store/utils.hpp>
 #include "../src/operations/constructive_recall_internal.hpp"
 #include "../src/operations/active_signal_embedding_ring_internal.hpp"
-#include "../src/operations/execution_cache_sidecar_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include <algorithm>
 #include <atomic>

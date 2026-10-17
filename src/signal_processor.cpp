@@ -15,9 +15,7 @@
 #include "operations/bounded_activation_shadow_internal.hpp"
 #include "operations/consolidation_epoch_profile_internal.hpp"
 #include "operations/consolidation_throughput_state_internal.hpp"
-#include "operations/execution_cache_sidecar_internal.hpp"
 #include "operations/historical_surface_search_cache_internal.hpp"
-#include "operations/rif_state_internal.hpp"
 #include "operations/signal_record_rollback_internal.hpp"
 #include "operations/sparse_retrieval_knobs_internal.hpp"
 #include "experimental_env.hpp"
@@ -90,80 +88,6 @@ AddConsolidationEpochCounters (
   op_context.AddOperationTiming (
       prefix + ".consolidation_dirty_index_count",
       static_cast<double> (counters.consolidation_dirty_index_count));
-}
-
-void
-EnsureRifActiveEpochCache (Store *store, ProcessorContext &context,
-                           const SignalProcessor::Config &config)
-{
-  if (!store)
-    return;
-  auto sidecar
-      = operations::execution_cache_sidecar_internal::Ensure (context);
-  try
-    {
-      operations::rif_active_epoch_cache_internal::Ensure (
-          sidecar->rif_active_epoch, *store,
-          operations::rif_active_epoch_cache_internal::DeriveLimits (
-              config.focus, config.sensitivity, config.stability));
-    }
-  catch (...)
-    {
-      // The persistent representation remains authoritative. A later signal
-      // can retry the bounded current-epoch rebuild.
-      sidecar->rif_active_epoch.database.reset ();
-      sidecar->rif_active_epoch.valid = false;
-    }
-}
-
-void
-CalibrateRifActiveEpochBeforeHydration (
-    Store &store, ProcessorContext &context,
-    const SignalProcessor::Config &config)
-{
-  EnsureRifActiveEpochCache (&store, context, config);
-  auto sidecar
-      = operations::execution_cache_sidecar_internal::Ensure (context);
-  if (!sidecar->rif_active_epoch.valid
-      || !sidecar->rif_active_epoch.database)
-    {
-      throw std::runtime_error (
-          "Failed to prepare lazy RIF state before hydration");
-    }
-  const auto memory_ids
-      = sidecar->rif_active_epoch.calibration_memory_ids;
-  if (memory_ids.empty ())
-    return;
-
-  auto transaction = store.Begin ();
-  try
-    {
-      operations::rif_state_internal::CalibrateMemoryIdsAtClock (
-          *transaction, memory_ids,
-          core::RetrievalCompetitionRecoverySeconds (config.stability)
-              * 1000.0,
-          sidecar->rif_active_epoch.limits.row_batch_size);
-      transaction->Commit ();
-    }
-  catch (...)
-    {
-      try
-        {
-          transaction->Rollback ();
-        }
-      catch (...)
-        {
-        }
-      throw;
-    }
-
-  // Rebuild the disposable epoch only from the calibrated persistent state.
-  // Startup hydration must never seed working slots from the pre-calibration
-  // effective view left by a schema-27 migration.
-  sidecar->rif_active_epoch.database.reset ();
-  sidecar->rif_active_epoch.valid = false;
-  sidecar->rif_active_epoch.calibration_memory_ids.clear ();
-  EnsureRifActiveEpochCache (&store, context, config);
 }
 
 double
@@ -243,19 +167,12 @@ struct DetachedProcessorCaches
       std::vector<ProcessorContext::RetrievalSurfaceSourceIndexEntry>>
       retrieval_surface_source_index;
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
-  std::shared_ptr<operations::execution_cache_sidecar_internal::State>
-      execution_cache_sidecar;
 };
 
 DetachedProcessorCaches
 SnapshotProcessorCaches (const DetachedProcessorCaches &caches)
 {
-  DetachedProcessorCaches snapshot = caches;
-  if (caches.execution_cache_sidecar)
-    snapshot.execution_cache_sidecar
-        = std::make_shared<operations::execution_cache_sidecar_internal::State> (
-            *caches.execution_cache_sidecar);
-  return snapshot;
+  return caches;
 }
 
 std::size_t
@@ -283,7 +200,6 @@ ClearDbDerivedProcessorCaches (ProcessorContext &ctx)
   ctx.retrieval_surface_embedding_index = {};
   ctx.retrieval_surface_source_index = {};
   ctx.retrieval_surface_source_index_dirty = {};
-  operations::execution_cache_sidecar_internal::Erase (ctx);
 }
 
 // Moves the DB-derived caches ClearDbDerivedProcessorCaches drops, except the
@@ -353,8 +269,6 @@ DetachRebuildableProcessorCaches (ProcessorContext &ctx)
       = std::move (ctx.retrieval_surface_source_index);
   caches.retrieval_surface_source_index_dirty
       = std::move (ctx.retrieval_surface_source_index_dirty);
-  caches.execution_cache_sidecar
-      = operations::execution_cache_sidecar_internal::Detach (ctx);
   ClearRebuildableProcessorCaches (ctx);
   return caches;
 }
@@ -371,8 +285,6 @@ RestoreRebuildableProcessorCaches (ProcessorContext &ctx,
       = std::move (caches.retrieval_surface_source_index);
   ctx.retrieval_surface_source_index_dirty
       = std::move (caches.retrieval_surface_source_index_dirty);
-  operations::execution_cache_sidecar_internal::Restore (
-      ctx, std::move (caches.execution_cache_sidecar));
 }
 
 class ScopedProcessorCacheDetach
@@ -928,20 +840,8 @@ private:
 void
 InvalidateCustomOperationCaches (ProcessorContext &context)
 {
-  auto sidecar
-      = operations::execution_cache_sidecar_internal::Find (context);
-  std::optional<operations::rif_active_epoch_cache_internal::State> rif_epoch;
-  if (sidecar)
-    rif_epoch = std::move (sidecar->rif_active_epoch);
   operations::historical_surface_search_cache_internal::Erase (context);
   ClearDbDerivedProcessorCaches (context);
-  // Caller SQL invalidates every database-derived lookup cache, but the
-  // bounded RIF epoch counters belong to the processor event lifecycle. Keep
-  // them across the compatibility rebuild so custom SQL cannot repeatedly
-  // re-zero the consolidation safety envelope.
-  if (rif_epoch)
-    operations::execution_cache_sidecar_internal::Ensure (context)
-        ->rif_active_epoch = std::move (*rif_epoch);
 }
 
 bool
@@ -1035,56 +935,19 @@ CustomQueryMayMutate (std::string_view query)
   return token_mutates ();
 }
 
-template <typename Executor>
-std::vector<std::map<std::string, std::any>>
-ExecuteCustomRifCompatible (Executor &executor, const std::string &query,
-                            const std::vector<std::any> &params,
-                            ProcessorContext &context)
-{
-  // A caller-supplied statement may reach memories through a wildcard, alias,
-  // view, trigger, or subquery that cannot be classified from SQL text alone.
-  // Materialize conservatively at this compatibility boundary.
-  auto sidecar
-      = operations::execution_cache_sidecar_internal::Ensure (context);
-  operations::rif_active_epoch_cache_internal::StageRebuild (
-      sidecar->rif_active_epoch);
-  operations::rif_state_internal::MaterializeAllAndClear (executor);
-  try
-    {
-      auto rows = executor.Execute (query, params);
-      operations::rif_state_internal::RebuildFromMaterialized (executor);
-      return rows;
-    }
-  catch (...)
-    {
-      try
-        {
-          operations::rif_state_internal::RebuildFromMaterialized (executor);
-        }
-      catch (...)
-        {
-        }
-      throw;
-    }
-}
-
 class CustomOperationTransaction final : public Transaction
 {
 public:
   CustomOperationTransaction (Transaction &transaction,
-                              ProcessorContext &context,
-                              double rif_recovery_time)
-      : transaction_ (&transaction), context_ (&context),
-        rif_recovery_time_ (rif_recovery_time)
+                              ProcessorContext &context)
+      : transaction_ (&transaction), context_ (&context)
   {
   }
 
   CustomOperationTransaction (std::unique_ptr<Transaction> transaction,
-                              ProcessorContext &context,
-                              double rif_recovery_time)
+                              ProcessorContext &context)
       : owned_transaction_ (std::move (transaction)),
-        transaction_ (owned_transaction_.get ()), context_ (&context),
-        rif_recovery_time_ (rif_recovery_time)
+        transaction_ (owned_transaction_.get ()), context_ (&context)
   {
   }
 
@@ -1092,22 +955,20 @@ public:
   Begin () override
   {
     return std::make_unique<CustomOperationTransaction> (
-        transaction_->Begin (), *context_, rif_recovery_time_);
+        transaction_->Begin (), *context_);
   }
 
   std::vector<std::map<std::string, std::any>>
   Execute (const std::string &query,
            const std::vector<std::any> &params = {}) override
   {
-    CalibrateRifIfNeeded ();
     // Caller-supplied roots can issue SQL that bypasses the engine's
     // incremental cache-maintenance helpers. Fail closed before the first
     // statement can make the sidecar stale, including when a later operation
     // in the same transaction consumes emotional metadata.
     if (CustomQueryMayMutate (query))
       InvalidateCustomOperationCaches (*context_);
-    return ExecuteCustomRifCompatible (*transaction_, query, params,
-                                       *context_);
+    return transaction_->Execute (query, params);
   }
 
   void
@@ -1123,38 +984,17 @@ public:
   }
 
 private:
-  void
-  CalibrateRifIfNeeded ()
-  {
-    auto sidecar
-        = operations::execution_cache_sidecar_internal::Ensure (*context_);
-    const auto memory_ids = sidecar->rif_active_epoch.calibration_memory_ids;
-    if (memory_ids.empty ())
-      return;
-    const auto changed
-        = operations::rif_state_internal::CalibrateMemoryIdsAtClock (
-            *transaction_, memory_ids, rif_recovery_time_,
-            sidecar->rif_active_epoch.limits.row_batch_size);
-    sidecar->rif_active_epoch.calibration_memory_ids.clear ();
-    operations::rif_active_epoch_cache_internal::StageMemories (
-        sidecar->rif_active_epoch, changed);
-  }
-
   std::unique_ptr<Transaction> owned_transaction_;
   Transaction *transaction_ = nullptr;
   ProcessorContext *context_ = nullptr;
-  double rif_recovery_time_ = 0.0;
 };
 
 class CustomOperationStore final : public Store
 {
 public:
-  CustomOperationStore (Store &store, ProcessorContext &context,
-                        double rif_recovery_time)
-      : store_ (&store), context_ (&context),
-        rif_recovery_time_ (rif_recovery_time)
+  CustomOperationStore (Store &store, ProcessorContext &context)
+      : store_ (&store), context_ (&context)
   {
-    CalibrateRifIfNeeded ();
   }
 
   std::vector<std::map<std::string, std::any>>
@@ -1163,14 +1003,14 @@ public:
   {
     if (CustomQueryMayMutate (query))
       InvalidateCustomOperationCaches (*context_);
-    return ExecuteCustomRifCompatible (*store_, query, params, *context_);
+    return store_->Execute (query, params);
   }
 
   std::unique_ptr<Transaction>
   Begin () override
   {
     return std::make_unique<CustomOperationTransaction> (
-        store_->Begin (), *context_, rif_recovery_time_);
+        store_->Begin (), *context_);
   }
 
   void
@@ -1192,28 +1032,8 @@ public:
   }
 
 private:
-  void
-  CalibrateRifIfNeeded ()
-  {
-    auto sidecar
-        = operations::execution_cache_sidecar_internal::Ensure (*context_);
-    const auto memory_ids = sidecar->rif_active_epoch.calibration_memory_ids;
-    if (memory_ids.empty ())
-      return;
-    auto transaction = store_->Begin ();
-    const auto changed
-        = operations::rif_state_internal::CalibrateMemoryIdsAtClock (
-            *transaction, memory_ids, rif_recovery_time_,
-            sidecar->rif_active_epoch.limits.row_batch_size);
-    transaction->Commit ();
-    sidecar->rif_active_epoch.calibration_memory_ids.clear ();
-    operations::rif_active_epoch_cache_internal::StageMemories (
-        sidecar->rif_active_epoch, changed);
-  }
-
   Store *store_ = nullptr;
   ProcessorContext *context_ = nullptr;
-  double rif_recovery_time_ = 0.0;
 };
 
 void
@@ -1560,15 +1380,6 @@ ApplyConsolidationHint (const Signal &signal, const SignalProcessor::Config &cfg
   if (signal.force_consolidation)
     {
       out.consolidation_state = ConsolidationState::None;
-      return;
-    }
-  const auto sidecar
-      = operations::execution_cache_sidecar_internal::Find (ctx);
-  if (sidecar
-      && operations::rif_active_epoch_cache_internal::RequiresConsolidation (
-          sidecar->rif_active_epoch))
-    {
-      out.consolidation_state = ConsolidationState::Required;
       return;
     }
   const auto rate_state
@@ -2383,22 +2194,8 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
                            double focus, double sensitivity,
                            double stability)
 {
-  std::optional<operations::rif_active_epoch_cache_internal::State> rif_epoch;
-  auto detach_rif_epoch = [&] {
-    if (auto sidecar
-        = operations::execution_cache_sidecar_internal::Find (ctx))
-      rif_epoch = std::move (sidecar->rif_active_epoch);
-  };
-  auto restore_rif_epoch = [&] {
-    if (rif_epoch)
-      operations::execution_cache_sidecar_internal::Ensure (ctx)
-          ->rif_active_epoch = std::move (*rif_epoch);
-  };
   try
     {
-      detach_rif_epoch ();
-      operations::execution_cache_sidecar_internal::Erase (ctx);
-      restore_rif_epoch ();
 #if defined(CORTEXT_TESTING)
       g_retrieval_surface_reload_count.fetch_add (1,
                                                   std::memory_order_relaxed);
@@ -2538,10 +2335,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
     }
   catch (const std::exception &e)
     {
-      detach_rif_epoch ();
       operations::historical_surface_search_cache_internal::Erase (ctx);
-      operations::execution_cache_sidecar_internal::Erase (ctx);
-      restore_rif_epoch ();
       operations::historical_surface_search_cache_internal::
           SetCurrentSurfaceDatabaseCurrent (ctx, false);
       operations::historical_surface_search_cache_internal::
@@ -2568,11 +2362,10 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
       // Load from MEMORIES table with kind='WORKING' and end_ts IS NULL (active)
       auto rows = store.Execute (
           "SELECT m.memory_id, m.embedding_id, m.source_id, "
-          "       rif.strength, m.last_access, m.strength_updated_at, "
+          "       m.strength, m.last_access, m.strength_updated_at, "
           "       m.n_signals, m.s_max, m.s_avg, m.s_emotion_max, "
           "       m.s_arousal_avg, m.drift_mag, m.modality, m.start_ts "
           "FROM memories m "
-          "JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
           "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
           "ORDER BY m.start_ts ASC, m.memory_id ASC");
 
@@ -2901,20 +2694,6 @@ SetSignalRecordSnapshotSetupThrowStageForTest (int stage)
 }
 
 void
-SetRifActiveEpochPublishFailureStageForTest (int stage)
-{
-  operations::rif_active_epoch_cache_internal::
-      SetPublishFailureStageForTest (stage);
-}
-
-void
-SetRifActiveEpochPublishFailureMaskForTest (unsigned int mask)
-{
-  operations::rif_active_epoch_cache_internal::
-      SetPublishFailureMaskForTest (mask);
-}
-
-void
 SetSQLiteCheckpointFailureOnceForTest ()
 {
   g_sqlite_checkpoint_failure_once.store (true, std::memory_order_relaxed);
@@ -2977,8 +2756,6 @@ SignalProcessor::SignalProcessor (const Config &config,
   if (store_)
     {
       cortext::store::ApplyMigrations (*store_);
-      CalibrateRifActiveEpochBeforeHydration (
-          *store_, *context_, config_);
       if (!object_store_)
         {
           object_store_ = std::make_shared<SqlObjectStore> (store_);
@@ -3022,7 +2799,6 @@ SignalProcessor::~SignalProcessor ()
       // inheriting state from this processor or store.
       operations::historical_surface_search_cache_internal::Erase (*context_);
       operations::bounded_activation_shadow_internal::Erase (*context_);
-      operations::execution_cache_sidecar_internal::Erase (*context_);
       operations::consolidation_throughput_state_internal::Erase (*context_);
       operations::consolidation_epoch_profile_internal::Erase (*context_);
     }
@@ -3069,10 +2845,6 @@ SignalProcessor::Process (const Signal &signal)
     consolidation_epoch_pre
         = operations::consolidation_epoch_profile_internal::Current (
             *context_);
-
-  // The disposable SQLite epoch is rebuilt only from committed authority and
-  // never after the signal transaction has begun.
-  EnsureRifActiveEpochCache (store_.get (), *context_, config_);
 
   // Create transaction for this signal processing
   const auto tx_begin_start = std::chrono::steady_clock::now ();
@@ -3165,9 +2937,7 @@ SignalProcessor::Process (const Signal &signal)
   if (operation_store && !snapshot_owner.IsEngineOwned ())
     {
       custom_operation_store = std::make_unique<CustomOperationStore> (
-          *operation_store, *context_,
-          core::RetrievalCompetitionRecoverySeconds (config_.stability)
-              * 1000.0);
+          *operation_store, *context_);
       operation_store = custom_operation_store.get ();
     }
   OperationContext op_context (signal, *context_, config_, operation_store,
@@ -3277,11 +3047,6 @@ SignalProcessor::Process (const Signal &signal)
 
   try
     {
-      if (maintenance)
-        operations::rif_active_epoch_cache_internal::StageRebuild (
-            operations::execution_cache_sidecar_internal::Ensure (*context_)
-                ->rif_active_epoch,
-            true);
       auto op_start = std::chrono::steady_clock::now ();
       if (!maintenance)
         {
@@ -3299,11 +3064,8 @@ SignalProcessor::Process (const Signal &signal)
             }
           else
             {
-              CustomOperationTransaction custom_transaction (
-                  *tx, *context_,
-                  core::RetrievalCompetitionRecoverySeconds (
-                      config_.stability)
-                      * 1000.0);
+              CustomOperationTransaction custom_transaction (*tx,
+                                                             *context_);
               root_operation_->Execute (op_context, custom_transaction);
             }
         }
@@ -3448,61 +3210,6 @@ SignalProcessor::Process (const Signal &signal)
                 telemetry::AddCounter (
                     "cortext.bounded_activation_shadow.disabled_total", 1);
             }
-          op_context.SetCurrentOperationType ("PublishRifActiveEpoch");
-          op_start = std::chrono::steady_clock::now ();
-          auto rif_sidecar
-              = operations::execution_cache_sidecar_internal::Ensure (*context_);
-          const auto rif_publish = operations::rif_active_epoch_cache_internal::
-              PublishAfterPersistentCommit (rif_sidecar->rif_active_epoch,
-                                            *store_);
-          if (maintenance && !rif_publish.published)
-            {
-              // The durable consolidation commit succeeded. Preserve the
-              // empty-epoch transition across a failed publication/recovery so
-              // the next signal cannot fall back to a full-history rebuild.
-              operations::rif_active_epoch_cache_internal::StageRebuild (
-                  rif_sidecar->rif_active_epoch, true);
-            }
-          op_context.AddOperationTiming (
-              "SignalProcessor.publish_rif_active_epoch",
-              ElapsedMillis (op_start, std::chrono::steady_clock::now ()));
-          if (ProfileWorkCountersEnabled ())
-            {
-              op_context.AddOperationTiming (
-                  "SignalProcessor.retrieval_suppression_id_count",
-                  static_cast<double> (rif_publish.changed_rows));
-              op_context.AddOperationTiming (
-                  "SignalProcessor.retrieval_suppression_id_activity",
-                  rif_publish.changed_rows == 0 ? 0.0 : 1.0);
-            }
-          op_context.AddOperationTiming (
-              "SignalProcessor.rif_epoch_publication_rebuild_count",
-              rif_publish.rebuilt ? 1.0 : 0.0);
-          op_context.AddOperationTiming (
-              "SignalProcessor.rif_epoch_publication_recovery_count",
-              rif_publish.recovered_from_failure ? 1.0 : 0.0);
-          const auto &rif_epoch
-              = operations::execution_cache_sidecar_internal::Ensure (
-                    *context_)
-                    ->rif_active_epoch;
-          op_context.AddOperationTiming (
-              "SignalProcessor.rif_active_epoch_event_count",
-              static_cast<double> (rif_epoch.event_count));
-          op_context.AddOperationTiming (
-              "SignalProcessor.rif_active_epoch_mutation_count",
-              static_cast<double> (rif_epoch.mutation_count));
-          op_context.AddOperationTiming (
-              "SignalProcessor.rif_active_epoch_allocated_bytes",
-              static_cast<double> (rif_epoch.allocated_bytes));
-          op_context.AddOperationTiming (
-              "SignalProcessor.rif_active_epoch_row_batch_high_water",
-              static_cast<double> (rif_epoch.row_batch_high_water));
-          op_context.AddOperationTiming (
-              "SignalProcessor.rif_active_epoch_required",
-              operations::rif_active_epoch_cache_internal::
-                      RequiresConsolidation (rif_epoch)
-                  ? 1.0
-                  : 0.0);
           if (!signal.force_consolidation && snapshot_owner.IsEngineOwned ()
               && sqlite_sparse_route_enabled)
             {
@@ -4657,8 +4364,6 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                         slot.s_arousal_avg, slot.drift_acc, slot.strength,
                         working_source_reliability, ts_ms,
                         strength_ts_ms, memory_id });
-                  operations::rif_state_internal::RefreshActiveStrengthWhere (
-                      tx, "memory_id = ?", { memory_id });
                   add_timing ("SignalProcessor.wm_update_slot_memory",
                               t_sql_start);
                 }

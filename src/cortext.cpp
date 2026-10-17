@@ -56,7 +56,6 @@
 
 #include "cortext/operations/boundary.hpp"
 #include "cortext/operations/coherence.hpp"
-#include "cortext/operations/competition.hpp"
 #include "cortext/operations/effective_focus.hpp"
 #include "cortext/operations/focus.hpp"
 #include "cortext/operations/focus_spread.hpp"
@@ -1536,7 +1535,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
       // Content blobs are loaded separately via LoadSignalBlobs
       auto rows = store->Execute (
           "SELECT m.memory_id, m.source_id, m.modality, m.start_ts, "
-          "       rif.strength, m.last_access, m.n_signals, "
+          "       m.strength, m.last_access, m.n_signals, "
           "       m.s_max, m.s_avg, m.s_arousal_avg, "
           "       m.retrieved_count, m.used_count, m.blob_id, "
           "       (SELECT mr.blob_id FROM memory_reconstructions mr "
@@ -1551,7 +1550,6 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           "          ORDER BY s.serial_position LIMIT 1)"
           "       ) AS signal_mime "
           "FROM memories m "
-          "JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
           "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
           "ORDER BY m.start_ts ASC, m.memory_id ASC");
 
@@ -1684,7 +1682,6 @@ std::unique_ptr<IOperation>
 BuildRootOperationSet (bool probe_mode)
 {
   using cortext::operations::ApplyReconsolidation;
-  using cortext::operations::ApplyRetrievalCompetition;
   using cortext::operations::CheckSpikeBypass;
   using cortext::operations::CheckStreamingPacing;
   using cortext::operations::ComputeCoherence;
@@ -1752,7 +1749,6 @@ BuildRootOperationSet (bool probe_mode)
                      DetectMemoryUsage>;
 
   using FeedbackStage = OperationSet<
-      ApplyRetrievalCompetition,
       ApplyReconsolidation,
       RecordMemoryUsage, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt>;

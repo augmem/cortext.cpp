@@ -607,19 +607,9 @@ append(memory_reconstructions,
 
 Hydration resolves `memory.current_view` from the latest reconstruction blob when one exists; otherwise it falls back to the immutable evidence packets. Reconsolidation follows the same audit-trail rule: it appends a new `trigger='reconsolidation'` reconstruction instead of overwriting the evidence embedding stored on the base memory row. This gives the current branch the controlled-distortion property the earlier draft claimed, while preserving the original evidence vector for inspection and replay.
 
-## Retrieval Competition
+## Retrieval Competition (Removed)
 
-Retrieved memories compete through lateral inhibition, modeling retrieval-induced forgetting [@anderson1994remembering]:
-
-```
-inhibition_radius = lerp(0.5, 0.85, F)
-winners_k = round(lerp(7, 3, F))
-suppression_per_retrieval = lerp(0.1, 0.01, T) ×
-                             (1 − winning_activation)
-recovery_time_RIF = lerp(300, 1800, T)  # seconds
-```
-
-High Focus produces narrow winner-take-all dynamics; low Focus permits broader activation.
+Earlier builds made retrieved memories compete through lateral inhibition, modeling retrieval-induced forgetting [@anderson1994remembering]: winners within `inhibition_radius = lerp(0.5, 0.85, F)` of the context suppressed losers by `lerp(0.1, 0.01, T) × (1 − winning_activation)`, scaled by `1 + 0.5 × NE_t`, and suppression recovered over `lerp(300, 1800, T)` seconds through a lazily anchored log clock. The suppressed value lowered `memories.strength`, but no retrieval, hydration or gating step reads strength for long-term memories, so suppression never reached a packet. Skipping the competition operation left every packet byte-identical on LongMemEval-S (0/48) and Eval 1 (0/250). Its only other effect was operational: the active-epoch bound was the sole source of `Required` consolidation hints, so without it BEAM-10M conversation 7 consolidated once instead of 44 times and the sparse route stopped recentering. Measured together with the in-conversation predecessor change described above, all 20 BEAM packets changed, gold-turn recall moved 0.103 → 0.110 (0.118 with the predecessor change alone) and Haiku-judged sufficiency by −0.014 ± 0.048 (n = 18). On a 111,527-turn chain of five BEAM-10M conversations the same build recalled 0.082 vs 0.062 of gold turns (13 cases better, 4 worse), judged +0.008 ± 0.040 (n = 89), with 13.5% fewer instructions retired. The engine ablation study (2026-10) removed the operation, the lazy recovery clock, its tables and its active-epoch projection.
 
 ## Predictive Pre-activation (Removed)
 

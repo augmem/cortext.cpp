@@ -82,160 +82,17 @@ accepted flush of that same pending unit; it does not construct a second
 single-signal memory alongside the accumulated unit. The Durable packet is the
 last signal in the flushed unit exactly once.
 
-### Lazy retrieval-inhibition state and the active epoch
+### Retrieval-inhibition state (removed)
 
-Migration 28 keeps the existing `memories` columns but adds a private SQLite
-recovery clock, generation resets, per-memory anchored inhibition state, an
-expiry index, and a connection-local temporary effective-value view. The
-persistent migration inventory is exactly the three state tables plus the
-expiry index; it does not install durable views or triggers. Retrieval
-competition advances one global log-recovery clock per event, materializes at
-most one knob-derived row batch whose exact suppression has crossed the
-existing $10^{-9}$ active threshold, and updates only newly suppressed losers.
-A full-recovery interval advances a generation; older rows are materialized in
-the same knob-derived batches and reset markers are pruned
-after their generation has no remaining active rows. Internal reads that
-depend on strength, suppression, or the suppression timestamp use the
-temporary effective view. Compatibility handling conservatively materializes
-and rebuilds the private representation around every caller-supplied SQL
-statement because aliases, wildcards, views, subqueries, and triggers cannot be
-classified safely from SQL text. A caller mutation also invalidates every
-database-derived processor cache before the statement executes.
-
-The engine's structured competition records carry `memory_id`, so ordinary
-retrieval-induced inhibition remains scoped to exactly one losing memory.
-Legacy callers may instead provide only an embedding identity. Because several
-memories may share that embedding, compatibility resolution enumerates every
-matching memory in stable identity order and applies the same suppression to
-each one. This prevents one arbitrary sibling from escaping inhibition, but it
-also means the embedding-only compatibility edge may perform work proportional
-to the shared-embedding membership. It is not included in the fixed
-memory-scoped operation claim.
-
-On startup from schema 27, migration may anchor active rows that carry
-different historical suppression timestamps to one recovery clock. The
-processor calibrates those rows transactionally and rebuilds the disposable
-active epoch before working-memory hydration reads the effective-value view.
-This ordering prevents restart from seeding a working slot with an
-uncalibrated strength and subsequently persisting that stale value.
-
-Consolidation candidate selection also consumes effective rather than stale
-materialized RIF strength. It merges an indexed, at-most-$A$ inactive-memory
-frontier with an at-most-$A$ exact active-RIF frontier, then retains the lowest
-$A$ combined identities for scoring. Before the active branch is evaluated,
-the implementation counts at most $64C+1$ active rows and fails closed when the
-existing knob-derived active-epoch mutation ceiling $64C$ has been exceeded.
-Consequently the indexed inactive scan can skip at most $64C$ active rows, the
-active calculation examines at most $64C$ rows, and downstream association work
-still sees at most $A$ identities. A recovered active row therefore cannot
-consume a low-strength slot merely because its durable `memories.strength` has
-not yet been materialized.
-
-The authoritative signal mutation still commits once to persistent SQLite.
-After that commit, a separate connection-local in-memory SQLite database
-publishes only the current recovery clock and the identities touched in the
-current engine epoch. Persistent SQLite may retain more active inhibition
-identities than this disposable epoch projection. Suppression, recovery-total, anchor, expiry,
-and effective-value fields remain solely in persistent SQLite; no production
-consumer reads a duplicated RIF value from the disposable identity ledger.
-Strength-only changes that cannot alter active membership therefore do not
-republish it. The ledger never mirrors durable memory, signal, embedding,
-association, or payload history. A failed persistent commit restores the pre-signal processor
-snapshot; a failed post-commit epoch publication discards and rebuilds the
-disposable database from persistent authority without replaying the committed
-signal. Natural returns after publication. Durable follows the identical path
-and then executes only the named WAL checkpoint barrier.
-
-The active epoch records event, changed-row, allocated-byte, and maximum
-statement-row measures. Its harness safety ceilings are derived from the same
-clamped F/S/T route capacity and row batch
-
-$$
-C(F,S,T)=\operatorname{round}(256+256F+128S+128T),\qquad
-B(F,S,T)=\operatorname{round}(64+64F+32S+32T).
-$$
-
-events are bounded by $C$, mutations by $64C$, and allocated bytes by
-$131{,}072C$. Persistent active-row loads, in-memory SQLite publication,
-recovery calibration, and retired-generation materialization use statements
-of at most $B$ rows. Thus all-low, midpoint, and all-high resolve respectively
-to 256/16,384/32 MiB/64 rows, 512/32,768/64 MiB/128 rows, and
-768/49,152/96 MiB/192 rows. The midpoint values are defaults, not fixed
-production constants. Reaching an epoch ceiling raises
-the existing `Required` consolidation hint before an honoring caller can enter
-another event. Ignoring the hint neither starts another epoch nor drops
-mutations. A live $B+1$ mutation set is completed by a second independently
-$B$-bounded statement; $B$ is a statement bound, not a history cap. This is
-distinct from historical sparse-route backfill, whose logical $B+1$
-completion probe does not read or process the additional historical row. Any
-epoch overflow observation is named as the resolved limit plus one and is not
-an additional work-batch size. A successful explicit consolidation commits
-persistent SQLite and then starts a fresh in-memory SQLite epoch containing
-only the current clock. It does not copy the persistent active-identity
-population into the new epoch. The next ordinary event publishes only its
-changed identities. A failed consolidation leaves the old epoch intact, while
-a publication failure after persistent commit discards and recreates the same
-empty epoch without replaying the durable mutation. The retry intent is sticky
-until that empty epoch is published: even if both publication and immediate
-recovery fail, the next processor event executes the empty reset rather than a
-full persistent-history rebuild. Retrieval-surface reloads preserve the RIF
-epoch sidecar across their independent cache refresh, including the exception
-path after a failed reload, so consolidation cannot erase that retry intent
-after the durable commit. These
-are harness-scoped ceilings, not a claim that every production workload is
-globally bounded. Non-finite F/S/T values fail before integer capacity
-derivation; finite out-of-range values retain the engine's established clamping
-to $[0,1]$.
-
-The row-batch contract is exercised structurally over all 27 points in
-$\{0,0.5,1\}^3$ and through live $B+1$ publication at nine production-shaped
-points: midpoint, both joint endpoints, and each one-axis endpoint. The latter
-varies text, audio, image, shared-source, and opaque-source labels while
-requiring the same resolved batch and the same two-statement completion. Thus
-128 is only the neutral-knob result, and 129 is only its derived $B+1$
-boundary.
-
-The consolidation-reset regression uses the same nine knob points and seeds a
-knob-derived $B+1$ persistent active population with mixed text, audio, image,
-shared-source, and opaque-source labels. At every point the durable population
-survives consolidation, the new disposable epoch contains zero copied
-identities, and the following event publishes exactly its one changed identity.
-An additional failure-chain regression seeds a neutral $B+1=129$ mature
-durable population, injects failures into publication, immediate recovery, and
-the following retrieval-surface reload, and requires the next event to observe
-zero copied rows before publishing exactly one changed identity. The
-persistent 129-row population remains authoritative; it is never converted
-into a 129-row statement. The reload exception was first reproduced as a
-missing sidecar before the catch path was repaired.
-This removes store-sized work from the successful-consolidation publication
-edge. It does not yet bound initial processor startup: compatibility and
-restart recovery may still reconstruct current-generation identity and
-calibration state from persistent SQLite, so bounded whole-engine restart
-remains an explicit open gate.
-
-The same derivation owns the integrated SQLite HNSW maintenance and
-consolidation frontiers. Public route inspection and queue effort reset to
-$8C$ after consolidation, advance by
-$R=\max(2,\lfloor B/16\rfloor)$ per retrieval-active query, and saturate at
-$9C$;
-downstream activated identities are bounded by $A=2C+2B$; graph degree is
-$N=\max(8,\lfloor B/2\rfloor)$; search expansion is
-$E=\max(8,\lfloor B/4\rfloor)$; and ordinary route sealing occurs at $B-E$.
-Score consolidation reads at most $A$ indexed low-strength identities and at
-most $N$ association edges for each admitted identity. Natural and Durable
-execute these same operations and mutations; Durable adds only the existing
-post-commit flush/checkpoint barrier. None of these bounds branches on
-modality or source identifier.
-
-The pinned HNSW implementation retains its SIMD distance kernels, while a
-content-checked local patch bounds every speculative neighbor prefetch by the
-actual adjacency length. This prevents a sanitizer-visible one-past-end read
-and skips the zero-byte adjacency copy whose empty-vector destination may be
-null, without changing candidate membership, adjacency contents, or ranking.
-Cache-byte estimation also
-performs its knob-derived multiplication explicitly in `std::size_t`, keeping
-the same capacity on native and WebAssembly targets instead of relying on an
-implicit 64-to-32-bit narrowing conversion.
+Migration 28 had added a lazy retrieval-induced-forgetting representation: a
+global log-recovery clock, generation resets, per-memory anchored inhibition
+rows, a connection-local effective-value view, and an in-memory SQLite
+active-epoch projection that could raise the `Required` consolidation hint.
+Caller-supplied SQL was wrapped to materialize and rebuild that state around
+every statement. Retrieval competition was removed (@sec-advanced), and
+migration 45 drops the three tables and the `suppression`, `suppression_ts`,
+`suppression_count` and `recovery_time_start` columns. Caller SQL still
+invalidates every database-derived processor cache before it executes.
 
 ### Bounded activation observation shadow
 
@@ -743,8 +600,8 @@ RetrievalStage:
   memory-usage detection
 
 FeedbackStage:
-  retrieval competition, reconsolidation,
-  memory usage counters, working memory, accumulator reset
+  reconsolidation, memory usage counters, working memory,
+  accumulator reset
 ```
 
 Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so replay
@@ -1051,16 +908,6 @@ slot and schedules at most one memory-row update per changed slot during normal
 persistence, and graph writes perform only O(1) cache invalidation. None adds a
 store-size-dependent query or eager graph reconstruction; working-memory
 persistence remains bounded by the configured live-slot capacity.
-
-The RIF shadow epoch is a disposable SQLite projection of committed persistent
-state. Suppression and recovery stage changed identities and clock values while
-the persistent transaction is open, but they do not pre-adjust the shadow's
-`active_rows` counter. After the persistent commit, publication compares the
-old and new shadow membership and applies each insertion or removal exactly
-once. Consolidation's active-RIF count and both candidate arms join the
-singleton recovery clock on the current generation; retired-generation rows
-may await bounded materialization, but they neither consume the active work
-ceiling nor enter the current active candidate frontier.
 
 The retained long-horizon optimization target is that mean process latency
 stays approximately flat as the database grows. The July 2026 exact-replay

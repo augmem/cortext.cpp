@@ -10,7 +10,6 @@
 #include "../../src/operations/bounded_activation_shadow_internal.hpp"
 #include "../../src/operations/active_signal_embedding_ring_internal.hpp"
 #include "../../src/operations/retrieval_trace_state.hpp"
-#include "../../src/operations/rif_active_epoch_cache_internal.hpp"
 #include "../../src/operations/sparse_retrieval_knobs_internal.hpp"
 #include "../../src/operations/sparse_retrieval_route_sqlite_internal.hpp"
 
@@ -1104,8 +1103,6 @@ WorkCountersJson (const cortext::Cortext::Context &ctx)
   const double supersession_sparse_route_rows
       = value ("MemoryStorage.supersession_sparse_route_node_rows");
   return {
-    { "retrieval_suppression_id_count",
-      value ("SignalProcessor.retrieval_suppression_id_count") },
     { "rollback_full_cache_copy_count",
       value ("SignalProcessor.snapshot_full_cache_copy_count") },
     { "rollback_cache_entry_copy_count",
@@ -1173,28 +1170,6 @@ ConsolidationEpochCountersJson (const cortext::Cortext::Context &ctx,
       counter ("consolidation_dirty_association_count") },
     { "consolidation_dirty_index_count",
       counter ("consolidation_dirty_index_count") },
-  };
-}
-
-nlohmann::json
-ActiveEpochCountersJson (const cortext::Cortext::Context &ctx)
-{
-  return {
-    { "event_count",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_event_count") },
-    { "mutation_count",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_mutation_count") },
-    { "allocated_bytes",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_allocated_bytes") },
-    { "row_batch_high_water",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_row_batch_high_water") },
-    { "required",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_required") == 1.0 },
   };
 }
 
@@ -1892,12 +1867,6 @@ StoreCheckpoint (const fs::path &db_path, std::size_t event_end)
                     "current_memory_embeddings_rowids") },
         { "memory_reconstructions",
           SqlCount (db_path, "SELECT COUNT(*) FROM memory_reconstructions") },
-        { "rif_recovery_clock",
-          SqlCount (db_path, "SELECT COUNT(*) FROM rif_recovery_clock") },
-        { "rif_generation_resets",
-          SqlCount (db_path, "SELECT COUNT(*) FROM rif_generation_resets") },
-        { "rif_active_state",
-          SqlCount (db_path, "SELECT COUNT(*) FROM rif_active_state") },
       } },
   };
 }
@@ -3338,8 +3307,6 @@ RunPacketCorpusProfile (const Config &cfg,
             { "post_reset_counters",
               ConsolidationEpochCountersJson (
                   consolidation_ctx, "ConsolidationEpoch.post") },
-            { "post_reset_active_epoch",
-              ActiveEpochCountersJson (consolidation_ctx) },
             { "state_after",
               ConsolidationStateName (
                   consolidation_ctx.consolidation_state) },
@@ -3366,7 +3333,6 @@ RunPacketCorpusProfile (const Config &cfg,
           row["consolidation_epoch_counters"]
               = ConsolidationEpochCountersJson (
                   ctx, "ConsolidationEpoch");
-          row["active_epoch"] = ActiveEpochCountersJson (ctx);
           const auto shadow_work
               = cortext::operations::bounded_activation_shadow_internal::
                   SingleWorkSnapshot ();
@@ -3451,15 +3417,6 @@ RunPacketCorpusProfile (const Config &cfg,
                    ? "live-required-hint"
                    : "none")
             : "fixed-one-based-control-derived-indices";
-  const auto active_epoch_limits
-      = cortext::operations::rif_active_epoch_cache_internal::DeriveLimits (
-          cfg.focus, cfg.sensitivity, cfg.stability);
-  out["active_epoch_limits"] = {
-    { "event_count", active_epoch_limits.event_count },
-    { "mutation_count", active_epoch_limits.mutation_count },
-    { "allocated_bytes", active_epoch_limits.allocated_bytes },
-    { "row_batch_size", active_epoch_limits.row_batch_size },
-  };
   out["active_signal_embedding_ring"] = {
     { "capacity",
       cortext::operations::active_signal_embedding_ring_internal::Capacity (

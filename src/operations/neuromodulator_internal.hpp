@@ -38,16 +38,4 @@ ReconsolidationScale (double neuromod_ach)
   return 1.0 + 0.4 * core::Clamp (neuromod_ach, 0.0, 1.0);
 }
 
-inline double
-RetrievalCompetitionScale (double neuromod_ne)
-{
-  if (EffectScalesDisabled ()
-      || internal::experimental_env::Flag (
-          "CORTEXT_DISABLE_NEUROMOD_COMPETITION_SCALE"))
-    {
-      return 1.0;
-    }
-  return 1.0 + 0.5 * core::Clamp (neuromod_ne, 0.0, 1.0);
-}
-
 } // namespace cortext::operations::neuromodulation

@@ -45,11 +45,7 @@ ALGORITHM_GROUPS = [
     {
         "id": "lazy-rif-active-epoch",
         "paths": [
-            "src/operations/competition.cpp",
-            "src/operations/execution_cache_sidecar_internal.hpp",
             "src/operations/memory_usage_record.cpp",
-            "src/operations/rif_active_epoch_cache_internal.hpp",
-            "src/operations/rif_state_internal.hpp",
             "src/store.cpp",
             "src/store/schema.cpp",
         ],

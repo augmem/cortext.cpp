@@ -542,26 +542,6 @@ TEST_CASE ("Retrieval candidate blend scoring policies derive from knobs",
   REQUIRE (blend_high.procedural > blend_low.procedural);
   REQUIRE (blend_high.label_boost > blend_low.label_boost);
 
-  REQUIRE (RetrievalCompetitionSuppressionBase (0.5, 0.5, 0.5)
-           == Catch::Approx (0.055));
-  REQUIRE (RetrievalCompetitionSuppressionBase (1.0, 0.5, 0.5)
-           < RetrievalCompetitionSuppressionBase (0.0, 0.5, 0.5));
-  REQUIRE (RetrievalCompetitionSuppressionBase (0.5, 1.0, 0.5)
-           > RetrievalCompetitionSuppressionBase (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalCompetitionSuppressionBase (0.5, 0.5, 1.0)
-           < RetrievalCompetitionSuppressionBase (0.5, 0.5, 0.0));
-  REQUIRE (RetrievalCompetitionWinnerCount (0.5) == 5);
-  REQUIRE (RetrievalCompetitionWinnerCount (0.0)
-           > RetrievalCompetitionWinnerCount (1.0));
-  REQUIRE (RetrievalCompetitionInhibitionRadius (0.5)
-           == Catch::Approx (0.64));
-  REQUIRE (RetrievalCompetitionInhibitionRadius (1.0)
-           > RetrievalCompetitionInhibitionRadius (0.0));
-  REQUIRE (RetrievalCompetitionRecoverySeconds (0.5)
-           == Catch::Approx (1050.0));
-  REQUIRE (RetrievalCompetitionRecoverySeconds (1.0)
-           > RetrievalCompetitionRecoverySeconds (0.0));
-
   const auto affect_mid = AffectDriveWeights (0.5);
   REQUIRE (affect_mid.arousal_weight
            == Catch::Approx (affect_mid.emotion_weight));

@@ -34,7 +34,6 @@ const cortext_cpp_sources = &.{
     "src/operations/boundary.cpp",
     "src/operations/memory_usage_record.cpp",
     "src/operations/reconsolidation.cpp",
-    "src/operations/competition.cpp",
     "src/operations/working_memory.cpp",
     "src/operations/interrupt_gate.cpp",
     "src/operations/embedding_prediction_error.cpp",
