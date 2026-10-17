@@ -15,6 +15,7 @@
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include "../src/operations/signal_record_rollback_internal.hpp"
+#include "../src/processor/source_state_eviction_internal.hpp"
 #include <array>
 #include <cstring>
 #include <limits>
@@ -3481,4 +3482,95 @@ TEST_CASE ("SignalProcessor restores historical cache after force commit "
       = store->Execute ("SELECT COUNT(*) AS c FROM deferred_child", {});
   REQUIRE (child_rows.size () == 1);
   REQUIRE (std::any_cast<long long> (child_rows[0].at ("c")) == 0LL);
+}
+
+namespace
+{
+// Leaves per-source state behind the way accumulation, drift, and pacing do:
+// every signal touches its source's AccumulatorState; "open/" sources keep an
+// open unit.
+struct SourceStateProbeOp : IOperation
+{
+  ProcessorContext **context_address = nullptr;
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    auto &pctx = ctx.GetProcessorContext ();
+    *context_address = &pctx;
+    const auto &signal = ctx.GetSignal ();
+    auto &acc = pctx.accumulator_states[signal.source_id];
+    acc.drift_accum += 1.0;
+    acc.prev_x = signal.embedding;
+    if (signal.source_id.rfind ("open/", 0) == 0)
+      {
+        acc.n_signals += 1;
+      }
+  }
+};
+} // namespace
+
+TEST_CASE ("SignalProcessor evicts idle per-source state beyond its budget",
+           "[processor][accumulator][memory]")
+{
+  namespace source_state = cortext::internal::source_state;
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+
+  ProcessorContext *pctx = nullptr;
+  auto probe = std::make_unique<SourceStateProbeOp> ();
+  probe->context_address = &pctx;
+  SignalProcessor processor (
+      cfg, store, std::make_unique<DynamicOperationSet> (std::move (probe)));
+
+  std::uint64_t ts = 1;
+  auto process = [&] (const std::string &source_id) {
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Constant (256, 0.5f);
+    signal.source_id = source_id;
+    signal.timestamp = ts++;
+    signal.retention = Retention::Durable;
+    processor.Process (signal);
+  };
+
+  // One open unit, one recurring conversation, and a fresh id per turn (the
+  // shape an eval or a per-call host produces).
+  process ("open/unit");
+  const std::size_t turns = 3 * source_state::kIdleSourceCapacity;
+  int active_signals = 0;
+  for (std::size_t i = 0; i < turns; ++i)
+    {
+      process ("turn/" + std::to_string (i));
+      if (i % 8 == 0)
+        {
+          process ("active/conversation");
+          ++active_signals;
+        }
+    }
+
+  REQUIRE (pctx != nullptr);
+  const auto &states = pctx->accumulator_states;
+  std::size_t idle = 0;
+  for (const auto &[id, state] : states)
+    {
+      if (source_state::IsIdle (state))
+        {
+          ++idle;
+        }
+    }
+  CHECK (idle <= source_state::kIdleSourceCapacity);
+  CHECK (states.size () <= source_state::kIdleSourceCapacity + 1);
+
+  // Open units are never dropped.
+  REQUIRE (states.contains ("open/unit"));
+  CHECK (states.at ("open/unit").n_signals == 1);
+  // A recently active source keeps its state across the churn.
+  REQUIRE (states.contains ("active/conversation"));
+  CHECK (states.at ("active/conversation").drift_accum
+         == static_cast<double> (active_signals));
+  // The least recent one-off sources are gone; the newest remain.
+  CHECK_FALSE (states.contains ("turn/0"));
+  CHECK (states.contains ("turn/" + std::to_string (turns - 1)));
 }

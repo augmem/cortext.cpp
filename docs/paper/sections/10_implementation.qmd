@@ -61,6 +61,16 @@ commands, or consolidation behavior from reserved source strings. Explicit
 maintenance is driven by API calls and `Signal::force_consolidation`, not magic
 source identifiers.
 
+Per-source accumulator state (open unit, drift, pacing, refractory) lives only
+in process memory and is never persisted. After each root signal the processor
+keeps every source with an open unit and at most 256 closed sources, evicting
+the least recently active closed ones; an evicted source restarts from fresh
+state exactly as it would after an engine restart. Hosts that mint one
+`source_id` per turn or per call therefore hold constant per-source memory
+instead of ~4.5 KB per id. The AIST text encoder's repeat-text cache is a
+256 KiB byte-bounded LRU for the same reason: benchmark streams repeat fewer
+than 0.6% of their texts, so an unbounded map grew with every ingested turn.
+
 SQLite parameters are checked at bind time, including exact statement/argument
 counts, so `SQLITE_TOOBIG`, `SQLITE_RANGE`, and allocation failures cannot be
 silently converted into NULL values. `Process()` and `Flush()` both snapshot

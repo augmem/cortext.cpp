@@ -79,6 +79,10 @@ struct AccumulatorState
   bool pending_interrupt_abort = false;  ///< Pending interrupt-induced abort
   Eigen::VectorXf pending_interrupt_embedding; ///< Selected interrupt memory
 
+  /// Processor activity sequence of this source's last root signal; orders
+  /// idle sources for eviction (src/processor/source_state_eviction_internal.hpp).
+  uint64_t last_active_seq = 0;
+
   /**
    * @brief Reset accumulator for new memory accumulation
    * @param first_embedding Initial embedding for the new memory

@@ -19,6 +19,7 @@
 #include "operations/signal_record_rollback_internal.hpp"
 #include "operations/sparse_retrieval_knobs_internal.hpp"
 #include "experimental_env.hpp"
+#include "processor/source_state_eviction_internal.hpp"
 #include "working_memory_time_internal.hpp"
 #include "store/mutation_audit_internal.hpp"
 #include "store/commit_profile_internal.hpp"
@@ -3563,6 +3564,20 @@ SignalProcessor::Process (const Signal &signal)
                 op_type),
             telemetry::Attribute::String ("cortext.error", "unknown") });
       throw std::runtime_error (msg);
+    }
+
+  // Root signals only: a nested Process may run while an outer operation
+  // still holds a reference into accumulator_states.
+  if (root_canonical_transaction)
+    {
+      const std::size_t evicted
+          = internal::source_state::TouchAndEvictIdle (*context_,
+                                                       signal.source_id);
+      if (evicted > 0)
+        {
+          telemetry::AddCounter ("cortext.accumulator.idle_source_evicted_total",
+                                 static_cast<std::uint64_t> (evicted));
+        }
     }
 
   Output out;

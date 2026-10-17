@@ -393,6 +393,8 @@ struct ProcessorContext
   /// Event Segmentation Theory (Zacks & Swallow, 2007) for grouping
   /// signals into natural "thought units".
   std::unordered_map<std::string, AccumulatorState> accumulator_states;
+  /// @brief Root signals processed; stamps AccumulatorState::last_active_seq.
+  uint64_t accumulator_activity_seq = 0;
 
   /// @brief Stream of written memory representatives (e_rep).
   std::deque<Eigen::VectorXf> memory_stream;
