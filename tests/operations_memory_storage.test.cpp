@@ -1,5 +1,6 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include "test_helpers.hpp"
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
@@ -1174,7 +1175,10 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
       cfg.focus, cfg.sensitivity, cfg.stability);
   REQUIRE (parameters.route_capacity == 512);
   REQUIRE (parameters.backfill_batch_size == 128);
-  const std::size_t population = parameters.route_capacity + 1;
+  // Historical supersession work must not scale with the stored population
+  // once the current surface is sparse-routed.
+  const std::size_t multiplier = GENERATE (1, 2);
+  const std::size_t population = parameters.route_capacity * multiplier + 1;
   const int candidate_limit = core::SupersessionCandidateLimit (
       cfg.focus, cfg.sensitivity, cfg.stability);
   REQUIRE (candidate_limit == 67);
@@ -1286,7 +1290,8 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
                "MemoryStorage.supersession_sparse_route_node_rows"));
   REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_historical_rows_visited")
-           == static_cast<double> (population + 1));
+           <= ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_population_mismatch_count"));
   REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_historical_coverage_proven")
            == 1.0);

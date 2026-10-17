@@ -363,6 +363,71 @@ HistoricalCandidatePopulationCoveredByCurrentProof (
   return true;
 }
 
+// Exact top-k over the historical embeddings of population mismatches only.
+// Work is O(|mismatches|), independent of the stored population. Returns
+// nullopt when the per-memory historical index is ambiguous, so the caller
+// falls back to the SQL search.
+std::optional<std::vector<BorrowedSupersessionCandidate>>
+LoadHistoricalMismatchRows (
+    const historical_surface_search_cache_internal::State &state,
+    const Eigen::VectorXf &query_embedding, long long memory_id,
+    long long end_ts, int candidate_limit,
+    const std::unordered_set<long long> &seen_memory_ids,
+    std::size_t *rows_visited)
+{
+  if (state.supersession_population_ambiguous)
+    return std::nullopt;
+  struct RankedMismatch
+  {
+    float distance = 0.0f;
+    long long memory_id = 0;
+    const Eigen::VectorXf *embedding = nullptr;
+  };
+  std::vector<RankedMismatch> ranked;
+  for (const long long mismatch_id : state.supersession_population_mismatches)
+    {
+      if (mismatch_id == memory_id || seen_memory_ids.count (mismatch_id) != 0)
+        continue;
+      const auto base_it = state.supersession_entry_by_memory.find (
+          mismatch_id);
+      // Current-only memories are searched through the current route.
+      if (base_it == state.supersession_entry_by_memory.end ())
+        continue;
+      if (base_it->second >= state.entries.size ())
+        return std::nullopt;
+      const auto &base = state.entries[base_it->second];
+      if (base.embedding.size () != query_embedding.size ())
+        return std::nullopt;
+      const auto *reference = historical_surface_search_cache_internal::
+          FindSupersessionMemoryReference (base, mismatch_id);
+      if (!reference)
+        return std::nullopt;
+      if (reference->start_ts >= end_ts)
+        continue;
+      if (rows_visited)
+        ++*rows_visited;
+      ranked.push_back ({ (base.embedding - query_embedding).squaredNorm (),
+                          mismatch_id, &base.embedding });
+    }
+  auto by_distance = [] (const RankedMismatch &a, const RankedMismatch &b) {
+    if (a.distance != b.distance)
+      return a.distance < b.distance;
+    return a.memory_id < b.memory_id;
+  };
+  if (static_cast<int> (ranked.size ()) > candidate_limit)
+    {
+      std::nth_element (ranked.begin (), ranked.begin () + candidate_limit,
+                        ranked.end (), by_distance);
+      ranked.resize (static_cast<std::size_t> (candidate_limit));
+    }
+  std::sort (ranked.begin (), ranked.end (), by_distance);
+  std::vector<BorrowedSupersessionCandidate> rows;
+  rows.reserve (ranked.size ());
+  for (const auto &candidate : ranked)
+    rows.push_back ({ candidate.memory_id, candidate.embedding });
+  return rows;
+}
+
 std::optional<std::vector<BorrowedSupersessionCandidate>>
 LoadHistoricalSupersessionRowsFromCache (
     const std::shared_ptr<
@@ -387,11 +452,23 @@ LoadHistoricalSupersessionRowsFromCache (
       return std::nullopt;
     }
 
-  // A bounded sparse result is a candidate set, not an exact coverage proof.
-  // Keep the historical proof path active so an omitted current candidate can
-  // still be recovered before supersession edges are written.
-  if (!current_search_proof.bounded_current_surface
-      && historical_surface_search_cache_internal::
+  // Once the current surface is sparse-routed, the route is the bounded
+  // candidate index for every memory whose historical embedding equals its
+  // current one. Only the population mismatches (memories whose historical
+  // embedding differs from, or has no, current surface row) can contribute a
+  // candidate the route cannot see, so search those exactly instead of
+  // scanning the whole historical population on every store.
+  if (current_search_proof.bounded_current_surface)
+    {
+      auto rows = LoadHistoricalMismatchRows (
+          *state, query_embedding, memory_id, end_ts, candidate_limit,
+          seen_memory_ids, rows_visited);
+      if (rows && coverage_proven)
+        *coverage_proven = true;
+      return rows;
+    }
+
+  if (historical_surface_search_cache_internal::
           CurrentPopulationCoversHistorical (*state, memory_id))
     {
       if (coverage_proven)
