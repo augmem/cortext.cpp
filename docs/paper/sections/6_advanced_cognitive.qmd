@@ -96,7 +96,7 @@ if Δt_decay > 0:
   strength ← max(strength_floor(F,S,T),
                  strength − maintenance_cost_per_memory × Δt_decay)
   strength_ts ← now_s()
-# last_ts changes only on chunking, rehearsal, or insertion
+# last_ts changes only on chunking or insertion
 ```
 
 The active floor is applied only while charging positive elapsed time. A
@@ -116,7 +116,6 @@ Gating thresholds determine entry and chunking:
 ```
 chunking_threshold = lerp(0.7, 0.9, F)
 gate_threshold = lerp(0.1, 0.4, F)
-rehearsal_rate = lerp(0.5, 2.0, S)
 memory_dedication_strength = lerp(0.3, 0.9, T)
 ```
 
@@ -161,7 +160,16 @@ if |similar_memories| > 0:
     merge_into_chunk(similar_memories, memory)
 ```
 
-**Implementation note:** durable ingress inputs preserve an ordered working-memory trace independent of the literal `source_id` string. `source_id` is still used for opaque provenance and exact same-source grouping, but Cortext does not parse roles such as user, assistant, speaker, or device from it. Internal maintenance work follows the same rule: explicit consolidation is driven by a force flag on the signal, not by a magic `source_id` value. Prompt hydration orders active slots by insertion/start time rather than `last_access`; otherwise rehearsal or retrieval touches can scramble the visible recent context even when the underlying memories are correct.
+Earlier builds also rehearsed slots: an incoming unit within
+`lerp(0.5, 0.7, F)` cosine of a slot, or a retrieved memory within the chunking
+threshold, raised that slot's strength by `lerp(0.5, 2.0, S) × base_delta`.
+The round-3 ablation (2026-10) found rehearsal changed 12/48 LongMemEval-S and
+33/250 Eval 1 packets (working-memory order only) and none on BEAM-10M
+conversation 7, with gold-turn recall unchanged and Haiku-judged sufficiency
++0.000 (S) and +0.002 ± 0.003 (Eval 1); removing it saved 3–4% of instructions,
+so it was removed.
+
+**Implementation note:** durable ingress inputs preserve an ordered working-memory trace independent of the literal `source_id` string. `source_id` is still used for opaque provenance and exact same-source grouping, but Cortext does not parse roles such as user, assistant, speaker, or device from it. Internal maintenance work follows the same rule: explicit consolidation is driven by a force flag on the signal, not by a magic `source_id` value. Prompt hydration orders active slots by insertion/start time rather than `last_access`; otherwise slot updates can scramble the visible recent context even when the underlying memories are correct.
 
 ## Two-Layer Graph Memory Surface {#sec-three-tier-graph-memory}
 

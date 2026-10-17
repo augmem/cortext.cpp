@@ -1598,7 +1598,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           m.modality = get_s ("modality");
           m.mimetype = get_s ("signal_mime");
           // Preserve conversational/order semantics using the slot start time.
-          // last_access can move when rehearsal/access updates touch a slot,
+          // last_access can move when a slot is touched,
           // which should not reorder working-memory prompt reconstruction.
           m.timestamp = static_cast<std::uint64_t> (get_ll ("start_ts"));
 

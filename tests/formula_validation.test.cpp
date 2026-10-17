@@ -408,16 +408,9 @@ TEST_CASE ("WMComplexityScale follows spec: lerp(0.5, 1.5, S)",
   REQUIRE (WMComplexityScale (0.3) < WMComplexityScale (0.7));
 }
 
-TEST_CASE ("WM rehearsal and eviction pressure derive from F/S/T",
+TEST_CASE ("WM eviction pressure derives from F/S/T",
            "[formula][knobs][working_memory]")
 {
-  REQUIRE (WMRehearsalBaseDelta (0.0, 0.5, 0.5)
-           > WMRehearsalBaseDelta (1.0, 0.5, 0.5));
-  REQUIRE (WMRehearsalBaseDelta (0.5, 1.0, 0.5)
-           > WMRehearsalBaseDelta (0.5, 0.0, 0.5));
-  REQUIRE (WMRehearsalBaseDelta (0.5, 0.5, 1.0)
-           > WMRehearsalBaseDelta (0.5, 0.5, 0.0));
-
   REQUIRE (WMRecencyTauSeconds (0.5, 0.5, 1.0)
            > WMRecencyTauSeconds (0.5, 0.5, 0.0));
   REQUIRE (WMRecencyTauSeconds (1.0, 0.5, 0.5)

@@ -2169,37 +2169,6 @@ WMComplexityScale (double S)
 }
 
 inline double
-WMRehearsalRate (double S)
-{
-  // rehearsal_rate = lerp(0.5, 2.0, S)
-  // Higher Sensitivity = faster rehearsal boost
-  return Lerp (0.5, 2.0, SensitivityBias (S));
-}
-
-inline double
-WMRehearsalBaseDelta (double F, double S, double T)
-{
-  // Base rehearsal increment before WMRehearsalRate(S). Focus suppresses
-  // broad rehearsal, Sensitivity raises weak-match responsiveness, and
-  // Stability preserves practiced slots more strongly.
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.10 * Lerp (1.15, 0.85, f) * Lerp (0.92, 1.08, s)
-                    * Lerp (0.90, 1.10, t),
-                0.04, 0.18);
-}
-
-inline double
-WMRehearsalThreshold (double F)
-{
-  // rehearsal_threshold = lerp(0.5, 0.7, F)
-  // Below chunking_threshold(F) = lerp(0.7, 0.9, F)
-  // Slots in [rehearsal_threshold, chunking_threshold) get rehearsal boost
-  return Lerp (0.5, 0.7, FocusBias (F));
-}
-
-inline double
 WMSlotDedicationStrength (double T)
 {
   // slot_dedication_strength = lerp(0.3, 0.9, T)
