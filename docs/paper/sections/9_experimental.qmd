@@ -995,11 +995,55 @@ Five subsystems changed packets when switched off but did not clearly help or hu
 
 | Subsystem | Judge sufficiency delta | Recall and cost | Decision |
 |---|---|---|---|
-| embedding movement (reconsolidation drift) | S -0.048 ± 0.045, Eval 1 -0.032 ± 0.029; misleading +0.012 on Eval 1 | packet recall -0.025 / -0.008; instructions -18%, store 380 → 265 MB | kept: switching it off hurts |
+| embedding movement (reconsolidation drift) | S -0.048 ± 0.045, Eval 1 -0.032 ± 0.029; misleading +0.012 on Eval 1 | packet recall -0.025 / -0.008; instructions -18%, store 380 → 265 MB | kept in round 2; removed in round 3 (below): this arm also switched off the reconstruction representation, and movement alone is neutral |
 | `supersedes` edges and superseded hydration | S -0.036 ± 0.052 (sufficient -0.095 ± 0.090), Eval 1 -0.016 ± 0.013 | packet recall -0.037 / -0.025; instructions -6% | kept: switching it off hurts |
-| working memory | S 0.000 ± 0.047 (sufficient -0.024), Eval 1 -0.014 ± 0.015 (sufficient -0.018) | packet recall -0.012 / -0.015; instructions -25% | kept: every sign is negative, though only just inside the noise |
-| neuromodulator effect scales and encode/retrieve oscillator | S 0.000, Eval 1 0.000 ± 0.009, BEAM +0.028 ± 0.054 | packet recall -0.003 on Eval 1; no cost change | oscillator removed after the MSC rerun below; effect scales kept pending the round-3 leave-one-out |
-| SQLite sparse route (BEAM only; S and Eval 1 packets are identical with it off) | BEAM +0.042 ± 0.059 (n = 18) | recall equal; instructions -22%, store 372 → 279 MB, query p95 906 → 811 ms | kept and flagged: neutral on quality and cheaper off, but it was built for stores past BEAM length, and scaling past 22k turns is untested without it |
+| working memory | S 0.000 ± 0.047 (sufficient -0.024), Eval 1 -0.014 ± 0.015 (sufficient -0.018) | packet recall -0.012 / -0.015; instructions -25% | kept: every sign is negative, though only just inside the noise; round 3 measured its packet cost (below) |
+| neuromodulator effect scales and encode/retrieve oscillator | S 0.000, Eval 1 0.000 ± 0.009, BEAM +0.028 ± 0.054 | packet recall -0.003 on Eval 1; no cost change | both removed in round 3 (below) |
+| SQLite sparse route (BEAM only; S and Eval 1 packets are identical with it off) | BEAM +0.042 ± 0.059 (n = 18) | recall equal; instructions -22%, store 372 → 279 MB, query p95 906 → 811 ms | kept: at 111k turns it is the cheaper path (round 3, below) |
+
+### Round 3: leave-one-out inside the kept subsystems (2026-10)
+
+Round 3 recursed into the subsystems the second round kept, on the merged
+pruned engine. Each feature was switched off alone (experiment-only hooks) on
+LongMemEval-S (48 cases), Eval 1 (250), BEAM-10M conversation 7 (22.6k turns,
+20 cases) and, where it mattered, an eight-episode LongMemEval-M subset (39k
+turns). Query-time-only parameters were swept by re-querying the stored
+baseline databases, which reproduced the baseline packets exactly. Every
+feature fired at full length (BEAM conversation 7: 45,290 `supersedes` edges,
+4,520 reconsolidation and 14,237 retrieval reconstructions, 15,767 labile
+memories, 18,162 suppressed memories, 5,403 used memories, 21 working-memory
+slots, 2 soft anchors). Tier 1 is packet gold-turn recall; Haiku (rubric v2)
+judged only packets that changed. Instruction counts come from
+`/usr/bin/time -l` because the machine was shared.
+
+| Feature | Packets changed (S / Eval 1 / BEAM) | Recall and judge | Cost | Decision |
+|---|---|---|---|---|
+| reconsolidation ripple over association edges | never fires: only `supersedes` edges exist | none | — | removed |
+| association fanout cache, association embedding cache, suppression id sets, sparse-key index and procedural table, unread retrieval-surface fields, superseded penalty, prediction horizon | write-only or unread | identical by construction, tip identity 0/48 and 0/250 | first query after a flush −54 ms at 20k turns; RSS −10% on BEAM | removed |
+| DA modulator and reward prediction error | consumer removed | identical | — | removed |
+| encode/retrieve oscillator | MSC 0/39 (Durable and Natural) | identical | — | removed |
+| temporal tie-break in retrieval scoring | 0/48, 0/250, 0/20 | identical | — | removed |
+| in-conversation skip in superseded-predecessor hydration | 0/48, 0/250, 17/20 | BEAM 0.103 → 0.118 (2 better) | +0.5 KB packet on BEAM | removed |
+| retrieval competition and RIF state | 0/48, 0/250, 0/20 with the op skipped; the epoch was the only `Required` consolidation hint | 111k chain recall 0.062 → 0.082, judge +0.008 ± 0.040 | −5% to −15% instructions | removed |
+| reconsolidation and retrieval-time reconstruction (together) | 48/48, 241/250, 20/20, 8/8 | S equal (judge 0.000); Eval 1 +0.014 (judge +0.010 ± 0.016); BEAM +0.007 (+0.014 ± 0.027); M equal (0.000) | −5% to −11% instructions, stores −12% to −23% | removed |
+| working-memory rehearsal | 12/48, 33/250, 0/20 | recall equal; judge 0.000 / +0.002 ± 0.003 | −3% to −4% | removed |
+| neuromodulator effect scales (write scale) and NE | 5/48, 32/250, 7/20 | recall within one case; judge 0.000 / −0.001 ± 0.006 / +0.028 ± 0.054 | — | removed |
+| contiguity budget 6 KiB → 12 KiB and lag 2 for all 11 anchors | query-time sweep | S 0.642 → 0.691, Eval 1 0.597 → 0.629; judge +0.048 ± 0.056 / +0.037 ± 0.019 | +2 KB per packet | adopted |
+| `supersedes` edge writing / predecessor hydration | 47/48, 249/250 | −0.037 / −0.025 / −0.015 recall | −5% instructions off | kept |
+| contiguity hydration | all | −0.06 / −0.09 recall off | — | kept |
+| working-memory chunking | 0/48, 0/250, 0/20, MSC 0/39 | never merged a slot | — | kept pending a workload where it fires |
+| family collapse in retrieval | 5/48, 18/250, 10/20 | recall within one case | −1% to −5% off | kept (candidate: wired through the sparse-route cache) |
+| usage detection and usage counters | 0/48, 0/250, 0/20 | identical | −1% each | kept: they feed the public `retrieved_count`/`used_count` fields |
+| soft anchors | 0/48, 0/250, 0/20 | identical | −0.5% to −1% | kept: public API |
+| working-memory packet hydration | 48/48, 250/250, 20/20 | −0.012 / −0.015 / 0 recall; judge +0.012 ± 0.053 / −0.008 ± 0.016 | packets −66% / −60% / −84% | kept: public API, flagged |
+| SQLite sparse route at 111,527 turns (five BEAM conversations chained) | 94/99 | off: recall 0.076 vs 0.062, judge +0.020 ± 0.052 | off: +26% instructions, ingest 170 vs 95 ms/turn past 100k, query median 45 vs 33 ms, RSS 7.4 vs 6.7 GB | kept |
+
+After all round-3 commits, the engine against the merged pruned engine:
+packet gold-turn recall 0.642 → 0.691 (S), 0.597 → 0.644 (Eval 1, 19 cases
+better, 1 worse), 0.103 → 0.118 (BEAM); Haiku-judged sufficiency +0.060 ±
+0.057, +0.039 ± 0.021 and +0.014 ± 0.048; instructions retired −12% (S),
+−12% (Eval 1), −24% (BEAM); peak RSS −14%, −3% and −17%. Artifacts:
+`.claude/hillclimb/ablation/ablate3/`.
 
 ## Experimental Interpretation
 
