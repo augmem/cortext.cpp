@@ -1372,8 +1372,6 @@ constexpr std::size_t kSupersededRecallContextBudgetBytes = 4096;
 struct SupersededTarget
 {
   long long memory_id = 0;
-  std::string source_id;
-  long long start_ts = 0;
 };
 
 // The `per_anchor` strongest LONG_TERM text targets of the 'supersedes'
@@ -1400,10 +1398,9 @@ LoadSupersededTargets (Store *store, const std::vector<long long> &anchor_ids,
     }
   params.emplace_back (per_anchor);
   const auto rows = store->Execute (
-      "SELECT r.anchor_id, r.memory_id, r.source_id, r.start_ts "
+      "SELECT r.anchor_id, r.memory_id "
       "FROM (SELECT a.source_memory_id AS anchor_id, "
-      "             a.target_memory_id AS memory_id, m.source_id, "
-      "             m.start_ts, "
+      "             a.target_memory_id AS memory_id, "
       "             ROW_NUMBER() OVER ("
       "               PARTITION BY a.source_memory_id "
       "               ORDER BY a.weight DESC, a.target_memory_id DESC) "
@@ -1419,8 +1416,7 @@ LoadSupersededTargets (Store *store, const std::vector<long long> &anchor_ids,
   for (const auto &row : rows)
     {
       out[RowLongLong (row, "anchor_id")].push_back (
-          { RowLongLong (row, "memory_id"), RowString (row, "source_id"),
-            RowLongLong (row, "start_ts") });
+          { RowLongLong (row, "memory_id") });
     }
   return out;
 }
@@ -1484,9 +1480,6 @@ AttachSupersededPredecessors (
             {
               continue;
             }
-          const long long anchor_start_ts
-              = anchor_rows.find (anchor.id)->second.start_ts;
-          const std::string anchor_stream = SourceStreamOf (anchor.source_id);
           std::vector<std::vector<unsigned char> > recalled;
           for (const auto &target : anchor_targets->second)
             {
@@ -1496,12 +1489,7 @@ AttachSupersededPredecessors (
                   break;
                 }
               const long long target_id = target.memory_id;
-              const long long gap = anchor_start_ts - target.start_ts;
-              const bool in_conversation_correction
-                  = SourceStreamOf (target.source_id) == anchor_stream
-                    && gap < kContiguityMaxGapMs && gap > -kContiguityMaxGapMs;
-              if (target_id <= 0 || in_conversation_correction
-                  || !excluded_ids.insert (target_id).second)
+              if (target_id <= 0 || !excluded_ids.insert (target_id).second)
                 {
                   continue;
                 }

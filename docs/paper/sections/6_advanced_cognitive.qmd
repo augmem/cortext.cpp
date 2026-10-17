@@ -567,6 +567,14 @@ rose by +0.017, +0.025, +0.000 and +0.039. In these conversations an "obsolete"
 turn is often the evidence a question asks about. The number of written
 supersession edges is capped by `SupersessionMaxEdges(F,S,T)`.
 
+Predecessor hydration used to skip a target from the anchor's own source stream
+within 30 minutes, treating it as an in-conversation correction. The round-3
+leave-one-out (2026-10) found the skip changed no packet on LongMemEval-S (0/48)
+or Eval 1 (0/250), because contiguity hydration already attaches such nearby
+turns, while on BEAM-10M conversation 7 dropping it raised packet gold-turn
+recall from 0.103 to 0.118 (2 cases better, none worse) for 0.5 KB more packet.
+The skip was removed.
+
 ## Constructive Recall and Controlled Distortion
 
 Constructive recall is now implemented as a two-layer memory view:
