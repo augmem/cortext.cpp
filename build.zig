@@ -432,6 +432,7 @@ pub fn build(b: *std.Build) void {
     mod.addCMacro("SQLITE_ENABLE_JSON1", "1");
     mod.addCMacro("SQLITE_ENABLE_MATH_FUNCTIONS", "1");
     mod.addCMacro("SQLITE_ENABLE_PREUPDATE_HOOK", "1");
+    mod.addCMacro("SQLITE_ENABLE_FTS5", "1");
     mod.addCMacro("CORTEXT_EMBED_VEC", "1");
     mod.addCMacro("SQLITE_VEC_OMIT_FS", "1");
     mod.addCMacro("CORTEXT_EMBED_OBJSTORE", "1");
@@ -543,6 +544,7 @@ pub fn build(b: *std.Build) void {
     mod.addCSourceFiles(.{ .files = cortext_cpp_sources, .flags = cxx_flags });
     mod.addCSourceFiles(.{ .files = sqlite_c_sources, .flags = &.{"-w"} });
     mod.addCSourceFile(.{ .file = parse_c, .flags = &.{"-w"} });
+    mod.addCSourceFile(.{ .file = b.path("third_party/sqlite/ext/fts5/fts5.c"), .flags = &.{"-w"} });
     mod.addCSourceFile(.{ .file = ctime_c, .flags = &.{"-w"} });
     mod.addCSourceFile(.{ .file = opcodes_c, .flags = &.{"-w"} });
     mod.addCSourceFiles(.{ .files = &.{"third_party/sqlite-vec/sqlite-vec.c"}, .flags = &.{"-w"} });

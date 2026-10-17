@@ -147,7 +147,12 @@ list(FILTER SQLITE_SOURCES EXCLUDE REGEX "ossshell\\.c$")
 list(FILTER SQLITE_SOURCES EXCLUDE REGEX "speedtest1\\.c$")
 list(FILTER SQLITE_SOURCES EXCLUDE REGEX "threadtest[0-9]*\\.c$")
 list(FILTER SQLITE_SOURCES EXCLUDE REGEX "wordcount\\.c$")
+# FTS5, as the composite ext/fts5/fts5.c the upstream amalgamation embeds
+# (generated from this tree's ext/fts5 sources by ext/fts5/tool/mkfts5c.tcl).
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ext/fts5/fts5.c
+    PROPERTIES COMPILE_DEFINITIONS SQLITE_CORE=1)
 list(APPEND SQLITE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/ext/fts5/fts5.c
     ${CMAKE_CURRENT_BINARY_DIR}/parse.c
     ${CMAKE_CURRENT_BINARY_DIR}/ctime.c
     ${CMAKE_CURRENT_BINARY_DIR}/opcodes.c
@@ -175,6 +180,7 @@ target_compile_definitions(sqlite3 PRIVATE
     SQLITE_ENABLE_JSON1
     SQLITE_ENABLE_MATH_FUNCTIONS
     SQLITE_ENABLE_PREUPDATE_HOOK=1
+    SQLITE_ENABLE_FTS5
 )
 target_compile_definitions(sqlite3 PUBLIC SQLITE_ENABLE_PREUPDATE_HOOK=1)
 if(UNIX AND NOT APPLE AND NOT EMSCRIPTEN)
