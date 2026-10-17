@@ -56,7 +56,6 @@ arm_env_name() {
   case "$1" in
     control) echo "" ;;
     emotion_mood_threshold_cascade) echo "CORTEXT_DISABLE_EMOTION_MOOD_THRESHOLD_CASCADE=1" ;;
-    neuromodulator_effect_scales) echo "CORTEXT_DISABLE_NEUROMODULATOR_EFFECT_SCALES=1" ;;
     daily_consolidation) echo "" ;;
     graph_expansion) echo "CORTEXT_DISABLE_SOURCE_SEED_GRAPH_EXPANSION=1" ;;
     stm_ltm_graph_label_handoff) echo "CORTEXT_DISABLE_STM_LTM_GRAPH_LABEL_HANDOFF=1" ;;

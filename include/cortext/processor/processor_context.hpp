@@ -230,7 +230,6 @@ struct ProcessorContext
   int signals_processed = 0;
   double u_t = 0.0;
   double neuromod_ach = 0.0;
-  double neuromod_ne = 0.0;
   double encode_bias = 0.5;
   double retrieval_bias = 0.5;
   double last_used_rate = 0.0;

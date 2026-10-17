@@ -1,7 +1,5 @@
 #include "cortext/operations/neuromodulators.hpp"
 
-#include "neuromodulator_internal.hpp"
-
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -25,9 +23,6 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
 
   const double novelty
       = context.GetMetric (operations::Metric::rarity).value_or (0.0);
-  const double surprisal
-      = context.GetMetric (operations::Metric::embedding_surprisal).value_or (0.0);
-  const double arousal = context.GetArousal ();
   const double retrieval_pressure
       = core::Clamp (
           static_cast<double> (context.GetRetrievalQueueDepth ())
@@ -39,10 +34,6 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
                          - policy.ach_retrieval_pressure_gain
                                * retrieval_pressure,
                      0.0, 1.0);
-  p_ctx.neuromod_ne
-      = core::Clamp (policy.ne_base + policy.ne_surprisal_gain * surprisal
-                         + policy.ne_arousal_gain * arousal,
-                     0.0, 1.0);
 
   p_ctx.encode_bias = core::Clamp (
       p_ctx.neuromod_ach
@@ -50,16 +41,11 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
              + policy.encode_sensitivity_gain * S_eff),
       0.0, 1.0);
   p_ctx.retrieval_bias = core::Clamp (1.0 - p_ctx.encode_bias, 0.0, 1.0);
-  const double write_threshold_scale
-      = neuromodulation::WriteThresholdScale (p_ctx.neuromod_ne);
 
   telemetry::LogDebug ("cortext.neuromodulators", {
     telemetry::Attribute::Double ("ACh", p_ctx.neuromod_ach),
-    telemetry::Attribute::Double ("NE", p_ctx.neuromod_ne),
     telemetry::Attribute::Double ("encode_bias", p_ctx.encode_bias),
-    telemetry::Attribute::Double ("retrieval_bias", p_ctx.retrieval_bias),
-    telemetry::Attribute::Double ("write_threshold_scale",
-                                  write_threshold_scale)
+    telemetry::Attribute::Double ("retrieval_bias", p_ctx.retrieval_bias)
   });
 }
 

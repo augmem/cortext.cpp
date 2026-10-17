@@ -20,7 +20,7 @@ JUDGE_MAX_OUTPUT_TOKENS="${JUDGE_MAX_OUTPUT_TOKENS:-384}"
 JUDGE_LIMIT="${JUDGE_LIMIT:--1}"
 BOOTSTRAP_SAMPLES="${BOOTSTRAP_SAMPLES:-2000}"
 ENV_FILE="${CORTEXT_EVAL_ENV_FILE:-${ENV_FILE:-}}"
-ARMS="${ARMS:-neuromodulator_effect_scales}"
+ARMS="${ARMS:-control}"
 REQUIRE_JUDGE_PROMPT_FIT="${REQUIRE_JUDGE_PROMPT_FIT:-0}"
 
 mkdir -p "${ROOT}"
@@ -66,7 +66,6 @@ PY
 arm_env_name() {
   case "$1" in
     control) echo "" ;;
-    neuromodulator_effect_scales) echo "CORTEXT_DISABLE_NEUROMODULATOR_EFFECT_SCALES=1" ;;
     *)
       echo "Unknown arm: $1" >&2
       return 1

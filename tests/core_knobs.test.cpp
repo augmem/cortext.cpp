@@ -575,14 +575,10 @@ TEST_CASE ("Neuromodulator and serial floor policies derive from knobs",
   const auto mid = NeuromodulatorPolicyForKnobs (0.5, 0.5, 0.5);
   REQUIRE (mid.ach_base >= 0.0);
   REQUIRE (mid.ach_base <= 1.0);
-  REQUIRE (mid.ne_base >= 0.0);
-  REQUIRE (mid.ne_base <= 1.0);
   REQUIRE (mid.retrieval_pressure_depth > 0.0);
 
   REQUIRE (NeuromodulatorPolicyForKnobs (0.5, 1.0, 0.5).ach_base
            > NeuromodulatorPolicyForKnobs (0.5, 0.0, 0.5).ach_base);
-  REQUIRE (NeuromodulatorPolicyForKnobs (0.5, 1.0, 0.5).ne_base
-           > NeuromodulatorPolicyForKnobs (0.5, 0.0, 0.5).ne_base);
 }
 
 TEST_CASE ("Memory trace policy derives from knobs with neutral midpoint",

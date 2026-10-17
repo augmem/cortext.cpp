@@ -1,6 +1,5 @@
 #include "cortext/operations/write_gate.hpp"
 
-#include "neuromodulator_internal.hpp"
 #include "../experimental_env.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
@@ -36,7 +35,7 @@ RecordWriteGateProfile (OperationContext &context, bool flush,
                         bool spike_bypass, bool accumulator_available,
                         double n_signals, double coverage,
                         double window_score, double threshold_dynamic,
-                        double refractory_multiplier, double write_scale,
+                        double refractory_multiplier,
                         double effective_threshold, double score_margin,
                         bool force_write, bool write_accumulator,
                         WriteGateProfileReason reason)
@@ -56,7 +55,6 @@ RecordWriteGateProfile (OperationContext &context, bool flush,
                               threshold_dynamic);
   context.AddOperationTiming ("WriteGate.refractory_multiplier",
                               refractory_multiplier);
-  context.AddOperationTiming ("WriteGate.write_scale", write_scale);
   context.AddOperationTiming ("WriteGate.effective_threshold",
                               effective_threshold);
   context.AddOperationTiming ("WriteGate.score_margin", score_margin);
@@ -90,7 +88,7 @@ ComputeWriteGate::Execute (OperationContext &context,
       context.SetWriteDecision (false);
       RecordWriteGateProfile (
           context, flush, spike_bypass, false, 0.0, 0.0, 0.0,
-          context.GetThresholdTDynamic (), 1.0, 1.0, 0.0, 0.0, false,
+          context.GetThresholdTDynamic (), 1.0, 0.0, 0.0, false,
           false, WriteGateProfileReason::Ephemeral);
       telemetry::AddCounter ("cortext.retention.ephemeral_no_store_total", 1);
       telemetry::LogDebug ("cortext.write_gate", {
@@ -106,7 +104,7 @@ ComputeWriteGate::Execute (OperationContext &context,
       context.SetAccumulatorWriteDecision (false);
       RecordWriteGateProfile (
           context, flush, spike_bypass, false, 0.0, 0.0, 0.0,
-          context.GetThresholdTDynamic (), 1.0, 1.0, 0.0, 0.0, false,
+          context.GetThresholdTDynamic (), 1.0, 0.0, 0.0, false,
           false, WriteGateProfileReason::NoTrigger);
       return;
     }
@@ -119,7 +117,7 @@ ComputeWriteGate::Execute (OperationContext &context,
       context.SetAccumulatorWriteDecision (false);
       RecordWriteGateProfile (
           context, flush, spike_bypass, false, 0.0, 0.0, 0.0,
-          context.GetThresholdTDynamic (), 1.0, 1.0, 0.0, 0.0, false,
+          context.GetThresholdTDynamic (), 1.0, 0.0, 0.0, false,
           false, WriteGateProfileReason::NoAccumulator);
       return;
     }
@@ -158,9 +156,7 @@ ComputeWriteGate::Execute (OperationContext &context,
     }
 
   // Effective accumulator threshold
-  const double neuromod_ne = core::Clamp (p_ctx.neuromod_ne, 0.0, 1.0);
-  const double write_scale = neuromodulation::WriteThresholdScale (neuromod_ne);
-  const double theta_accumulator = T_dynamic * M_write_refrac * write_scale;
+  const double theta_accumulator = T_dynamic * M_write_refrac;
 
   // Final write decision
   const bool force_write = spike_bypass || RetentionForcesWrite (signal.retention);
@@ -169,7 +165,7 @@ ComputeWriteGate::Execute (OperationContext &context,
 
   RecordWriteGateProfile (
       context, flush, spike_bypass, true, static_cast<double> (n), coverage,
-      S_window, T_dynamic, M_write_refrac, write_scale, theta_accumulator,
+      S_window, T_dynamic, M_write_refrac, theta_accumulator,
       S_window - theta_accumulator, force_write, write_accumulator,
       force_write ? WriteGateProfileReason::Forced
                   : (write_accumulator
@@ -277,8 +273,6 @@ ComputeWriteGate::Execute (OperationContext &context,
     telemetry::Attribute::Double ("k_refrac", k_refrac),
     telemetry::Attribute::Double ("dt_write", dt_write),
     telemetry::Attribute::Double ("refractory_mult", M_write_refrac),
-    telemetry::Attribute::Double ("neuromod_ne", neuromod_ne),
-    telemetry::Attribute::Double ("write_scale", write_scale),
     telemetry::Attribute::Double ("theta_accumulator", theta_accumulator),
     telemetry::Attribute::Double ("rho", rho),
     telemetry::Attribute::Bool ("force_write", force_write),

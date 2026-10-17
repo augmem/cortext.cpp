@@ -158,36 +158,34 @@ Earlier builds also kept an adaptive memory half-life. It started at `base_half_
 
 To keep the three-knob UI while enabling more biologically faithful control, Cortext maps the knobs and internal signals to continuous neuromodulator-like variables. These are **not** additional user knobs; they are latent control signals derived from F/S/T and real-time stream statistics.
 
-We define two modulators:
+One modulator remains:
 
 * **ACh-like (acetylcholine):** encode vs retrieve bias.
-* **NE-like (norepinephrine):** arousal + interrupt urgency.
 
-Baseline levels come from knobs; phasic bursts come from current signals:
+Its baseline comes from the knobs and its phasic part from the current signal:
 
 ```
 ACh_base(F,S,T) = clamp(0.15 + 0.55S + 0.25(1 − T) − 0.15F, 0, 1)
-NE_base(F,S,T)  = clamp(0.10 + 0.60S + 0.20(1 − T), 0, 1)
-
 ACh_t ← clamp(ACh_base + 0.35 × novelty_t − 0.20 × retrieval_pressure, 0, 1)
-NE_t  ← clamp(NE_base  + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)
-```
-
-Where `retrieval_pressure` is the normalized retrieval queue-depth input. The production operation context does not
-currently populate queue depth, so this term is zero in the shipped full
-pipeline; tests and experiment hooks can supply it. The other phasic terms are
-live. These modulators drive internal gates without introducing new user-facing
-parameters:
-
-```
 encode_bias ← ACh_t × (0.7 + 0.3S)
 retrieve_bias ← 1 − encode_bias
-write_threshold_scale ← 1 − 0.3 × NE_t
 ```
 
-In the current implementation, the remaining latent scale is applied at one concrete downstream sites rather than introduced as separate runtime controls:
+Where `retrieval_pressure` is the normalized retrieval queue-depth input. The
+production operation context does not currently populate queue depth, so this
+term is zero in the shipped full pipeline. `retrieve_bias` gates streaming
+retrieval checks between boundaries (@sec-interrupt).
 
-* `write_threshold_scale` multiplies the accumulator write-gate threshold, so high `NE_t` lowers the barrier for committing a boundary candidate.
+Earlier builds also kept an NE-like modulator,
+`NE_t = clamp(NE_base + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)`, and
+"effect scales" that multiplied the write-gate threshold by `1 − 0.3 × NE_t`,
+reconsolidation drift by `1 + 0.4 × ACh_t` and retrieval competition by
+`1 + 0.5 × NE_t`. Competition and reconsolidation were removed by the engine
+ablation study (2026-10). Switching all effect scales off changed 5/48
+LongMemEval-S, 32/250 Eval 1 and 7/20 BEAM-10M conversation 7 packets, left
+gold-turn recall within one case, and moved Haiku-judged sufficiency by 0.000,
+−0.001 ± 0.006 and +0.028 ± 0.054; the MSC replay changed 7/39 probe packets,
+five only in order. The write scale and NE were then removed (migration 47).
 
 Earlier builds also kept a DA-like modulator, `DA_t = clamp(DA_base + max(0, δ_reward_t), 0, 1)`, driven by a reward prediction error `δ_reward_t = outcome_t − EWMA(outcome_t)` from the metric blender. Its only consumer was `value_update_gain` for the procedural value table (@sec-pattern-separation). The engine ablation study (2026-10) removed that table, then the DA modulator, the reward prediction error and their persisted state, with no packet change.
 

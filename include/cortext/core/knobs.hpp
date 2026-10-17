@@ -2053,12 +2053,9 @@ TargetPrecision (double F, double T)
 struct NeuromodulatorPolicy
 {
   double ach_base;
-  double ne_base;
   double retrieval_pressure_depth;
   double ach_novelty_gain;
   double ach_retrieval_pressure_gain;
-  double ne_surprisal_gain;
-  double ne_arousal_gain;
   double encode_sensitivity_floor;
   double encode_sensitivity_gain;
 };
@@ -2073,17 +2070,12 @@ NeuromodulatorPolicyForKnobs (double F, double S, double T)
   const double s0 = SensitivityBias (0.5);
   return {
     Clamp (0.15 + 0.55 * s + 0.25 * (1.0 - t) - 0.15 * f, 0.0, 1.0),
-    Clamp (0.10 + 0.60 * s + 0.20 * (1.0 - t), 0.0, 1.0),
     Clamp (10.0 * (1.0 - 0.10 * (s - s0) + 0.15 * (t - 0.5)),
            6.0, 14.0),
     Clamp (0.35 * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)),
            0.25, 0.45),
     Clamp (0.20 * (1.0 + 0.12 * (f - f0) - 0.08 * (t - 0.5)),
            0.12, 0.28),
-    Clamp (0.50 * (1.0 + 0.12 * (s - s0) - 0.08 * (t - 0.5)),
-           0.35, 0.65),
-    Clamp (0.30 * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)),
-           0.20, 0.40),
     Clamp (0.70 - 0.06 * (s - s0) + 0.04 * (t - 0.5), 0.58,
            0.80),
     Clamp (0.30 + 0.06 * (s - s0) - 0.04 * (t - 0.5), 0.20,

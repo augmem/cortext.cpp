@@ -6,9 +6,6 @@ add_executable(cortext_text_encoder_bench
 
 
 
-add_executable(cortext_neuromodulator_ablation_bench
-  neuromodulator_ablation_bench.cpp
-)
 
 
 add_executable(cortext_live_loop_steady_state_bench
@@ -39,9 +36,6 @@ add_executable(cortext_chat_replay_live_run
 target_include_directories(cortext_text_encoder_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_neuromodulator_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
 target_include_directories(cortext_live_loop_steady_state_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -63,9 +57,6 @@ target_include_directories(cortext_chat_replay_live_run PRIVATE
 )
 # Link dependencies
 target_link_libraries(cortext_text_encoder_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_neuromodulator_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_live_loop_steady_state_bench PRIVATE

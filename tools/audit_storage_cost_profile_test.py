@@ -1857,7 +1857,6 @@ class PlateauContractTest(unittest.TestCase):
             "WriteGate.window_score",
             "WriteGate.threshold_dynamic",
             "WriteGate.refractory_multiplier",
-            "WriteGate.write_scale",
             "WriteGate.effective_threshold",
             "WriteGate.score_margin",
             "WriteGate.force_write",

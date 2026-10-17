@@ -95,7 +95,6 @@ TEST_CASE ("UpdateNeuromodulators derives bounded control state",
 
   REQUIRE (pctx.neuromod_ach >= 0.0);
   REQUIRE (pctx.neuromod_ach <= 1.0);
-  REQUIRE (pctx.neuromod_ne > 0.0);
   REQUIRE (pctx.encode_bias >= 0.0);
   REQUIRE (pctx.encode_bias <= 1.0);
   REQUIRE (pctx.retrieval_bias == Catch::Approx (1.0 - pctx.encode_bias));

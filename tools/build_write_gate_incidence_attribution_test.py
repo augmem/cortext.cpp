@@ -35,7 +35,6 @@ class WriteGateAttributionBuilderTest(unittest.TestCase):
                 "WriteGate.window_score": 0.6 if reason in (5, 6) else 0.0,
                 "WriteGate.threshold_dynamic": 0.3,
                 "WriteGate.refractory_multiplier": 1.0,
-                "WriteGate.write_scale": 1.0,
                 "WriteGate.effective_threshold": 0.5 if reason in (5, 6) else 0.0,
                 "WriteGate.score_margin": 0.1 if reason in (5, 6) else 0.0,
                 "WriteGate.force_write": float(forced),

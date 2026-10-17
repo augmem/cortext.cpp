@@ -1004,6 +1004,13 @@ GetCoreMigrations ()
               "ALTER TABLE memories DROP COLUMN original_centroid",
           },
       },
+      {
+          47,
+          "Drop the removed norepinephrine-like modulator state",
+          {
+              "ALTER TABLE state DROP COLUMN neuromod_ne",
+          },
+      },
   };
 }
 
