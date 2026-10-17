@@ -53,6 +53,9 @@ struct NodeSnapshot
   int level = 0;
   bool active = false;
   std::vector<std::vector<long long>> links;
+  /// Parallel to links: inner-product distance between this node and each
+  /// linked node over their normalized embeddings.
+  std::vector<std::vector<float>> link_distances;
 };
 
 struct GraphSnapshot

@@ -1090,6 +1090,20 @@ GetCoreMigrations ()
               "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
           },
       },
+      {
+          52,
+          "Rebuild the sparse retrieval route with per-link distances",
+          {
+              // Route link rows now carry each link's distance so a full
+              // neighbor list keeps its nearest members. Older rows lack it;
+              // drop every generation and let the bounded backfill rebuild
+              // the route from the authoritative current surface.
+              "DELETE FROM cortext_sparse_route_dirty",
+              "DELETE FROM cortext_sparse_route_build",
+              "DELETE FROM cortext_sparse_route_meta",
+              "DELETE FROM cortext_sparse_route_nodes",
+          },
+      },
   };
 }
 

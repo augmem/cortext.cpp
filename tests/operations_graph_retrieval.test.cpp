@@ -295,7 +295,7 @@ TEST_CASE ("SQLite sparse route restart and query work stay row bounded",
   REQUIRE (restarted->DeltaSize () == 1);
   REQUIRE (restarted->Seal ());
   REQUIRE (restarted->LastSearchNodeRows ()
-           <= parameters.backfill_search_node_budget);
+           <= parameters.construction_search_node_budget);
   REQUIRE (restarted->ActivationSearchEffort () == parameters.search_ef);
   REQUIRE (restarted->ActivationSearchNodeBudget ()
            == parameters.search_node_budget);
@@ -2419,6 +2419,95 @@ TEST_CASE ("SQLite sparse route starts backfill at the knob-derived headroom "
                                       + parameters.backfill_batch_size));
 }
 
+TEST_CASE ("SQLite sparse route keeps a full node's nearest neighbors as "
+           "closer neighbors arrive",
+           "[operations][graph][retrieval][hnsw][sqlite][reciprocal]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  state.sparse_route_parameters = parameters;
+  auto append_entry = [&] (long long memory_id, Eigen::VectorXf embedding) {
+    embedding.normalize ();
+    const std::size_t index = state.current_entries.size ();
+    state.current_entries.emplace_back (
+        memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+        std::move (embedding), memory_id);
+    state.current_memory_index.emplace (memory_id, index);
+    state.current_memory_order.emplace (memory_id, index);
+  };
+  constexpr long long kBaseCount = 700;
+  for (long long memory_id = 1; memory_id <= kBaseCount; ++memory_id)
+    {
+      Eigen::VectorXf embedding (kEmbeddingDim);
+      for (Eigen::Index dimension = 0; dimension < embedding.size ();
+           ++dimension)
+        embedding[dimension] = std::sin (
+            static_cast<float> (memory_id * (dimension + 1)) * 0.013f);
+      append_entry (memory_id, std::move (embedding));
+    }
+  std::size_t advances = 0;
+  while (!state.sqlite_sparse_route && advances++ < 32)
+    REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route);
+
+  // More arrivals than one level-zero list holds, each nearer to the hub X
+  // than to each other or to any other row: y_i = X + 0.02 e_i. Every
+  // arrival therefore selects X, and X's nearest neighborhood becomes the
+  // arrivals.
+  constexpr long long kHub = kBaseCount / 2;
+  const Eigen::VectorXf hub
+      = state.current_entries[static_cast<std::size_t> (kHub - 1)].embedding;
+  const std::size_t level_zero_links
+      = parameters.row_addressed_level_zero_links;
+  const long long arrivals = static_cast<long long> (level_zero_links) + 22;
+  REQUIRE (arrivals < kEmbeddingDim);
+  const std::size_t batch = parameters.backfill_batch_size
+                            - parameters.search_expansion_batch;
+  for (long long offset = 1; offset <= arrivals; ++offset)
+    {
+      const long long memory_id = kBaseCount + offset;
+      Eigen::VectorXf embedding = hub;
+      embedding[static_cast<Eigen::Index> (offset)] += 0.02f;
+      append_entry (memory_id, embedding);
+      REQUIRE (state.sqlite_sparse_route->Upsert (
+          memory_id, state.current_entries.back ().embedding));
+      if (offset % static_cast<long long> (batch) == 0 || offset == arrivals)
+        REQUIRE (cache::ReconcileSQLiteSparseRoute (
+            state, *store, state.sqlite_sparse_route, nullptr));
+    }
+
+  const auto rows = store->Execute (
+      "SELECT links FROM cortext_sparse_route_nodes WHERE memory_id = ?",
+      { kHub });
+  REQUIRE (rows.size () == 1);
+  const auto bytes = store::BlobFromAny (rows.front ().at ("links"));
+  REQUIRE (bytes.size () >= 8);
+  std::uint32_t level_zero_count = 0;
+  std::memcpy (&level_zero_count, bytes.data () + 4, sizeof (std::uint32_t));
+  REQUIRE (bytes.size () >= 8 + level_zero_count * sizeof (long long));
+  std::size_t arrivals_linked = 0;
+  for (std::uint32_t index = 0; index < level_zero_count; ++index)
+    {
+      long long linked = 0;
+      std::memcpy (&linked, bytes.data () + 8 + index * sizeof (long long),
+                   sizeof (long long));
+      if (linked > kBaseCount)
+        ++arrivals_linked;
+    }
+  // X's level-zero list is its nearest neighborhood: every slot holds an
+  // arrival, not whichever arrival last overwrote a single slot.
+  REQUIRE (level_zero_count == level_zero_links);
+  REQUIRE (arrivals_linked == level_zero_links);
+}
+
 TEST_CASE ("SQLite sparse route invalidates a moved active journal slice "
            "before publishing stale topology",
            "[operations][graph][retrieval][hnsw][sqlite][backfill]"
@@ -2794,11 +2883,12 @@ TEST_CASE ("SQLite sparse route work budgets derive from every knob",
                    == parameters.reciprocal_update_count);
           REQUIRE (parameters.shadow_node_capacity
                    == parameters.route_capacity * 24);
-          REQUIRE (parameters.backfill_search_node_budget
-                   == parameters.route_capacity
-                          + parameters.backfill_batch_size);
-          REQUIRE (parameters.backfill_search_ef
-                   == parameters.backfill_batch_size * 2);
+          REQUIRE (parameters.construction_search_node_budget
+                   == parameters.route_capacity * 4);
+          REQUIRE (parameters.construction_search_ef
+                   == parameters.construction_search_node_budget);
+          REQUIRE (parameters.row_addressed_level_zero_links
+                   == parameters.row_addressed_neighbor_count * 2);
           REQUIRE (
               parameters.row_addressed_neighbor_count
               == static_cast<std::size_t> (
@@ -2859,8 +2949,9 @@ TEST_CASE ("SQLite sparse route work budgets derive from every knob",
   REQUIRE (midpoint.route_capacity == 512);
   REQUIRE (midpoint.activation_identity_target == 1280);
   REQUIRE (midpoint.backfill_batch_size == 128);
-  REQUIRE (midpoint.row_addressed_neighbor_count == 64);
-  REQUIRE (midpoint.row_addressed_level_zero_links == 128);
+  REQUIRE (midpoint.row_addressed_neighbor_count == 16);
+  REQUIRE (midpoint.row_addressed_level_zero_links == 32);
+  REQUIRE (midpoint.construction_search_node_budget == 2048);
   REQUIRE (midpoint.family_exact_comparison_limit == 1024);
   REQUIRE (midpoint.maximum_level == 9);
   REQUIRE (midpoint.reciprocal_update_count == 8);
@@ -2903,8 +2994,8 @@ TEST_CASE ("SQLite sparse route work budgets derive from every knob",
                   ? expected + selected.activation_identity_target
                   : selected.route_capacity * 5
                         + selected.activation_identity_target));
-      REQUIRE (selected.backfill_search_node_budget
-               == selected.route_capacity + selected.backfill_batch_size);
+      REQUIRE (selected.construction_search_node_budget
+               == selected.route_capacity * 4);
     }
 
   {

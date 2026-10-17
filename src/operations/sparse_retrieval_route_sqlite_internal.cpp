@@ -30,6 +30,10 @@ namespace cortext::operations::sparse_retrieval_route_sqlite_internal
 namespace
 {
 
+// Link rows store each link's distance next to its identity so a full
+// neighbor list can admit a closer reciprocal link by replacing its farthest
+// member without fetching the neighbor's neighbors. Schema migration 52
+// dropped every route generation written without those distances.
 constexpr int kSchemaVersion = 1;
 
 struct NodeRow
@@ -38,6 +42,9 @@ struct NodeRow
   std::vector<float> embedding;
   int level = 0;
   std::vector<std::vector<long long>> links;
+  /// Parallel to links: Distance (node embedding, linked embedding) at the
+  /// time the link was written.
+  std::vector<std::vector<float>> link_distances;
   bool active = false;
 };
 
@@ -168,16 +175,44 @@ ReadInt64 (const std::vector<unsigned char> &bytes, std::size_t &offset)
   return static_cast<long long> (value);
 }
 
-std::vector<unsigned char>
-EncodeLinks (const std::vector<std::vector<long long>> &links)
+void
+AppendFloat (std::vector<unsigned char> &bytes, float value)
 {
+  std::uint32_t encoded = 0;
+  std::memcpy (&encoded, &value, sizeof (encoded));
+  AppendUint32 (bytes, encoded);
+}
+
+std::optional<float>
+ReadFloat (const std::vector<unsigned char> &bytes, std::size_t &offset)
+{
+  const auto encoded = ReadUint32 (bytes, offset);
+  if (!encoded)
+    return std::nullopt;
+  float value = 0.0f;
+  std::memcpy (&value, &*encoded, sizeof (value));
+  if (!std::isfinite (value))
+    return std::nullopt;
+  return value;
+}
+
+std::vector<unsigned char>
+EncodeLinks (const std::vector<std::vector<long long>> &links,
+             const std::vector<std::vector<float>> &distances)
+{
+  if (distances.size () != links.size ())
+    throw std::invalid_argument ("sparse route link distances mismatch");
   std::vector<unsigned char> bytes;
   AppendUint32 (bytes, static_cast<std::uint32_t> (links.size ()));
-  for (const auto &level : links)
+  for (std::size_t level = 0; level < links.size (); ++level)
     {
-      AppendUint32 (bytes, static_cast<std::uint32_t> (level.size ()));
-      for (const long long memory_id : level)
+      if (distances[level].size () != links[level].size ())
+        throw std::invalid_argument ("sparse route link distances mismatch");
+      AppendUint32 (bytes, static_cast<std::uint32_t> (links[level].size ()));
+      for (const long long memory_id : links[level])
         AppendInt64 (bytes, memory_id);
+      for (const float distance : distances[level])
+        AppendFloat (bytes, distance);
     }
   return bytes;
 }
@@ -220,7 +255,13 @@ DecodeIdentityIds (const std::any &value, std::size_t capacity)
   return memory_ids;
 }
 
-std::optional<std::vector<std::vector<long long>>>
+struct DecodedLinks
+{
+  std::vector<std::vector<long long>> links;
+  std::vector<std::vector<float>> distances;
+};
+
+std::optional<DecodedLinks>
 DecodeLinks (const std::any &value, int expected_level,
              const Parameters &parameters)
 {
@@ -233,11 +274,13 @@ DecodeLinks (const std::any &value, int expected_level,
   if (!level_count
       || *level_count != static_cast<std::uint32_t> (expected_level + 1))
     return std::nullopt;
-  std::vector<std::vector<long long>> links (*level_count);
-  for (std::size_t level_index = 0; level_index < links.size ();
+  DecodedLinks decoded;
+  decoded.links.resize (*level_count);
+  decoded.distances.resize (*level_count);
+  for (std::size_t level_index = 0; level_index < decoded.links.size ();
        ++level_index)
     {
-      auto &level = links[level_index];
+      auto &level = decoded.links[level_index];
       const auto count = ReadUint32 (bytes, offset);
       const std::size_t link_limit
           = level_index == 0 ? parameters.row_addressed_level_zero_links
@@ -252,10 +295,115 @@ DecodeLinks (const std::any &value, int expected_level,
             return std::nullopt;
           level.push_back (*memory_id);
         }
+      auto &distances = decoded.distances[level_index];
+      distances.reserve (*count);
+      for (std::uint32_t index = 0; index < *count; ++index)
+        {
+          const auto distance = ReadFloat (bytes, offset);
+          if (!distance)
+            return std::nullopt;
+          distances.push_back (*distance);
+        }
     }
   if (offset != bytes.size ())
     return std::nullopt;
-  return links;
+  return decoded;
+}
+
+/// Open-addressing set of positive memory ids for one traversal. A query
+/// probes every level-zero link of each expanded row, so most probes hit an
+/// already-visited id; a flat table keeps that membership test allocation
+/// free. Capacity is sized from the traversal envelope and grows at half
+/// load, so the bound is the envelope, never the store.
+class VisitedIds
+{
+public:
+  explicit VisitedIds (std::size_t expected)
+  {
+    std::size_t capacity = 64;
+    while (capacity < expected * 2)
+      capacity <<= 1;
+    slots_.assign (capacity, 0);
+  }
+
+  bool Insert (long long memory_id)
+  {
+    if ((size_ + 1) * 2 > slots_.size ())
+      Grow ();
+    return Place (slots_, memory_id);
+  }
+
+private:
+  static std::size_t Hash (long long memory_id)
+  {
+    auto value = static_cast<std::uint64_t> (memory_id);
+    value ^= value >> 33U;
+    value *= 0xff51afd7ed558ccdULL;
+    value ^= value >> 33U;
+    return static_cast<std::size_t> (value);
+  }
+
+  bool Place (std::vector<long long> &slots, long long memory_id)
+  {
+    const std::size_t mask = slots.size () - 1;
+    for (std::size_t index = Hash (memory_id) & mask;;
+         index = (index + 1) & mask)
+      {
+        if (slots[index] == memory_id)
+          return false;
+        if (slots[index] == 0)
+          {
+            slots[index] = memory_id;
+            if (&slots == &slots_)
+              ++size_;
+            return true;
+          }
+      }
+  }
+
+  void Grow ()
+  {
+    std::vector<long long> grown (slots_.size () * 2, 0);
+    for (const long long memory_id : slots_)
+      if (memory_id != 0)
+        Place (grown, memory_id);
+    slots_.swap (grown);
+  }
+
+  std::vector<long long> slots_;
+  std::size_t size_ = 0;
+};
+
+/// Admit memory_id into row's level list. Returns whether the row changed.
+/// A full list replaces its farthest member only when memory_id is closer.
+bool
+AdmitLink (NodeRow &row, int level, long long memory_id, float distance,
+           std::size_t link_limit)
+{
+  if (level < 0 || static_cast<std::size_t> (level) >= row.links.size ()
+      || row.link_distances.size () != row.links.size ())
+    return false;
+  auto &links = row.links[static_cast<std::size_t> (level)];
+  auto &distances = row.link_distances[static_cast<std::size_t> (level)];
+  if (distances.size () != links.size ()
+      || std::find (links.begin (), links.end (), memory_id) != links.end ())
+    return false;
+  if (links.size () < link_limit)
+    {
+      links.push_back (memory_id);
+      distances.push_back (distance);
+      return true;
+    }
+  if (links.empty ())
+    return false;
+  const auto farthest = static_cast<std::size_t> (
+      std::max_element (distances.begin (), distances.end ())
+      - distances.begin ());
+  if (!(distance < distances[farthest]))
+    return false;
+  links[farthest] = memory_id;
+  distances[farthest] = distance;
+  return true;
 }
 
 std::string
@@ -299,7 +447,8 @@ DecodeNode (const std::map<std::string, std::any> &row, int embedding_dim,
   if (!decoded_embedding || !decoded_links)
     return std::nullopt;
   node.embedding = std::move (*decoded_embedding);
-  node.links = std::move (*decoded_links);
+  node.links = std::move (decoded_links->links);
+  node.link_distances = std::move (decoded_links->distances);
   return node;
 }
 
@@ -424,7 +573,8 @@ Route::Create (
               "memory_id, embedding, level, links, active, generation) "
               "VALUES(?, ?, ?, ?, 1, 1)",
               { node.memory_id, EncodeEmbedding (node.embedding),
-                static_cast<long long> (node.level), EncodeLinks (node.links) });
+                static_cast<long long> (node.level),
+                EncodeLinks (node.links, node.link_distances) });
         }
       if (!expected.empty ())
         return nullptr;
@@ -761,11 +911,11 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
           = impl_->building || construction_search;
       const std::size_t search_node_budget
           = use_construction_envelope
-                ? impl_->parameters.backfill_search_node_budget
+                ? impl_->parameters.construction_search_node_budget
                 : impl_->activation_search_node_budget;
       const std::size_t search_effort
           = use_construction_envelope
-                ? impl_->parameters.backfill_search_ef
+                ? impl_->parameters.construction_search_ef
                 : impl_->activation_search_ef;
       if (impl_->delta_embeddings.size () > search_node_budget)
         {
@@ -996,10 +1146,12 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       std::priority_queue<Ranked, std::vector<Ranked>, std::greater<Ranked>>
           frontier;
       std::priority_queue<Ranked> best;
-      std::unordered_set<long long> visited;
-      visited.reserve (search_node_budget + activation_nodes.size ());
+      // Seen-but-unfetched link targets outnumber fetched rows; start at a
+      // small multiple of the row envelope and let the table grow.
+      VisitedIds visited (4
+                          * (search_node_budget + activation_nodes.size ()));
       auto seed_frontier = [&] (const long long memory_id) {
-        if (memory_id <= 0 || !visited.insert (memory_id).second)
+        if (memory_id <= 0 || !visited.Insert (memory_id))
           return false;
         const auto node = cache.find (memory_id);
         if (node == cache.end ())
@@ -1054,7 +1206,7 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
                 continue;
               for (const long long neighbor_id
                    : node->second.row->links.front ())
-                if (visited.insert (neighbor_id).second)
+                if (visited.Insert (neighbor_id))
                   neighbor_ids.push_back (neighbor_id);
             }
           if (!fetch (neighbor_ids))
@@ -1457,6 +1609,11 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
           int next_max_level = impl_->max_level;
           const long long next_generation = impl_->generation;
 
+          const auto link_limit_at = [&] (int level) {
+            return level == 0
+                       ? impl_->parameters.row_addressed_level_zero_links
+                       : impl_->parameters.row_addressed_neighbor_count;
+          };
           for (const long long memory_id : roots)
             {
               const auto removed = impl_->removed.count (memory_id) != 0;
@@ -1545,6 +1702,10 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                                   || (left.distance == right.distance
                                       && left.memory_id < right.memory_id);
                          });
+              std::unordered_map<long long, const Neighbor *> neighbor_index;
+              neighbor_index.reserve (neighbors.size ());
+              for (const auto &neighbor : neighbors)
+                neighbor_index.emplace (neighbor.memory_id, &neighbor);
               NodeRow node;
               node.memory_id = memory_id;
               node.embedding = delta->second;
@@ -1555,44 +1716,87 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                                       memory_id,
                                       impl_->parameters.maximum_level);
               node.links.resize (static_cast<std::size_t> (node.level + 1));
+              node.link_distances.resize (node.links.size ());
               node.active = true;
               for (int level = 0; level <= node.level; ++level)
                 {
                   auto &links
                       = node.links[static_cast<std::size_t> (level)];
-                  const std::size_t link_limit
-                      = level == 0
-                            ? impl_->parameters
-                                  .row_addressed_level_zero_links
-                            : impl_->parameters
-                                  .row_addressed_neighbor_count;
+                  auto &distances
+                      = node.link_distances[static_cast<std::size_t> (level)];
+                  const std::size_t link_limit = link_limit_at (level);
                   links.reserve (std::min (link_limit, neighbors.size ()));
+                  distances.reserve (links.capacity ());
+                  // HNSW neighbor selection: a candidate nearer to an
+                  // already-selected neighbor than to this node is reachable
+                  // through that neighbor, so the slot goes to a candidate
+                  // in another direction first. Skipped candidates fill any
+                  // remaining slots in distance order.
+                  std::vector<const Neighbor *> skipped;
                   for (const auto &neighbor : neighbors)
                     {
                       if (neighbor.node.level < level)
                         continue;
-                      links.push_back (neighbor.memory_id);
                       if (links.size () >= link_limit)
                         break;
+                      bool covered = false;
+                      for (const long long selected_id : links)
+                        {
+                          const auto selected = neighbor_index.find (
+                              selected_id);
+                          if (selected != neighbor_index.end ()
+                              && Distance (neighbor.node.embedding,
+                                           selected->second->node.embedding)
+                                     < neighbor.distance)
+                            {
+                              covered = true;
+                              break;
+                            }
+                        }
+                      if (covered)
+                        {
+                          skipped.push_back (&neighbor);
+                          continue;
+                        }
+                      links.push_back (neighbor.memory_id);
+                      distances.push_back (neighbor.distance);
+                    }
+                  for (const Neighbor *neighbor : skipped)
+                    {
+                      if (links.size () >= link_limit)
+                        break;
+                      links.push_back (neighbor->memory_id);
+                      distances.push_back (neighbor->distance);
                     }
                   // Upper-level members are sparse in the proposal set, so a
                   // relinked hierarchy node keeps its prior upper-level
                   // links behind the new ones. Level zero, which owns exact
-                  // locality, is rebuilt only from the moved vector.
+                  // locality, is rebuilt only from the moved vector. A kept
+                  // link carries its prior distance; it only orders eviction.
                   if (relink && level > 0)
-                    for (const long long prior_link :
-                         prior->second.links[static_cast<std::size_t> (
-                             level)])
-                      {
-                        if (links.size () >= link_limit)
-                          break;
-                        if (prior_link != memory_id
-                            && impl_->removed.count (prior_link) == 0
-                            && std::find (links.begin (), links.end (),
-                                          prior_link)
-                                   == links.end ())
-                          links.push_back (prior_link);
-                      }
+                    {
+                      const auto &prior_links = prior->second.links[
+                          static_cast<std::size_t> (level)];
+                      const auto &prior_distances
+                          = prior->second.link_distances[
+                              static_cast<std::size_t> (level)];
+                      for (std::size_t index = 0;
+                           index < prior_links.size (); ++index)
+                        {
+                          if (links.size () >= link_limit)
+                            break;
+                          const long long prior_link = prior_links[index];
+                          if (prior_link != memory_id
+                              && impl_->removed.count (prior_link) == 0
+                              && std::find (links.begin (), links.end (),
+                                            prior_link)
+                                     == links.end ())
+                            {
+                              links.push_back (prior_link);
+                              distances.push_back (prior_distances[index]);
+                            }
+                        }
+                    }
                 }
               updates[memory_id] = node;
               if (!relink)
@@ -1603,39 +1807,31 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                   next_max_level = node.level;
                 }
 
+              // Every selected neighbor receives the reciprocal link. A full
+              // neighbor list admits the new node only by replacing its
+              // farthest member when the new node is closer, so a mature
+              // node keeps its nearest neighborhood as later neighbors
+              // arrive instead of churning one slot.
               for (int level = 0; level <= node.level; ++level)
                 {
-                  std::size_t reciprocal_count = 0;
+                  const std::size_t link_limit = link_limit_at (level);
+                  const auto &selected
+                      = node.links[static_cast<std::size_t> (level)];
                   for (const auto &candidate : neighbors)
                     {
-                      if (candidate.node.level < level)
+                      if (candidate.node.level < level
+                          || std::find (selected.begin (), selected.end (),
+                                        candidate.memory_id)
+                                 == selected.end ())
                         continue;
-                      NodeRow neighbor = candidate.node;
                       const auto updated = updates.find (
                           candidate.memory_id);
-                      if (updated != updates.end ())
-                        neighbor = updated->second;
-                      auto &level_links
-                          = neighbor.links[static_cast<std::size_t> (level)];
-                      if (std::find (level_links.begin (), level_links.end (),
-                                     memory_id)
-                          == level_links.end ())
-                        {
-                          const std::size_t link_limit
-                              = level == 0
-                                    ? impl_->parameters
-                                          .row_addressed_level_zero_links
-                                    : impl_->parameters
-                                          .row_addressed_neighbor_count;
-                          if (level_links.size () < link_limit)
-                            level_links.push_back (memory_id);
-                          else if (!level_links.empty ())
-                            level_links.back () = memory_id;
-                        }
-                      updates[neighbor.memory_id] = std::move (neighbor);
-                      if (++reciprocal_count
-                          >= impl_->parameters.reciprocal_update_count)
-                        break;
+                      NodeRow neighbor = updated != updates.end ()
+                                             ? updated->second
+                                             : candidate.node;
+                      if (AdmitLink (neighbor, level, memory_id,
+                                     candidate.distance, link_limit))
+                        updates[neighbor.memory_id] = std::move (neighbor);
                     }
                 }
             }
@@ -1729,7 +1925,7 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                   "generation = excluded.generation",
                   { node.memory_id, EncodeEmbedding (node.embedding),
                     static_cast<long long> (node.level),
-                    EncodeLinks (node.links),
+                    EncodeLinks (node.links, node.link_distances),
                     static_cast<long long> (node.active ? 1 : 0),
                     next_generation });
             }
@@ -1873,7 +2069,8 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               "links = excluded.links, active = excluded.active, "
               "generation = excluded.generation",
               { node.memory_id, EncodeEmbedding (node.embedding),
-                static_cast<long long> (node.level), EncodeLinks (node.links),
+                static_cast<long long> (node.level),
+                EncodeLinks (node.links, node.link_distances),
                 static_cast<long long> (node.active ? 1 : 0), next_generation });
         }
       const std::string metadata_table

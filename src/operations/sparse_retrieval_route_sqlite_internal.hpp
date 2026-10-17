@@ -37,8 +37,8 @@ struct Parameters
   std::size_t activation_search_ef_step = 0;
   std::size_t shadow_node_capacity = 0;
   std::size_t backfill_batch_size = 0;
-  std::size_t backfill_search_node_budget = 0;
-  std::size_t backfill_search_ef = 0;
+  std::size_t construction_search_node_budget = 0;
+  std::size_t construction_search_ef = 0;
   std::size_t row_addressed_neighbor_count = 0;
   std::size_t row_addressed_level_zero_links = 0;
   std::size_t family_exact_comparison_limit = 0;
@@ -55,6 +55,9 @@ DeriveParameters (double focus, double sensitivity, double stability)
           focus, sensitivity, stability));
   const auto backfill_batch_size = static_cast<std::size_t> (
       sparse_retrieval_knobs_internal::BackfillBatchSize (
+          focus, sensitivity, stability));
+  const auto construction_node_budget = static_cast<std::size_t> (
+      sparse_retrieval_knobs_internal::ConstructionNodeBudget (
           focus, sensitivity, stability));
   const auto retrieval_sawtooth_floor = static_cast<std::size_t> (
       sparse_retrieval_knobs_internal::RetrievalSawtoothFloor (
@@ -89,8 +92,8 @@ DeriveParameters (double focus, double sensitivity, double stability)
     retrieval_sawtooth_step,
     route_capacity * 24,
     backfill_batch_size,
-    route_capacity + backfill_batch_size,
-    backfill_batch_size * 2,
+    construction_node_budget,
+    construction_node_budget,
     static_cast<std::size_t> (sparse_retrieval_knobs_internal::
                                   GraphNeighborCount (
         focus, sensitivity, stability)),

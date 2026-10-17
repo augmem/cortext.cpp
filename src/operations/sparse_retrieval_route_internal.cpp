@@ -489,15 +489,28 @@ Route::Snapshot (const std::vector<long long> &roots) const
           node.active = impl_->sealed_removed.count (memory_id) == 0
                         && impl_->removed.count (memory_id) == 0;
           node.links.resize (static_cast<std::size_t> (node.level + 1));
+          node.link_distances.resize (node.links.size ());
           for (int graph_level = 0; graph_level <= node.level; ++graph_level)
             {
               const auto neighbors = impl_->first.getConnectionsWithLock (
                   internal_id, graph_level);
               auto &links = node.links[static_cast<std::size_t> (graph_level)];
+              auto &distances = node.link_distances[static_cast<std::size_t> (
+                  graph_level)];
               links.reserve (neighbors.size ());
+              distances.reserve (neighbors.size ());
               for (const hnswlib::tableint neighbor : neighbors)
-                links.push_back (static_cast<long long> (
-                    impl_->first.getExternalLabel (neighbor)));
+                {
+                  const long long neighbor_id = static_cast<long long> (
+                      impl_->first.getExternalLabel (neighbor));
+                  const auto neighbor_embedding
+                      = impl_->sealed_embeddings.find (neighbor_id);
+                  if (neighbor_embedding == impl_->sealed_embeddings.end ())
+                    return std::nullopt;
+                  links.push_back (neighbor_id);
+                  distances.push_back (InnerProductDistance (
+                      embedding->second, neighbor_embedding->second));
+                }
             }
           snapshot.nodes.push_back (std::move (node));
         }
