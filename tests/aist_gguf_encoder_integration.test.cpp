@@ -6,6 +6,8 @@
 
 #include <cortext/models/aist_gguf_encoder.hpp>
 
+#include "../src/models/aist_semantic_cache_internal.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -180,6 +182,42 @@ TEST_CASE ("AIST GGUF text graph memory stays bounded across lengths",
           static_cast<double> (std::abs (embedding[i] - fresh[i])));
     }
   CHECK (max_abs_diff < 1.0e-5);
+}
+
+TEST_CASE ("AIST GGUF semantic cache stays within its byte budget",
+           "[aist][gguf][integration]")
+{
+  cortext::AistGgufConfig config;
+  config.model_path = AistModelPath ().string ();
+  config.context_length = 64;
+  cortext::AistGgufEncoder encoder (config);
+
+  const std::string probe = "probe text that is encoded first";
+  std::vector<float> embedding;
+  encoder.EncodeText (probe, embedding);
+  encoder.EncodeText (probe, embedding);
+  REQUIRE (encoder.DebugRuntimeStats ().semantic_cache_hits == 1);
+
+  // Fill past the budget with distinct texts; each entry costs at least its
+  // embedding plus bookkeeping, so the probe must age out.
+  using Cache = cortext::internal::AistSemanticCache;
+  const std::size_t per_entry = Cache::EntryBytes (probe, embedding);
+  const std::size_t fill = Cache::kDefaultCapacityBytes / per_entry + 2;
+  for (std::size_t i = 0; i < fill; ++i)
+    {
+      encoder.EncodeText ("filler " + std::to_string (i), embedding);
+    }
+  const std::vector<float> before = embedding;
+  encoder.EncodeText (probe, embedding);
+  const auto stats = encoder.DebugRuntimeStats ();
+  CHECK (stats.semantic_cache_hits == 1);
+  CHECK (stats.semantic_cache_misses == fill + 2);
+  CHECK (stats.semantic_requests == fill + 3);
+
+  // The most recent text is still a hit.
+  encoder.EncodeText ("filler " + std::to_string (fill - 1), embedding);
+  CHECK (encoder.DebugRuntimeStats ().semantic_cache_hits == 2);
+  CHECK (embedding == before);
 }
 
 TEST_CASE ("AIST native image tower output is pinned",

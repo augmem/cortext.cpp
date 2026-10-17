@@ -1,4 +1,5 @@
 #include "cortext/models/aist_gguf_encoder.hpp"
+#include "aist_semantic_cache_internal.hpp"
 #include "ggml_support.hpp"
 #include "../experimental_env.hpp"
 
@@ -3786,11 +3787,10 @@ private:
   EncodeSemantic (const std::string &text)
   {
     ++stats_.semantic_requests;
-    const auto cache_it = semantic_cache_.find (text);
-    if (cache_it != semantic_cache_.end ())
+    if (const std::vector<float> *cached = semantic_cache_.Find (text))
       {
         ++stats_.semantic_cache_hits;
-        return cache_it->second;
+        return *cached;
       }
     ++stats_.semantic_cache_misses;
 
@@ -3804,9 +3804,8 @@ private:
             std::vector<float> semantic = kernel_->EncodeTextTokensFullGraph (
                 ids);
             NormalizeL2InPlace (semantic);
-            auto inserted = semantic_cache_.emplace (text,
-                                                     std::move (semantic));
-            return inserted.first->second;
+            semantic_cache_.Put (text, semantic);
+            return semantic;
           }
         catch (const std::exception &ex)
           {
@@ -3859,8 +3858,8 @@ private:
     std::vector<float> semantic = ProjectionBlock (text_features,
                                                    "text_projection");
     L2Normalize (semantic);
-    auto inserted = semantic_cache_.emplace (text, std::move (semantic));
-    return inserted.first->second;
+    semantic_cache_.Put (text, semantic);
+    return semantic;
   }
 
   std::vector<float>
@@ -3911,7 +3910,7 @@ private:
   std::string kernel_error_;
   std::string full_graph_error_;
   bool native_image_used_ = false;
-  std::unordered_map<std::string, std::vector<float>> semantic_cache_;
+  internal::AistSemanticCache semantic_cache_;
   AistRuntimeStats stats_;
 };
 
