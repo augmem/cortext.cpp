@@ -22,6 +22,7 @@
 #include "working_memory_time_internal.hpp"
 #include "store/mutation_audit_internal.hpp"
 #include "store/commit_profile_internal.hpp"
+#include "store/memory_text_index_internal.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2650,6 +2651,8 @@ SignalProcessor::SignalProcessor (const Config &config,
         {
           object_store_ = std::make_shared<SqlObjectStore> (store_);
         }
+      store::memory_text_index_internal::RunPendingBackfill (
+          *store_, object_store_.get ());
 
       // Load persisted state for algorithm resumption (v2 schema)
       loaded_state = LoadState (*store_, *context_, config_);      // Unified state

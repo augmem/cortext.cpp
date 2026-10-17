@@ -1019,6 +1019,29 @@ GetCoreMigrations ()
               "DROP TABLE IF EXISTS soft_anchors",
           },
       },
+      {
+          49,
+          "Keyword index over LONG_TERM memory text (FTS5, contentless)",
+          {
+              // rowid = memory_id. Text stays in the object store; the
+              // index keeps only inverted lists (porter-stemmed unicode61).
+              "CREATE VIRTUAL TABLE IF NOT EXISTS memory_text_fts USING fts5("
+              "  text, content='', contentless_delete=1,"
+              "  tokenize='porter unicode61 remove_diacritics 2')",
+              "CREATE TRIGGER IF NOT EXISTS memories_text_fts_delete "
+              "AFTER DELETE ON memories WHEN old.kind = 'LONG_TERM' "
+              "BEGIN DELETE FROM memory_text_fts WHERE rowid = old.memory_id; "
+              "END",
+              // Object payloads may live outside this database, so stores
+              // that already hold memories are indexed from C++ once
+              // (memory_text_index_internal::RunPendingBackfill).
+              "CREATE TABLE IF NOT EXISTS cortext_pending_backfills ("
+              "  name TEXT PRIMARY KEY)",
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'memory_text_fts' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
   };
 }
 

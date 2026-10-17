@@ -3,6 +3,7 @@
 #include "constructive_recall_internal.hpp"
 #include "historical_surface_search_cache_internal.hpp"
 #include "family_embedding_features_internal.hpp"
+#include "../store/memory_text_index_internal.hpp"
 #include "retrieval_trace_state.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -1369,6 +1370,83 @@ SortCandidates (std::vector<Candidate> &ranked)
   });
 }
 
+struct LexicalSeedConfig
+{
+  bool enabled = true;
+  std::size_t limit = 20;
+  std::size_t max_terms = 16;
+  double rrf_k = 60.0;
+  double weight = 1.0;
+};
+
+// Experiment hooks only (CORTEXT_EXPERIMENT_HOOKS builds); release builds use
+// the defaults.
+LexicalSeedConfig
+LoadLexicalSeedConfig ()
+{
+  namespace env = internal::experimental_env;
+  LexicalSeedConfig cfg;
+  cfg.enabled = env::Int ("CORTEXT_LEXICAL_SEEDS").value_or (1) != 0;
+  cfg.limit = static_cast<std::size_t> (
+      std::max (0, env::Int ("CORTEXT_LEXICAL_LIMIT").value_or (20)));
+  cfg.max_terms = static_cast<std::size_t> (
+      std::max (1, env::Int ("CORTEXT_LEXICAL_MAX_TERMS").value_or (16)));
+  cfg.rrf_k = env::Int ("CORTEXT_LEXICAL_RRF_K").value_or (60);
+  cfg.weight = env::Int ("CORTEXT_LEXICAL_WEIGHT_PERMILLE").value_or (1000)
+               / 1000.0;
+  return cfg;
+}
+
+// Resolves a lexical hit to a seed-eligible candidate under the same rules as
+// dense seeding: a LONG_TERM vector surface written before the exclusion time.
+std::optional<Candidate>
+LexicalCandidate (const ProcessorContext &p_ctx, Transaction &tx,
+                  long long memory_id, long long exclusion_ts,
+                  int embedding_dim)
+{
+  Candidate candidate;
+  const auto it = p_ctx.retrieval_surface_index.find (memory_id);
+  if (it != p_ctx.retrieval_surface_index.end ()
+      && it->second < p_ctx.retrieval_surface_cache.size ())
+    {
+      const auto &surface = p_ctx.retrieval_surface_cache[it->second];
+      if (surface.kind != "LONG_TERM" || !surface.vector_seed_eligible
+          || surface.start_ts >= exclusion_ts || surface.embedding_id <= 0
+          || surface.embedding.size () != embedding_dim)
+        return std::nullopt;
+      candidate.memory_id = memory_id;
+      candidate.embedding_id = surface.embedding_id;
+      candidate.start_ts = surface.start_ts;
+      candidate.embedding = surface.embedding;
+      return candidate;
+    }
+  if (!p_ctx.retrieval_surface_cache.empty ())
+    return std::nullopt;
+  // No installed surface: read the memory's current vector from the store.
+  auto rows = tx.Execute (
+      "SELECT m.memory_id, COALESCE(cme.embedding_id, m.embedding_id) "
+      "         AS embedding_id, "
+      "       COALESCE(m.start_ts, 0) AS start_ts, "
+      "       COALESCE(cme.embedding, e.embedding) AS embedding "
+      "FROM memories m "
+      "LEFT JOIN current_memory_embeddings cme "
+      "  ON cme.memory_id = m.memory_id "
+      "JOIN embeddings e ON e.embedding_id = m.embedding_id "
+      "WHERE m.memory_id = ? AND m.kind = 'LONG_TERM' "
+      "  AND COALESCE(m.start_ts, 0) < ?",
+      { memory_id, exclusion_ts });
+  if (rows.empty ())
+    return std::nullopt;
+  candidate.memory_id = memory_id;
+  candidate.embedding_id = AnyLongLong (rows[0], "embedding_id");
+  candidate.start_ts = AnyLongLong (rows[0], "start_ts");
+  const auto emb = rows[0].find ("embedding");
+  if (candidate.embedding_id <= 0 || emb == rows[0].end ()
+      || !AnyToEmbedding (emb->second, embedding_dim, candidate.embedding))
+    return std::nullopt;
+  return candidate;
+}
+
 } // namespace
 
 void
@@ -1806,6 +1884,72 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       InsertOrBoost (candidates, candidate);
     }
 
+  // Lexical seed channel for queries: FTS5 BM25 over memory text, fused
+  // with the dense seed ranking by reciprocal rank. Dense seeding alone
+  // misses turns that share the query's rare words (names, numbers) but not
+  // its embedding. Ingest-time retrieval stays dense-only: lexical seeds
+  // there cost per-turn time without improving recall (hc_bm25 sweep1).
+  start_profile_timing ();
+  static const LexicalSeedConfig lexical_cfg = LoadLexicalSeedConfig ();
+  std::unordered_map<long long, double> fused_scores;
+  std::size_t lexical_hits = 0;
+  std::size_t lexical_added = 0;
+  if (lexical_cfg.enabled && lexical_cfg.limit > 0
+      && signal.retention == Retention::Ephemeral
+      && signal.modality == "text" && signal.payload
+      && !signal.payload->empty () && embedding_dim > 0)
+    {
+      std::vector<store::memory_text_index_internal::Hit> hits;
+      try
+        {
+          // Over-fetch: hits at or after the exclusion time are not seeds.
+          hits = store::memory_text_index_internal::Search (
+              tx,
+              std::string_view (
+                  reinterpret_cast<const char *> (signal.payload->data ()),
+                  signal.payload->size ()),
+              lexical_cfg.limit * 2 + 4, lexical_cfg.max_terms);
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogWarn (
+              "cortext.graph_retrieval.lexical_unavailable",
+              { telemetry::Attribute::String ("error", e.what ()) });
+        }
+      lexical_hits = hits.size ();
+      if (!hits.empty ())
+        for (std::size_t rank = 0; rank < seeded.size (); ++rank)
+          fused_scores[seeded[rank].memory_id]
+              += 1.0 / (lexical_cfg.rrf_k + static_cast<double> (rank + 1));
+      std::size_t lexical_rank = 0;
+      for (const auto &hit : hits)
+        {
+          if (lexical_rank >= lexical_cfg.limit)
+            break;
+          auto candidate = LexicalCandidate (
+              p_ctx, tx, hit.memory_id,
+              static_cast<long long> (exclusion_ts), embedding_dim);
+          if (!candidate)
+            continue;
+          ++lexical_rank;
+          fused_scores[hit.memory_id]
+              += lexical_cfg.weight
+                 / (lexical_cfg.rrf_k + static_cast<double> (lexical_rank));
+          if (candidates.count (hit.memory_id) != 0)
+            continue;
+          candidate->seed_score = core::Map01 (
+              Cosine (signal.embedding, candidate->embedding));
+          candidate->score = core::Clamp (candidate->seed_score, 0.0, 1.0);
+          InsertOrBoost (candidates, std::move (*candidate));
+          ++lexical_added;
+        }
+    }
+  profile_timing ("GraphRetrieve.lexical_seeds", section_start);
+  context.AddOperationTiming ("GraphRetrieve.lexical_hits",
+                              static_cast<double> (lexical_hits));
+  context.AddOperationTiming ("GraphRetrieve.lexical_added",
+                              static_cast<double> (lexical_added));
+
   start_profile_timing ();
   // Candidates are the already family-collapsed seed set.
   std::vector<Candidate> ranked_all;
@@ -1815,7 +1959,23 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       (void)memory_id;
       ranked_all.push_back (std::move (candidate));
     }
-  SortCandidates (ranked_all);
+  if (fused_scores.empty ())
+    SortCandidates (ranked_all);
+  else
+    std::sort (ranked_all.begin (), ranked_all.end (),
+               [&fused_scores] (const Candidate &a, const Candidate &b) {
+                 const auto ia = fused_scores.find (a.memory_id);
+                 const auto ib = fused_scores.find (b.memory_id);
+                 const double fa
+                     = ia == fused_scores.end () ? 0.0 : ia->second;
+                 const double fb
+                     = ib == fused_scores.end () ? 0.0 : ib->second;
+                 if (fa != fb)
+                   return fa > fb;
+                 if (a.score != b.score)
+                   return a.score > b.score;
+                 return a.memory_id > b.memory_id;
+               });
 
   const auto direct_count = std::min<std::size_t> (
       ranked_all.size (), static_cast<std::size_t> (output_limit));

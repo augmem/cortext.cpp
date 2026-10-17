@@ -620,6 +620,23 @@ point and topology footprint (@sec-emotional-consolidation).
 
 ## Retrieval Implementation
 
+Read-only (ephemeral) text queries add a lexical seed channel to the vector
+seeds. Each stored long-term text memory is indexed in a contentless SQLite
+FTS5 table (`memory_text_fts`, rowid = memory id, porter-stemmed
+`unicode61` tokens) inside the savepoint that writes the memory, so the index
+commits, rolls back, and is deleted with it; the text itself stays in the
+object store. A query ORs its non-stopword words (at most 16, each a quoted
+FTS5 string) and takes the 20 best `bm25()` hits that pass the same seed
+eligibility as vector seeds (long-term, vector-seed eligible, written before
+the exclusion time). Vector seed ranks and lexical ranks are fused by
+reciprocal rank, $\sum 1/(60 + r)$, which orders the output; the semantic
+score of every candidate is unchanged. The channel targets turns that share a
+query's rare words (names, numbers) but sit far down the vector ranking: on
+the 250-case packet-sufficiency evaluation, gold-turn recall in the packet
+rose from 0.60 to 0.78 and judged sufficiency rose by about 0.15 to 0.20
+(paired, train and test splits). Ingest-time retrieval stays vector-only;
+lexical seeds there cost per-turn time without improving recall.
+
 Production retrieval discovers a broad but bounded vector seed set from durable
 memory embeddings. Before the seed cap, it collapses near-duplicate embedding
 families to one representative; superseded targets stay eligible.

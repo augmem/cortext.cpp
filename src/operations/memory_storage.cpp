@@ -1,5 +1,6 @@
 #include "cortext/operations/memory_storage.hpp"
 #include "constructive_recall_internal.hpp"
+#include "../store/memory_text_index_internal.hpp"
 #include "active_signal_embedding_ring_internal.hpp"
 #include "historical_surface_search_cache_internal.hpp"
 #include "retrieval_trace_state.hpp"
@@ -1416,6 +1417,38 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
               static_cast<long long> (end_ts), 0.0, "initial", 1.0, 1.0);
           context.AddOperationTiming ("MemoryStorage.initial_reconstruction",
                                       ElapsedMillis (reconstruction_start));
+        }
+
+      // Keyword index (FTS5): the memory's text content, written in this
+      // savepoint so it commits and rolls back with the memory.
+      std::string memory_text;
+      if (text_mode)
+        {
+          if (!content_payload.empty ())
+            memory_text.assign (content_payload.begin (),
+                                 content_payload.end ());
+          else
+            for (const auto *rec : ordered_signals)
+              {
+                if (!rec || rec->payload.empty ())
+                  continue;
+                if (!memory_text.empty ())
+                  memory_text.push_back ('\n');
+                memory_text.append (rec->payload.begin (),
+                                     rec->payload.end ());
+              }
+          if (memory_text.empty () && signal.payload
+              && signal.modality == "text")
+            memory_text.assign (signal.payload->begin (),
+                                 signal.payload->end ());
+        }
+      if (memory_id > 0 && !memory_text.empty ())
+        {
+          const auto fts_start = SteadyClock::now ();
+          store::memory_text_index_internal::IndexMemoryText (
+              *savepoint, memory_id, memory_text);
+          context.AddOperationTiming ("MemoryStorage.memory_text_fts",
+                                      ElapsedMillis (fts_start));
         }
 
       // Commit external object content before releasing the DB savepoint. If

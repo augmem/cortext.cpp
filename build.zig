@@ -9,6 +9,7 @@ const cortext_cpp_sources = &.{
     "src/store/extension_loader.cpp",
     "src/store/object_store.cpp",
     "src/store/schema.cpp",
+    "src/store/memory_text_index_internal.cpp",
     "src/internal/cancellation.cpp",
     "src/processor/operation_context.cpp",
     "src/signal_processor.cpp",
