@@ -26,6 +26,20 @@ hydration. A displayed memory carries the relevance and composite score of its
 own retrieval trace. The C API and JavaScript addon serialize the same memory
 object.
 
+Each retrieved text turn is also hydrated with the adjacent turns of its own
+source stream (temporal contiguity): the immediate successor and predecessor of
+every anchor in rank order, then the turns two steps away, each clipped to 480
+bytes under one 12 KiB budget per context. The round-3 ablation (2026-10)
+measured the earlier 6 KiB budget and lag-2 cap (top 6 anchors) as binding.
+Raising the budget to 12 KiB and giving every anchor lag-2 turns raised packet
+gold-turn recall from 0.642 to 0.691 on LongMemEval-S and from 0.597 to 0.629
+on Eval 1 (13 cases better, none worse) for +2.2 KB per Eval 1 packet, and
+Haiku-judged sufficiency by +0.048 ± 0.056 (S) and +0.037 ± 0.019 (Eval 1).
+Budgets of 16 and 24 KiB gave packets identical to 12 KiB. Switching contiguity
+off costs 0.06 to 0.09 packet recall; clipping neighbours to 240 bytes raised
+the clipped-text recall proxy but not judged sufficiency, so the 480-byte clip
+stays.
+
 ## Durable Memory Surface
 
 The current v1 runtime uses two durable graph layers plus one bounded live layer:

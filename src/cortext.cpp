@@ -847,14 +847,15 @@ StripSourceBlobsIfDisabled (Cortext::Context::Memory &memory)
 // hydrated as extra content blobs of that same retrieved memory, clipped and
 // under a per-context byte budget: first the immediate successor and
 // predecessor of every anchor in rank order, then, with what budget is left,
-// the turns two steps away. Cost is O(anchors): primary-key range lookups
+// the turns two steps away. A 2026-10 sweep found the old 6 KiB budget and
+// lag-2 cap (top 6 anchors) binding; 12 KiB with lag 2 for every anchor raised
+// judged sufficiency on Eval 1 by +0.037 (budgets past 12 KiB change nothing). Cost is O(anchors): primary-key range lookups
 // bounded by a fixed id span plus one indexed supersession check per
 // neighbor, issued as two statements (lag 1, lag 2) for all anchors. Ranking
 // and the number of retrieved memories are unchanged.
 constexpr std::size_t kContiguityAnchorLimit = 11;
-constexpr std::size_t kContiguityLag2AnchorLimit = 6;
 constexpr std::size_t kContiguityNeighborMaxBytes = 480;
-constexpr std::size_t kContiguityContextBudgetBytes = 6144;
+constexpr std::size_t kContiguityContextBudgetBytes = 12288;
 constexpr long long kContiguityIdScanSpan = 16;
 constexpr long long kContiguityMaxGapMs = 30LL * 60LL * 1000LL;
 
@@ -1281,8 +1282,6 @@ AttachContiguousTurns (Store *store,
       std::vector<ContiguousTurn *> lag2_targets;
       for (auto &walk : walks)
         {
-          if (walk.index >= kContiguityLag2AnchorLimit)
-            break;
           if (walk.successor.position_id > 0)
             {
               probes.push_back ({ walk.successor.position_id, walk.start_ts,
@@ -1323,7 +1322,7 @@ AttachContiguousTurns (Store *store,
       for (std::size_t w = 0; w < walked; ++w)
         {
           const auto &walk = walks[w];
-          if (budget == 0 || walk.index >= kContiguityLag2AnchorLimit)
+          if (budget == 0)
             break;
           if (walk.successor.position_id > 0)
             attach_adjacent (walk, walk.successor_lag2, true);
