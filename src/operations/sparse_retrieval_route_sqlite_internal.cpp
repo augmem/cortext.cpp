@@ -460,17 +460,26 @@ FetchNodes (Store &store, int embedding_dim,
 {
   if (memory_ids.empty ())
     return std::vector<NodeRow>{};
+  // Round the IN list up to a power of two, padded with the never-stored
+  // id 0, so a traversal reuses a handful of prepared statements instead of
+  // preparing (and evicting from the shared statement cache) one statement
+  // per distinct batch size.
+  std::size_t placeholders = 16;
+  while (placeholders < memory_ids.size ())
+    placeholders <<= 1;
   std::vector<std::any> params;
-  params.reserve (memory_ids.size () + 1);
+  params.reserve (placeholders + 1);
   params.emplace_back (generation);
   for (const long long memory_id : memory_ids)
     params.emplace_back (memory_id);
+  while (params.size () < placeholders + 1)
+    params.emplace_back (0LL);
   const auto rows = store.Execute (
       "SELECT memory_id, embedding, level, links, active "
       // Unary + keeps the planner on the rowid: one table seek per row
       // instead of a generation-index seek plus a table seek.
       "FROM cortext_sparse_route_nodes WHERE +generation = ? AND memory_id IN ("
-          + Placeholders (memory_ids.size ()) + ")",
+          + Placeholders (placeholders) + ")",
       params);
   std::vector<NodeRow> decoded;
   decoded.reserve (rows.size ());
@@ -530,6 +539,16 @@ struct Route::Impl
   mutable int last_search_failure_code = 0;
   mutable int last_seal_failure_code = 0;
   mutable std::mutex mutex;
+  /// Advances on every change a query result depends on: staged delta,
+  /// seals, activation snapshot, publication, invalidation.
+  std::uint64_t state_epoch = 0;
+  /// The last activated-identity result. One ingest searches the same
+  /// embedding for seed retrieval and again for supersession candidates;
+  /// an unchanged route returns the same identities without re-walking.
+  mutable bool activated_memo_valid = false;
+  mutable std::uint64_t activated_memo_epoch = 0;
+  mutable std::vector<float> activated_memo_query;
+  mutable std::vector<long long> activated_memo_result;
 
   /// Drop only the rows a seal rewrote. Unchanged rows stay valid within the
   /// generation, so the next queries keep their locality instead of
@@ -855,7 +874,11 @@ Route::StagePendingUpsert (long long memory_id,
   try
     {
       std::lock_guard<std::mutex> lock (impl_->mutex);
-      impl_->removed.erase (memory_id);
+      const auto staged = impl_->delta_embeddings.find (memory_id);
+      if (impl_->removed.erase (memory_id) != 0
+          || staged == impl_->delta_embeddings.end ()
+          || staged->second != *normalized)
+        ++impl_->state_epoch;
       impl_->delta_embeddings[memory_id] = std::move (*normalized);
       return true;
     }
@@ -873,8 +896,9 @@ Route::StagePendingRemove (long long memory_id)
   try
     {
       std::lock_guard<std::mutex> lock (impl_->mutex);
-      impl_->delta_embeddings.erase (memory_id);
-      impl_->removed.insert (memory_id);
+      if (impl_->delta_embeddings.erase (memory_id) != 0
+          || impl_->removed.insert (memory_id).second)
+        ++impl_->state_epoch;
       return true;
     }
   catch (...)
@@ -938,6 +962,25 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
         {
           impl_->last_search_failure_code = 2;
           return std::nullopt;
+        }
+      const bool memoizable = return_all_activated
+                              && !use_construction_envelope
+                              && !rebuild_activation;
+      if (memoizable && impl_->activated_memo_valid
+          && impl_->activated_memo_epoch == impl_->state_epoch
+          && impl_->activated_memo_query == *normalized)
+        {
+          // No rows are fetched; the envelope still advances one step so
+          // the sawtooth ramp keeps counting searches.
+          impl_->activation_search_ef = std::min (
+              impl_->parameters.search_ef,
+              impl_->activation_search_ef
+                  + impl_->parameters.activation_search_ef_step);
+          impl_->activation_search_node_budget = std::min (
+              impl_->parameters.search_node_budget,
+              impl_->activation_search_node_budget
+                  + impl_->parameters.activation_search_node_budget_step);
+          return impl_->activated_memo_result;
         }
       const std::size_t persisted_node_budget
           = use_construction_envelope
@@ -1405,6 +1448,13 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
           (void)distance;
           result.push_back (memory_id);
         }
+      if (memoizable)
+        {
+          impl_->activated_memo_valid = true;
+          impl_->activated_memo_epoch = impl_->state_epoch;
+          impl_->activated_memo_query = *normalized;
+          impl_->activated_memo_result = result;
+        }
       if (!impl_->building && !construction_search && !rebuild_activation)
         {
           impl_->activation_search_ef = std::min (
@@ -1462,6 +1512,7 @@ Route::Recenter (const Eigen::VectorXf &consolidation_embedding)
       impl_->activation_entry_level = rows->front ().level;
       impl_->activation_centroid = *normalized;
       impl_->activation_identity_ids = *activated;
+      ++impl_->state_epoch;
       impl_->activation_search_ef
           = impl_->parameters.activation_search_ef_min;
       impl_->activation_search_node_budget
@@ -1524,6 +1575,7 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
       impl_->last_seal_failure_code = 0;
       if (impl_->delta_embeddings.empty () && impl_->removed.empty ())
         return true;
+      ++impl_->state_epoch;
       // Metadata and the durable dirty identities remain visible until the
       // row updates, refreshed metadata, and journal clear commit atomically.
       // An interrupted seal can therefore restage only the committed delta.
@@ -2170,6 +2222,7 @@ Route::Invalidate ()
   try
     {
       std::lock_guard<std::mutex> lock (impl_->mutex);
+      ++impl_->state_epoch;
       auto tx = impl_->store->Begin ();
       tx->Execute (
           impl_->building
@@ -2222,6 +2275,7 @@ Route::PublishBuild (std::size_t expected_active_count)
       tx->Execute ("DELETE FROM cortext_sparse_route_dirty");
       tx->Commit ();
       impl_->building = false;
+      ++impl_->state_epoch;
       return true;
     }
   catch (...)

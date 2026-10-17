@@ -1001,7 +1001,15 @@ TEST_CASE ("Consolidation rebuilds and restarts a knob-bounded SQLite "
   REQUIRE (route->LastActivationSnapshotCacheMissRows () > 0);
   REQUIRE (route->LastActivationSnapshotCacheMissRows ()
            <= parameters.activation_identity_target);
+  // An unchanged route answers the same activated query without walking.
   REQUIRE (route->SearchActivated (observer_query) == first_activation);
+  REQUIRE (route->LastSearchNodeRows () == 0);
+  REQUIRE (route->LastSearchDistanceEvaluations () == 0);
+  // A different query walks again, from the warm activation snapshot.
+  Eigen::VectorXf nearby_query = observer_query;
+  nearby_query[0] += 1e-3f;
+  REQUIRE (route->SearchActivated (nearby_query));
+  REQUIRE (route->LastSearchNodeRows () > 0);
   REQUIRE (route->LastActivationSnapshotCacheMissRows () == 0);
   REQUIRE (route->LastActivationFrontierSeedCount () > 0);
   REQUIRE (route->LastActivationFrontierSeedCount ()
