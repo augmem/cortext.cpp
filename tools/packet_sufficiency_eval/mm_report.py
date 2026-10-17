@@ -181,6 +181,28 @@ def main() -> None:
               f"{ci(j['sufficiency_image'])} | {ci(j['sufficiency_all'])} | {ci(j['sufficiency_control'])} | {ci(j['misleading_all'])} | {ci(j['abstain_safe'])} | "
               f"{rt['text_turn_ms_p50']:.1f}/{rt['text_turn_ms_p95']:.1f} | {rt['image_turn_ms_p50']:.1f}/{rt['image_turn_ms_p95']:.1f} | "
               f"{rt['query_ms_p50']:.1f}/{rt['query_ms_p95']:.1f} | {rt['media_bytes_per_image']:.0f} |")
+    # Paired per-case sufficiency deltas vs the first arm (answerable cases).
+    def per_case(variant):
+        acc = defaultdict(list)
+        for r in load_jsonl(args.flow / variant / "results.jsonl"):
+            if "sufficiency" in r["grade"]:
+                acc[(r["prompt_id"], r["tags"][1])].append(r["grade"]["sufficiency"])
+        return {k: sum(v) / len(v) for k, v in acc.items()}
+    names = [spec.split("=", 1)[0] for spec in args.arm]
+    base = per_case(names[0])
+    print(f"\npaired sufficiency delta vs {args.arm[0]} (image-evidence cases):")
+    for spec, name in zip(args.arm[1:], names[1:]):
+        cur = per_case(name)
+        d = [cur[k] - base[k] for k in base if k in cur and k[1] == "image-evidence"]
+        m, hw, n = mean_ci(d)
+        up = sum(1 for x in d if x > 0); down = sum(1 for x in d if x < 0)
+        print(f"  {spec}: {m:+.3f} ± {hw:.3f} (n={n}, better {up}, worse {down})")
+        report[f"{name}:{spec.split('=', 1)[1]}"]["paired_vs_first"] = [m, hw, n, up, down]
+    for name, r in report.items():
+        j = r["judged"]
+        print(f"{name}: judge cost ${j['judge_cost_usd']:.2f}, errors {j['errors']}, judge images/packet {j['packet_images_mean']:.2f}, "
+              f"packets with media {r['realtime']['packets_with_media']}/{r['realtime']['packets']}, images filtered {r['realtime']['images_filtered']}/{r['realtime']['image_signals']}, "
+              f"image encode p50/p95 {r['realtime']['image_encode_ms_p50']:.0f}/{r['realtime']['image_encode_ms_p95']:.0f} ms")
     if args.json_out:
         args.json_out.write_text(json.dumps(report, indent=1) + "\n")
 
