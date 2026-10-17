@@ -2528,6 +2528,36 @@ TEST_CASE ("Attached turns keep the window that covers the query",
         clipped_window = s.rfind ("Sure.", 0) == 0; // head kept too
     }
   REQUIRE (clipped_window);
+
+  // Ingest-time hydration skips the windowing scan and keeps the head.
+  // Short turns on the same topic fill the anchor slots ahead of the long
+  // reply, so the reply comes back attached (clipped) to its question.
+  for (int i = 0; i < 12; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt ("Orchid conservatory tickets note "
+                                    + std::to_string (i) + ".",
+                                "notes/" + std::to_string (i) + "/0", ts,
+                                cortext::Retention::Durable);
+    }
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  const auto ingest = ctx->ProcessTextAt (
+      "Can you book tickets for the orchid conservatory?", "chat/other/1", ts,
+      cortext::Retention::Durable);
+  std::size_t head_clips = 0, window_clips = 0;
+  for (const auto &m : ingest.retrieved_memory)
+    for (const auto &blob : m.content)
+      {
+        const std::string s (blob.begin (), blob.end ());
+        if (s.rfind ("Sure.", 0) != 0 || s.size () > 600) // clipped only
+          continue;
+        if (s.find ("opens at nine") == std::string::npos)
+          ++head_clips;
+        else
+          ++window_clips;
+      }
+  REQUIRE (head_clips >= 1);
+  REQUIRE (window_clips == 0);
 }
 
 TEST_CASE ("Contiguity attaches adjacent turns of any modality",

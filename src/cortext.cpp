@@ -854,12 +854,14 @@ ClipTextBlob (const std::vector<unsigned char> &text, std::size_t max_bytes)
 // Terms that pick the clipped window of attached text: the query's
 // keywords (the keyword channel's stopword-filtered words) of 3+ bytes,
 // lowercased and cut to 5 bytes so inflections match ("assemble",
-// "assembly"). Only a query that carries text has terms; any other query
-// keeps the leading window.
+// "assembly"). Only a query (Ephemeral retention) that carries text has
+// terms; any other query, and every ingest-time hydration, keeps the
+// leading window, so ingest pays nothing for the windowing scan.
 std::vector<std::string>
 ClipTermsOf (const cortext::Signal *query)
 {
-  if (!query || !query->payload || !IsTextMime (query->mimetype))
+  if (!query || query->retention != Retention::Ephemeral || !query->payload
+      || !IsTextMime (query->mimetype))
     return {};
   const std::string_view text (
       reinterpret_cast<const char *> (query->payload->data ()),
