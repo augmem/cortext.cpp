@@ -50,6 +50,8 @@ struct Options
   // Drive the engine clock from the stream (turn timestamps). Needed for
   // image/audio signals, whose public API has no explicit-timestamp form.
   bool stream_clock = false;
+  // Engine default is on; "off" measures images the change detector drops.
+  bool image_filter = true;
   std::filesystem::path ingest_log_path;
 };
 
@@ -122,6 +124,7 @@ void PrintUsage (std::ostream &out)
       << "                      context reports Recommended or Required\n"
       << "  --stream-clock      Engine clock follows turn timestamps (needed\n"
       << "                      for image/audio, which have no *At API)\n"
+      << "  --image-filter=on|off  Engine image signal filter, default on\n"
       << "  --ingest-log PATH   Write one JSONL row per ingested signal\n"
       << "                      (modality, wall/encode/process ms, filter)\n"
       << "  -h, --help          Show this help\n";
@@ -195,6 +198,12 @@ Options ParseArgs (int argc, char **argv)
       else if (arg == "--stream-clock")
         {
           opts.stream_clock = true;
+        }
+      else if (auto v = TakeArg (arg, "--image-filter="))
+        {
+          if (*v != "on" && *v != "off")
+            throw std::runtime_error ("--image-filter must be on or off");
+          opts.image_filter = *v == "on";
         }
       else if (auto v = TakeArg (arg, "--ingest-log="))
         {
@@ -813,6 +822,7 @@ CreateEngine (const Options &opts, const std::string &db_path,
   cfg.focus = opts.focus;
   cfg.sensitivity = opts.sensitivity;
   cfg.stability = opts.stability;
+  cfg.signal_filter_image_enabled = opts.image_filter;
   if (clock)
     {
       return cortext::Cortext::Create (cfg, db_path, clock);
@@ -1018,6 +1028,7 @@ int Run (const Options &opts)
                 {"process_ms", ctx.process_ms},
                 {"hydrate_ms", ctx.hydrate_ms},
                 {"accepted", accepted},
+                {"filter_reason", ctx.output.signal_filter_reason},
                 {"consolidation", ctx.consolidation_state
                                       != cortext::ConsolidationState::None},
             }.dump () << "\n";
@@ -1277,6 +1288,7 @@ int Run (const Options &opts)
       {"by_question_type", by_type_json},
       {"query_rows", opts.out_path.string ()},
       {"stream_clock", opts.stream_clock},
+      {"image_filter", opts.image_filter},
       {"query_ms", Percentiles (query_ms_all)},
       {"media_bytes_ingested", media_bytes_by_modality},
       {"filtered_signals", filtered_by_modality},
