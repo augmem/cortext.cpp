@@ -11,6 +11,7 @@
 #include "cortext/store/store.hpp"
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
+#include "../contiguity_internal.hpp"
 #include "../experimental_env.hpp"
 
 #include <algorithm>
@@ -1520,6 +1521,75 @@ SearchCrossModalVectors (Transaction &tx, const Eigen::VectorXf &query,
   return out;
 }
 
+// Ranked candidates minus the turns context hydration attaches to a
+// higher-ranked pick anyway. Hydration's contiguity completion
+// (contiguity_internal.hpp) attaches the adjacent turn on each side of every
+// anchor, whatever its modality; a candidate that is such a neighbour of an
+// earlier pick would spend an anchor slot on content the packet already
+// carries (a reply next to its question, the other half of an exchange).
+// Skipped candidates move behind the picks, in order, so a short list still
+// fills. Costs one primary-key range lookup per pick. Returns how many
+// candidates were moved.
+std::size_t
+DeferAttachedNeighbours (const ProcessorContext &p_ctx, Transaction &tx,
+                         std::vector<Candidate> &ranked, std::size_t limit)
+{
+  namespace contiguity = internal::contiguity;
+  std::unordered_set<long long> attached;
+  std::vector<Candidate> picked;
+  std::vector<Candidate> deferred;
+  picked.reserve (ranked.size ());
+  for (auto &candidate : ranked)
+    {
+      if (picked.size () >= limit
+          || attached.count (candidate.memory_id) != 0)
+        {
+          deferred.push_back (std::move (candidate));
+          continue;
+        }
+      const auto it = p_ctx.retrieval_surface_index.find (candidate.memory_id);
+      if (picked.size () + 1 < limit && it != p_ctx.retrieval_surface_index.end ()
+          && it->second < p_ctx.retrieval_surface_cache.size ())
+        {
+          const auto &pick = p_ctx.retrieval_surface_cache[it->second];
+          const std::string stream = contiguity::StreamOf (pick.source_id);
+          const auto rows = tx.Execute (
+              "SELECT * FROM (SELECT memory_id, start_ts, source_id "
+              "  FROM memories WHERE memory_id > ? AND memory_id <= ? "
+              "  AND kind = 'LONG_TERM' ORDER BY memory_id ASC LIMIT 1) "
+              "UNION ALL "
+              "SELECT * FROM (SELECT memory_id, start_ts, source_id "
+              "  FROM memories WHERE memory_id < ? AND memory_id >= ? "
+              "  AND kind = 'LONG_TERM' ORDER BY memory_id DESC LIMIT 1)",
+              { candidate.memory_id,
+                candidate.memory_id + contiguity::kIdScanSpan,
+                candidate.memory_id,
+                candidate.memory_id - contiguity::kIdScanSpan });
+          for (const auto &row : rows)
+            {
+              const long long gap = AnyLongLong (row, "start_ts") - pick.start_ts;
+              const auto source = row.find ("source_id");
+              if (gap > contiguity::kMaxGapMs || gap < -contiguity::kMaxGapMs
+                  || source == row.end ())
+                continue;
+              const auto *source_id
+                  = std::any_cast<std::string> (&source->second);
+              if (source_id && contiguity::StreamOf (*source_id) == stream)
+                attached.insert (AnyLongLong (row, "memory_id"));
+            }
+        }
+      picked.push_back (std::move (candidate));
+    }
+  const std::size_t moved = std::count_if (
+      deferred.begin (), deferred.end (), [&] (const Candidate &c) {
+        return attached.count (c.memory_id) != 0;
+      });
+  for (auto &candidate : deferred)
+    picked.push_back (std::move (candidate));
+  ranked = std::move (picked);
+  return moved;
+}
+
 // Resolves a lexical hit to a seed-eligible candidate under the same rules as
 // dense seeding: a LONG_TERM vector surface written before the exclusion time.
 std::optional<Candidate>
@@ -2160,6 +2230,14 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                  return a.memory_id > b.memory_id;
                });
 
+  // Queries only: ingest-time retrieval feeds the engine's own operations,
+  // not a hydrated packet.
+  std::size_t neighbours_deferred = 0;
+  if (signal.retention == Retention::Ephemeral)
+    neighbours_deferred = DeferAttachedNeighbours (
+        p_ctx, tx, ranked_all, static_cast<std::size_t> (output_limit));
+  context.AddOperationTiming ("GraphRetrieve.neighbours_deferred",
+                              static_cast<double> (neighbours_deferred));
   const auto direct_count = std::min<std::size_t> (
       ranked_all.size (), static_cast<std::size_t> (output_limit));
   std::vector<Candidate> ranked (

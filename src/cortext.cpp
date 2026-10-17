@@ -12,6 +12,7 @@
 #include "operations/retrieval_trace_state.hpp"
 #include "operations/signal_record_rollback_internal.hpp"
 #include "operations/sparse_retrieval_knobs_internal.hpp"
+#include "contiguity_internal.hpp"
 #include "experimental_env.hpp"
 #include "signal_filter.hpp"
 #include "streaming_text_probe.hpp"
@@ -761,22 +762,24 @@ StripSourceBlobsIfDisabled (Cortext::Context::Memory &memory)
 // with distance. A retrieved turn is rarely self-contained: a question's
 // answer, the statement an acknowledgement refers to, or the user message an
 // assistant reply was written for lives one or two turns away. For each
-// retrieved text turn, the adjacent turns from the same source stream
-// (adjacent LONG_TERM rows in write order, within a short time gap) are
-// hydrated as extra content blobs of that same retrieved memory, clipped and
-// under a per-context byte budget: first the immediate successor and
-// predecessor of every anchor in rank order, then, with what budget is left,
-// the turns two steps away. A 2026-10 sweep found the old 6 KiB budget and
+// retrieved turn, of any modality, the adjacent turns from the same source
+// stream (adjacent LONG_TERM rows in write order, within a short time gap;
+// contiguity_internal.hpp) are hydrated as extra content blobs of that same
+// retrieved memory under a per-context byte budget, text clipped and other
+// media whole, charged as one clipped neighbour each: first the immediate
+// successor and predecessor of every anchor in rank order, then, with what
+// budget is left, the turns two steps away. A 2026-10 sweep found the old 6 KiB budget and
 // lag-2 cap (top 6 anchors) binding; 12 KiB with lag 2 for every anchor raised
 // judged sufficiency on Eval 1 by +0.037 (budgets past 12 KiB change nothing). Cost is O(anchors): primary-key range lookups
 // bounded by a fixed id span plus one indexed supersession check per
-// neighbor, issued as two statements (lag 1, lag 2) for all anchors. Ranking
-// and the number of retrieved memories are unchanged.
+// neighbor, issued as two statements (lag 1, lag 2) for all anchors. Query
+// retrieval does not spend anchor slots on these neighbours
+// (DeferAttachedNeighbours in graph_retrieval.cpp).
 constexpr std::size_t kContiguityAnchorLimit = 11;
 constexpr std::size_t kContiguityNeighborMaxBytes = 480;
 constexpr std::size_t kContiguityContextBudgetBytes = 12288;
-constexpr long long kContiguityIdScanSpan = 16;
-constexpr long long kContiguityMaxGapMs = 30LL * 60LL * 1000LL;
+constexpr long long kContiguityIdScanSpan = internal::contiguity::kIdScanSpan;
+constexpr long long kContiguityMaxGapMs = internal::contiguity::kMaxGapMs;
 
 bool
 IsTextMime (const std::string &mimetype)
@@ -811,8 +814,7 @@ AlignContentMimetypes (Cortext::Context::Memory &memory)
 std::string
 SourceStreamOf (const std::string &source_id)
 {
-  const auto slash = source_id.rfind ('/');
-  return slash == std::string::npos ? source_id : source_id.substr (0, slash);
+  return internal::contiguity::StreamOf (source_id);
 }
 
 long long
@@ -863,6 +865,43 @@ public:
         max_fallback_signal_blobs_ (max_fallback_signal_blobs),
         loaded_fallback_signal_blobs_ (loaded_fallback_signal_blobs)
   {
+  }
+
+  // Content of a memory to attach to another memory, whatever its
+  // modalities: its text blobs joined by spaces into one clipped text/plain
+  // blob, then each non-text blob whole. cost charges text by its bytes and
+  // each non-text blob as one full clipped neighbour.
+  struct AttachedParts
+  {
+    std::vector<std::vector<unsigned char> > blobs;
+    std::vector<std::string> mimetypes;
+    std::size_t cost = 0;
+  };
+
+  AttachedParts
+  AttachedContent (long long memory_id, std::size_t max_text_bytes)
+  {
+    AttachedParts parts;
+    auto text = AttachedText (memory_id, max_text_bytes);
+    if (!text.empty ())
+      {
+        parts.cost += text.size ();
+        parts.blobs.push_back (std::move (text));
+        parts.mimetypes.push_back ("text/plain");
+      }
+    const Hydrated &memory = Hydrate (memory_id);
+    for (std::size_t i = 0; i < memory.content.size (); ++i)
+      {
+        const std::string &mime = i < memory.content_mimetypes.size ()
+                                      ? memory.content_mimetypes[i]
+                                      : memory.mimetype;
+        if (memory.content[i].empty () || IsTextMime (mime))
+          continue;
+        parts.cost += max_text_bytes;
+        parts.blobs.push_back (memory.content[i]);
+        parts.mimetypes.push_back (mime);
+      }
+    return parts;
   }
 
   // Text of a memory to attach to another memory's content: its content
@@ -1059,9 +1098,7 @@ FindContiguousTurns (Store *store, const std::vector<ContiguityProbe> &probes)
         }
       auto &turn = turns[static_cast<std::size_t> (k)];
       turn.position_id = neighbor_id;
-      const std::string neighbor_modality = RowString (row, "modality");
-      if ((neighbor_modality == "text" || neighbor_modality == "mixed")
-          && RowLongLong (row, "corrected") == 0)
+      if (RowLongLong (row, "corrected") == 0)
         {
           turn.memory_id = neighbor_id;
         }
@@ -1166,24 +1203,21 @@ AttachContiguousTurns (Store *store,
       {
         return turn.position_id;
       }
-    auto text = hydrations.AttachedText (turn.memory_id,
-                                         kContiguityNeighborMaxBytes);
-    if (!text.empty () && text.size () <= budget)
+    auto parts = hydrations.AttachedContent (turn.memory_id,
+                                             kContiguityNeighborMaxBytes);
+    if (!parts.blobs.empty () && parts.cost <= budget)
       {
         auto &anchor = retrieved[walk.index];
-        budget -= text.size ();
+        budget -= parts.cost;
         AlignContentMimetypes (anchor);
-        if (forward)
-          {
-            anchor.content.push_back (std::move (text));
-            anchor.content_mimetypes.push_back ("text/plain");
-          }
-        else
-          {
-            anchor.content.insert (anchor.content.begin (), std::move (text));
-            anchor.content_mimetypes.insert (anchor.content_mimetypes.begin (),
-                                             "text/plain");
-          }
+        const auto at = forward ? anchor.content.size () : 0;
+        anchor.content.insert (
+            anchor.content.begin () + static_cast<std::ptrdiff_t> (at),
+            std::make_move_iterator (parts.blobs.begin ()),
+            std::make_move_iterator (parts.blobs.end ()));
+        anchor.content_mimetypes.insert (
+            anchor.content_mimetypes.begin () + static_cast<std::ptrdiff_t> (at),
+            parts.mimetypes.begin (), parts.mimetypes.end ());
         excluded_ids.insert (turn.memory_id);
         attached_ids.insert (turn.memory_id);
         ++attached;
@@ -1197,8 +1231,7 @@ AttachContiguousTurns (Store *store,
       for (std::size_t i = 0; i < anchors; ++i)
         {
           const auto &anchor = retrieved[i];
-          if (anchor.id <= 0 || !HasTextContent (anchor)
-              || !HasHydratedContent (anchor))
+          if (anchor.id <= 0 || !HasHydratedContent (anchor))
             {
               continue;
             }

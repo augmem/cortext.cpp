@@ -2397,3 +2397,152 @@ TEST_CASE ("Cortext recalls memories across modalities in both directions",
                                      cortext::Retention::Ephemeral);
   REQUIRE (contains (by_image, matching_note));
 }
+
+namespace
+{
+// Unrelated turns, each its own stream and hours apart, so a query has more
+// candidates than packet anchors and none of them is anyone's neighbour.
+void
+AddUnrelatedTurns (cortext::Cortext &ctx, cortext::FixedClock *clock,
+                   std::uint64_t &ts)
+{
+  const std::vector<std::string> topics = {
+    "The quarterly tax filing is due at the end of April.",
+    "My sister adopted a grey kitten named Pebble.",
+    "The bakery on Elm Street sells sourdough on Sundays.",
+    "We repainted the guest bedroom a pale green colour.",
+    "The marathon route passes the old harbour bridge.",
+    "Our team switched the build system to Bazel last month.",
+    "The dentist moved my cleaning appointment to Friday.",
+    "Grandpa's vinyl collection includes rare jazz records.",
+    "The library extended its weekend opening hours.",
+    "I need new brake pads for the blue hatchback.",
+    "The community garden plot gets full sun until noon.",
+    "Our flight to Lisbon departs from terminal two.",
+    "The thermostat schedule drops to sixty at night.",
+    "She is learning to play the cello with a tutor.",
+  };
+  for (std::size_t i = 0; i < topics.size (); ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      if (clock)
+        clock->SetNowMillis (ts);
+      (void)ctx.ProcessTextAt (topics[i],
+                               "other/" + std::to_string (i) + "/0", ts,
+                               cortext::Retention::Durable);
+    }
+}
+
+std::string
+PacketText (const cortext::Cortext::Context &context)
+{
+  std::string out;
+  for (const auto &memory : context.retrieved_memory)
+    for (std::size_t i = 0; i < memory.content.size (); ++i)
+      {
+        const auto mimes = ContentMimes (memory);
+        if (mimes[i].rfind ("text/", 0) == 0 || mimes[i].empty ())
+          out.append (memory.content[i].begin (), memory.content[i].end ())
+              .append ("\n");
+      }
+  return out;
+}
+
+} // namespace
+
+TEST_CASE ("Query retrieval defers the adjacent turn of a higher anchor",
+           "[cortext][retrieval][contiguity]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  // One exchange: both turns match the query, and hydration attaches each
+  // to the other when only one of them is an anchor.
+  const auto question = ctx->ProcessTextAt (
+      "When does the zebra kite festival start at Marlow beach?",
+      "chat/kites/1", ts, cortext::Retention::Durable);
+  const auto reply = ctx->ProcessTextAt (
+      "The zebra kite festival at Marlow beach starts Saturday at ten.",
+      "chat/kites/2", ts + 60000, cortext::Retention::Durable);
+  REQUIRE (question.output.stored_memory_id.has_value ());
+  REQUIRE (reply.output.stored_memory_id.has_value ());
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+
+  const auto packet = ctx->ProcessTextAt ("zebra kite festival Marlow beach",
+                                          "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral);
+  std::size_t exchange_anchors = 0;
+  for (const auto &memory : packet.retrieved_memory)
+    if (memory.id == *question.output.stored_memory_id
+        || memory.id == *reply.output.stored_memory_id)
+      ++exchange_anchors;
+  // One anchor slot for the exchange; the other turn rides along with it.
+  REQUIRE (exchange_anchors == 1);
+  const std::string text = PacketText (packet);
+  REQUIRE (text.find ("When does the zebra kite festival") != std::string::npos);
+  REQUIRE (text.find ("starts Saturday at ten") != std::string::npos);
+  REQUIRE (packet.output.operation_ms.at ("GraphRetrieve.neighbours_deferred")
+           >= 1.0);
+}
+
+TEST_CASE ("Contiguity attaches adjacent turns of any modality",
+           "[cortext][retrieval][contiguity][media]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_image_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto clock = std::make_shared<cortext::FixedClock> (1000);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  std::uint64_t ts = 1000;
+  AddUnrelatedTurns (*ctx, clock.get (), ts);
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  clock->SetNowMillis (ts);
+  const auto text_turn = ctx->ProcessTextAt (
+      "Here is the receipt from the hardware store run.", "chat/errand/1", ts,
+      cortext::Retention::Durable);
+  REQUIRE (text_turn.output.stored_memory_id.has_value ());
+  // The next turn is a photo alone.
+  clock->SetNowMillis (ts + 60000);
+  std::vector<std::uint8_t> pixels (8 * 8 * 3, 90);
+  cortext::Cortext::Media photo;
+  photo.data = kFakeJpeg.data ();
+  photo.size = kFakeJpeg.size ();
+  photo.mimetype = "image/jpeg";
+  const auto image_turn = ctx->ProcessImage (
+      pixels.data (), 8, 8, 3, "chat/errand/2", photo,
+      cortext::Retention::Durable);
+  REQUIRE (image_turn.output.stored_memory_id.has_value ());
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  AddUnrelatedTurns (*ctx, clock.get (), ts);
+  clock->SetNowMillis (ts + 1000);
+
+  const auto packet = ctx->ProcessTextAt ("receipt from the hardware store",
+                                          "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral);
+  const auto *anchor = FindMemoryWithText (packet.retrieved_memory,
+                                           "receipt from the hardware store");
+  REQUIRE (anchor != nullptr);
+  bool photo_in_packet = false;
+  for (const auto &memory : packet.retrieved_memory)
+    for (const auto &blob : memory.content)
+      photo_in_packet = photo_in_packet
+                        || blob == std::vector<unsigned char> (
+                               kFakeJpeg.begin (), kFakeJpeg.end ());
+  REQUIRE (photo_in_packet);
+  // One anchor for the two turns: the photo rides along with the text turn
+  // (or the text with the photo), whichever ranks first.
+  std::size_t errand_anchors = 0;
+  for (const auto &memory : packet.retrieved_memory)
+    if (memory.id == *image_turn.output.stored_memory_id
+        || memory.id == *text_turn.output.stored_memory_id)
+      ++errand_anchors;
+  REQUIRE (errand_anchors == 1);
+}
