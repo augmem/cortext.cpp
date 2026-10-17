@@ -865,8 +865,8 @@ asymptotic order or the historical window partition's internal sort and
 materialization work.
 Ephemeral retrieval uses the fallback without installing volatile registry
 state.
-It returns a compact selected set from those seeds. Vector similarity owns the
-rank and recency is a tie-break. Graph expansion over association edges was
+It returns a compact selected set from those seeds, ranked by vector similarity
+alone. Graph expansion over association edges was
 removed in the 2026-10 engine ablation: once clustering consolidation was gone,
 no traversable edge type was ever written. `source_id` and modality are metadata,
 not ranking inputs. When a current

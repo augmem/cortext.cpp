@@ -42,7 +42,6 @@ struct Candidate
   Eigen::VectorXf embedding;
   double seed_score = 0.0;
   double source_confidence = 0.0;
-  double temporal_score = 0.0;
   double score = 0.0;
 };
 
@@ -115,7 +114,6 @@ AddSeedCachePhaseTime (SeedCacheProfile *profile,
     }
 }
 
-constexpr double kTemporalRankDaySeconds = 24.0 * 60.0 * 60.0;
 
 double
 Cosine (const Eigen::VectorXf &a, const Eigen::VectorXf &b)
@@ -1370,29 +1368,6 @@ LoadEligibleSeedRowsFromSqlFallback (
   return selected;
 }
 
-double
-TemporalScore (std::uint64_t now_ts, long long start_ts, double F, double S,
-               double T)
-{
-  if (start_ts <= 0 || now_ts <= static_cast<std::uint64_t> (start_ts))
-    {
-      return 0.0;
-    }
-  const auto age_ms = static_cast<std::uint64_t> (now_ts)
-                      - static_cast<std::uint64_t> (start_ts);
-  const double f = core::RetrievalFocusBias (F);
-  const double s = core::RetrievalSensitivityBias (S);
-  const double t = core::RetrievalStabilityBias (T);
-  const double tau_seconds
-      = core::Clamp (core::Lerp (2.0, 14.0, t)
-                         * core::Lerp (1.25, 0.75, f)
-                         * core::Lerp (1.15, 0.80, s)
-                         * kTemporalRankDaySeconds,
-                     kTemporalRankDaySeconds, 21.0 * kTemporalRankDaySeconds);
-  const double age_seconds = static_cast<double> (age_ms) / 1000.0;
-  return core::Clamp (std::exp (-age_seconds / tau_seconds), 0.0, 1.0);
-}
-
 void
 InsertOrBoost (std::unordered_map<long long, Candidate> &candidates,
                Candidate candidate)
@@ -1410,8 +1385,6 @@ InsertOrBoost (std::unordered_map<long long, Candidate> &candidates,
       it->second.source_confidence
           = std::max (it->second.source_confidence,
                       candidate.source_confidence);
-      it->second.temporal_score = std::max (it->second.temporal_score,
-                                            candidate.temporal_score);
       it->second.score = std::max (it->second.score, candidate.score);
       if (it->second.start_ts <= 0)
         {
@@ -1423,16 +1396,6 @@ InsertOrBoost (std::unordered_map<long long, Candidate> &candidates,
           it->second.embedding_id = candidate.embedding_id;
         }
     }
-}
-
-double
-SemanticFirstScore (double semantic_score, double temporal_score)
-{
-  constexpr double kTieBreakScale = 1e-6;
-  const double semantic = core::Clamp (semantic_score, 0.0, 1.0);
-  return semantic
-         + (1.0 - semantic) * kTieBreakScale
-               * core::Clamp (temporal_score, 0.0, 1.0);
 }
 
 std::vector<Candidate>
@@ -1887,10 +1850,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                                           p_ctx, candidate.memory_id,
                                           signal.embedding)
                                           .value_or (candidate.seed_score);
-        candidate.temporal_score = TemporalScore (
-            signal.timestamp, candidate.start_ts, F, S, T);
-        candidate.score = SemanticFirstScore (
-            candidate.seed_score, candidate.temporal_score);
+        candidate.score = core::Clamp (candidate.seed_score, 0.0, 1.0);
         result.push_back (std::move (candidate));
       }
     if (rows_are_current)
@@ -1921,7 +1881,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
             trace.memory_id = candidate.memory_id;
             trace.score = candidate.score;
             trace.relevance = candidate.seed_score;
-            trace.temporal_score = candidate.temporal_score;
             trace.evidence_confidence = candidate.source_confidence;
             trace.activation.base_level = candidate.seed_score;
             trace.activation.activation_total = candidate.score;
@@ -1991,7 +1950,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       trace.memory_id = candidate.memory_id;
       trace.score = candidate.score;
       trace.relevance = candidate.seed_score;
-      trace.temporal_score = candidate.temporal_score;
       trace.activation.base_level = candidate.seed_score;
       trace.activation.activation_total = candidate.score;
       retrieval_trace::RejectedCandidate rejected;
@@ -2141,7 +2099,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       trace.memory_id = candidate.memory_id;
       trace.score = candidate.score;
       trace.relevance = candidate.seed_score;
-      trace.temporal_score = candidate.temporal_score;
       trace.activation.base_level = candidate.seed_score;
       trace.activation.activation_total = candidate.score;
       trace_ranked.push_back (trace);

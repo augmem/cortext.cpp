@@ -200,14 +200,16 @@ expansion:
 selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
 ```
 
-Vector relevance is the primary rank. Event-time recency is restricted to a
-bounded tie-break so an old semantic match cannot be displaced by a recent but
-unrelated memory:
+Vector relevance is the rank:
 
 ```
-semantic(m) = map01(cos(q, embedding(m)))
-score(m) = semantic(m) + (1 - semantic(m)) * 10^-6 * temporal_rank(m)
+score(m) = map01(cos(q, embedding(m)))
 ```
+
+Earlier builds added an event-time recency tie-break,
+`(1 − semantic) × 10^-6 × temporal_rank(m)`. The round-3 ablation (2026-10)
+dropped it with every packet byte-identical (LongMemEval-S 0/48, Eval 1 0/250,
+BEAM-10M conversation 7 0/20), so it was removed.
 
 Earlier builds added a bounded graph bonus from one-hop association expansion.
 It was removed with clustering consolidation (@sec-experimental), because no

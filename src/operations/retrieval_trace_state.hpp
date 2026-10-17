@@ -25,7 +25,6 @@ struct RankedCandidate
   int label_match_count = 0;
   double durable_source_boost = 0.0;
   int durable_source_count = 0;
-  double temporal_score = 0.0;
   double evidence_confidence = 0.0;
   double evidence_weight = 0.0;
   int evidence_source_diversity = 0;
