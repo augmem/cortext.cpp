@@ -50,16 +50,4 @@ RetrievalCompetitionScale (double neuromod_ne)
   return 1.0 + 0.5 * core::Clamp (neuromod_ne, 0.0, 1.0);
 }
 
-inline double
-ValueUpdateGain (double neuromod_da)
-{
-  if (EffectScalesDisabled ()
-      || internal::experimental_env::Flag (
-          "CORTEXT_DISABLE_NEUROMOD_VALUE_GAIN"))
-    {
-      return 1.0;
-    }
-  return 0.5 + 0.5 * core::Clamp (neuromod_da, 0.0, 1.0);
-}
-
 } // namespace cortext::operations::neuromodulation

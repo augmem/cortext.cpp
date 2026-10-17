@@ -967,6 +967,14 @@ GetCoreMigrations ()
               "ALTER TABLE memories DROP COLUMN cascade_decay",
           },
       },
+      {
+          43,
+          "Drop the removed reward-prediction and dopamine state",
+          {
+              "ALTER TABLE state DROP COLUMN outcome_pred",
+              "ALTER TABLE state DROP COLUMN neuromod_da",
+          },
+      },
   };
 }
 

@@ -50,9 +50,6 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
       = core::Clamp (policy.ne_base + policy.ne_surprisal_gain * surprisal
                          + policy.ne_arousal_gain * arousal,
                      0.0, 1.0);
-  p_ctx.neuromod_da
-      = core::Clamp (policy.da_base + std::max (0.0, p_ctx.delta_reward), 0.0,
-                     1.0);
 
   // Oscillatory gating (no discrete modes)
   const uint64_t now_ts = context.GetSignal ().timestamp;
@@ -85,13 +82,10 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
       = neuromodulation::ReconsolidationScale (p_ctx.neuromod_ach);
   const double retrieval_competition_scale
       = neuromodulation::RetrievalCompetitionScale (p_ctx.neuromod_ne);
-  const double value_update_gain
-      = neuromodulation::ValueUpdateGain (p_ctx.neuromod_da);
 
   telemetry::LogDebug ("cortext.neuromodulators", {
     telemetry::Attribute::Double ("ACh", p_ctx.neuromod_ach),
     telemetry::Attribute::Double ("NE", p_ctx.neuromod_ne),
-    telemetry::Attribute::Double ("DA", p_ctx.neuromod_da),
     telemetry::Attribute::Double ("encode_bias", p_ctx.encode_bias),
     telemetry::Attribute::Double ("retrieval_bias", p_ctx.retrieval_bias),
     telemetry::Attribute::Double ("write_threshold_scale",
@@ -100,7 +94,6 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
                                   reconsolidation_scale),
     telemetry::Attribute::Double ("retrieval_competition_scale",
                                   retrieval_competition_scale),
-    telemetry::Attribute::Double ("value_update_gain", value_update_gain),
     telemetry::Attribute::Double ("osc_phase", p_ctx.osc_phase)
   });
 }

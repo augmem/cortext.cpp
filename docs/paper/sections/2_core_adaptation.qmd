@@ -158,27 +158,22 @@ Earlier builds also kept an adaptive memory half-life. It started at `base_half_
 
 To keep the three-knob UI while enabling more biologically faithful control, Cortext maps the knobs and internal signals to continuous neuromodulator-like variables. These are **not** additional user knobs; they are latent control signals derived from F/S/T and real-time stream statistics.
 
-We define three modulators:
+We define two modulators:
 
 * **ACh-like (acetylcholine):** encode vs retrieve bias.
 * **NE-like (norepinephrine):** arousal + interrupt urgency.
-* **DA-like (dopamine):** reward prediction error + value learning.
 
 Baseline levels come from knobs; phasic bursts come from current signals:
 
 ```
 ACh_base(F,S,T) = clamp(0.15 + 0.55S + 0.25(1 − T) − 0.15F, 0, 1)
 NE_base(F,S,T)  = clamp(0.10 + 0.60S + 0.20(1 − T), 0, 1)
-DA_base(F,S,T)  = clamp(0.10 + 0.40F + 0.30T, 0, 1)
 
 ACh_t ← clamp(ACh_base + 0.35 × novelty_t − 0.20 × retrieval_pressure, 0, 1)
 NE_t  ← clamp(NE_base  + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)
-DA_t  ← clamp(DA_base  + max(0, δ_reward_t), 0, 1)
 ```
 
-Where `retrieval_pressure` is the normalized retrieval queue-depth input, and
-`δ_reward_t` is a reward prediction error derived from downstream outcome
-signals (see @sec-structural-metrics). The production operation context does not
+Where `retrieval_pressure` is the normalized retrieval queue-depth input. The production operation context does not
 currently populate queue depth, so this term is zero in the shipped full
 pipeline; tests and experiment hooks can supply it. The other phasic terms are
 live. These modulators drive internal gates without introducing new user-facing
@@ -190,15 +185,15 @@ retrieve_bias ← 1 − encode_bias
 write_threshold_scale ← 1 − 0.3 × NE_t
 reconsolidation_scale ← 1 + 0.4 × ACh_t
 retrieval_competition_scale ← 1 + 0.5 × NE_t
-value_update_gain ← 0.5 + 0.5 × DA_t
 ```
 
-In the current implementation, these latent scales are applied at four concrete downstream sites rather than introduced as separate runtime controls:
+In the current implementation, these latent scales are applied at three concrete downstream sites rather than introduced as separate runtime controls:
 
 * `write_threshold_scale` multiplies the accumulator write-gate threshold, so high `NE_t` lowers the barrier for committing a boundary candidate.
 * `reconsolidation_scale` multiplies reconsolidation drift magnitude, so high `ACh_t` strengthens context-driven reconstruction updates.
 * `retrieval_competition_scale` multiplies lateral inhibition during retrieval competition, so high `NE_t` sharpens suppression among near-duplicate candidates.
-* `value_update_gain` scales procedural-store reward updates, so high `DA_t` increases reinforcement of recently used routines.
+
+Earlier builds also kept a DA-like modulator, `DA_t = clamp(DA_base + max(0, δ_reward_t), 0, 1)`, driven by a reward prediction error `δ_reward_t = outcome_t − EWMA(outcome_t)` from the metric blender. Its only consumer was `value_update_gain` for the procedural value table (@sec-pattern-separation). The engine ablation study (2026-10) removed that table, then the DA modulator, the reward prediction error and their persisted state, with no packet change.
 
 ## Oscillatory Gating (No Discrete Modes)
 

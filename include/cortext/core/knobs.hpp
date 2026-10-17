@@ -1854,12 +1854,6 @@ BlenderOutcomeScoringWeights (double F, double S, double T)
                   0.06, 0.14) };
 }
 
-inline double
-BlenderOutcomeAlpha (double T)
-{
-  return Lerp (0.12, 0.03, Clamp (T, 0.0, 1.0));
-}
-
 // Rate observation window (seconds)
 inline int
 WRateSeconds (double T)
@@ -2290,7 +2284,6 @@ struct NeuromodulatorPolicy
 {
   double ach_base;
   double ne_base;
-  double da_base;
   double retrieval_pressure_depth;
   double ach_novelty_gain;
   double ach_retrieval_pressure_gain;
@@ -2314,7 +2307,6 @@ NeuromodulatorPolicyForKnobs (double F, double S, double T)
   return {
     Clamp (0.15 + 0.55 * s + 0.25 * (1.0 - t) - 0.15 * f, 0.0, 1.0),
     Clamp (0.10 + 0.60 * s + 0.20 * (1.0 - t), 0.0, 1.0),
-    Clamp (0.10 + 0.40 * f + 0.30 * t, 0.0, 1.0),
     Clamp (10.0 * (1.0 - 0.10 * (s - s0) + 0.15 * (t - 0.5)),
            6.0, 14.0),
     Clamp (0.35 * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)),

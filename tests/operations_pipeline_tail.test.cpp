@@ -78,7 +78,6 @@ TEST_CASE ("UpdateNeuromodulators derives bounded control state",
 {
   ProcessorContext pctx;
   pctx.last_signal_timestamp = 1000;
-  pctx.delta_reward = 0.4;
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
   cfg.focus = 0.5;
@@ -97,7 +96,6 @@ TEST_CASE ("UpdateNeuromodulators derives bounded control state",
   REQUIRE (pctx.neuromod_ach >= 0.0);
   REQUIRE (pctx.neuromod_ach <= 1.0);
   REQUIRE (pctx.neuromod_ne > 0.0);
-  REQUIRE (pctx.neuromod_da >= 0.4);
   REQUIRE (pctx.encode_bias >= 0.0);
   REQUIRE (pctx.encode_bias <= 1.0);
   REQUIRE (pctx.retrieval_bias == Catch::Approx (1.0 - pctx.encode_bias));

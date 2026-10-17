@@ -229,11 +229,8 @@ struct ProcessorContext
   // ======================================================================
   int signals_processed = 0;
   double u_t = 0.0;
-  double outcome_pred = 0.0;
-  double delta_reward = 0.0;
   double neuromod_ach = 0.0;
   double neuromod_ne = 0.0;
-  double neuromod_da = 0.0;
   double encode_bias = 0.5;
   double retrieval_bias = 0.5;
   double osc_phase = 0.0;
