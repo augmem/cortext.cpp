@@ -183,7 +183,6 @@ extern "C"
     int affect_interrupt;
     int affect_retrieval;
     int reinforcement_enabled;
-    int procedural_enabled;
     int sequential_edges_enabled;
     int signal_filter_audio_enabled;
     int signal_filter_image_enabled;

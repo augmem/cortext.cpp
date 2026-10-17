@@ -40,6 +40,6 @@ run_case procedural_both_off \
   --max-turns 156 \
   --max-total 156 \
   --consolidate-cycles 2 \
-  --extra-args="--consolidate-every=40 --no-procedural --no-sequential-edges"
+  --extra-args="--consolidate-every=40 --no-sequential-edges"
 
 echo "Wrote Taskmaster study runs to ${ROOT}"

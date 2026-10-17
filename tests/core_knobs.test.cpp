@@ -346,10 +346,6 @@ TEST_CASE ("Graph build thresholds derive from knobs", "[core][knobs]")
 
   REQUIRE (LabelCooccurrenceEdgeWeight (0.5, 1.0, 0.5)
            > LabelCooccurrenceEdgeWeight (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalProceduralSeedMinScore (1.0, 0.5, 0.5)
-           > RetrievalProceduralSeedMinScore (0.0, 0.5, 0.5));
-  REQUIRE (RetrievalProceduralSeedMinScore (0.5, 1.0, 0.5)
-           < RetrievalProceduralSeedMinScore (0.5, 0.0, 0.5));
 }
 
 TEST_CASE ("Neutral retrieval knobs map to judged mixed-media optimum",
@@ -393,12 +389,6 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
            > RetrievalGraphExpandedRagTemporalRankScore (0.5, 0.5, 0.5, 1));
   REQUIRE (RetrievalContextReinstatementAlpha (0.5, 0.5, 1.0)
            < RetrievalContextReinstatementAlpha (0.5, 0.5, 0.0));
-  REQUIRE (RetrievalProceduralSeedReserveCount (0.0, 1.0, 0.0, 2)
-           >= RetrievalProceduralSeedReserveCount (1.0, 0.0, 1.0, 2));
-  REQUIRE (RetrievalProceduralSeedFanout (0.5, 1.0, 0.5)
-           > RetrievalProceduralSeedFanout (0.5, 0.0, 0.5));
-  REQUIRE (RetrievalProceduralSeedFanout (1.0, 0.5, 0.5)
-           <= RetrievalProceduralSeedFanout (0.0, 0.5, 0.5));
   REQUIRE (RetrievalSourceConfidenceThreshold (0.5, 1.0, 0.5, 1.0)
            < RetrievalSourceConfidenceThreshold (0.5, 0.0, 0.5, 1.0));
   REQUIRE (RetrievalSourceConfidenceThreshold (0.5, 0.5, 1.0, 1.0)
@@ -447,17 +437,9 @@ TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
            > RecentRetrievedIdWindow (0.5, 0.5, 0.0));
 }
 
-TEST_CASE ("Retrieval candidate blend scoring policies derive from knobs",
+TEST_CASE ("Retrieval affect scoring policies derive from knobs",
            "[core][knobs][retrieval]")
 {
-  const auto blend_low
-      = RetrievalCandidateBlendScoringWeights (0.0, 0.0, 0.5);
-  const auto blend_high
-      = RetrievalCandidateBlendScoringWeights (1.0, 1.0, 0.5);
-  REQUIRE (blend_high.context > blend_low.context);
-  REQUIRE (blend_high.procedural > blend_low.procedural);
-  REQUIRE (blend_high.label_boost > blend_low.label_boost);
-
   const auto affect_mid = AffectDriveWeights (0.5);
   REQUIRE (affect_mid.arousal_weight
            == Catch::Approx (affect_mid.emotion_weight));

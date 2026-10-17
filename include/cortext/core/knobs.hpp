@@ -610,27 +610,6 @@ RetrievalEvidenceBlendMaxMembers (double F, double S, double T)
                                       * Lerp (0.95, 1.10, t))));
 }
 
-struct RetrievalCandidateBlendWeights
-{
-  double context;
-  double procedural;
-  double label_boost;
-};
-
-inline RetrievalCandidateBlendWeights
-RetrievalCandidateBlendScoringWeights (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return { Lerp (0.15, 0.35, f) * Lerp (1.0, 0.85, s)
-               * Lerp (0.98, 1.02, t),
-           Lerp (0.10, 0.25, s) * Lerp (1.02, 0.98, f)
-               * Lerp (0.98, 1.02, t),
-           Lerp (0.05, 0.18, s) * Lerp (1.04, 0.96, f)
-	               * Lerp (0.98, 1.02, t) };
-}
-
 struct RetrievalMemoryAffectWeights
 {
   double emotion;
@@ -944,37 +923,6 @@ RetrievalContextReinstatementAlpha (double F, double S, double T)
 }
 
 inline int
-RetrievalProceduralSeedReserveCount (double F, double S, double T,
-                                     int remaining_slots)
-{
-  if (remaining_slots <= 0)
-    {
-      return 0;
-    }
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (1.4, 0.6, f) * Lerp (0.85, 1.20, s)
-                     * Lerp (1.05, 0.90, t);
-  const int reserve = static_cast<int> (std::round (Clamp (raw, 0.0, 2.0)));
-  return std::min (reserve, remaining_slots);
-}
-
-inline int
-RetrievalProceduralSeedFanout (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double focus_scale = Clamp (1.0 - 0.20 * (f - f0), 0.85, 1.15);
-  return std::max (
-      1, static_cast<int> (std::round (Lerp (1.0, 4.0, s)
-                                       * Lerp (1.0, 0.75, t)
-                                       * focus_scale)));
-}
-
-inline int
 AdjacentWindow (double F)
 {
   // adjacent_window(F) = round(lerp(adjacent_max, adjacent_min, F)),
@@ -1063,17 +1011,6 @@ RetrievalDiversificationWeights (double F, double S, double T)
       return { 1.0, 0.0 };
     }
   return { w_rel_raw / sum, w_div_raw / sum };
-}
-
-inline double
-RetrievalProceduralSeedMinScore (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (0.44, 0.72, f) * Lerp (1.08, 0.92, s)
-                    * Lerp (0.96, 1.04, t),
-                0.30, 0.80);
 }
 
 // Small boost for consolidated association memories during retrieval ranking.

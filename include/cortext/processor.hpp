@@ -37,7 +37,6 @@ public:
     bool affect_interrupt = true;
     bool affect_retrieval = true;
     bool reinforcement_enabled = true;
-    bool procedural_enabled = true;
     bool sequential_edges_enabled = true;
 
     Encoder *encoder = nullptr; // Required for embedding-based operations

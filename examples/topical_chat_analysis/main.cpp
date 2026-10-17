@@ -270,7 +270,6 @@ struct AnalysisConfig {
   bool affect_interrupt = true;
   bool affect_retrieval = true;
   bool reinforcement_enabled = true;
-  bool procedural_enabled = true;
   bool sequential_edges_enabled = true;
 };
 
@@ -978,8 +977,6 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.semantic_overlap = true;
     } else if (arg == "--reuse") {
       cfg.reset_per_conversation = false;
-    } else if (arg == "--no-procedural") {
-      cfg.procedural_enabled = false;
     } else if (arg == "--no-sequential-edges") {
       cfg.sequential_edges_enabled = false;
     }
@@ -1171,7 +1168,6 @@ int main(int argc, char **argv) {
       c.affect_interrupt = cfg.affect_interrupt;
       c.affect_retrieval = cfg.affect_retrieval;
       c.reinforcement_enabled = cfg.reinforcement_enabled;
-      c.procedural_enabled = cfg.procedural_enabled;
       c.sequential_edges_enabled = cfg.sequential_edges_enabled;
       cortext = cortext::Cortext::Create(c, cfg.db_path);
       embedding_cache.clear();

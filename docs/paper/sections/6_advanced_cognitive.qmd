@@ -367,7 +367,8 @@ either one: retrieval seeds come from the dense vector surface only. The tables
 were still journaled for rollback on every signal and grew by one entry per
 stored memory. The engine ablation study (2026-10) removed both tables, the
 sparse key and its knob with no packet change. The public `procedural_enabled`
-configuration flag no longer controls anything; removing it is a public API
-change and awaits approval. The historical `procedural_proactive` ablation in
+configuration flag (C++ `Config`, C ABI `cortext_config`, and the bindings)
+then controlled nothing and was removed with the unused procedural seed and
+candidate-blend knobs. The historical `procedural_proactive` ablation in
 @sec-experimental evaluated an earlier research-branch path and was an exact
 null.

@@ -133,7 +133,6 @@ public:
     bool affect_interrupt = true;
     bool affect_retrieval = true;
     bool reinforcement_enabled = true;
-    bool procedural_enabled = true;
     bool sequential_edges_enabled = true;
     bool signal_filter_audio_enabled = true;
     bool signal_filter_image_enabled = true;

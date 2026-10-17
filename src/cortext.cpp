@@ -1833,7 +1833,6 @@ struct Cortext::Impl
     pcfg.affect_interrupt = cfg.affect_interrupt;
     pcfg.affect_retrieval = cfg.affect_retrieval;
     pcfg.reinforcement_enabled = cfg.reinforcement_enabled;
-    pcfg.procedural_enabled = cfg.procedural_enabled;
     pcfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
     pcfg.encoder = encoder.get ();
     pcfg.clock = clock;
