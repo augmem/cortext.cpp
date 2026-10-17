@@ -71,6 +71,7 @@ target_include_directories(cortext_audio_video_accumulator_bench PRIVATE
 )
 target_include_directories(cortext_chat_replay_live_run PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src
 )
 # Link dependencies
 target_link_libraries(cortext_text_encoder_bench PRIVATE
