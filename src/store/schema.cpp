@@ -995,6 +995,15 @@ GetCoreMigrations ()
               "ALTER TABLE memories DROP COLUMN recovery_time_start",
           },
       },
+      {
+          46,
+          "Drop the removed reconsolidation lability state",
+          {
+              "ALTER TABLE memories DROP COLUMN lability_state",
+              "ALTER TABLE memories DROP COLUMN lability_ts",
+              "ALTER TABLE memories DROP COLUMN original_centroid",
+          },
+      },
   };
 }
 

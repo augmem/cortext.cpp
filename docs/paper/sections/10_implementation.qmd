@@ -600,8 +600,7 @@ RetrievalStage:
   memory-usage detection
 
 FeedbackStage:
-  reconsolidation, memory usage counters, working memory,
-  accumulator reset
+  memory usage counters, working memory, accumulator reset
 ```
 
 Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so replay

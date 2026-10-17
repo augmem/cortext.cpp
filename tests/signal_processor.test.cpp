@@ -5,7 +5,6 @@
 #include <cortext/clock.hpp>
 #include <cortext/operations/graph_retrieval.hpp>
 #include <cortext/operations/memory_usage_record.hpp>
-#include <cortext/operations/reconsolidation.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/operation_set.hpp>
@@ -2426,7 +2425,6 @@ TEST_CASE ("SignalProcessor engine read-only rollback keeps the retrieval "
   auto pipeline = std::make_unique<DynamicOperationSet> (
       std::make_unique<CaptureRetrievalSurfaceOp> (&before),
       std::make_unique<PrimeQueryFeedbackOp> (query),
-      std::make_unique<operations::ApplyReconsolidation> (),
       std::make_unique<operations::RecordMemoryUsage> (),
       std::make_unique<CaptureRetrievalSurfaceOp> (&after));
   SignalProcessor processor (

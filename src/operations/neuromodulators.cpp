@@ -52,8 +52,6 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
   p_ctx.retrieval_bias = core::Clamp (1.0 - p_ctx.encode_bias, 0.0, 1.0);
   const double write_threshold_scale
       = neuromodulation::WriteThresholdScale (p_ctx.neuromod_ne);
-  const double reconsolidation_scale
-      = neuromodulation::ReconsolidationScale (p_ctx.neuromod_ach);
 
   telemetry::LogDebug ("cortext.neuromodulators", {
     telemetry::Attribute::Double ("ACh", p_ctx.neuromod_ach),
@@ -61,9 +59,7 @@ UpdateNeuromodulators::Execute (OperationContext &context, Transaction &tx) cons
     telemetry::Attribute::Double ("encode_bias", p_ctx.encode_bias),
     telemetry::Attribute::Double ("retrieval_bias", p_ctx.retrieval_bias),
     telemetry::Attribute::Double ("write_threshold_scale",
-                                  write_threshold_scale),
-    telemetry::Attribute::Double ("reconsolidation_scale",
-                                  reconsolidation_scale)
+                                  write_threshold_scale)
   });
 }
 

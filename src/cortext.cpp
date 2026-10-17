@@ -64,7 +64,6 @@
 #include "cortext/operations/metrics.hpp"
 #include "cortext/operations/neuromodulators.hpp"
 #include "cortext/operations/recent_context.hpp"
-#include "cortext/operations/reconsolidation.hpp"
 #include "cortext/operations/signal_metrics_persistence.hpp"
 #include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
@@ -1681,7 +1680,6 @@ private:
 std::unique_ptr<IOperation>
 BuildRootOperationSet (bool probe_mode)
 {
-  using cortext::operations::ApplyReconsolidation;
   using cortext::operations::CheckSpikeBypass;
   using cortext::operations::CheckStreamingPacing;
   using cortext::operations::ComputeCoherence;
@@ -1749,7 +1747,6 @@ BuildRootOperationSet (bool probe_mode)
                      DetectMemoryUsage>;
 
   using FeedbackStage = OperationSet<
-      ApplyReconsolidation,
       RecordMemoryUsage, WorkingMemory,
       ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt>;
 

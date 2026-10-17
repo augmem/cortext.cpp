@@ -273,30 +273,6 @@ TEST_CASE ("MaxDeltaTPerMin follows spec: lerp(0.30, 0.10, maturity)",
 // 5.1.5 Half-Life & Decay Functions (9 functions)
 // =============================================================================
 
-TEST_CASE ("TauLabile follows spec: lerp(30, 300, T)",
-           "[formula][knobs][decay]")
-{
-  // TauLabile = lerp(30, 300, T)
-  REQUIRE (TauLabile (0.0) == Catch::Approx (30.0));
-  REQUIRE (TauLabile (1.0) == Catch::Approx (300.0));
-  REQUIRE (TauLabile (0.5) == Catch::Approx (165.0));
-
-  // Monotonic
-  REQUIRE (TauLabile (0.3) < TauLabile (0.7));
-}
-
-TEST_CASE ("ReconsolidationGain follows spec: lerp(0.2, 0.02, T)",
-           "[formula][knobs][decay]")
-{
-  // ReconsolidationGain = lerp(0.2, 0.02, T)
-  REQUIRE (ReconsolidationGain (0.0) == Catch::Approx (0.2));
-  REQUIRE (ReconsolidationGain (1.0) == Catch::Approx (0.02));
-  REQUIRE (ReconsolidationGain (0.5) == Catch::Approx (0.11));
-
-  // Monotonic: higher T means lower gain
-  REQUIRE (ReconsolidationGain (0.3) > ReconsolidationGain (0.7));
-}
-
 TEST_CASE ("Reinforcement edge-maintenance calibrations remain bounded",
            "[formula][knobs][reinforcement]")
 {
@@ -484,30 +460,6 @@ TEST_CASE ("FlashbulbThreshold follows spec: lerp(0.97, 0.65, SensitivityBias(S)
   // Monotonic: higher S means lower threshold
   REQUIRE (FlashbulbThreshold (0.3) > FlashbulbThreshold (0.7));
 }
-
-TEST_CASE ("LabilitySusceptibility follows spec: (1 - T) * (0.5 + 0.5 * S)",
-           "[formula][knobs][emotional]")
-{
-  // LabilitySusceptibility = (1 - T) * (0.5 + 0.5 * S)
-
-  // At T=1, always 0 (high stability = no lability)
-  REQUIRE (LabilitySusceptibility (0.0, 1.0) == Catch::Approx (0.0));
-  REQUIRE (LabilitySusceptibility (1.0, 1.0) == Catch::Approx (0.0));
-
-  // At T=0, S=0: 1 * 0.5 = 0.5
-  REQUIRE (LabilitySusceptibility (0.0, 0.0) == Catch::Approx (0.5));
-
-  // At T=0, S=1: 1 * 1.0 = 1.0
-  REQUIRE (LabilitySusceptibility (1.0, 0.0) == Catch::Approx (1.0));
-
-  REQUIRE (LabilitySusceptibility (0.5, 0.5)
-           == Catch::Approx ((1.0 - 0.5)
-                             * (0.5 + 0.5 * SensitivityBias (0.5))));
-}
-
-// =============================================================================
-// 5.1.11 Knowledge Graph Functions (3 functions)
-// =============================================================================
 
 TEST_CASE ("MinEpisodesForConcept follows spec: lerp(2, 5, T)",
            "[formula][knobs][graph]")

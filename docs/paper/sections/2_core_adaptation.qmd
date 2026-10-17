@@ -183,13 +183,11 @@ parameters:
 encode_bias ← ACh_t × (0.7 + 0.3S)
 retrieve_bias ← 1 − encode_bias
 write_threshold_scale ← 1 − 0.3 × NE_t
-reconsolidation_scale ← 1 + 0.4 × ACh_t
 ```
 
-In the current implementation, these latent scales are applied at two concrete downstream sites rather than introduced as separate runtime controls:
+In the current implementation, the remaining latent scale is applied at one concrete downstream sites rather than introduced as separate runtime controls:
 
 * `write_threshold_scale` multiplies the accumulator write-gate threshold, so high `NE_t` lowers the barrier for committing a boundary candidate.
-* `reconsolidation_scale` multiplies reconsolidation drift magnitude, so high `ACh_t` strengthens context-driven reconstruction updates.
 
 Earlier builds also kept a DA-like modulator, `DA_t = clamp(DA_base + max(0, δ_reward_t), 0, 1)`, driven by a reward prediction error `δ_reward_t = outcome_t − EWMA(outcome_t)` from the metric blender. Its only consumer was `value_update_gain` for the procedural value table (@sec-pattern-separation). The engine ablation study (2026-10) removed that table, then the DA modulator, the reward prediction error and their persisted state, with no packet change.
 

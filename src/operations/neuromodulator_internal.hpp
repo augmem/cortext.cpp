@@ -26,16 +26,4 @@ WriteThresholdScale (double neuromod_ne)
                       1.0);
 }
 
-inline double
-ReconsolidationScale (double neuromod_ach)
-{
-  if (EffectScalesDisabled ()
-      || internal::experimental_env::Flag (
-          "CORTEXT_DISABLE_NEUROMOD_RECONSOLIDATION_SCALE"))
-    {
-      return 1.0;
-    }
-  return 1.0 + 0.4 * core::Clamp (neuromod_ach, 0.0, 1.0);
-}
-
 } // namespace cortext::operations::neuromodulation

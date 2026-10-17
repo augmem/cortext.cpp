@@ -109,7 +109,6 @@ struct DurableRetrievalState
   long long retrieved = 0;
   long long used = 0;
   long long accessed = 0;
-  long long lability_nanos = 0;
   long long strength_nanos = 0;
   long long associations = 0;
   long long association_weight_nanos = 0;
@@ -131,8 +130,6 @@ SnapshotDurableRetrievalState (cortext::Store &store)
       "COALESCE(SUM(used_count), 0) AS used, "
       "COALESCE(SUM(CASE WHEN last_access IS NOT NULL THEN 1 ELSE 0 END), 0) "
       "  AS accessed, "
-      "COALESCE(CAST(ROUND(SUM(lability_state) * 1000000000.0) AS INTEGER), 0) "
-      "  AS lability_nanos, "
       "COALESCE(CAST(ROUND(SUM(strength) * 1000000000.0) AS INTEGER), 0) "
       "  AS strength_nanos FROM memories");
   REQUIRE (memories.size () == 1);
@@ -140,7 +137,6 @@ SnapshotDurableRetrievalState (cortext::Store &store)
   out.retrieved = AnyToLongLong (memories[0].at ("retrieved"));
   out.used = AnyToLongLong (memories[0].at ("used"));
   out.accessed = AnyToLongLong (memories[0].at ("accessed"));
-  out.lability_nanos = AnyToLongLong (memories[0].at ("lability_nanos"));
   out.strength_nanos = AnyToLongLong (memories[0].at ("strength_nanos"));
 
   const auto associations = store.Execute (

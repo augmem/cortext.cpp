@@ -2,7 +2,6 @@
 #include <cortext/core/utils.hpp>
 #include <cortext/encoder/encoder.hpp>
 #include <cortext/operations/detect_memory_usage.hpp>
-#include <cortext/operations/reconsolidation.hpp>
 #include <cortext/operations/write_gate.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/accumulator_state.hpp>
@@ -185,30 +184,6 @@ private:
   double ne_ = 0.0;
 };
 
-class SetupReconInputsOp : public cortext::IOperation
-{
-public:
-  SetupReconInputsOp (Eigen::VectorXf cur,
-                      std::unordered_map<long long, Eigen::VectorXf> retrieved)
-      : cur_ (std::move (cur)), retrieved_ (std::move (retrieved))
-  {
-  }
-
-  void
-  Execute (cortext::OperationContext &ctx,
-           cortext::Transaction & /*tx*/) const override
-  {
-    auto &pctx = ctx.GetProcessorContext ();
-    pctx.recent_context_embeddings.clear ();
-    pctx.recent_context_embeddings.push_back (cur_);
-    ctx.SetRetrievedMemoryEmbeddings (retrieved_);
-  }
-
-private:
-  Eigen::VectorXf cur_;
-  std::unordered_map<long long, Eigen::VectorXf> retrieved_;
-};
-
 long long
 AnyToInt64 (const std::any &value)
 {
@@ -259,61 +234,6 @@ RunWriteStudy (bool disable_scale)
   return ctx.GetAccumulatorWriteDecision () ? 1.0 : 0.0;
 }
 
-double
-RunReconStudy (bool disable_scale)
-{
-  auto unique_store = cortext::SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
-  cortext::store::ApplyMigrations (*store);
-
-  Eigen::VectorXf current = MakeVec ({ { 0, 1.0f }, { 1, 0.9f } });
-  const Eigen::VectorXf mem = MakeVec ({ { 0, 1.0f } });
-
-  store->Execute (
-      "INSERT INTO embeddings(embedding_id, embedding, created_at) VALUES(?, ?, ?)",
-      { 9LL, ToFloatVec (mem), 1LL });
-  store->Execute (
-      "INSERT INTO memories(memory_id, embedding_id, source_id, kind, start_ts, n_signals, "
-      "modality, s_max, s_avg, strength, created_at) "
-      "VALUES(?, ?, 'bench', 'LONG_TERM', 1, 1, 'text', 0.5, 0.5, 1.0, 1)",
-      { 9LL, 9LL });
-
-  cortext::SignalProcessor::Config cfg;
-  cfg.encoder = &GetBenchEncoder ();
-  cfg.focus = 0.5;
-  cfg.sensitivity = 1.0;
-  cfg.stability = 0.0;
-
-  auto pipeline = std::make_unique<cortext::DynamicOperationSet> (
-      std::make_unique<SetupReconInputsOp> (
-          current, std::unordered_map<long long, Eigen::VectorXf>{ { 9LL, mem } }),
-      std::make_unique<SetNeuromodOp> (1.0, 0.0),
-      std::make_unique<cortext::operations::ApplyReconsolidation> ());
-  cortext::SignalProcessor processor (cfg, store, std::move (pipeline));
-
-  ScopedEnvVar disable_constructive ("CORTEXT_DISABLE_CONSTRUCTIVE_RECALL", "1");
-  std::optional<ScopedEnvVar> disable_guard;
-  if (disable_scale)
-    {
-      disable_guard.emplace (
-          "CORTEXT_DISABLE_NEUROMOD_RECONSOLIDATION_SCALE", "1");
-    }
-  processor.Process (MakeSignal (current, 100));
-  processor.Flush ();
-
-  auto rows = store->Execute (
-      "SELECT embedding FROM embeddings WHERE embedding_id = ?",
-      { 9LL });
-  Eigen::VectorXf updated;
-  if (rows.empty ()
-      || !cortext::core::DecodeFloatBlob (rows[0].at ("embedding"),
-                                          kEmbeddingDim, updated))
-    {
-      return 0.0;
-    }
-  return cortext::core::CosineSimilarity (updated, current);
-}
-
 } // namespace
 
 int
@@ -321,16 +241,11 @@ main ()
 {
   const double write_on = RunWriteStudy (false);
   const double write_off = RunWriteStudy (true);
-  const double recon_on = RunReconStudy (false);
-  const double recon_off = RunReconStudy (true);
 
   std::cout << "neuromod_write_accept_on=" << write_on
             << " neuromod_write_accept_off=" << write_off << "\n";
-  std::cout << "neuromod_recon_similarity_on=" << recon_on
-            << " neuromod_recon_similarity_off=" << recon_off << "\n";
 
-  const bool pass = write_on > write_off
-                    && recon_on > recon_off;
+  const bool pass = write_on > write_off;
   std::cout << "neuromodulator_bench_passed=" << (pass ? "1" : "0") << "\n";
   return pass ? 0 : 1;
 }

@@ -41,7 +41,6 @@ struct Candidate
   long long start_ts = 0;
   Eigen::VectorXf embedding;
   double seed_score = 0.0;
-  double source_confidence = 0.0;
   double score = 0.0;
 };
 
@@ -246,94 +245,6 @@ RefreshCandidateFromProcessorSurface (const ProcessorContext &p_ctx,
   candidate.embedding_id = entry.embedding_id;
   candidate.embedding = entry.embedding;
   return true;
-}
-
-std::optional<double>
-OriginalEvidenceConfidence (const ProcessorContext &p_ctx,
-                            long long memory_id,
-                            const Eigen::VectorXf &query_embedding)
-{
-  const auto surface_it = p_ctx.retrieval_surface_index.find (memory_id);
-  if (surface_it == p_ctx.retrieval_surface_index.end ()
-      || surface_it->second >= p_ctx.retrieval_surface_cache.size ())
-    return std::nullopt;
-  const auto &surface = p_ctx.retrieval_surface_cache[surface_it->second];
-  const long long base_embedding_id
-      = historical_surface_search_cache_internal::BaseEmbeddingIdForMemory (
-          p_ctx, memory_id, surface.embedding_id);
-  const auto state
-      = historical_surface_search_cache_internal::Find (p_ctx);
-  if (!state || base_embedding_id <= 0)
-    return std::nullopt;
-  const auto embedding_it = state->embedding_index.find (base_embedding_id);
-  if (embedding_it == state->embedding_index.end ()
-      || embedding_it->second >= state->entries.size ())
-    return std::nullopt;
-  const auto &base_embedding = state->entries[embedding_it->second].embedding;
-  if (base_embedding.size () != query_embedding.size ())
-    return std::nullopt;
-  return core::Map01 (Cosine (query_embedding, base_embedding));
-}
-
-void
-RefreshProcessorSurfaces (Transaction &tx, ProcessorContext &p_ctx,
-                          long long memory_id, long long old_embedding_id,
-                          long long new_embedding_id,
-                          const Eigen::VectorXf &embedding)
-{
-  auto cache_it = p_ctx.retrieval_surface_index.find (memory_id);
-  if (cache_it != p_ctx.retrieval_surface_index.end ())
-    {
-      auto &entry = p_ctx.retrieval_surface_cache[cache_it->second];
-      if (entry.embedding_id > 0)
-        {
-          p_ctx.retrieval_surface_embedding_index.erase (entry.embedding_id);
-        }
-      entry.embedding_id = new_embedding_id;
-      entry.embedding = embedding;
-      entry.embedding_norm = embedding.norm ();
-      p_ctx.retrieval_surface_embedding_index[new_embedding_id]
-          = cache_it->second;
-    }
-
-  if (old_embedding_id > 0 && old_embedding_id != new_embedding_id
-      && p_ctx.retrieval_surface_embedding_index.find (old_embedding_id)
-             == p_ctx.retrieval_surface_embedding_index.end ())
-    {
-      auto rows = tx.Execute (
-          "SELECT memory_id FROM memories "
-          "WHERE embedding_id = ? AND memory_id != ? "
-          "ORDER BY memory_id ASC LIMIT 1",
-          { old_embedding_id, memory_id });
-      if (!rows.empty () && rows[0].count ("memory_id") == 1)
-        {
-          const long long sibling_memory_id = cortext::store::AnyToLongLong (
-              rows[0].at ("memory_id")).value_or (0);
-          auto sibling_it = p_ctx.retrieval_surface_index.find (
-              sibling_memory_id);
-          if (sibling_memory_id > 0
-              && sibling_it != p_ctx.retrieval_surface_index.end ())
-            {
-              p_ctx.retrieval_surface_embedding_index[old_embedding_id]
-                  = sibling_it->second;
-            }
-        }
-    }
-
-  if (!constructive_recall::CurrentSurfaceWritesDisabled ())
-    {
-      historical_surface_search_cache_internal::UpsertCurrent (
-          p_ctx,
-          { new_embedding_id, memory_id, 0, std::string (), std::string (),
-            embedding });
-    }
-  else
-    {
-      historical_surface_search_cache_internal::
-          SetCurrentSurfaceDatabaseCurrent (p_ctx, false);
-    }
-  retrieval_trace::RecordSurfaceUpsert (
-      memory_id, new_embedding_id, ToFloatVector (embedding));
 }
 
 void
@@ -1382,9 +1293,6 @@ InsertOrBoost (std::unordered_map<long long, Candidate> &candidates,
     {
       it->second.seed_score = std::max (it->second.seed_score,
                                         candidate.seed_score);
-      it->second.source_confidence
-          = std::max (it->second.source_confidence,
-                      candidate.source_confidence);
       it->second.score = std::max (it->second.score, candidate.score);
       if (it->second.start_ts <= 0)
         {
@@ -1846,10 +1754,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           }
         candidate.seed_score = core::Map01 (
             Cosine (signal.embedding, candidate.embedding));
-        candidate.source_confidence = OriginalEvidenceConfidence (
-                                          p_ctx, candidate.memory_id,
-                                          signal.embedding)
-                                          .value_or (candidate.seed_score);
         candidate.score = core::Clamp (candidate.seed_score, 0.0, 1.0);
         result.push_back (std::move (candidate));
       }
@@ -1881,7 +1785,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
             trace.memory_id = candidate.memory_id;
             trace.score = candidate.score;
             trace.relevance = candidate.seed_score;
-            trace.evidence_confidence = candidate.source_confidence;
             trace.activation.base_level = candidate.seed_score;
             trace.activation.activation_total = candidate.score;
             traced.push_back (trace);
@@ -1970,122 +1873,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   retrieved_candidates.reserve (ranked.size ());
   std::vector<retrieval_trace::RankedCandidate> trace_ranked;
   trace_ranked.reserve (ranked.size ());
-  {
-    const auto reconstruction_start = std::chrono::steady_clock::now ();
-    if (constructive_recall_enabled
-        && signal.retention != Retention::Ephemeral
-        && signal.embedding.size () > 0)
-      {
-        const constructive_recall::ReconstructionUpdatePolicy policy {
-          core::ReconstructionHistoryLimit (F, S, T),
-          core::ReconstructionPruneBatchLimit (F, S, T),
-          core::ReconstructionMinUpdateIntervalMs (F, S, T)
-        };
-        const auto reconstruction_policy
-            = core::RetrievalConstructiveReconstructionPolicy (F, S, T);
-        const int update_count
-            = core::RetrievalReconstructionUpdateCount (F, S, T);
-        int updates = 0;
-        for (auto &candidate : ranked)
-          {
-            if (updates >= update_count)
-              {
-                break;
-              }
-            if (candidate.memory_id <= 0 || candidate.embedding.size () == 0
-                || candidate.embedding.size () != signal.embedding.size ())
-              {
-                continue;
-              }
-            if (constructive_recall::ShouldSkipReconstructionUpdate (
-                    tx, candidate.memory_id,
-                    static_cast<long long> (signal.timestamp), "retrieval",
-                    policy))
-              {
-                ++updates;
-                continue;
-              }
-
-            const double source_confidence
-                = core::Clamp (candidate.source_confidence, 0.0, 1.0);
-            const double candidate_score
-                = core::Clamp (candidate.score, 0.0, 1.0);
-            const double context_score
-                = core::Clamp (candidate.seed_score, 0.0, 1.0);
-            const double uncertainty_raw =
-                reconstruction_policy.source_confidence_weight
-                    * (1.0 - source_confidence)
-                    + reconstruction_policy.candidate_score_weight
-                          * (1.0 - candidate_score)
-                    + reconstruction_policy.context_score_weight
-                          * (1.0 - context_score);
-            const double uncertainty = core::Clamp (uncertainty_raw, 0.0, 1.0);
-            const double blend_raw =
-                reconstruction_policy.min_blend
-                + (reconstruction_policy.max_blend
-                   - reconstruction_policy.min_blend) * uncertainty;
-            const double blend = core::Clamp (
-                blend_raw, reconstruction_policy.min_blend,
-                reconstruction_policy.max_blend);
-
-            Eigen::VectorXf reconstructed
-                = static_cast<float> (1.0 - blend) * candidate.embedding
-                  + static_cast<float> (
-                        blend * reconstruction_policy.query_weight)
-                        * signal.embedding;
-            const float norm = reconstructed.norm ();
-            if (norm <= 1e-9f)
-              {
-                continue;
-              }
-            reconstructed /= norm;
-
-            const auto blob_id
-                = constructive_recall::LoadCurrentBlobId (tx,
-                                                          candidate.memory_id);
-            constructive_recall::ReconstructionAppendTimings timings;
-            constructive_recall::AppendReconstructionWithEmbeddingUnchecked (
-                tx, candidate.memory_id, reconstructed, blob_id,
-                static_cast<long long> (signal.timestamp), uncertainty,
-                "retrieval", source_confidence, context_score, policy,
-                &timings, &context.GetProcessorContext ());
-            const long long current_embedding_id
-                = LoadCurrentSurfaceEmbeddingId (tx, candidate.memory_id,
-                                                 candidate.embedding_id);
-            if (auto current = constructive_recall::LoadCurrentEmbedding (
-                    tx, candidate.memory_id, candidate.embedding_id,
-                    static_cast<int> (reconstructed.size ())))
-              {
-                auto &p_ctx = context.GetProcessorContext ();
-                RefreshProcessorSurfaces (tx, p_ctx, candidate.memory_id,
-                                          candidate.embedding_id,
-                                          current_embedding_id, *current);
-                candidate.embedding_id = current_embedding_id;
-                candidate.embedding = *current;
-                candidate.seed_score = core::Map01 (
-                    Cosine (signal.embedding, candidate.embedding));
-              }
-            context.AddOperationTiming (
-                "GraphRetrieve.reconstruction_append_insert_embedding",
-                timings.insert_embedding_ms);
-            context.AddOperationTiming (
-                "GraphRetrieve.reconstruction_append_insert_record",
-                timings.insert_reconstruction_ms);
-            context.AddOperationTiming (
-                "GraphRetrieve.reconstruction_append_current_surface",
-                timings.current_surface_ms);
-            context.AddOperationTiming (
-                "GraphRetrieve.reconstruction_append_prune",
-                timings.prune_ms);
-            ++updates;
-          }
-      }
-    context.AddOperationTiming (
-        "GraphRetrieve.reconstruction_versions",
-        std::chrono::duration<double, std::milli> (
-            std::chrono::steady_clock::now () - reconstruction_start)
-            .count ());
-  }
   for (const auto &candidate : ranked)
     {
       out.emplace (candidate.embedding_id, candidate.embedding);

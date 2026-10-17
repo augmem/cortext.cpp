@@ -2,7 +2,7 @@
 
 This section presents algorithms modeling higher-order cognitive phenomena:
 working memory maintenance, soft anchor formation, retrieval uncertainty,
-and reconsolidation dynamics.
+and the removed reconsolidation dynamics.
 
 **Knob note:** Unless explicitly stated otherwise, F and S in this section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
 
@@ -492,29 +492,24 @@ candidate packet and evidence surfaces to decide whether to answer, ask for
 clarification, or expose multiple possible memories without the engine carrying
 a separate persistent confidence machine.
 
-## Memory Reconsolidation
+## Memory Reconsolidation and Retrieval Reconstruction (Removed)
 
-Following @nader2000fear, retrieved memories enter a labile state permitting modification:
+Earlier builds moved stored embeddings after use. Following @nader2000fear, a
+retrieved memory became labile (`τ_labile = lerp(30, 300, T)`, susceptibility
+`(1 − T) × (0.5 + 0.5 × S)`) and drifted toward the current context by
+`(1 − T) × S × lability × contextual_relevance × lerp(0.2, 0.02, T)`, scaled
+by `1 + 0.4 × ACh_t`. Retrieval itself also re-encoded its top candidates as a
+bounded blend of the stored embedding and the query
+(`blend ∈ [lerp(0.04, 0.07, S), …]`, at most `RetrievalReconstructionUpdateCount`
+updates per signal). Both appended versions to `memory_reconstructions` and
+moved the current retrieval surface. An earlier ripple over association edges
+was removed first because nothing wrote those edges.
 
-```
-τ_labile = lerp(30, 300, T)  # seconds
-reconsolidation_gain = lerp(0.2, 0.02, T)
-lability_susceptibility = (1 − T) × (0.5 + 0.5 × S)
-```
-
-During the lability window, memories can drift toward current context:
-
-```
-drift_magnitude = (1 − T) × S × lability ×
-                   contextual_relevance
-```
-
-Drift applies only to the retrieved memories themselves. Earlier builds also
-rippled lability and drift over `co_occurs` and `reinforces` association edges
-with `ripple_decay = lerp(0.5, 0.1, T)` per hop. Only clustering consolidation
-wrote those edges, so after it was removed the ripple never fired: full-length
-stores hold only `supersedes` edges (BEAM conversation 7: 45,290 edges, all
-`supersedes`). The ripple and its knobs were removed with no packet change.
+The round-3 leave-one-out (2026-10) switched both off together on the full-length evaluations. LongMemEval-S packet gold-turn recall was unchanged (0.642) and Haiku-judged sufficiency moved 0.000; Eval 1 recall rose 0.597 → 0.611 (6 cases better, 1 worse), judged +0.010 ± 0.016; BEAM-10M conversation 7 rose 0.103 → 0.110, judged +0.014 ± 0.027; an eight-episode LongMemEval-M subset (39k turns) kept recall at 0.462, judged 0.000. Instructions fell 5–11% and stores shrank 12–23%. Each source alone was also neutral. The earlier phase-1 "embedding movement" arm that measured harm also switched off the constructive reconstruction representation, so its delta came from that representation change rather than from movement. The engine ablation study (2026-10) therefore removed both movement
+sources, their knobs, the ACh reconsolidation scale and the per-memory lability
+columns (migration 46). Stored memories keep the reconstruction ledger written
+at storage time, so existing stores that already hold moved versions are still
+read through their latest reconstruction.
 
 ## Stored Source Metadata and Supersession
 
@@ -600,20 +595,11 @@ on_memory_write:
             trigger = 'initial'})
 ```
 
-During retrieval:
-```
-current_embedding ← latest(reconstruction.embedding, fallback = memory.embedding)
-score_retrieval(current_embedding, current_context)
-recon ← bounded_blend(current_embedding, query, temporal_context)
-append(memory_reconstructions,
-       {embedding_id = recon.embedding,
-        blob_id = current_blob,
-        ts = now,
-        uncertainty = inferred_retrieval_uncertainty,
-        trigger = 'retrieval'})
-```
+During retrieval the current embedding is the latest reconstruction (or the
+base embedding when none exists). Since the 2026-10 ablation nothing appends
+further versions, so for new stores it equals the stored embedding.
 
-Hydration resolves `memory.current_view` from the latest reconstruction blob when one exists; otherwise it falls back to the immutable evidence packets. Reconsolidation follows the same audit-trail rule: it appends a new `trigger='reconsolidation'` reconstruction instead of overwriting the evidence embedding stored on the base memory row. This gives the current branch the controlled-distortion property the earlier draft claimed, while preserving the original evidence vector for inspection and replay.
+Hydration resolves `memory.current_view` from the latest reconstruction blob when one exists; otherwise it falls back to the immutable evidence packets.
 
 ## Retrieval Competition (Removed)
 

@@ -507,16 +507,6 @@ TEST_CASE ("Retrieval source pressure and scoring helpers derive from knobs",
            > RetrievalRouteTokenMinChars (0.0, 1.0, 0.0));
   REQUIRE (RetrievalDurableSourceSupportSaturationCount (0.0, 0.5)
            > RetrievalDurableSourceSupportSaturationCount (1.0, 0.5));
-
-  const auto low_t_reconstruct
-      = RetrievalConstructiveReconstructionPolicy (0.5, 0.5, 0.0);
-  const auto high_t_reconstruct
-      = RetrievalConstructiveReconstructionPolicy (0.5, 0.5, 1.0);
-  REQUIRE (high_t_reconstruct.max_blend < low_t_reconstruct.max_blend);
-  REQUIRE (high_t_reconstruct.query_weight < low_t_reconstruct.query_weight);
-  REQUIRE (RetrievalReconstructionUpdateCount (0.5, 0.5, 0.5) == 1);
-  REQUIRE (RetrievalReconstructionUpdateCount (0.0, 1.0, 0.0)
-           > RetrievalReconstructionUpdateCount (1.0, 0.0, 1.0));
 }
 
 TEST_CASE ("Retrieval hydration and expansion limits derive from knobs",
@@ -729,39 +719,3 @@ TEST_CASE ("Graph and memory policy constants derive from knobs",
            < MetricUtilitySensitivityScale (0.0));
 }
 
-TEST_CASE ("Reconsolidation and cascade gates derive from knobs",
-           "[core][knobs]")
-{
-  REQUIRE (ReconsolidationDriftClamp (0.5, 0.5, 0.5)
-           == Catch::Approx (0.30));
-  REQUIRE (ReconsolidationDriftSkipEpsilon (0.5, 0.5, 0.5)
-           == Catch::Approx (0.001));
-  REQUIRE (ReconsolidationPrimaryReconstructionLimit (0.5, 0.5, 0.5)
-           == 1);
-  REQUIRE (ReconsolidationUncertaintyRelevanceWeight (0.5, 0.5, 0.5)
-           == Catch::Approx (0.50));
-  REQUIRE (ReconsolidationPrimaryDriftMagnitude (0.5, 0.5, 0.5,
-                                                 1.0, 1.0, 1.0)
-           == Catch::Approx (0.0275));
-  REQUIRE (ReconsolidationPrimaryDriftMagnitude (0.5, 0.5, 0.0,
-                                                 1.0, 1.0, 1.0)
-           > ReconsolidationPrimaryDriftMagnitude (0.5, 0.5, 1.0,
-                                                   1.0, 1.0, 1.0));
-  REQUIRE (ReconsolidationPrimaryDriftMagnitude (0.5, 1.0, 0.5,
-                                                 1.0, 1.0, 1.0)
-           > ReconsolidationPrimaryDriftMagnitude (0.5, 0.0, 0.5,
-                                                   1.0, 1.0, 1.0));
-  REQUIRE (ReconsolidationDriftClamp (0.5, 0.5, 0.0)
-           > ReconsolidationDriftClamp (0.5, 0.5, 1.0));
-  REQUIRE (ReconsolidationPrimaryReconstructionLimit (0.0, 1.0, 0.0)
-           > ReconsolidationPrimaryReconstructionLimit (1.0, 0.0, 1.0));
-
-  REQUIRE (AffectThresholdGain (0.5) == Catch::Approx (0.04));
-  REQUIRE (AffectThresholdGain (1.0) > AffectThresholdGain (0.0));
-  REQUIRE (ThresholdObservedQuantile (0.5, 0.5, 0.5)
-           == Catch::Approx (0.90));
-  REQUIRE (ThresholdObservedQuantile (1.0, 0.5, 0.5)
-           > ThresholdObservedQuantile (0.0, 0.5, 0.5));
-  REQUIRE (ThresholdObservedQuantile (0.5, 1.0, 0.5)
-           < ThresholdObservedQuantile (0.5, 0.0, 0.5));
-}

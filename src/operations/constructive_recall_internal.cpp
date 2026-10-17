@@ -494,34 +494,6 @@ LoadLatestReconstructionImpl (Executor &executor, long long memory_id)
 }
 
 template <typename Executor>
-std::vector<unsigned char>
-LoadCurrentBlobIdImpl (Executor &executor, long long memory_id)
-{
-  if (memory_id <= 0)
-    {
-      return {};
-    }
-  if (const auto latest = LoadLatestReconstructionImpl (executor, memory_id);
-      latest.has_value () && !latest->blob_id.empty ())
-    {
-      return latest->blob_id;
-    }
-
-  auto rows = Exec (executor, "SELECT blob_id FROM memories WHERE memory_id = ?",
-                    { memory_id });
-  if (rows.empty ())
-    {
-      return {};
-    }
-  auto it = rows[0].find ("blob_id");
-  if (it == rows[0].end () || !it->second.has_value ())
-    {
-      return {};
-    }
-  return store::BlobFromAny (it->second);
-}
-
-template <typename Executor>
 std::optional<Eigen::VectorXf>
 LoadCurrentEmbeddingImpl (Executor &executor, long long memory_id,
                           long long base_embedding_id, int expected_dim)
@@ -603,32 +575,6 @@ std::optional<ReconstructionRecord>
 LoadLatestReconstruction (Transaction &tx, long long memory_id)
 {
   return LoadLatestReconstructionImpl (tx, memory_id);
-}
-
-bool
-ShouldSkipReconstructionUpdate (Transaction &tx, long long memory_id,
-                                long long created_at,
-                                std::string_view trigger,
-                                ReconstructionUpdatePolicy policy)
-{
-  return ShouldSkipReconstructionUpdateImpl (tx, memory_id, created_at,
-                                             trigger, policy);
-}
-
-std::vector<unsigned char>
-LoadCurrentBlobId (Store *store, long long memory_id)
-{
-  if (!store)
-    {
-      return {};
-    }
-  return LoadCurrentBlobIdImpl (*store, memory_id);
-}
-
-std::vector<unsigned char>
-LoadCurrentBlobId (Transaction &tx, long long memory_id)
-{
-  return LoadCurrentBlobIdImpl (tx, memory_id);
 }
 
 std::optional<Eigen::VectorXf>

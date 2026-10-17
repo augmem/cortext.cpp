@@ -1236,13 +1236,14 @@ TEST_CASE ("Graph retrieval returns nearest retained memory",
   REQUIRE (seeds.front ().memory_id == 10LL);
   REQUIRE (seeds.front ().embedding_id > 0);
   REQUIRE (seeds.front ().score >= seeds.back ().score);
+  // Retrieval no longer re-encodes what it returns: the stored embedding
+  // stays the current surface.
   auto current_rows = store->Execute (
       "SELECT embedding_id FROM current_memory_embeddings "
       "WHERE memory_id = ?",
       { 10LL });
-  REQUIRE (current_rows.size () == 1);
-  REQUIRE (selected.front ()
-           == std::any_cast<long long> (current_rows[0].at ("embedding_id")));
+  REQUIRE (current_rows.empty ());
+  REQUIRE (selected.front () == 100LL);
 }
 
 TEST_CASE ("Graph retrieval keeps superseded memories eligible as seeds",
@@ -1679,74 +1680,6 @@ TEST_CASE ("Current surface upsert preserves original base embedding lineage",
                state->current_memory_index.at (10LL)).embedding_id
            == 101LL);
   cache::Erase (pctx);
-}
-
-TEST_CASE ("Graph retrieval returns refreshed output after reconstruction",
-           "[operations][graph][retrieval]")
-{
-  cortext::testing::ScopedEnvVar enable_constructive_recall (
-      "CORTEXT_DISABLE_CONSTRUCTIVE_RECALL");
-  cortext::testing::ScopedEnvVar no_reconstruction_interval (
-      "CORTEXT_RECONSTRUCTION_MIN_UPDATE_MS", "0");
-
-  auto unique_store = SQLiteStore::Create (":memory:");
-  auto store = std::shared_ptr<Store> (std::move (unique_store));
-  cortext::testing::InitializeCoreSchema (*store);
-
-  const Eigen::VectorXf query = UnitVec (0);
-  Eigen::VectorXf memory = VectorWithCosineToDim0 (0.20f);
-  SeedMemory (*store, 10, 100, memory, 1000);
-
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  ProcessorContext pctx;
-  auto signal = MakeSignal (query, 2'000'000);
-  OperationContext ctx (signal, pctx, cfg, store.get ());
-  ctx.SetShouldCheckRetrieval (true);
-  ctx.SetWriteExclusionTs (2'000'000);
-
-  GraphAugmentedRetrieveCandidates op;
-  auto tx = store->Begin ();
-  op.Execute (ctx, *tx);
-  tx->Commit ();
-
-  auto recon_rows = store->Execute (
-      "SELECT COUNT(*) AS cnt FROM memory_reconstructions "
-      "WHERE memory_id = ?",
-      { 10LL });
-  REQUIRE (recon_rows.size () == 1);
-  REQUIRE (std::any_cast<long long> (recon_rows[0].at ("cnt")) > 0);
-  auto latest_rows = store->Execute (
-      "SELECT mr.embedding_id, e.embedding FROM memory_reconstructions mr "
-      "JOIN embeddings e ON e.embedding_id = mr.embedding_id "
-      "WHERE mr.memory_id = ? "
-      "ORDER BY mr.reconstruction_id DESC LIMIT 1",
-      { 10LL });
-  REQUIRE (latest_rows.size () == 1);
-  const long long latest_embedding_id
-      = std::any_cast<long long> (latest_rows[0].at ("embedding_id"));
-  REQUIRE (latest_embedding_id != 100LL);
-  Eigen::VectorXf latest;
-  REQUIRE (cortext::core::DecodeFloatBlob (
-      latest_rows[0].at ("embedding"), kEmbeddingDim, latest));
-  auto current_rows = store->Execute (
-      "SELECT embedding_id, embedding FROM current_memory_embeddings "
-      "WHERE memory_id = ?",
-      { 10LL });
-  REQUIRE (current_rows.size () == 1);
-  const long long current_embedding_id
-      = std::any_cast<long long> (current_rows[0].at ("embedding_id"));
-  REQUIRE (current_embedding_id == latest_embedding_id);
-  Eigen::VectorXf current;
-  REQUIRE (cortext::core::DecodeFloatBlob (
-      current_rows[0].at ("embedding"), kEmbeddingDim, current));
-  REQUIRE ((current - latest).norm () < 1e-6f);
-
-  const auto &candidates = ctx.GetRetrievedMemoryCandidates ();
-  REQUIRE_FALSE (candidates.empty ());
-  REQUIRE (candidates.front ().memory_id == 10LL);
-  REQUIRE (candidates.front ().embedding_id == current_embedding_id);
-  REQUIRE ((candidates.front ().embedding - current).norm () < 1e-6f);
 }
 
 TEST_CASE ("Graph retrieval reloads base memory surfaces without current rows",
