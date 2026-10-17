@@ -14,6 +14,7 @@
 #include "operations/sparse_retrieval_knobs_internal.hpp"
 #include "contiguity_internal.hpp"
 #include "experimental_env.hpp"
+#include "store/memory_text_index_internal.hpp"
 #include "signal_filter.hpp"
 #include "streaming_text_probe.hpp"
 
@@ -38,6 +39,7 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -765,10 +767,11 @@ StripSourceBlobsIfDisabled (Cortext::Context::Memory &memory)
 // retrieved turn, of any modality, the adjacent turns from the same source
 // stream (adjacent LONG_TERM rows in write order, within a short time gap;
 // contiguity_internal.hpp) are hydrated as extra content blobs of that same
-// retrieved memory under a per-context byte budget, text clipped and other
-// media whole, charged as one clipped neighbour each: first the immediate
-// successor and predecessor of every anchor in rank order, then, with what
-// budget is left, the turns two steps away. A 2026-10 sweep found the old 6 KiB budget and
+// retrieved memory under a per-context byte budget, text clipped to the
+// window that best covers a text query's terms and other media whole,
+// charged as one clipped neighbour each: first the immediate successor and
+// predecessor of every anchor in rank order, then, with what budget is
+// left, the turns two steps away. A 2026-10 sweep found the old 6 KiB budget and
 // lag-2 cap (top 6 anchors) binding; 12 KiB with lag 2 for every anchor raised
 // judged sufficiency on Eval 1 by +0.037 (budgets past 12 KiB change nothing). Cost is O(anchors): primary-key range lookups
 // bounded by a fixed id span plus one indexed supersession check per
@@ -848,6 +851,118 @@ ClipTextBlob (const std::vector<unsigned char> &text, std::size_t max_bytes)
   return out;
 }
 
+// Terms that pick the clipped window of attached text: the query's
+// keywords (the keyword channel's stopword-filtered words) of 3+ bytes,
+// lowercased and cut to 5 bytes so inflections match ("assemble",
+// "assembly"). Only a query that carries text has terms; any other query
+// keeps the leading window.
+std::vector<std::string>
+ClipTermsOf (const cortext::Signal *query)
+{
+  if (!query || !query->payload || !IsTextMime (query->mimetype))
+    return {};
+  const std::string_view text (
+      reinterpret_cast<const char *> (query->payload->data ()),
+      query->payload->size ());
+  std::vector<std::string> terms;
+  for (auto &w : store::memory_text_index_internal::QueryWords (text, 32))
+    {
+      if (w.size () < 3)
+        continue;
+      if (w.size () > 5)
+        w.resize (5);
+      if (std::find (terms.begin (), terms.end (), w) == terms.end ())
+        terms.push_back (std::move (w));
+    }
+  return terms;
+}
+
+// Clips text to max_bytes keeping the window with the most distinct query
+// terms: the first kClipHeadBytes (turn header: time, speaker) stay, then
+// the best window. Falls back to the head clip when no window beats it.
+std::vector<unsigned char>
+ClipTextAroundTerms (const std::vector<unsigned char> &text,
+                     std::size_t max_bytes,
+                     const std::vector<std::string> &terms)
+{
+  if (text.size () <= max_bytes)
+    return text;
+  constexpr std::size_t kClipHeadBytes = 64;
+  const auto is_word = [] (unsigned char c) {
+    return c >= 0x80 || std::isalnum (c);
+  };
+  // (position, term index) of every word that starts with a term.
+  std::vector<std::pair<std::size_t, std::size_t> > hits;
+  for (std::size_t i = 0; i < text.size ();)
+    {
+      while (i < text.size () && !is_word (text[i]))
+        ++i;
+      const std::size_t start = i;
+      while (i < text.size () && is_word (text[i]))
+        ++i;
+      if (i == start)
+        continue;
+      for (std::size_t t = 0; t < terms.size (); ++t)
+        {
+          const auto &term = terms[t];
+          if (i - start < term.size ())
+            continue;
+          bool match = true;
+          for (std::size_t k = 0; k < term.size () && match; ++k)
+            match = static_cast<char> (std::tolower (text[start + k])) == term[k];
+          if (match)
+            {
+              hits.emplace_back (start, t);
+              break;
+            }
+        }
+    }
+  const auto distinct_in = [&] (std::size_t lo, std::size_t hi) {
+    std::vector<bool> seen (terms.size (), false);
+    std::size_t n = 0;
+    for (const auto &[pos, t] : hits)
+      if (pos >= lo && pos < hi && !seen[t])
+        {
+          seen[t] = true;
+          ++n;
+        }
+    return n;
+  };
+  const std::size_t head_score = distinct_in (0, max_bytes);
+  const std::size_t window = max_bytes - kClipHeadBytes - 8;
+  std::size_t best_start = 0, best_score = head_score;
+  for (const auto &[pos, t] : hits)
+    {
+      (void)t;
+      // Start a little before the hit so the sentence around it survives.
+      std::size_t lo = pos > 96 ? pos - 96 : 0;
+      if (lo < kClipHeadBytes)
+        continue;
+      while (lo < pos && is_word (text[lo - 1]))
+        ++lo;
+      const std::size_t score = distinct_in (lo, lo + window);
+      if (score > best_score)
+        {
+          best_score = score;
+          best_start = lo;
+        }
+    }
+  if (best_start == 0)
+    return ClipTextBlob (text, max_bytes);
+  std::vector<unsigned char> head (
+      text.begin (), text.begin () + static_cast<std::ptrdiff_t> (kClipHeadBytes));
+  auto out = ClipTextBlob (head, kClipHeadBytes - 3);
+  out.push_back (' ');
+  std::size_t lo = best_start;
+  while (lo < text.size () && (text[lo] & 0xC0u) == 0x80u)
+    ++lo;
+  std::vector<unsigned char> tail (text.begin () + static_cast<std::ptrdiff_t> (lo),
+                                   text.end ());
+  auto clipped = ClipTextBlob (tail, window);
+  out.insert (out.end (), clipped.begin (), clipped.end ());
+  return out;
+}
+
 // Hydrations for the attachment steps, which read but never write. A memory
 // a step hydrates again (a neighbour that did not fit the budget, a
 // predecessor that is also a neighbour of another anchor) is served from the
@@ -860,10 +975,12 @@ public:
   AttachmentHydrations (Store *store, ObjectStore *object_store,
                         SharedObjectReads *shared,
                         int max_fallback_signal_blobs,
-                        std::size_t *loaded_fallback_signal_blobs)
+                        std::size_t *loaded_fallback_signal_blobs,
+                        std::vector<std::string> clip_terms = {})
       : store_ (store), object_store_ (object_store), shared_ (shared),
         max_fallback_signal_blobs_ (max_fallback_signal_blobs),
-        loaded_fallback_signal_blobs_ (loaded_fallback_signal_blobs)
+        loaded_fallback_signal_blobs_ (loaded_fallback_signal_blobs),
+        clip_terms_ (std::move (clip_terms))
   {
   }
 
@@ -931,11 +1048,13 @@ public:
             text.push_back (' ');
           }
         text.insert (text.end (), blob.begin (), blob.end ());
-        if (text.size () > max_bytes)
+        if (clip_terms_.empty () && text.size () > max_bytes)
           {
             break;
           }
       }
+    if (!clip_terms_.empty ())
+      return ClipTextAroundTerms (text, max_bytes, clip_terms_);
     return ClipTextBlob (text, max_bytes);
   }
 
@@ -982,6 +1101,7 @@ private:
   SharedObjectReads *shared_;
   int max_fallback_signal_blobs_;
   std::size_t *loaded_fallback_signal_blobs_;
+  std::vector<std::string> clip_terms_;
   std::unordered_map<long long, Hydrated> cache_;
 };
 
@@ -1982,7 +2102,7 @@ struct Cortext::Impl
     span.SetStatusOk ();
     telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
     const auto hydrate_start = std::chrono::steady_clock::now ();
-    Cortext::Context result = HydrateContext (out, true, &s.embedding);
+    Cortext::Context result = HydrateContext (out, true, &s.embedding, true, &s);
     const auto hydrate_end = std::chrono::steady_clock::now ();
     hydrate_span.SetStatusOk ();
     result.encode_ms = 0.0;
@@ -2063,7 +2183,8 @@ struct Cortext::Impl
   HydrateContext (const cortext::SignalProcessor::Output &out,
                   bool hydrate_working_memory = true,
                   const Eigen::VectorXf *query_embedding = nullptr,
-                  bool hydrate_retrieved_memory = true)
+                  bool hydrate_retrieved_memory = true,
+                  const cortext::Signal *query_signal = nullptr)
   {
     Cortext::Context result;
     if (query_embedding)
@@ -2260,7 +2381,8 @@ struct Cortext::Impl
       }
     AttachmentHydrations attachment_hydrations (
         store.get (), object_store.get (), &attachment_reads,
-        max_fallback_signal_blobs, &loaded_fallback_signal_blobs);
+        max_fallback_signal_blobs, &loaded_fallback_signal_blobs,
+        ClipTermsOf (query_signal));
     const auto anchor_rows = SourceBlobsDisabled ()
         ? std::unordered_map<long long, AnchorRow> ()
         : LoadAnchorRows (store.get (), result.retrieved_memory,
@@ -2450,7 +2572,7 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2503,7 +2625,7 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2574,7 +2696,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2644,7 +2766,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2719,7 +2841,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2789,7 +2911,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2986,7 +3108,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
   Cortext::Context result
-      = cortext.impl_->HydrateContext (out, true, &s.embedding);
+      = cortext.impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -3065,7 +3187,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
   Cortext::Context result
-      = cortext.impl_->HydrateContext (out, true, &s.embedding);
+      = cortext.impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -3249,7 +3371,7 @@ struct StreamingTextProbeSession::Impl
 
     const auto hydrate_start = std::chrono::steady_clock::now ();
     Cortext::Context result
-        = cortext->impl_->HydrateContext (out, false, &signal.embedding);
+        = cortext->impl_->HydrateContext (out, false, &signal.embedding, true, &signal);
     const auto hydrate_end = std::chrono::steady_clock::now ();
 
     result.encode_ms = ToMillis (encode_end - total_start);

@@ -2491,6 +2491,45 @@ TEST_CASE ("Query retrieval defers the adjacent turn of a higher anchor",
            >= 1.0);
 }
 
+TEST_CASE ("Attached turns keep the window that covers the query",
+           "[cortext][retrieval][contiguity]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  (void)ctx->ProcessTextAt ("Can you book tickets for the orchid conservatory?",
+                            "chat/garden/1", ts, cortext::Retention::Durable);
+  std::string reply = "Sure. ";
+  for (int i = 0; i < 24; ++i)
+    reply += "Weekend traffic downtown is heavy, so leave early. ";
+  reply += "The orchid conservatory opens at nine and tickets cost twelve.";
+  REQUIRE (reply.size () > 1000);
+  (void)ctx->ProcessTextAt (reply, "chat/garden/2", ts + 60000,
+                            cortext::Retention::Durable);
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+
+  const auto packet = ctx->ProcessTextAt ("orchid conservatory tickets",
+                                          "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral);
+  const auto *anchor = FindMemoryWithText (packet.retrieved_memory,
+                                           "book tickets for the orchid");
+  REQUIRE (anchor != nullptr);
+  bool clipped_window = false;
+  for (const auto &blob : anchor->content)
+    {
+      const std::string s (blob.begin (), blob.end ());
+      if (s.find ("opens at nine") != std::string::npos && s.size () <= 480)
+        clipped_window = s.rfind ("Sure.", 0) == 0; // head kept too
+    }
+  REQUIRE (clipped_window);
+}
+
 TEST_CASE ("Contiguity attaches adjacent turns of any modality",
            "[cortext][retrieval][contiguity][media]")
 {
