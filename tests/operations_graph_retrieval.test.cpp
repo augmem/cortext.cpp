@@ -2525,6 +2525,79 @@ TEST_CASE ("SQLite sparse route keeps a full node's nearest neighbors as "
   REQUIRE (arrivals_linked == level_zero_links);
 }
 
+TEST_CASE ("SQLite sparse route links a staged row from its ingest walk",
+           "[operations][graph][retrieval][hnsw][sqlite][reciprocal]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  state.sparse_route_parameters = parameters;
+  auto append_entry = [&] (long long memory_id, Eigen::VectorXf embedding) {
+    embedding.normalize ();
+    const std::size_t index = state.current_entries.size ();
+    state.current_entries.emplace_back (
+        memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+        std::move (embedding), memory_id);
+    state.current_memory_index.emplace (memory_id, index);
+    state.current_memory_order.emplace (memory_id, index);
+  };
+  constexpr long long kBaseCount = 700;
+  for (long long memory_id = 1; memory_id <= kBaseCount; ++memory_id)
+    {
+      Eigen::VectorXf embedding (kEmbeddingDim);
+      for (Eigen::Index dimension = 0; dimension < embedding.size ();
+           ++dimension)
+        embedding[dimension] = std::sin (
+            static_cast<float> (memory_id * (dimension + 1)) * 0.013f);
+      append_entry (memory_id, std::move (embedding));
+    }
+  std::size_t advances = 0;
+  while (!state.sqlite_sparse_route && advances++ < 32)
+    REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route);
+  auto &route = *state.sqlite_sparse_route;
+
+  // Ingest order: the turn's embedding is walked before its memory row is
+  // staged, then the seal links the staged row.
+  constexpr long long kHub = kBaseCount / 2;
+  Eigen::VectorXf arrival
+      = state.current_entries[static_cast<std::size_t> (kHub - 1)].embedding;
+  arrival[5] += 0.02f;
+  arrival.normalize ();
+  REQUIRE (route.SearchActivated (arrival));
+  REQUIRE (route.LastSearchNodeRows () > 0);
+  constexpr long long kArrival = kBaseCount + 1;
+  append_entry (kArrival, arrival);
+  REQUIRE (route.Upsert (kArrival, arrival));
+  REQUIRE (cache::ReconcileSQLiteSparseRoute (
+      state, *store, state.sqlite_sparse_route, nullptr));
+  REQUIRE (route.LastSealWalkReuseCount () == 1);
+
+  const auto result = route.Search (arrival, 16);
+  REQUIRE (result);
+  REQUIRE (result->size () >= 2);
+  CHECK (result->at (0) == kArrival);
+  CHECK (result->at (1) == kHub);
+  const auto rows = store->Execute (
+      "SELECT links FROM cortext_sparse_route_nodes WHERE memory_id = ?",
+      { kArrival });
+  REQUIRE (rows.size () == 1);
+  const auto bytes = store::BlobFromAny (rows.front ().at ("links"));
+  std::uint32_t level_zero_count = 0;
+  std::memcpy (&level_zero_count, bytes.data () + 4, sizeof (std::uint32_t));
+  REQUIRE (level_zero_count > 0);
+  long long first_link = 0;
+  std::memcpy (&first_link, bytes.data () + 8, sizeof (long long));
+  CHECK (first_link == kHub);
+}
+
 TEST_CASE ("SQLite sparse route invalidates a moved active journal slice "
            "before publishing stale topology",
            "[operations][graph][retrieval][hnsw][sqlite][backfill]"

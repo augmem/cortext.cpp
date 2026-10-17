@@ -328,6 +328,9 @@ public:
   std::size_t CacheOrderRows () const;
   int LastSearchFailureCode () const;
   int LastSealFailureCode () const;
+  /// Staged rows the last seal linked from their ingest-time activated walk
+  /// instead of a construction walk.
+  std::size_t LastSealWalkReuseCount () const;
   long long ActivationEntryMemoryId () const;
   std::size_t ActivationIdentityCount () const;
   std::vector<long long> ActivationIdentityIds () const;

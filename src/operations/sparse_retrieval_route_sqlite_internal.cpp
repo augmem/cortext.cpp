@@ -310,6 +310,19 @@ DecodeLinks (const std::any &value, int expected_level,
   return decoded;
 }
 
+std::uint64_t
+QueryKey (const std::vector<float> &query)
+{
+  std::uint64_t hash = 0xcbf29ce484222325ULL;
+  const auto *bytes = reinterpret_cast<const unsigned char *> (query.data ());
+  for (std::size_t index = 0; index < query.size () * sizeof (float); ++index)
+    {
+      hash ^= bytes[index];
+      hash *= 0x100000001b3ULL;
+    }
+  return hash;
+}
+
 /// Open-addressing set of positive memory ids for one traversal. A query
 /// probes every level-zero link of each expanded row, so most probes hit an
 /// already-visited id; a flat table keeps that membership test allocation
@@ -538,6 +551,7 @@ struct Route::Impl
   mutable std::size_t last_search_distance_evaluations = 0;
   mutable int last_search_failure_code = 0;
   mutable int last_seal_failure_code = 0;
+  std::size_t last_seal_walk_reuse_count = 0;
   mutable std::mutex mutex;
   /// Advances on every change a query result depends on: staged delta,
   /// seals, activation snapshot, publication, invalidation.
@@ -549,6 +563,15 @@ struct Route::Impl
   mutable std::uint64_t activated_memo_epoch = 0;
   mutable std::vector<float> activated_memo_query;
   mutable std::vector<long long> activated_memo_result;
+  /// Nearest identities of recently walked activated queries, keyed by the
+  /// normalized query. A new memory's embedding is walked at ingest; its
+  /// seal reuses that neighborhood as link proposals instead of walking the
+  /// construction envelope again. Cleared by every seal, bounded by 2B.
+  mutable std::unordered_map<std::uint64_t,
+                             std::pair<std::vector<float>,
+                                       std::vector<long long>>>
+      walked_neighborhoods;
+  mutable std::deque<std::uint64_t> walked_order;
 
   /// Drop only the rows a seal rewrote. Unchanged rows stay valid within the
   /// generation, so the next queries keep their locality instead of
@@ -1454,6 +1477,28 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
           impl_->activated_memo_epoch = impl_->state_epoch;
           impl_->activated_memo_query = *normalized;
           impl_->activated_memo_result = result;
+          const std::size_t kept = std::min (
+              result.size (),
+              impl_->parameters.row_addressed_level_zero_links
+                  + impl_->parameters.backfill_batch_size);
+          const std::uint64_t key = QueryKey (*normalized);
+          if (impl_->walked_neighborhoods
+                  .insert_or_assign (
+                      key, std::make_pair (
+                               *normalized,
+                               std::vector<long long> (
+                                   result.begin (),
+                                   result.begin ()
+                                       + static_cast<std::ptrdiff_t> (kept))))
+                  .second)
+            impl_->walked_order.push_back (key);
+          while (impl_->walked_order.size ()
+                 > 2 * impl_->parameters.backfill_batch_size)
+            {
+              impl_->walked_neighborhoods.erase (
+                  impl_->walked_order.front ());
+              impl_->walked_order.pop_front ();
+            }
         }
       if (!impl_->building && !construction_search && !rebuild_activation)
         {
@@ -1530,6 +1575,10 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
 {
   if (!impl_ || !impl_->store)
     return false;
+  {
+    std::lock_guard<std::mutex> lock (impl_->mutex);
+    impl_->last_seal_walk_reuse_count = 0;
+  }
   std::unordered_map<long long, std::vector<long long>> neighbor_proposals;
   if (!hnsw_route)
     {
@@ -1548,8 +1597,57 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
             queries.emplace_back (memory_id, std::move (query));
           }
       }
+      std::unordered_map<long long, std::vector<long long>> walked;
+      {
+        std::lock_guard<std::mutex> lock (impl_->mutex);
+        if (!impl_->building)
+          for (const auto &[memory_id, embedding] : impl_->delta_embeddings)
+            {
+              const auto found
+                  = impl_->walked_neighborhoods.find (QueryKey (embedding));
+              if (found != impl_->walked_neighborhoods.end ()
+                  && found->second.first == embedding)
+                walked.emplace (memory_id, found->second.second);
+            }
+      }
+      {
+        std::lock_guard<std::mutex> lock (impl_->mutex);
+        impl_->last_seal_walk_reuse_count = walked.size ();
+      }
       for (const auto &[memory_id, query] : queries)
         {
+          const auto reuse = walked.find (memory_id);
+          if (reuse != walked.end ())
+            {
+              // The ingest walk already ranked this exact embedding over a
+              // larger envelope; other staged rows join as candidates and
+              // the link selection below ranks every candidate exactly.
+              // Same candidate count as the construction walk: M + |delta|
+              // nearest from the ingest walk, then the staged rows.
+              const std::size_t walked_limit
+                  = impl_->parameters.row_addressed_neighbor_count
+                    + queries.size ();
+              std::vector<long long> candidates;
+              candidates.reserve (walked_limit + queries.size ());
+              for (const long long candidate : reuse->second)
+                {
+                  if (candidates.size () >= walked_limit)
+                    break;
+                  if (candidate != memory_id)
+                    candidates.push_back (candidate);
+                }
+              for (const auto &[staged_id, staged_query] : queries)
+                {
+                  (void)staged_query;
+                  if (staged_id != memory_id
+                      && std::find (candidates.begin (), candidates.end (),
+                                    staged_id)
+                             == candidates.end ())
+                    candidates.push_back (staged_id);
+                }
+              neighbor_proposals.emplace (memory_id, std::move (candidates));
+              continue;
+            }
           auto candidates = SearchWithEnvelope (
               query, impl_->parameters.row_addressed_neighbor_count
                          + queries.size (),
@@ -2061,6 +2159,8 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               impl_->activation_identity_ids.clear ();
             }
           impl_->InvalidateCachedRows (update_ids);
+          impl_->walked_neighborhoods.clear ();
+          impl_->walked_order.clear ();
           impl_->delta_embeddings.clear ();
           impl_->removed.clear ();
           return true;
@@ -2450,6 +2550,15 @@ Route::LastSearchFailureCode () const
     return 0;
   std::lock_guard<std::mutex> lock (impl_->mutex);
   return impl_->last_search_failure_code;
+}
+
+std::size_t
+Route::LastSealWalkReuseCount () const
+{
+  if (!impl_)
+    return 0;
+  std::lock_guard<std::mutex> lock (impl_->mutex);
+  return impl_->last_seal_walk_reuse_count;
 }
 
 int

@@ -3176,6 +3176,10 @@ SignalProcessor::Process (const Signal &signal)
                           sealed ? 0.0
                                  : static_cast<double> (
                                        prior->LastSealFailureCode ()));
+                      op_context.AddOperationTiming (
+                          "SignalProcessor.sqlite_sparse_route_ordinary_seal_walk_reuse",
+                          static_cast<double> (
+                              prior->LastSealWalkReuseCount ()));
                     }
                 }
             }
