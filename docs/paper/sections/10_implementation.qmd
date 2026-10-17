@@ -724,7 +724,13 @@ expanding every memory sibling, whereas the current surface ranks per-memory
 rows. The complete embedding-level pass therefore preserves sibling fanout even
 when the per-memory candidate limit is saturated. This proof changes neither
 the candidate population nor the chosen supersession edges, but the current
-surface distance pass remains proportional to that surface.
+surface distance pass remains proportional to that surface. Above the sparse
+cutover the current result comes from the bounded SQLite route and carries no
+exact cutoff, so memory storage no longer verifies it against the complete
+historical population: it ranks only the tracked changed memories' historical
+embeddings exactly and accepts the route's approximate current neighbours for
+every unchanged memory. Candidate work is then independent of store size, and
+the written `supersedes` edges are as approximate as the route.
 Rollback and flush recovery also rehydrate each current entry's original base
 ID from `memories.embedding_id`; they never infer it from the reconstructed
 surface.
