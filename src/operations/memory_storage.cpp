@@ -1322,6 +1322,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       double signal_embedding_insert_ms = 0.0;
       double signal_row_insert_ms = 0.0;
       double signal_id_select_ms = 0.0;
+      double signal_vector_insert_ms = 0.0;
       const int active_signal_embedding_capacity
           = active_signal_embedding_ring_internal::Capacity (
               cfg.focus, cfg.sensitivity, cfg.stability);
@@ -1370,6 +1371,17 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                   signal_embedding_insert_ms
                       += ElapsedMillis (signal_embedding_start);
                   stored_signal_id = *signal_id;
+                  if (!sig_rec.blob_id.empty ()
+                      && sig_rec.embedding.size () > 0)
+                    {
+                      const auto vector_start = SteadyClock::now ();
+                      savepoint->Execute (
+                          "INSERT OR IGNORE INTO memory_signal_vectors "
+                          "(blob_id, modality, embedding) VALUES (?, ?, ?)",
+                          { sig_rec.blob_id, sig_rec.modality,
+                            EigenToFloatVec (sig_rec.embedding) });
+                      signal_vector_insert_ms += ElapsedMillis (vector_start);
+                    }
                   if (sig_rec.timestamp == signal.timestamp
                       && sig_rec.modality == signal.modality)
                     {
@@ -1384,6 +1396,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                   signal_row_insert_ms);
       context.AddOperationTiming ("MemoryStorage.select_signal_ids",
                                   signal_id_select_ms);
+      context.AddOperationTiming ("MemoryStorage.insert_signal_vectors",
+                                  signal_vector_insert_ms);
 
       for (auto &entry : inserted_search_entries)
         {

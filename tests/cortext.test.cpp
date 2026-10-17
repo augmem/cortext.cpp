@@ -2281,3 +2281,119 @@ TEST_CASE ("Cortext multi-modality memory keeps and returns every signal",
   REQUIRE (std::count (slot_mimes.begin (), slot_mimes.end (), "image/jpeg")
            == 1);
 }
+
+namespace
+{
+std::vector<float>
+RetrievalView (std::vector<float> v)
+{
+  v.resize (256);
+  double norm = 0.0;
+  for (float x : v)
+    norm += static_cast<double> (x) * x;
+  for (float &x : v)
+    x = static_cast<float> (x / std::sqrt (norm));
+  return v;
+}
+} // namespace
+
+TEST_CASE ("Cortext recalls memories across modalities in both directions",
+           "[cortext][media][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_image_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto clock = std::make_shared<cortext::FixedClock> (1000);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  const auto set_vector = [&] (long long memory_id, const std::string &modality,
+                               const std::vector<float> &v) {
+    store->Execute ("UPDATE memory_signal_vectors SET embedding = ? "
+                    "WHERE blob_id IN (SELECT blob_id FROM signals "
+                    "WHERE memory_id = ? AND modality = ?)",
+                    { v, memory_id, modality });
+  };
+
+  // Photos (image memories). Their stored vectors stand in for what each
+  // photo shows; the image tower itself is not under test.
+  const std::vector<std::string> scenes = {
+    "a bowl of tomato soup",        "a snowy mountain trail",
+    "a laptop on a desk",           "a cat sleeping on a sofa",
+    "a crowded subway platform",    "a plate of sushi",
+    "a sunset over the ocean",      "a pile of autumn leaves",
+    "a birthday cake with candles", "a city skyline at night",
+    "a red bicycle leaning on a fence",
+  };
+  std::uint64_t ts = 1000;
+  long long bicycle_photo = 0;
+  for (std::size_t i = 0; i < scenes.size (); ++i)
+    {
+      std::vector<std::uint8_t> pixels (8 * 8 * 3,
+                                        static_cast<std::uint8_t> (20 * i));
+      std::vector<std::uint8_t> bytes = kFakeJpeg;
+      bytes.push_back (static_cast<std::uint8_t> (i));
+      cortext::Cortext::Media photo;
+      photo.data = bytes.data ();
+      photo.size = bytes.size ();
+      photo.mimetype = "image/jpeg";
+      clock->SetNowMillis (ts += 60000);
+      auto ingest = ctx->ProcessImage (pixels.data (), 8, 8, 3,
+                                       "camera/roll/" + std::to_string (i),
+                                       photo, cortext::Retention::Durable);
+      REQUIRE (ingest.output.stored_memory_id.has_value ());
+      set_vector (*ingest.output.stored_memory_id, "image",
+                  RetrievalView (ctx->EmbedText (scenes[i])));
+      if (i + 1 == scenes.size ())
+        bicycle_photo = *ingest.output.stored_memory_id;
+    }
+  // Notes (text memories); one is about what a query photo will show.
+  std::vector<std::uint8_t> query_pixels (8 * 8 * 3, 77);
+  long long matching_note = 0;
+  for (int i = 0; i < 40; ++i)
+    {
+      const bool target = i == 39;
+      auto ingest = ctx->ProcessTextAt (
+          target ? "Remember to water the plants on Friday."
+                 : "Weekly note " + std::to_string (i)
+                       + ": the red invoice for the bicycle shop fence repair"
+                         " is due next week.",
+          "notes/main", ts += 60000, cortext::Retention::Durable);
+      clock->SetNowMillis (ts);
+      REQUIRE (ingest.output.stored_memory_id.has_value ());
+      if (target)
+        {
+          matching_note = *ingest.output.stored_memory_id;
+          set_vector (matching_note, "text",
+                      RetrievalView (ctx->EmbedImage (query_pixels.data (), 8,
+                                                      8, 3)));
+        }
+    }
+
+  const auto contains = [] (const cortext::Cortext::Context &c, long long id) {
+    return std::any_of (c.retrieved_memory.begin (), c.retrieved_memory.end (),
+                        [id] (const auto &m) { return m.id == id; });
+  };
+  clock->SetNowMillis (ts += 60000);
+  auto by_text = ctx->ProcessTextAt ("the red bicycle by the fence",
+                                     "query/public", ts,
+                                     cortext::Retention::Ephemeral);
+  INFO ("xmodal hits "
+        << by_text.output.operation_ms.at ("GraphRetrieve.cross_modal_hits")
+        << " added "
+        << by_text.output.operation_ms.at ("GraphRetrieve.cross_modal_added")
+        << " vectors "
+        << AnyToLongLong (store->Execute ("SELECT COUNT(*) AS n FROM "
+                                          "memory_signal_vectors")[0]
+                              .at ("n"))
+        << " retrieved " << by_text.retrieved_memory.size ());
+  REQUIRE (contains (by_text, bicycle_photo));
+  REQUIRE (by_text.output.operation_ms.at ("GraphRetrieve.cross_modal_hits")
+           >= 1.0);
+
+  clock->SetNowMillis (ts += 60000);
+  auto by_image = ctx->ProcessImage (query_pixels.data (), 8, 8, 3,
+                                     "query/camera",
+                                     cortext::Retention::Ephemeral);
+  REQUIRE (contains (by_image, matching_note));
+}

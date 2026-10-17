@@ -1407,6 +1407,119 @@ LoadLexicalSeedConfig ()
   return cfg;
 }
 
+// Cross-modal seed channel: a query of one modality against the stored
+// signal vectors of every other modality in the shared space (text query ->
+// image/audio signals, image query -> text/audio signals, ...). Cosines
+// across modalities sit far below those within one (the modality gap: a
+// matching image scores about as high as unrelated text), so each stored
+// modality is ranked in its own list, gated by a per-query z-score over all
+// of that modality's vectors, and fused by reciprocal rank like the lexical
+// channel instead of competing on raw cosine. Same-modality recall stays
+// with dense seeding over memory vectors.
+struct CrossModalSeedConfig
+{
+  bool enabled = true;
+  std::size_t limit = 3;  // per stored modality
+  double min_z = 1.5;
+  double rrf_k = 60.0;
+  double weight = 1.0;
+  std::size_t min_population = 3;
+};
+
+// Experiment hooks only (CORTEXT_EXPERIMENT_HOOKS builds); release builds use
+// the defaults.
+CrossModalSeedConfig
+LoadCrossModalSeedConfig ()
+{
+  namespace env = internal::experimental_env;
+  CrossModalSeedConfig cfg;
+  cfg.enabled = env::Int ("CORTEXT_XMODAL_SEEDS").value_or (1) != 0;
+  cfg.limit = static_cast<std::size_t> (
+      std::max (0, env::Int ("CORTEXT_XMODAL_LIMIT").value_or (3)));
+  cfg.min_z = env::Int ("CORTEXT_XMODAL_MIN_Z_PERMILLE").value_or (1500)
+              / 1000.0;
+  cfg.weight = env::Int ("CORTEXT_XMODAL_WEIGHT_PERMILLE").value_or (1000)
+               / 1000.0;
+  return cfg;
+}
+
+struct CrossModalHit
+{
+  long long memory_id = 0;
+  double z = 0.0;
+};
+
+// Per stored modality other than the query's: memories whose signals match
+// the query, best first (per memory, its best signal's z-score among all
+// vectors of that modality, kept when >= min_z).
+std::map<std::string, std::vector<CrossModalHit>>
+SearchCrossModalVectors (Transaction &tx, const Eigen::VectorXf &query,
+                         const std::string &query_modality,
+                         const CrossModalSeedConfig &cfg)
+{
+  // The engine's signal modalities; each other one is read through the
+  // modality index, so a query never scans its own modality's vectors.
+  static const char *const kModalities[] = { "text", "image", "audio" };
+  const int dim = static_cast<int> (query.size ());
+  std::map<std::string, std::vector<std::pair<long long, double>>> scored;
+  Eigen::VectorXf vec;
+  for (const char *modality : kModalities)
+    {
+      if (query_modality == modality)
+        continue;
+      const auto rows = tx.Execute (
+          "SELECT s.memory_id AS memory_id, v.embedding AS embedding "
+          "FROM memory_signal_vectors v "
+          "JOIN signals s ON s.blob_id = v.blob_id "
+          "JOIN memories m ON m.memory_id = s.memory_id "
+          "WHERE v.modality = ? AND m.kind = 'LONG_TERM'",
+          { std::string (modality) });
+      for (const auto &row : rows)
+        {
+          const auto emb = row.find ("embedding");
+          if (emb == row.end () || !AnyToEmbedding (emb->second, dim, vec))
+            continue;
+          scored[modality].emplace_back (AnyLongLong (row, "memory_id"),
+                                         Cosine (query, vec));
+        }
+    }
+  std::map<std::string, std::vector<CrossModalHit>> out;
+  for (const auto &[modality, list] : scored)
+    {
+      // A z-score needs a population of that modality.
+      if (list.size () < cfg.min_population)
+        continue;
+      double mean = 0.0;
+      for (const auto &[id, c] : list)
+        mean += c;
+      mean /= static_cast<double> (list.size ());
+      double var = 0.0;
+      for (const auto &[id, c] : list)
+        var += (c - mean) * (c - mean);
+      const double sd = std::sqrt (var / static_cast<double> (list.size ()));
+      if (sd <= 1e-9)
+        continue;
+      std::unordered_map<long long, double> best;
+      for (const auto &[id, c] : list)
+        {
+          const double z = (c - mean) / sd;
+          if (z < cfg.min_z)
+            continue;
+          auto [it, inserted] = best.emplace (id, z);
+          if (!inserted && z > it->second)
+            it->second = z;
+        }
+      auto &hits = out[modality];
+      for (const auto &[id, z] : best)
+        hits.push_back ({ id, z });
+      std::sort (hits.begin (), hits.end (),
+                 [] (const CrossModalHit &a, const CrossModalHit &b) {
+                   return a.z != b.z ? a.z > b.z : a.memory_id > b.memory_id;
+                 });
+    }
+  return out;
+}
+
 // Resolves a lexical hit to a seed-eligible candidate under the same rules as
 // dense seeding: a LONG_TERM vector surface written before the exclusion time.
 std::optional<Candidate>
@@ -1958,6 +2071,67 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                               static_cast<double> (lexical_hits));
   context.AddOperationTiming ("GraphRetrieve.lexical_added",
                               static_cast<double> (lexical_added));
+
+  // Cross-modal channel for queries of any modality (see
+  // CrossModalSeedConfig): one gap-corrected list per other stored modality,
+  // fused by reciprocal rank.
+  start_profile_timing ();
+  static const CrossModalSeedConfig xmodal_cfg = LoadCrossModalSeedConfig ();
+  std::size_t xmodal_hits = 0;
+  std::size_t xmodal_added = 0;
+  if (xmodal_cfg.enabled && xmodal_cfg.limit > 0
+      && signal.retention == Retention::Ephemeral && embedding_dim > 0
+      && !signal.modality.empty ())
+    {
+      std::map<std::string, std::vector<CrossModalHit>> lists;
+      try
+        {
+          lists = SearchCrossModalVectors (tx, signal.embedding,
+                                           signal.modality, xmodal_cfg);
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogWarn (
+              "cortext.graph_retrieval.cross_modal_unavailable",
+              { telemetry::Attribute::String ("error", e.what ()) });
+        }
+      for (const auto &[modality, hits] : lists)
+        {
+          (void)modality;
+          xmodal_hits += hits.size ();
+          if (!hits.empty () && fused_scores.empty ())
+            for (std::size_t rank = 0; rank < seeded.size (); ++rank)
+              fused_scores[seeded[rank].memory_id]
+                  += 1.0 / (xmodal_cfg.rrf_k + static_cast<double> (rank + 1));
+          std::size_t list_rank = 0;
+          for (const auto &hit : hits)
+            {
+              if (list_rank >= xmodal_cfg.limit)
+                break;
+              auto candidate = LexicalCandidate (
+                  p_ctx, tx, hit.memory_id,
+                  static_cast<long long> (exclusion_ts), embedding_dim);
+              if (!candidate)
+                continue;
+              ++list_rank;
+              fused_scores[hit.memory_id]
+                  += xmodal_cfg.weight
+                     / (xmodal_cfg.rrf_k + static_cast<double> (list_rank));
+              if (candidates.count (hit.memory_id) != 0)
+                continue;
+              candidate->seed_score = core::Map01 (
+                  Cosine (signal.embedding, candidate->embedding));
+              candidate->score = core::Clamp (candidate->seed_score, 0.0, 1.0);
+              InsertOrBoost (candidates, std::move (*candidate));
+              ++xmodal_added;
+            }
+        }
+    }
+  profile_timing ("GraphRetrieve.cross_modal_seeds", section_start);
+  context.AddOperationTiming ("GraphRetrieve.cross_modal_hits",
+                              static_cast<double> (xmodal_hits));
+  context.AddOperationTiming ("GraphRetrieve.cross_modal_added",
+                              static_cast<double> (xmodal_added));
 
   start_profile_timing ();
   // Candidates are the already family-collapsed seed set.

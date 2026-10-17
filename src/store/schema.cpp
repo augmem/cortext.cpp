@@ -1042,6 +1042,29 @@ GetCoreMigrations ()
               "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
           },
       },
+      {
+          50,
+          "Shared-space vectors of stored signals, keyed by content",
+          {
+              // One retrieval-view vector per stored signal payload of any
+              // modality (content id = objstore BLAKE3 id). Memories reach a
+              // vector through their signal rows, so merges stay correct and
+              // identical payloads share one vector.
+              "CREATE TABLE IF NOT EXISTS memory_signal_vectors ("
+              "  blob_id BLOB PRIMARY KEY,"
+              "  modality TEXT NOT NULL,"
+              "  embedding BLOB NOT NULL)",
+              "CREATE INDEX IF NOT EXISTS idx_memory_signal_vectors_modality "
+              "ON memory_signal_vectors(modality)",
+              "CREATE INDEX IF NOT EXISTS idx_signals_blob "
+              "ON signals(blob_id) WHERE blob_id IS NOT NULL",
+              "CREATE TRIGGER IF NOT EXISTS signals_vector_delete "
+              "AFTER DELETE ON signals WHEN old.blob_id IS NOT NULL "
+              "BEGIN DELETE FROM memory_signal_vectors "
+              "WHERE blob_id = old.blob_id AND NOT EXISTS ("
+              "  SELECT 1 FROM signals WHERE blob_id = old.blob_id); END",
+          },
+      },
   };
 }
 
