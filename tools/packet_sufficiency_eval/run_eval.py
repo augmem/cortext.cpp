@@ -19,6 +19,7 @@ models. Layout matches the claude-api hillclimb report builder.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -55,10 +56,11 @@ METRICS = [
     {"id": "ret_precision", "label": "ret precision", "kind": "float", "scale": 1},
     {"id": "wm_needed", "label": "WM needed", "kind": "float", "scale": 1},
 ]
-PERF_FIELDS = ["packet_chars", "packet_items", "query_ms", "judge_cost_usd", "judge_s"]
+PERF_FIELDS = ["packet_chars", "packet_items", "packet_images", "query_ms", "judge_cost_usd", "judge_s"]
 HARNESS_PATHS = [
     "tools/packet_sufficiency_eval/run_eval.py",
     "tools/packet_sufficiency_eval/build_cases.py",
+    "tools/packet_sufficiency_eval/build_memlens_cases.py",
     "tools/memory_eval_runner/main.cpp",
 ]
 
@@ -115,6 +117,22 @@ Packet size is not a virtue: do not reward long packets for their length.
 needed_items: ids of packet items containing needed facts.
 relevant_retrieved: ids of R items that bear on the question at all.
 reason: one or two sentences naming what is present or missing."""
+
+# Rubric v2 extended for images (--rubric v2img). Appended to JUDGE_SYSTEM for
+# every packet of a multimodal run, image or not, so arms share one prompt.
+JUDGE_IMAGE_ADDENDUM = """
+
+Some packet items are images. An image belongs to the item whose label \
+precedes it ("[R3] ... [image 1 of R3 follows]") and is part of that \
+memory, exactly like its text. Judge an image only by what is visibly in it \
+(text on a receipt, an object, a label, a count): it counts as a needed fact \
+only if a careful reader looking at it could read or recognize that fact. Do \
+not assume content you cannot see. A packet image may be omitted when a \
+packet has many images; the item then says "[image omitted]". Gold evidence \
+turns may mention "[attached image; BLIP caption: ...]": the caption only \
+tells you what the original image showed - it is not in the packet unless \
+packet text or a packet image carries it."""
+MAX_JUDGE_IMAGES = 5
 
 JUDGE_SCHEMA = {
     "type": "object",
@@ -214,6 +232,8 @@ def build_packets(args, cases: list[dict], vdir: Path) -> dict[str, dict]:
         f"--sensitivity={args.sensitivity}",
         f"--stability={args.stability}",
         f"--consolidate={args.consolidate}",
+        f"--ingest-log={sub / 'ingest.jsonl'}",
+        *args.runner_arg,
     ]
     eprint(f"packets: ingesting {len(episodes)} episodes for {len(key_rows)} queries ...")
     t0 = time.time()
@@ -235,6 +255,8 @@ def build_packets(args, cases: list[dict], vdir: Path) -> dict[str, dict]:
                 "stability": args.stability,
                 "cortext_env": args.cortext_env,
                 "consolidate": args.consolidate,
+                "runner_args": args.runner_arg,
+                "rubric": args.rubric,
                 "ingest_seconds": round(time.time() - t0, 1),
             },
             indent=2,
@@ -251,14 +273,53 @@ def packet_items(packet: dict) -> list[tuple[str, str]]:
     return items
 
 
-def judge_prompt(case: dict, items: list[tuple[str, str]]) -> str:
-    body = {
+def packet_media(packet: dict) -> dict[str, list[dict]]:
+    out = {}
+    for prefix, key in (("R", "retrieved"), ("W", "working")):
+        for i, m in enumerate(packet.get(key, [])):
+            if m.get("media"):
+                out[f"{prefix}{i + 1}"] = m["media"]
+    return out
+
+
+def judge_content(case: dict, items: list[tuple[str, str]], media: dict[str, list[dict]]) -> tuple[list[dict], int]:
+    """Content blocks for --rubric v2img: the v2 prompt with packet images
+    interleaved after their item, at most MAX_JUDGE_IMAGES (rank order)."""
+    blocks = [{"type": "text", "text": json.dumps(judge_header(case), indent=2) + "\n\n<packet>"}]
+    shown = 0
+    for iid, text in items:
+        refs = media.get(iid, [])
+        notes = []
+        imgs = []
+        for k, ref in enumerate(refs, 1):
+            path = ref.get("judge_path")
+            if path and shown < MAX_JUDGE_IMAGES and Path(path).is_file():
+                shown += 1
+                notes.append(f"[image {k} of {iid} follows]")
+                imgs.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                         "data": base64.b64encode(Path(path).read_bytes()).decode()}})
+            else:
+                notes.append("[image omitted]")
+        blocks.append({"type": "text", "text": f"[{iid}] {text}" + (" " + " ".join(notes) if notes else "")})
+        blocks += imgs
+    if not items:
+        blocks.append({"type": "text", "text": "(empty packet)"})
+    blocks.append({"type": "text", "text": "</packet>"})
+    return blocks, shown
+
+
+def judge_header(case: dict) -> dict:
+    return {
         "question": case["question"],
         "question_date": case["question_date"],
         "requires_abstention": case["requires_abstention"],
         "gold_answer": case["answers"],
         "gold_evidence": case["evidence"],
     }
+
+
+def judge_prompt(case: dict, items: list[tuple[str, str]]) -> str:
+    body = judge_header(case)
     packet = "\n\n".join(f"[{iid}] {text}" for iid, text in items) or "(empty packet)"
     return json.dumps(body, indent=2) + "\n\n<packet>\n" + packet + "\n</packet>"
 
@@ -271,17 +332,45 @@ class JudgeError(Exception):
         self.kind, self.usage, self.retries = kind, usage, retries
 
 
-def call_claude(prompt: str, model: str, timeout_s: float) -> tuple[dict, dict, float]:
+def judge_system() -> str:
+    return JUDGE_SYSTEM + (JUDGE_IMAGE_ADDENDUM if args_global.rubric == "v2img" else "")
+
+
+def parse_stream(stdout: str) -> dict:
+    """Last `result` event of --output-format stream-json."""
+    result = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") == "result":
+                result = ev
+    if result is None:
+        raise json.JSONDecodeError("no result event", stdout[-200:], 0)
+    return result
+
+
+def call_claude(prompt, model: str, timeout_s: float) -> tuple[dict, dict, float]:
+    """prompt is a str (rubric v2) or a list of content blocks (v2img)."""
+    blocks = isinstance(prompt, list)
     cmd = [
         args_global.claude_bin, "-p",
         "--model", model,
         "--tools", "",
         "--setting-sources", "",
         "--no-session-persistence",
-        "--system-prompt", JUDGE_SYSTEM,
+        "--system-prompt", judge_system(),
         "--json-schema", json.dumps(JUDGE_SCHEMA),
-        "--output-format", "json",
     ]
+    if blocks:
+        cmd += ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+        stdin = json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n"
+    else:
+        cmd += ["--output-format", "json"]
+        stdin = prompt
     retries = 0
     deadline = time.monotonic() + timeout_s
     with tempfile.TemporaryDirectory(prefix="psuff_judge_") as cwd:
@@ -291,12 +380,12 @@ def call_claude(prompt: str, model: str, timeout_s: float) -> tuple[dict, dict, 
                 raise JudgeError("timeout", "wall-clock ceiling", retries=retries)
             t0 = time.monotonic()
             try:
-                proc = subprocess.run(cmd, input=prompt, text=True, capture_output=True, timeout=remaining, cwd=cwd)
+                proc = subprocess.run(cmd, input=stdin, text=True, capture_output=True, timeout=remaining, cwd=cwd)
             except subprocess.TimeoutExpired:
                 raise JudgeError("timeout", "wall-clock ceiling", retries=retries)
             elapsed = time.monotonic() - t0
             try:
-                out = json.loads(proc.stdout)
+                out = parse_stream(proc.stdout) if blocks else json.loads(proc.stdout)
             except json.JSONDecodeError:
                 out = {"is_error": True, "result": (proc.stdout + proc.stderr)[-500:]}
             status = out.get("api_error_status")
@@ -339,7 +428,11 @@ def score(case: dict, packet: dict, grade: dict) -> dict:
 
 def run_case(case: dict, rep: int, packet: dict, vdir: Path, model: str, timeout_s: float):
     items = packet_items(packet)
-    prompt = judge_prompt(case, items)
+    n_images = 0
+    if args_global.rubric == "v2img":
+        prompt, n_images = judge_content(case, items, packet_media(packet))
+    else:
+        prompt = judge_prompt(case, items)
     try:
         grade, out, elapsed = call_claude(prompt, model, timeout_s)
     except JudgeError as e:
@@ -351,8 +444,10 @@ def run_case(case: dict, rep: int, packet: dict, vdir: Path, model: str, timeout
     scores = score(case, packet, grade)
     tid = f"{safe_id(case['prompt_id'])}_rep{rep}"
     trace = [
-        {"role": "system", "content": JUDGE_SYSTEM},
-        {"role": "user", "content": prompt},
+        {"role": "system", "content": judge_system()},
+        {"role": "user", "content": prompt if isinstance(prompt, str) else [
+            b if b["type"] == "text" else {"type": "image", "omitted_base64_bytes": len(b["source"]["data"])}
+            for b in prompt]},
         {"role": "assistant", "content": json.dumps(grade, indent=2)},
     ]
     (vdir / "traces" / f"{tid}.json").write_text(json.dumps(trace, indent=1))
@@ -375,6 +470,7 @@ def run_case(case: dict, rep: int, packet: dict, vdir: Path, model: str, timeout
         "perf": {
             "packet_chars": sum(len(t) for _, t in items),
             "packet_items": len(items),
+            "packet_images": n_images,
             "query_ms": packet.get("query_ms"),
             "judge_cost_usd": out.get("total_cost_usd"),
             "judge_s": round(elapsed, 2),
@@ -456,6 +552,9 @@ def parse_args():
         help="consolidate when the engine reports Recommended/Required (production cadence)",
     )
     ap.add_argument("--cortext-env", action="append", default=[], help="KEY=VAL for the runner (ablations)")
+    ap.add_argument("--runner-arg", action="append", default=[], help="extra runner flag, e.g. --runner-arg=--stream-clock")
+    ap.add_argument("--rubric", choices=["v2", "v2img"], default="v2",
+                    help="v2img: v2 plus the image addendum; packet images go to the judge as content blocks")
     ap.add_argument("--summary-only", action="store_true")
     ap.add_argument("--approve-harness", action="store_true")
     return ap.parse_args()

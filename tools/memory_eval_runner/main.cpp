@@ -4,11 +4,13 @@
 // durable retention, then benchmark questions are issued with ephemeral
 // retention so the query path does not pollute long-term memory.
 
+#include <cortext/clock.hpp>
 #include <cortext/cortext.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -45,6 +47,10 @@ struct Options
   int max_queries = 0;
   bool reuse_engine = false;
   bool consolidate_on_recommend = false;
+  // Drive the engine clock from the stream (turn timestamps). Needed for
+  // image/audio signals, whose public API has no explicit-timestamp form.
+  bool stream_clock = false;
+  std::filesystem::path ingest_log_path;
 };
 
 struct Signal
@@ -59,6 +65,11 @@ struct Signal
   int height = 0;
   int channels = 0;
   std::uint64_t timestamp_ms = 0;
+  // Multimodal file inputs: decoded pixels for ProcessImage, and the original
+  // compressed bytes stored as Media. media_ref is echoed into packet rows.
+  std::string pixels_path;
+  std::string media_path;
+  nlohmann::json media_ref;
 };
 
 struct Episode
@@ -109,6 +120,10 @@ void PrintUsage (std::ostream &out)
       << "  --reuse-engine      Reuse one engine/DB across episodes\n"
       << "  --consolidate=recommended  Run Consolidate() whenever an ingest\n"
       << "                      context reports Recommended or Required\n"
+      << "  --stream-clock      Engine clock follows turn timestamps (needed\n"
+      << "                      for image/audio, which have no *At API)\n"
+      << "  --ingest-log PATH   Write one JSONL row per ingested signal\n"
+      << "                      (modality, wall/encode/process ms, filter)\n"
       << "  -h, --help          Show this help\n";
 }
 
@@ -176,6 +191,14 @@ Options ParseArgs (int argc, char **argv)
       else if (auto v = TakeArg (arg, "--max-queries="))
         {
           opts.max_queries = std::stoi (*v);
+        }
+      else if (arg == "--stream-clock")
+        {
+          opts.stream_clock = true;
+        }
+      else if (auto v = TakeArg (arg, "--ingest-log="))
+        {
+          opts.ingest_log_path = *v;
         }
       else if (arg == "--reuse-engine")
         {
@@ -335,6 +358,95 @@ std::string MemoryText (const cortext::Cortext::Context::Memory &memory)
         }
     }
   return text;
+}
+
+/// Engine clock for --stream-clock: the stream's latest timestamp, or the
+/// wall clock until the first timestamped signal arrives.
+class StreamClock final : public cortext::Clock
+{
+public:
+  std::uint64_t
+  NowMillis () const override
+  {
+    const auto now = now_ms_.load ();
+    return now != 0 ? now : system_.NowMillis ();
+  }
+  void
+  Set (std::uint64_t ms)
+  {
+    if (ms > now_ms_.load ())
+      {
+        now_ms_.store (ms);
+      }
+  }
+
+private:
+  std::atomic<std::uint64_t> now_ms_{0};
+  cortext::SystemClock system_;
+};
+
+std::uint64_t Fnv1a64 (const unsigned char *data, std::size_t size)
+{
+  std::uint64_t h = 1469598103934665603ULL;
+  for (std::size_t i = 0; i < size; ++i)
+    {
+      h ^= data[i];
+      h *= 1099511628211ULL;
+    }
+  return h ^ static_cast<std::uint64_t> (size);
+}
+
+/// Payload bytes the runner ingested as media -> reference echoed in packets.
+using MediaRegistry = std::unordered_map<std::uint64_t, nlohmann::json>;
+
+bool LooksLikeEncodedImage (const std::vector<unsigned char> &blob)
+{
+  static const unsigned char kJpeg[] = {0xFF, 0xD8, 0xFF};
+  static const unsigned char kPng[] = {0x89, 'P', 'N', 'G'};
+  return (blob.size () >= 3 && std::memcmp (blob.data (), kJpeg, 3) == 0)
+         || (blob.size () >= 4 && std::memcmp (blob.data (), kPng, 4) == 0);
+}
+
+/// Split a memory's blobs into text (joined exactly as MemoryText) and media
+/// references. Media blobs are never flattened into text.
+std::pair<std::string, nlohmann::json>
+MemoryTextAndMedia (const cortext::Cortext::Context::Memory &memory,
+                    const MediaRegistry &registry)
+{
+  cortext::Cortext::Context::Memory text_only;
+  nlohmann::json media = nlohmann::json::array ();
+  for (const auto &blob : memory.content)
+    {
+      const auto it = registry.find (Fnv1a64 (blob.data (), blob.size ()));
+      if (it != registry.end ())
+        {
+          media.push_back (it->second);
+        }
+      else if (LooksLikeEncodedImage (blob)
+               || (memory.modality != "text"
+                   && memory.mimetype.rfind ("text/", 0) != 0))
+        {
+          media.push_back ({{"mimetype", memory.mimetype},
+                            {"bytes", blob.size ()},
+                            {"unregistered", true}});
+        }
+      else
+        {
+          text_only.content.push_back (blob);
+        }
+    }
+  return {MemoryText (text_only), media};
+}
+
+std::vector<unsigned char> ReadFileBytes (const std::string &path)
+{
+  std::ifstream in (path, std::ios::binary);
+  if (!in)
+    {
+      throw std::runtime_error ("Failed to open media file: " + path);
+    }
+  return std::vector<unsigned char> (std::istreambuf_iterator<char> (in),
+                                     std::istreambuf_iterator<char> ());
 }
 
 std::string Normalize (const std::string &text)
@@ -534,6 +646,22 @@ Signal ParseSignal (const nlohmann::json &j, const std::string &episode_id,
       signal.samples = DecodeFloat32Base64 (audio_f32);
     }
   signal.timestamp_ms = JsonU64 (j, "timestamp_ms");
+  signal.pixels_path = JsonString (j, "pixels_path");
+  signal.media_path = JsonString (j, "media_path");
+  if (!signal.media_path.empty ())
+    {
+      signal.media_ref = {{"source_id", signal.source_id},
+                          {"mimetype", signal.mimetype},
+                          {"path", signal.media_path}};
+      for (const char *key : {"caption", "judge_path", "media_sha"})
+        {
+          const std::string value = JsonString (j, key);
+          if (!value.empty ())
+            {
+              signal.media_ref[key] = value;
+            }
+        }
+    }
   return signal;
 }
 
@@ -677,14 +805,42 @@ LoadQueries (const std::filesystem::path &path, int max_queries)
   return out;
 }
 
-std::unique_ptr<cortext::Cortext> CreateEngine (const Options &opts,
-                                                const std::string &db_path)
+std::unique_ptr<cortext::Cortext>
+CreateEngine (const Options &opts, const std::string &db_path,
+              const std::shared_ptr<StreamClock> &clock)
 {
   cortext::Cortext::Config cfg;
   cfg.focus = opts.focus;
   cfg.sensitivity = opts.sensitivity;
   cfg.stability = opts.stability;
+  if (clock)
+    {
+      return cortext::Cortext::Create (cfg, db_path, clock);
+    }
   return cortext::Cortext::Create (cfg, db_path);
+}
+
+nlohmann::json Percentiles (std::vector<double> xs)
+{
+  if (xs.empty ())
+    {
+      return {{"n", 0}};
+    }
+  std::sort (xs.begin (), xs.end ());
+  auto at = [&] (double q) {
+    return xs[std::min (xs.size () - 1,
+                        static_cast<std::size_t> (q * static_cast<double> (xs.size ())))];
+  };
+  double sum = 0.0;
+  for (double x : xs)
+    {
+      sum += x;
+    }
+  return {{"n", xs.size ()},
+          {"mean", sum / static_cast<double> (xs.size ())},
+          {"p50", at (0.50)},
+          {"p95", at (0.95)},
+          {"max", xs.back ()}};
 }
 
 std::string DbPathForEpisode (const Options &opts, std::size_t episode_index)
@@ -772,9 +928,30 @@ int Run (const Options &opts)
   int episode_index = 0;
 
   std::unique_ptr<cortext::Cortext> shared_engine;
+  std::shared_ptr<StreamClock> shared_clock;
   if (opts.reuse_engine)
     {
-      shared_engine = CreateEngine (opts, opts.db_path);
+      if (opts.stream_clock)
+        {
+          shared_clock = std::make_shared<StreamClock> ();
+        }
+      shared_engine = CreateEngine (opts, opts.db_path, shared_clock);
+    }
+  MediaRegistry media_registry;
+  std::map<std::string, std::vector<double>> ingest_ms_by_modality;
+  std::map<std::string, std::vector<double>> encode_ms_by_modality;
+  std::map<std::string, int> filtered_by_modality;
+  std::map<std::string, std::uint64_t> media_bytes_by_modality;
+  std::vector<double> query_ms_all;
+  std::ofstream ingest_log;
+  if (!opts.ingest_log_path.empty ())
+    {
+      ingest_log.open (opts.ingest_log_path);
+      if (!ingest_log)
+        {
+          throw std::runtime_error ("Failed to open ingest log: "
+                                    + opts.ingest_log_path.string ());
+        }
     }
 
   for (const auto &episode : episodes)
@@ -786,11 +963,16 @@ int Run (const Options &opts)
         }
 
       std::unique_ptr<cortext::Cortext> local_engine;
+      std::shared_ptr<StreamClock> clock = shared_clock;
       cortext::Cortext *engine = shared_engine.get ();
       if (!engine)
         {
-          local_engine = CreateEngine (opts,
-                                       DbPathForEpisode (opts, episode_index));
+          if (opts.stream_clock)
+            {
+              clock = std::make_shared<StreamClock> ();
+            }
+          local_engine = CreateEngine (
+              opts, DbPathForEpisode (opts, episode_index), clock);
           engine = local_engine.get ();
         }
 
@@ -811,9 +993,44 @@ int Run (const Options &opts)
           }
       };
       std::uint64_t last_timestamp_ms = 0;
+      // Per-signal ingest timing; does not touch engine state.
+      auto record = [&] (const Signal &signal, const auto &ctx,
+                         std::chrono::steady_clock::time_point t0) {
+        const double ms = std::chrono::duration<double, std::milli> (
+                              std::chrono::steady_clock::now () - t0)
+                              .count ();
+        ingest_ms_by_modality[signal.modality].push_back (ms);
+        encode_ms_by_modality[signal.modality].push_back (ctx.encode_ms);
+        const bool accepted = !ctx.output.signal_filter_evaluated
+                              || ctx.output.signal_filter_accepted;
+        if (!accepted)
+          {
+            filtered_by_modality[signal.modality] += 1;
+          }
+        if (ingest_log.is_open ())
+          {
+            ingest_log << nlohmann::json{
+                {"episode_id", episode.id},
+                {"source_id", signal.source_id},
+                {"modality", signal.modality},
+                {"ms", ms},
+                {"encode_ms", ctx.encode_ms},
+                {"process_ms", ctx.process_ms},
+                {"hydrate_ms", ctx.hydrate_ms},
+                {"accepted", accepted},
+                {"consolidation", ctx.consolidation_state
+                                      != cortext::ConsolidationState::None},
+            }.dump () << "\n";
+          }
+      };
       for (const auto &signal : episode.signals)
         {
           signal_modality_counts[signal.modality] += 1;
+          if (clock && signal.timestamp_ms > 0)
+            {
+              clock->Set (signal.timestamp_ms);
+            }
+          const auto signal_start = std::chrono::steady_clock::now ();
           if (signal.modality == "text")
             {
               if (signal.text.empty ())
@@ -826,14 +1043,19 @@ int Run (const Options &opts)
                 {
                   last_timestamp_ms
                       = std::max (last_timestamp_ms, signal.timestamp_ms);
-                  settle (engine->ProcessTextAt (signal.text, signal.source_id,
-                                               last_timestamp_ms,
-                                               cortext::Retention::Durable));
+                  const auto ctx = engine->ProcessTextAt (
+                      signal.text, signal.source_id, last_timestamp_ms,
+                      cortext::Retention::Durable);
+                  record (signal, ctx, signal_start);
+                  settle (ctx);
                 }
               else
                 {
-                  settle (engine->ProcessText (signal.text, signal.source_id,
-                                             cortext::Retention::Durable));
+                  const auto ctx = engine->ProcessText (
+                      signal.text, signal.source_id,
+                      cortext::Retention::Durable);
+                  record (signal, ctx, signal_start);
+                  settle (ctx);
                 }
               ++text_signals;
               ++processed_signals;
@@ -841,30 +1063,51 @@ int Run (const Options &opts)
             }
           if (signal.modality == "image")
             {
-              if (signal.data_base64.empty () || signal.width <= 0
-                  || signal.height <= 0 || signal.channels <= 0)
+              if ((signal.data_base64.empty () && signal.pixels_path.empty ())
+                  || signal.width <= 0 || signal.height <= 0
+                  || signal.channels <= 0)
                 {
                   ++skipped_signals;
                   ++skipped_unsupported_signals;
                   continue;
                 }
-              const auto pixels = DecodeBase64 (signal.data_base64);
+              // Pixel decode happens upstream (build step); file reads are
+              // excluded from the ingest timing below.
+              const auto pixels = signal.pixels_path.empty ()
+                                      ? DecodeBase64 (signal.data_base64)
+                                      : ReadFileBytes (signal.pixels_path);
+              const std::size_t want = static_cast<std::size_t> (signal.width)
+                                       * static_cast<std::size_t> (signal.height)
+                                       * static_cast<std::size_t> (signal.channels);
+              if (pixels.size () != want)
+                {
+                  throw std::runtime_error ("pixel buffer size mismatch for "
+                                            + signal.source_id);
+                }
+              std::vector<unsigned char> media_bytes;
+              if (!signal.media_path.empty ())
+                {
+                  media_bytes = ReadFileBytes (signal.media_path);
+                }
               cortext::Cortext::Media media;
               media.mimetype = signal.mimetype;
-              if (signal.timestamp_ms > 0)
-                {
-                  settle (engine->ProcessImage (pixels.data (), signal.width,
-                                              signal.height, signal.channels,
-                                              signal.source_id, media,
-                                              cortext::Retention::Durable));
-                }
-              else
-                {
-                  settle (engine->ProcessImage (pixels.data (), signal.width,
-                                              signal.height, signal.channels,
-                                              signal.source_id, media,
-                                              cortext::Retention::Durable));
-                }
+              media.data = media_bytes.empty () ? nullptr : media_bytes.data ();
+              media.size = media_bytes.size ();
+              // The engine stores Media bytes when given, else raw pixels.
+              const auto &stored = media_bytes.empty () ? pixels : media_bytes;
+              nlohmann::json ref = signal.media_ref.is_null ()
+                                       ? nlohmann::json{{"source_id", signal.source_id},
+                                                        {"mimetype", signal.mimetype}}
+                                       : signal.media_ref;
+              ref["bytes"] = stored.size ();
+              media_registry[Fnv1a64 (stored.data (), stored.size ())] = ref;
+              media_bytes_by_modality["image"] += stored.size ();
+              const auto image_start = std::chrono::steady_clock::now ();
+              const auto ctx = engine->ProcessImage (
+                  pixels.data (), signal.width, signal.height, signal.channels,
+                  signal.source_id, media, cortext::Retention::Durable);
+              record (signal, ctx, image_start);
+              settle (ctx);
               ++image_signals;
               ++processed_signals;
               continue;
@@ -879,10 +1122,11 @@ int Run (const Options &opts)
                 }
               cortext::Cortext::Media media;
               media.mimetype = signal.mimetype;
-              settle (engine->ProcessAudio (signal.samples.data (),
-                                          signal.samples.size (),
-                                          signal.source_id, media,
-                                          cortext::Retention::Durable));
+              const auto ctx = engine->ProcessAudio (
+                  signal.samples.data (), signal.samples.size (),
+                  signal.source_id, media, cortext::Retention::Durable);
+              record (signal, ctx, signal_start);
+              settle (ctx);
               ++audio_signals;
               ++processed_signals;
               continue;
@@ -894,6 +1138,10 @@ int Run (const Options &opts)
 
       for (const auto &query : q_it->second)
         {
+          if (clock)
+            {
+              clock->Set (std::max (query.timestamp_ms, last_timestamp_ms));
+            }
           const auto start = std::chrono::steady_clock::now ();
           // Ask at the benchmark's question date when the key carries one,
           // clamped so engine time never runs backwards.
@@ -908,6 +1156,7 @@ int Run (const Options &opts)
           const auto end = std::chrono::steady_clock::now ();
           const double query_ms =
               std::chrono::duration<double, std::milli> (end - start).count ();
+          query_ms_all.push_back (query_ms);
 
           std::string retrieved_text;
           nlohmann::json retrieved = nlohmann::json::array ();
@@ -916,10 +1165,11 @@ int Run (const Options &opts)
           for (std::size_t i = 0; i < shown; ++i)
             {
               const auto &memory = context.retrieved_memory[i];
-              const std::string text = MemoryText (memory);
+              const auto [text, media]
+                  = MemoryTextAndMedia (memory, media_registry);
               retrieved_text += " ";
               retrieved_text += text;
-              retrieved.push_back ({
+              nlohmann::json item = {
                   {"rank", i + 1},
                   {"id", memory.id},
                   {"source_id", memory.source_id},
@@ -929,20 +1179,33 @@ int Run (const Options &opts)
                   {"salience", memory.salience},
                   {"text", text},
                   {"preview", Clip (text, 240)},
-              });
+              };
+              // Text-only packets keep the exact prior row shape.
+              if (!media.empty ())
+                {
+                  item["media"] = media;
+                }
+              retrieved.push_back (std::move (item));
             }
 
           nlohmann::json working = nlohmann::json::array ();
           for (std::size_t i = 0; i < context.working_memory.size (); ++i)
             {
               const auto &memory = context.working_memory[i];
-              working.push_back ({
+              const auto [text, media]
+                  = MemoryTextAndMedia (memory, media_registry);
+              nlohmann::json item = {
                   {"slot", i},
                   {"id", memory.id},
                   {"source_id", memory.source_id},
                   {"modality", memory.modality},
-                  {"text", MemoryText (memory)},
-              });
+                  {"text", text},
+              };
+              if (!media.empty ())
+                {
+                  item["media"] = media;
+                }
+              working.push_back (std::move (item));
             }
 
           const bool answer_hit =
@@ -1013,7 +1276,18 @@ int Run (const Options &opts)
       {"totals", CountsJson (totals)},
       {"by_question_type", by_type_json},
       {"query_rows", opts.out_path.string ()},
+      {"stream_clock", opts.stream_clock},
+      {"query_ms", Percentiles (query_ms_all)},
+      {"media_bytes_ingested", media_bytes_by_modality},
+      {"filtered_signals", filtered_by_modality},
   };
+  nlohmann::json ingest_ms = nlohmann::json::object ();
+  for (const auto &kv : ingest_ms_by_modality)
+    {
+      ingest_ms[kv.first] = {{"wall", Percentiles (kv.second)},
+                             {"encode", Percentiles (encode_ms_by_modality[kv.first])}};
+    }
+  summary["ingest_ms"] = ingest_ms;
 
   auto summary_path = opts.out_path;
   summary_path.replace_extension (".summary.json");
