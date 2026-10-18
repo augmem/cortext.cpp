@@ -290,7 +290,17 @@ PruneReconstructionHistory (Executor &executor, long long memory_id,
             + Placeholders (reconstruction_ids.size ()) + ")",
         reconstruction_ids);
 
-  if (!policy.delete_orphan_embeddings || embedding_ids.empty ())
+  if (!policy.delete_orphan_embeddings)
+    {
+      // The forced working-memory flush deletes the embeddings this left
+      // unreferenced.
+      if (p_ctx != nullptr)
+        p_ctx->orphan_embedding_candidates.insert (
+            p_ctx->orphan_embedding_candidates.end (),
+            seen_embeddings.begin (), seen_embeddings.end ());
+      return;
+    }
+  if (embedding_ids.empty ())
     {
       return;
     }
@@ -605,7 +615,8 @@ AppendReconstructionWithEmbeddingId (Transaction &tx, long long memory_id,
                                      std::string_view trigger,
                                      double source_confidence,
                                      double context_similarity,
-                                     ReconstructionUpdatePolicy policy)
+                                     ReconstructionUpdatePolicy policy,
+                                     ProcessorContext *p_ctx)
 {
   if (memory_id <= 0 || embedding_id <= 0)
     {
@@ -633,7 +644,7 @@ AppendReconstructionWithEmbeddingId (Transaction &tx, long long memory_id,
     {
       UpdateCurrentEmbeddingSurface (tx, memory_id, embedding_id, created_at);
     }
-  PruneReconstructionHistory (tx, memory_id, policy);
+  PruneReconstructionHistory (tx, memory_id, policy, p_ctx);
 
   return reconstruction_id;
 }

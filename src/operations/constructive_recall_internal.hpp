@@ -64,7 +64,8 @@ AppendReconstructionWithEmbeddingId (Transaction &tx, long long memory_id,
                                      std::string_view trigger,
                                      double source_confidence = 1.0,
                                      double context_similarity = 0.0,
-                                     ReconstructionUpdatePolicy policy = {});
+                                     ReconstructionUpdatePolicy policy = {},
+                                     ProcessorContext *p_ctx = nullptr);
 
 long long
 AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,

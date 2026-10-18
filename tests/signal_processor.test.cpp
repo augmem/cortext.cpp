@@ -36,6 +36,8 @@ void SetSignalRecordSnapshotSetupThrowStageForTest (int stage);
 void SetSQLiteCheckpointFailureOnceForTest ();
 void SetRetrievalSurfaceReloadFailureOnceForTest ();
 std::size_t RetrievalSurfaceReloadCountForTest ();
+std::size_t FlushSnapshotCopiedEntryCountForTest ();
+std::size_t FullOrphanEmbeddingSweepCountForTest ();
 }
 
 namespace cortext::store
@@ -2601,6 +2603,194 @@ TEST_CASE ("SignalProcessor flush keeps the retrieval surface without "
   REQUIRE (fresh_surfaces.size () == 1);
   REQUIRE (surfaces[1] == fresh_surfaces[0]);
   REQUIRE (historical[1] == fresh_historical[0]);
+}
+
+namespace
+{
+// Gives the processor `count` idle per-source accumulators once.
+struct SeedIdleSourcesOp : IOperation
+{
+  explicit SeedIdleSourcesOp (int count) : count (count) {}
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    if (seeded)
+      return;
+    seeded = true;
+    auto &p_ctx = ctx.GetProcessorContext ();
+    for (int index = 0; index < count; ++index)
+      {
+        AccumulatorState state;
+        state.n_signals = 1;
+        state.mu_acc = Eigen::VectorXf::Ones (256);
+        p_ctx.accumulator_states["idle/" + std::to_string (index)]
+            = std::move (state);
+      }
+  }
+
+  int count = 0;
+  mutable bool seeded = false;
+};
+
+// On its second call, drops the only reference to an embedding the way an
+// engine path does: the row goes, the surfaces forget it, and the embedding
+// becomes an orphan candidate.
+struct DropEmbeddingReferenceOp : IOperation
+{
+  DropEmbeddingReferenceOp (long long memory_id, long long embedding_id)
+      : memory_id (memory_id), embedding_id (embedding_id)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction &tx) const override
+  {
+    if (++calls != 2)
+      return;
+    auto &p_ctx = ctx.GetProcessorContext ();
+    tx.Execute ("DELETE FROM current_memory_embeddings WHERE memory_id = ?",
+                { memory_id });
+    tx.Execute ("DELETE FROM memories WHERE memory_id = ?", { memory_id });
+    p_ctx.RemoveRetrievalSurface (memory_id);
+    operations::historical_surface_search_cache_internal::RemoveCurrent (
+        p_ctx, memory_id);
+    p_ctx.orphan_embedding_candidates.push_back (embedding_id);
+  }
+
+  long long memory_id = 0;
+  long long embedding_id = 0;
+  mutable int calls = 0;
+};
+
+bool
+EmbeddingExists (Store &store, long long embedding_id)
+{
+  return !store.Execute ("SELECT 1 FROM embeddings WHERE embedding_id = ?",
+                         { embedding_id })
+              .empty ();
+}
+} // namespace
+
+TEST_CASE ("SignalProcessor flush work does not grow with the store or the "
+           "source count",
+           "[processor][flush][cache][scaling]")
+{
+  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
+  query[0] = 1.0f;
+  for (const int count : { 16, 1024 })
+    {
+      auto uniq = SQLiteStore::Create (":memory:");
+      std::shared_ptr<Store> store (std::move (uniq));
+      cortext::testing::InitializeCoreSchema (*store);
+      for (int index = 0; index < count; ++index)
+        {
+          Eigen::VectorXf embedding = Eigen::VectorXf::Zero (256);
+          embedding[index % 256] = 1.0f;
+          embedding[(index / 256 + 1) % 256] += 0.5f;
+          cortext::testing::SeedEmbeddingV2 (*store, 5000LL + index,
+                                             embedding, 1000LL + index);
+          cortext::testing::SeedMemoryV2 (*store, 1000LL + index,
+                                          5000LL + index, "seed/ltm",
+                                          "LONG_TERM", 1.0, 1000LL + index);
+        }
+
+      SignalProcessor::Config cfg;
+      cortext::testing::RequireEncoder (cfg);
+      std::vector<RetrievalSurfaceCapture> surfaces;
+      auto pipeline = std::make_unique<DynamicOperationSet> (
+          std::make_unique<SeedIdleSourcesOp> (count),
+          std::make_unique<CaptureRetrievalSurfaceOp> (&surfaces));
+      SignalProcessor processor (
+          cfg, store,
+          operations::signal_record_rollback_internal::
+              MarkEngineOwnedJournalAware (std::move (pipeline)));
+      processor.Process (MakeReadOnlyQuery (query, 2000));
+      REQUIRE (surfaces.back ().size () == static_cast<std::size_t> (count));
+
+      const auto copied_before
+          = cortext::testing::FlushSnapshotCopiedEntryCountForTest ();
+      const auto sweeps_before
+          = cortext::testing::FullOrphanEmbeddingSweepCountForTest ();
+      const auto reloads_before
+          = cortext::testing::RetrievalSurfaceReloadCountForTest ();
+      processor.Flush ();
+      processor.Flush ();
+      processor.Flush ();
+      // The rollback snapshot copies neither the surface nor the sources,
+      // only the first flush sweeps every embedding, and none reloads.
+      REQUIRE (cortext::testing::FlushSnapshotCopiedEntryCountForTest ()
+               == copied_before);
+      REQUIRE (cortext::testing::FullOrphanEmbeddingSweepCountForTest ()
+               == sweeps_before + 1);
+      REQUIRE (cortext::testing::RetrievalSurfaceReloadCountForTest ()
+               == reloads_before);
+
+      processor.Process (MakeReadOnlyQuery (query, 3000));
+      REQUIRE (surfaces.back ()
+               == FreshRetrievalSurface (cfg, store,
+                                         MakeReadOnlyQuery (query, 4000)));
+    }
+}
+
+TEST_CASE ("SignalProcessor flush deletes tracked orphan embeddings and a "
+           "failed flush reloads the surface",
+           "[processor][flush][cache][rollback]")
+{
+  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
+  query[0] = 1.0f;
+  auto store = MakeReadOnlySurfaceStore (query);
+  Eigen::VectorXf dropped = Eigen::VectorXf::Zero (256);
+  dropped[4] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 55LL, dropped, 1150LL);
+  cortext::testing::SeedMemoryV2 (*store, 44LL, 55LL, "seed/dropped",
+                                  "LONG_TERM", 1.0, 1150LL);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  std::vector<RetrievalSurfaceCapture> surfaces;
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<SeedIdleSourcesOp> (8),
+      std::make_unique<DropEmbeddingReferenceOp> (44LL, 55LL),
+      std::make_unique<CaptureRetrievalSurfaceOp> (&surfaces));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (pipeline)));
+  processor.Process (MakeReadOnlyQuery (query, 2000));
+  REQUIRE (surfaces.back ().contains (44LL));
+  processor.Flush ();
+  const auto sweeps_after_first
+      = cortext::testing::FullOrphanEmbeddingSweepCountForTest ();
+
+  Signal drop = MakeReadOnlyQuery (query, 3000);
+  drop.retention = Retention::Natural;
+  drop.source_id = "test";
+  processor.Process (drop);
+  REQUIRE (surfaces.back ().count (44LL) == 0);
+  REQUIRE (EmbeddingExists (*store, 55LL));
+
+  store->Execute ("CREATE TRIGGER fail_flush BEFORE INSERT ON episodes "
+                  "BEGIN SELECT RAISE(ABORT, 'forced flush failure'); END");
+  const auto reloads_before
+      = cortext::testing::RetrievalSurfaceReloadCountForTest ();
+  REQUIRE_THROWS (processor.Flush ());
+  // The rolled-back flush kept the orphan and reloaded the surface from the
+  // rolled-back store.
+  REQUIRE (EmbeddingExists (*store, 55LL));
+  REQUIRE (cortext::testing::RetrievalSurfaceReloadCountForTest ()
+           == reloads_before + 1);
+  store->Execute ("DROP TRIGGER fail_flush");
+
+  processor.Flush ();
+  REQUIRE_FALSE (EmbeddingExists (*store, 55LL));
+  REQUIRE (cortext::testing::FullOrphanEmbeddingSweepCountForTest ()
+           == sweeps_after_first);
+
+  processor.Process (MakeReadOnlyQuery (query, 4000));
+  REQUIRE (surfaces.back ()
+           == FreshRetrievalSurface (cfg, store,
+                                     MakeReadOnlyQuery (query, 5000)));
 }
 
 TEST_CASE ("SignalProcessor rollback preserves pending Natural record storage",

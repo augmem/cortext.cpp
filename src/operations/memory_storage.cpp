@@ -1496,7 +1496,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           const auto reconstruction_start = SteadyClock::now ();
           constructive_recall::AppendReconstructionWithEmbeddingId (
               *savepoint, memory_id, embedding_id, content_blob_id,
-              static_cast<long long> (end_ts), 0.0, "initial", 1.0, 1.0);
+              static_cast<long long> (end_ts), 0.0, "initial", 1.0, 1.0, {},
+              &context.GetProcessorContext ());
           context.AddOperationTiming ("MemoryStorage.initial_reconstruction",
                                       ElapsedMillis (reconstruction_start));
         }

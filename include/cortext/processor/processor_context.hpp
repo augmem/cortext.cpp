@@ -383,6 +383,16 @@ struct ProcessorContext
   bool wm_last_accepted = false;
   bool wm_last_chunked = false;
 
+  /// @brief Embedding ids whose last reference may have been dropped since
+  /// the last forced working-memory flush (replaced slot embeddings, pruned
+  /// working rows, cleared slot signals, pruned reconstructions).
+  ///
+  /// The forced flush deletes exactly those that are unreferenced instead of
+  /// scanning every embedding. The first forced flush of a context still
+  /// sweeps the whole table, which covers orphans left by an earlier process.
+  std::vector<long long> orphan_embedding_candidates;
+  bool orphan_embedding_sweep_complete = false;
+
   // ======================================================================
   // Memory Accumulation State (Section 4.4)
   // ======================================================================

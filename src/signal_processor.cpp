@@ -56,6 +56,7 @@ namespace
 {
 
 constexpr int kClosedWorkingMemoryPruneBatch = 1024;
+constexpr std::size_t kOrphanEmbeddingCandidateLimit = 65536;
 constexpr int kClosedWorkingMemoryIncrementalPruneBatch = 8;
 constexpr int kClosedWorkingMemoryIncrementalPruneIntervalSignals = 8;
 constexpr uint64_t kWalPassiveCheckpointIntervalSignals = 256;
@@ -66,6 +67,7 @@ constexpr std::uintmax_t kWalPassiveCheckpointMinBytes
 std::atomic<bool> g_sqlite_checkpoint_failure_once { false };
 std::atomic<bool> g_retrieval_surface_reload_failure_once { false };
 std::atomic<std::size_t> g_retrieval_surface_reload_count { 0 };
+std::atomic<std::size_t> g_flush_snapshot_copied_entry_count { 0 };
 #endif
 
 bool
@@ -1065,12 +1067,68 @@ private:
   ProcessorContext *context_ = nullptr;
 };
 
-// Returns the embedding rows it deleted, so in-memory surfaces can drop
-// exactly those identities.
+// Deletes the embeddings among embedding_ids that no memory, signal or
+// reconstruction references, and returns the ids it deleted.
+std::vector<long long>
+DeleteUnreferencedEmbeddingsAmong (Transaction &tx,
+                                   std::vector<long long> embedding_ids)
+{
+  std::sort (embedding_ids.begin (), embedding_ids.end ());
+  embedding_ids.erase (
+      std::unique (embedding_ids.begin (), embedding_ids.end ()),
+      embedding_ids.end ());
+  embedding_ids.erase (std::remove_if (embedding_ids.begin (),
+                                       embedding_ids.end (),
+                                       [] (long long id) { return id <= 0; }),
+                       embedding_ids.end ());
+  constexpr std::size_t kChunk = 512;
+  std::vector<long long> deleted;
+  for (std::size_t begin = 0; begin < embedding_ids.size (); begin += kChunk)
+    {
+      const std::vector<long long> chunk (
+          embedding_ids.begin () + static_cast<std::ptrdiff_t> (begin),
+          embedding_ids.begin ()
+              + static_cast<std::ptrdiff_t> (
+                  std::min (embedding_ids.size (), begin + kChunk)));
+      const auto unreferenced = ExtractInt64Column (
+          tx.Execute (
+              "SELECT embedding_id FROM embeddings "
+              "WHERE embedding_id IN (" + Placeholders (chunk.size ()) + ") "
+              "  AND NOT EXISTS ("
+              "    SELECT 1 FROM memories m "
+              "    WHERE m.embedding_id = embeddings.embedding_id"
+              "  ) "
+              "  AND NOT EXISTS ("
+              "    SELECT 1 FROM signals s "
+              "    WHERE s.embedding_id = embeddings.embedding_id"
+              "  ) "
+              "  AND NOT EXISTS ("
+              "    SELECT 1 FROM memory_reconstructions mr "
+              "    WHERE mr.embedding_id = embeddings.embedding_id"
+              "  )",
+              MakeParams (chunk)),
+          "embedding_id");
+      if (unreferenced.empty ())
+        continue;
+      tx.Execute ("DELETE FROM embeddings WHERE embedding_id IN ("
+                      + Placeholders (unreferenced.size ()) + ")",
+                  MakeParams (unreferenced));
+      deleted.insert (deleted.end (), unreferenced.begin (),
+                      unreferenced.end ());
+    }
+  return deleted;
+}
+
+// Deletes stale working rows. With delete_payloads it also deletes their
+// associations, current-surface rows and the embeddings left unreferenced,
+// and returns the deleted embedding ids so in-memory surfaces can drop
+// exactly those identities; without, the rows' embeddings are appended to
+// orphan_candidates for the next forced flush.
 std::vector<long long>
 DeleteStaleWorkingMemoryRows (Transaction &tx,
                               const std::vector<long long> &memory_ids,
-                              bool delete_payloads)
+                              bool delete_payloads,
+                              std::vector<long long> &orphan_candidates)
 {
   if (memory_ids.empty ())
     {
@@ -1079,29 +1137,21 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
 
   const std::string placeholders = Placeholders (memory_ids.size ());
   const auto memory_params = MakeParams (memory_ids);
-  std::vector<long long> embedding_ids;
-  if (delete_payloads)
-    {
-      embedding_ids = ExtractInt64Column (
-          tx.Execute ("SELECT embedding_id FROM memories "
-                      "WHERE memory_id IN (" + placeholders + ") "
-                      "  AND kind = 'WORKING' "
-                      "  AND embedding_id IS NOT NULL",
-                      memory_params),
-          "embedding_id");
-      auto signal_embedding_ids = ExtractInt64Column (
-          tx.Execute ("SELECT embedding_id FROM signals "
-                      "WHERE memory_id IN (" + placeholders + ") "
-                      "  AND embedding_id IS NOT NULL",
-                      memory_params),
-          "embedding_id");
-      embedding_ids.insert (embedding_ids.end (), signal_embedding_ids.begin (),
-                            signal_embedding_ids.end ());
-      std::sort (embedding_ids.begin (), embedding_ids.end ());
-      embedding_ids.erase (
-          std::unique (embedding_ids.begin (), embedding_ids.end ()),
-          embedding_ids.end ());
-    }
+  auto embedding_ids = ExtractInt64Column (
+      tx.Execute ("SELECT embedding_id FROM memories "
+                  "WHERE memory_id IN (" + placeholders + ") "
+                  "  AND kind = 'WORKING' "
+                  "  AND embedding_id IS NOT NULL",
+                  memory_params),
+      "embedding_id");
+  const auto signal_embedding_ids = ExtractInt64Column (
+      tx.Execute ("SELECT embedding_id FROM signals "
+                  "WHERE memory_id IN (" + placeholders + ") "
+                  "  AND embedding_id IS NOT NULL",
+                  memory_params),
+      "embedding_id");
+  embedding_ids.insert (embedding_ids.end (), signal_embedding_ids.begin (),
+                        signal_embedding_ids.end ());
 
   if (delete_payloads)
     {
@@ -1132,38 +1182,28 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
               "WHERE kind = 'WORKING' AND memory_id IN (" + placeholders + ")",
               memory_params);
 
-  if (embedding_ids.empty ())
-    return {};
-  const std::string embedding_placeholders
-      = Placeholders (embedding_ids.size ());
-  const auto unreferenced = ExtractInt64Column (
-      tx.Execute (
-          "SELECT embedding_id FROM embeddings "
-          "WHERE embedding_id IN (" + embedding_placeholders + ") "
-          "  AND NOT EXISTS ("
-          "    SELECT 1 FROM memories m "
-          "    WHERE m.embedding_id = embeddings.embedding_id"
-          "  ) "
-          "  AND NOT EXISTS ("
-          "    SELECT 1 FROM signals s "
-          "    WHERE s.embedding_id = embeddings.embedding_id"
-          "  ) "
-          "  AND NOT EXISTS ("
-          "    SELECT 1 FROM memory_reconstructions mr "
-          "    WHERE mr.embedding_id = embeddings.embedding_id"
-          "  )",
-          MakeParams (embedding_ids)),
-      "embedding_id");
-  if (!unreferenced.empty ())
-    tx.Execute ("DELETE FROM embeddings WHERE embedding_id IN ("
-                    + Placeholders (unreferenced.size ()) + ")",
-                MakeParams (unreferenced));
-  return unreferenced;
+  if (!delete_payloads)
+    {
+      orphan_candidates.insert (orphan_candidates.end (),
+                                embedding_ids.begin (), embedding_ids.end ());
+      return {};
+    }
+  return DeleteUnreferencedEmbeddingsAmong (tx, std::move (embedding_ids));
 }
 
+#if defined(CORTEXT_TESTING)
+std::atomic<std::size_t> g_full_orphan_embedding_sweep_count { 0 };
+#endif
+
+// Scans every embedding for missing references. Paid once per processor
+// context (orphans left by an earlier process); later forced flushes check
+// only ProcessorContext::orphan_embedding_candidates.
 std::vector<long long>
 DeleteUnreferencedEmbeddings (Transaction &tx)
 {
+#if defined(CORTEXT_TESTING)
+  g_full_orphan_embedding_sweep_count.fetch_add (1, std::memory_order_relaxed);
+#endif
   const auto unreferenced = ExtractInt64Column (tx.Execute (
       "SELECT embedding_id FROM embeddings "
       "WHERE NOT EXISTS ("
@@ -2637,6 +2677,18 @@ RetrievalSurfaceReloadCountForTest ()
   return g_retrieval_surface_reload_count.load (std::memory_order_relaxed);
 }
 
+std::size_t
+FlushSnapshotCopiedEntryCountForTest ()
+{
+  return g_flush_snapshot_copied_entry_count.load (std::memory_order_relaxed);
+}
+
+std::size_t
+FullOrphanEmbeddingSweepCountForTest ()
+{
+  return g_full_orphan_embedding_sweep_count.load (std::memory_order_relaxed);
+}
+
 void
 SetRetrievalSurfaceReloadFailureOnceForTest ()
 {
@@ -3731,21 +3783,42 @@ SignalProcessor::Flush ()
       preserved_sqlite_sparse_route_backfill
           = state->sqlite_sparse_route_backfill;
     }
+  // Rollback snapshot. Flush never touches the per-source accumulators, and
+  // the DB-derived retrieval surface is reloaded from the rolled-back store
+  // on failure, so neither is copied: the snapshot stays independent of the
+  // store size and the number of sources.
   ProcessorContext context_snapshot;
-  DetachedProcessorCaches context_cache_snapshot;
   const auto consolidation_throughput_snapshot
       = operations::consolidation_throughput_state_internal::Find (*context_);
   {
     auto detached_caches = DetachRebuildableProcessorCaches (*context_);
-    context_snapshot = *context_;
-    context_cache_snapshot = SnapshotProcessorCaches (detached_caches);
+    auto accumulators = std::move (context_->accumulator_states);
+    context_->accumulator_states.clear ();
+    try
+      {
+        context_snapshot = *context_;
+      }
+    catch (...)
+      {
+        context_->accumulator_states = std::move (accumulators);
+        RestoreRebuildableProcessorCaches (*context_, detached_caches);
+        throw;
+      }
+    context_->accumulator_states = std::move (accumulators);
     RestoreRebuildableProcessorCaches (*context_, detached_caches);
   }
+#if defined(CORTEXT_TESTING)
+  g_flush_snapshot_copied_entry_count.fetch_add (
+      context_snapshot.accumulator_states.size ()
+          + context_snapshot.retrieval_surface_cache.size (),
+      std::memory_order_relaxed);
+#endif
   auto restore_context_snapshot = [&] {
+    auto accumulators = std::move (context_->accumulator_states);
     *context_ = std::move (context_snapshot);
+    context_->accumulator_states = std::move (accumulators);
     operations::consolidation_throughput_state_internal::Reset (
         *context_, consolidation_throughput_snapshot);
-    RestoreRebuildableProcessorCaches (*context_, context_cache_snapshot);
   };
   auto tx = store_->Begin ();
   std::unique_ptr<ObjectTransaction> object_tx;
@@ -3793,7 +3866,8 @@ SignalProcessor::Flush ()
         {
         }
       restore_context_snapshot ();
-      LoadHistoricalSurfaceSearchCache (*store_, *context_);
+      LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
+                                 config_.sensitivity, config_.stability);
       throw;
     }
   // Flush persists episode, state and working-memory rows. Working-memory
@@ -4158,6 +4232,14 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
 {
   if (!context_)
     return;
+  // A context that goes this long without a forced flush falls back to the
+  // full sweep instead of holding an unbounded candidate list.
+  if (context_->orphan_embedding_candidates.size ()
+      > kOrphanEmbeddingCandidateLimit)
+    {
+      context_->orphan_embedding_candidates.clear ();
+      context_->orphan_embedding_sweep_complete = false;
+    }
 
   // Working-memory persistence keeps the in-memory surfaces exact: pruned
   // rows and the embedding rows deleted with them leave the retrieval
@@ -4267,14 +4349,22 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
       add_timing ("SignalProcessor.wm_prune_select",
                   t_prune_select_start);
       const auto t_prune_delete_start = std::chrono::steady_clock::now ();
-      auto deleted_embedding_ids
-          = DeleteStaleWorkingMemoryRows (tx, stale_ids, force);
+      auto deleted_embedding_ids = DeleteStaleWorkingMemoryRows (
+          tx, stale_ids, force, context_->orphan_embedding_candidates);
       add_timing ("SignalProcessor.wm_prune_delete",
                   t_prune_delete_start);
       if (force)
         {
           const auto t_orphan_delete_start = std::chrono::steady_clock::now ();
-          const auto orphans = DeleteUnreferencedEmbeddings (tx);
+          // Candidates stay in the context until a forced flush commits; a
+          // rolled-back flush restores them with the context snapshot.
+          const auto orphans
+              = context_->orphan_embedding_sweep_complete
+                    ? DeleteUnreferencedEmbeddingsAmong (
+                          tx, std::move (context_->orphan_embedding_candidates))
+                    : DeleteUnreferencedEmbeddings (tx);
+          context_->orphan_embedding_candidates.clear ();
+          context_->orphan_embedding_sweep_complete = true;
           deleted_embedding_ids.insert (deleted_embedding_ids.end (),
                                         orphans.begin (), orphans.end ());
           add_timing ("SignalProcessor.wm_prune_orphan_embeddings",
@@ -4341,6 +4431,8 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
           if (slot.embedding_dirty || embedding_id <= 0)
             {
               failure_stage = "insert_slot_embedding";
+              if (embedding_id > 0)
+                context_->orphan_embedding_candidates.push_back (embedding_id);
               const std::vector<float> emb_vec = ToFloatVector (slot.embedding);
               const auto t_sql_start = std::chrono::steady_clock::now ();
               tx.Execute (
@@ -4442,6 +4534,16 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                 {
                   failure_stage = "clear_slot_signals";
                   const auto t_sql_start = std::chrono::steady_clock::now ();
+                  const auto cleared_embedding_ids = ExtractInt64Column (
+                      tx.Execute ("SELECT DISTINCT embedding_id FROM signals "
+                                  "WHERE memory_id = ? "
+                                  "  AND embedding_id IS NOT NULL",
+                                  { memory_id }),
+                      "embedding_id");
+                  context_->orphan_embedding_candidates.insert (
+                      context_->orphan_embedding_candidates.end (),
+                      cleared_embedding_ids.begin (),
+                      cleared_embedding_ids.end ());
                   tx.Execute ("DELETE FROM signals WHERE memory_id = ?",
                               { memory_id });
                   add_timing ("SignalProcessor.wm_clear_slot_signals",
