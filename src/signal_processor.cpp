@@ -1068,7 +1068,10 @@ private:
 };
 
 // Deletes the embeddings among embedding_ids that no memory, signal or
-// reconstruction references, and returns the ids it deleted.
+// reconstruction references, and returns those ids. The reference checks
+// run on the candidate list and the referencing tables' embedding indexes;
+// the vec0 embeddings table is touched only by primary-key point deletes,
+// since a vec0 IN filter scans every embedding.
 std::vector<long long>
 DeleteUnreferencedEmbeddingsAmong (Transaction &tx,
                                    std::vector<long long> embedding_ids)
@@ -1090,29 +1093,31 @@ DeleteUnreferencedEmbeddingsAmong (Transaction &tx,
           embedding_ids.begin ()
               + static_cast<std::ptrdiff_t> (
                   std::min (embedding_ids.size (), begin + kChunk)));
+      std::string values;
+      values.reserve (chunk.size () * 4);
+      for (std::size_t index = 0; index < chunk.size (); ++index)
+        values += index == 0 ? "(?)" : ",(?)";
       const auto unreferenced = ExtractInt64Column (
           tx.Execute (
-              "SELECT embedding_id FROM embeddings "
-              "WHERE embedding_id IN (" + Placeholders (chunk.size ()) + ") "
-              "  AND NOT EXISTS ("
+              "WITH candidates(embedding_id) AS (VALUES " + values + ") "
+              "SELECT c.embedding_id FROM candidates c "
+              "WHERE NOT EXISTS ("
               "    SELECT 1 FROM memories m "
-              "    WHERE m.embedding_id = embeddings.embedding_id"
+              "    WHERE m.embedding_id = c.embedding_id"
               "  ) "
               "  AND NOT EXISTS ("
               "    SELECT 1 FROM signals s "
-              "    WHERE s.embedding_id = embeddings.embedding_id"
+              "    WHERE s.embedding_id = c.embedding_id"
               "  ) "
               "  AND NOT EXISTS ("
               "    SELECT 1 FROM memory_reconstructions mr "
-              "    WHERE mr.embedding_id = embeddings.embedding_id"
+              "    WHERE mr.embedding_id = c.embedding_id"
               "  )",
               MakeParams (chunk)),
           "embedding_id");
-      if (unreferenced.empty ())
-        continue;
-      tx.Execute ("DELETE FROM embeddings WHERE embedding_id IN ("
-                      + Placeholders (unreferenced.size ()) + ")",
-                  MakeParams (unreferenced));
+      for (const long long embedding_id : unreferenced)
+        tx.Execute ("DELETE FROM embeddings WHERE embedding_id = ?",
+                    { embedding_id });
       deleted.insert (deleted.end (), unreferenced.begin (),
                       unreferenced.end ());
     }
