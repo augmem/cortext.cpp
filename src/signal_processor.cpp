@@ -1179,9 +1179,12 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
               memory_params);
   if (delete_payloads)
     {
-      tx.Execute ("DELETE FROM current_memory_embeddings "
-                  "WHERE memory_id IN (" + placeholders + ")",
-                  memory_params);
+      // current_memory_embeddings is a vec0 table: an IN filter scans every
+      // row, a primary-key equality is a point delete.
+      for (const long long memory_id : memory_ids)
+        tx.Execute ("DELETE FROM current_memory_embeddings "
+                    "WHERE memory_id = ?",
+                    { memory_id });
     }
   tx.Execute ("DELETE FROM memories "
               "WHERE kind = 'WORKING' AND memory_id IN (" + placeholders + ")",
