@@ -2436,6 +2436,50 @@ TEST_CASE ("SQLite sparse route starts backfill at the knob-derived headroom "
                                       + parameters.backfill_batch_size));
 }
 
+/// Active route rows (other than the entry) that no persisted level-0 link
+/// reaches, read directly from SQLite rows.
+std::size_t
+LevelZeroOrphanRows (Store &store)
+{
+  const auto meta = store.Execute (
+      "SELECT entry_memory_id, generation FROM cortext_sparse_route_meta");
+  REQUIRE (meta.size () == 1);
+  const long long entry
+      = store::AnyToLongLong (meta.front ().at ("entry_memory_id")).value_or (0);
+  const long long generation
+      = store::AnyToLongLong (meta.front ().at ("generation")).value_or (0);
+  const auto rows = store.Execute (
+      "SELECT memory_id, links, active FROM cortext_sparse_route_nodes "
+      "WHERE generation = ?",
+      { generation });
+  std::unordered_map<long long, std::size_t> indegree;
+  std::vector<long long> active;
+  for (const auto &row : rows)
+    {
+      const long long memory_id
+          = store::AnyToLongLong (row.at ("memory_id")).value_or (0);
+      if (store::AnyToLongLong (row.at ("active")).value_or (0) == 1)
+        active.push_back (memory_id);
+      const auto bytes = store::BlobFromAny (row.at ("links"));
+      REQUIRE (bytes.size () >= 8);
+      std::uint32_t count = 0;
+      std::memcpy (&count, bytes.data () + 4, sizeof (count));
+      REQUIRE (bytes.size () >= 8 + count * sizeof (long long));
+      for (std::uint32_t index = 0; index < count; ++index)
+        {
+          long long target = 0;
+          std::memcpy (&target, bytes.data () + 8 + index * sizeof (long long),
+                       sizeof (long long));
+          ++indegree[target];
+        }
+    }
+  std::size_t orphans = 0;
+  for (const long long memory_id : active)
+    if (memory_id != entry && indegree[memory_id] == 0)
+      ++orphans;
+  return orphans;
+}
+
 TEST_CASE ("SQLite sparse route keeps a full node's nearest neighbors as "
            "closer neighbors arrive",
            "[operations][graph][retrieval][hnsw][sqlite][reciprocal]")
@@ -2474,6 +2518,7 @@ TEST_CASE ("SQLite sparse route keeps a full node's nearest neighbors as "
   while (!state.sqlite_sparse_route && advances++ < 32)
     REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
   REQUIRE (state.sqlite_sparse_route);
+  const std::size_t orphans_before = LevelZeroOrphanRows (*store);
 
   // More arrivals than one level-zero list holds, each nearer to the hub X
   // than to each other or to any other row: y_i = X + 0.02 e_i. Every
@@ -2520,10 +2565,13 @@ TEST_CASE ("SQLite sparse route keeps a full node's nearest neighbors as "
       if (linked > kBaseCount)
         ++arrivals_linked;
     }
-  // X's level-zero list is its nearest neighborhood: every slot holds an
-  // arrival, not whichever arrival last overwrote a single slot.
+  // X's level-zero list fills with its nearest neighborhood, the arrivals,
+  // but never by evicting a row's only inbound link: no arrival and no
+  // displaced base row is left unreachable at level zero.
   REQUIRE (level_zero_count == level_zero_links);
-  REQUIRE (arrivals_linked == level_zero_links);
+  INFO ("arrivals linked from the hub " << arrivals_linked);
+  REQUIRE (arrivals_linked > level_zero_links / 2);
+  REQUIRE (LevelZeroOrphanRows (*store) <= orphans_before);
 }
 
 TEST_CASE ("SQLite sparse route links a staged row from its ingest walk",
@@ -2686,6 +2734,67 @@ PseudoRandomUnit (std::uint64_t seed)
     }
   v.normalize ();
   return v;
+}
+
+TEST_CASE ("SQLite sparse route links an arrival that no full neighbor "
+           "would admit by distance",
+           "[operations][graph][retrieval][hnsw][sqlite][reciprocal]")
+{
+  namespace cache
+      = operations::historical_surface_search_cache_internal;
+  const auto parameters
+      = operations::sparse_retrieval_route_sqlite_internal::
+          DefaultParameters ();
+  auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
+  cortext::testing::InitializeCoreSchema (*store);
+
+  cache::State state;
+  state.embedding_dim = kEmbeddingDim;
+  state.sparse_route_parameters = parameters;
+  auto append_entry = [&] (long long memory_id, Eigen::VectorXf embedding) {
+    embedding.normalize ();
+    const std::size_t index = state.current_entries.size ();
+    state.current_entries.emplace_back (
+        memory_id, memory_id, 1000 + memory_id, "LONG_TERM", "opaque",
+        std::move (embedding), memory_id);
+    state.current_memory_index.emplace (memory_id, index);
+    state.current_memory_order.emplace (memory_id, index);
+  };
+  // A tight cluster: every member's level-zero list fills with members far
+  // closer than any outside row.
+  const Eigen::VectorXf center = PseudoRandomUnit (1);
+  constexpr long long kBaseCount = 700;
+  for (long long memory_id = 1; memory_id <= kBaseCount; ++memory_id)
+    append_entry (memory_id,
+                  center
+                      + 0.01f
+                            * PseudoRandomUnit (
+                                static_cast<std::uint64_t> (100 + memory_id)));
+  std::size_t advances = 0;
+  while (!state.sqlite_sparse_route && advances++ < 32)
+    REQUIRE (cache::AdvanceSQLiteSparseRouteBackfill (state, *store));
+  REQUIRE (state.sqlite_sparse_route);
+  const std::size_t orphans_before = LevelZeroOrphanRows (*store);
+
+  // Outliers whose nearest rows are all cluster members holding full,
+  // closer lists: no reciprocal admission by distance can take them.
+  constexpr long long kArrivals = 8;
+  for (long long offset = 1; offset <= kArrivals; ++offset)
+    {
+      const long long memory_id = kBaseCount + offset;
+      append_entry (memory_id,
+                    center
+                        + 0.6f
+                              * PseudoRandomUnit (static_cast<std::uint64_t> (
+                                  5000 + offset)));
+      REQUIRE (state.sqlite_sparse_route->Upsert (
+          memory_id, state.current_entries.back ().embedding.View ()));
+    }
+  REQUIRE (cache::ReconcileSQLiteSparseRoute (
+      state, *store, state.sqlite_sparse_route, nullptr));
+  // Every arrival is reachable at level zero, and no displaced row lost its
+  // last inbound link.
+  REQUIRE (LevelZeroOrphanRows (*store) <= orphans_before);
 }
 
 TEST_CASE ("Consolidation relinks moved active embeddings then seals and "

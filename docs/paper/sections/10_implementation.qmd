@@ -555,7 +555,13 @@ sparse index into a second unbounded write path.
 Normal writes and reconsolidations append only their memory identities to the
 durable journal. A successful seal writes changed nodes and knob-bounded
 reciprocal neighbors, advances graph metadata, and clears only its staged root
-identities in the same SQLite transaction. Neighbor proposal during this seal
+identities in the same SQLite transaction. A full neighbor list admits a
+closer new node by replacing a member, but never a member for which that
+link is its only level-0 inbound link (the resident graph keeps the exact
+level-0 in-degree of every row); and a new node that no neighbor admitted by distance is linked
+from its nearest neighbor that can give up such a member. Distance-only
+replacement had left 1.5% of nodes with no inbound link and 2.9% unreachable
+from the entry at 443k nodes. Neighbor proposal during this seal
 uses the $C+B$ node and $2B$ queue construction envelope, not the public $9C$
 activation envelope. If an existing active node's normalized embedding moves
 beyond the fixed $10^{-6}$ cosine-distance tolerance,

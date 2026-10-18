@@ -433,36 +433,53 @@ private:
   std::size_t size_ = 0;
 };
 
-/// Admit memory_id into row's level list. Returns whether the row changed.
-/// A full list replaces its farthest member only when memory_id is closer.
-bool
+struct Admission
+{
+  bool changed = false;
+  long long evicted = 0; ///< replaced member, 0 when the list had room
+};
+
+/// Admit memory_id into row's level list. A full list replaces a member
+/// farther than memory_id (the farthest such member, or with `force` the
+/// farthest member at any distance) that `evictable` allows; at level 0 the
+/// caller only allows members that keep another inbound link, so admitting
+/// a closer neighbor never strands a node.
+template <typename Evictable>
+Admission
 AdmitLink (NodeRow &row, int level, long long memory_id, float distance,
-           std::size_t link_limit)
+           std::size_t link_limit, Evictable evictable, bool force = false)
 {
   if (level < 0 || static_cast<std::size_t> (level) >= row.links.size ()
       || row.link_distances.size () != row.links.size ())
-    return false;
+    return {};
   auto &links = row.links[static_cast<std::size_t> (level)];
   auto &distances = row.link_distances[static_cast<std::size_t> (level)];
   if (distances.size () != links.size ()
       || std::find (links.begin (), links.end (), memory_id) != links.end ())
-    return false;
+    return {};
   if (links.size () < link_limit)
     {
       links.push_back (memory_id);
       distances.push_back (distance);
-      return true;
+      return { true, 0 };
     }
-  if (links.empty ())
-    return false;
-  const auto farthest = static_cast<std::size_t> (
-      std::max_element (distances.begin (), distances.end ())
-      - distances.begin ());
-  if (!(distance < distances[farthest]))
-    return false;
-  links[farthest] = memory_id;
-  distances[farthest] = distance;
-  return true;
+  std::size_t victim = links.size ();
+  for (std::size_t index = 0; index < links.size (); ++index)
+    {
+      if ((!force && !(distance < distances[index]))
+          || !evictable (level, links[index]))
+        continue;
+      if (victim == links.size () || distances[index] > distances[victim]
+          || (distances[index] == distances[victim]
+              && links[index] > links[victim]))
+        victim = index;
+    }
+  if (victim == links.size ())
+    return {};
+  const long long evicted = links[victim];
+  links[victim] = memory_id;
+  distances[victim] = distance;
+  return { true, evicted };
 }
 
 std::string
@@ -591,7 +608,32 @@ struct Route::Impl
   /// writes. Traversal never reads a node row from SQLite; SQLite stays the
   /// durable authority the graph is reloaded from.
   std::unordered_map<long long, ResidentNode> resident;
+  /// Level-0 links pointing at each identity, over every resident row.
+  std::unordered_map<long long, std::uint32_t> level_zero_indegree;
   std::function<internal::SharedEmbedding (long long)> embedding_provider;
+
+  void CountLevelZeroLinks (const ResidentNode &node, bool add)
+  {
+    if (node.links.empty ())
+      return;
+    for (const long long target : node.links.front ())
+      {
+        if (add)
+          {
+            ++level_zero_indegree[target];
+            continue;
+          }
+        const auto count = level_zero_indegree.find (target);
+        if (count != level_zero_indegree.end () && --count->second == 0)
+          level_zero_indegree.erase (count);
+      }
+  }
+
+  std::uint32_t LevelZeroIndegree (long long memory_id) const
+  {
+    const auto count = level_zero_indegree.find (memory_id);
+    return count == level_zero_indegree.end () ? 0 : count->second;
+  }
   std::size_t restart_rows_loaded = 0;
   std::vector<float> activation_centroid;
   std::vector<long long> activation_identity_ids;
@@ -618,6 +660,7 @@ struct Route::Impl
   bool LoadGeneration ()
   {
     resident.clear ();
+    level_zero_indegree.clear ();
     constexpr long long kChunkRows = 4096;
     long long cursor = 0;
     std::size_t loaded = 0;
@@ -658,7 +701,13 @@ struct Route::Impl
                 + static_cast<std::ptrdiff_t> (
                     std::min (memory_ids.size (), begin + kChunkIds)));
         for (const long long memory_id : chunk)
-          resident.erase (memory_id);
+          {
+            const auto prior = resident.find (memory_id);
+            if (prior == resident.end ())
+              continue;
+            CountLevelZeroLinks (prior->second, false);
+            resident.erase (prior);
+          }
         const auto rows = FetchNodes (*store, embedding_dim, parameters,
                                       generation, chunk);
         if (!rows)
@@ -711,6 +760,10 @@ struct Route::Impl
             static_cast<Eigen::Index> (node.embedding.size ()));
         resident_node.scale = 1.0f;
       }
+    const auto prior = resident.find (node.memory_id);
+    if (prior != resident.end ())
+      CountLevelZeroLinks (prior->second, false);
+    CountLevelZeroLinks (resident_node, true);
     return resident.insert_or_assign (node.memory_id,
                                       std::move (resident_node))
         .first->second;
@@ -1831,6 +1884,26 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                        ? impl_->parameters.row_addressed_level_zero_links
                        : impl_->parameters.row_addressed_neighbor_count;
           };
+          // Level-0 in-degree as this seal leaves it: the resident count plus
+          // the links this seal has added or dropped so far.
+          std::unordered_map<long long, long long> indegree_delta;
+          const auto indegree = [&] (long long memory_id) {
+            const auto delta = indegree_delta.find (memory_id);
+            return static_cast<long long> (
+                       impl_->LevelZeroIndegree (memory_id))
+                   + (delta == indegree_delta.end () ? 0 : delta->second);
+          };
+          const auto evictable = [&] (int level, long long memory_id) {
+            return level > 0 || indegree (memory_id) > 1;
+          };
+          const auto record_admission
+              = [&] (int level, long long memory_id, const Admission &result) {
+                  if (level != 0 || !result.changed)
+                    return;
+                  ++indegree_delta[memory_id];
+                  if (result.evicted > 0)
+                    --indegree_delta[result.evicted];
+                };
           for (const long long memory_id : roots)
             {
               const auto removed = impl_->removed.count (memory_id) != 0;
@@ -2015,6 +2088,11 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                         }
                     }
                 }
+              if (relink && !prior->second.links.empty ())
+                for (const long long target : prior->second.links.front ())
+                  --indegree_delta[target];
+              for (const long long target : node.links.front ())
+                ++indegree_delta[target];
               updates[memory_id] = node;
               if (!relink)
                 ++next_active_count;
@@ -2046,11 +2124,35 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                       NodeRow neighbor = updated != updates.end ()
                                              ? updated->second
                                              : candidate.node;
-                      if (AdmitLink (neighbor, level, memory_id,
-                                     candidate.distance, link_limit))
+                      const auto admitted
+                          = AdmitLink (neighbor, level, memory_id,
+                                       candidate.distance, link_limit,
+                                       evictable);
+                      record_admission (level, memory_id, admitted);
+                      if (admitted.changed)
                         updates[neighbor.memory_id] = std::move (neighbor);
                     }
                 }
+              // A node no full neighbor admitted would be unreachable at
+              // level 0. Its nearest neighbor that can give up a member whose
+              // inbound link survives elsewhere links it regardless of
+              // distance order.
+              if (indegree (memory_id) == 0)
+                for (const auto &candidate : neighbors)
+                  {
+                    const auto updated = updates.find (candidate.memory_id);
+                    NodeRow neighbor = updated != updates.end ()
+                                           ? updated->second
+                                           : candidate.node;
+                    const auto admitted = AdmitLink (
+                        neighbor, 0, memory_id, candidate.distance,
+                        link_limit_at (0), evictable, true);
+                    record_admission (0, memory_id, admitted);
+                    if (!admitted.changed)
+                      continue;
+                    updates[neighbor.memory_id] = std::move (neighbor);
+                    break;
+                  }
             }
 
           if (next_active_count < 0)
