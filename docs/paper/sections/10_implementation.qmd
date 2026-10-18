@@ -97,7 +97,9 @@ two-turn conversation below the boundary warm-up) were otherwise volatile and
 lost at the next restart; under per-conversation Natural ingest that was 19%
 of turns. Units closed by `Flush()` reach the sparse route as ordinary writes
 do (dirty rows sealed by a later signal), so the published route survives the
-flush.
+flush. A failed `Flush()` rolls back and reopens exactly the units it closed;
+its snapshot copies only those accumulators, so it stays independent of idle
+sources and store size.
 
 ### Retrieval-inhibition state (removed)
 
