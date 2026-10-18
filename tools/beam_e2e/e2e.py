@@ -48,7 +48,11 @@ JUDGE_SYSTEM = "You are a careful, impartial evaluator. Follow the instructions 
 # Claude tokenizer on BEAM packet text measures 2.81 chars/token (100K fit: tokens =
 # 4279 + 0.356 * chars), so a budget of N tokens is N * 2.8 chars of evidence.
 CHARS_PER_TOKEN = 2.8
-BUDGET_CHARS = {"r8k": int(8000 * CHARS_PER_TOKEN), "r2k": int(2000 * CHARS_PER_TOKEN)}
+# r8ko: 8,000 tokens in the answerer's own (gpt-5.6-luna) tokenizer, measured 4.35 chars/token
+# on BEAM packet text via CPA prompt_tokens (60k chars -> 13,807 tokens) - past.dev's budget.
+LUNA_CHARS_PER_TOKEN = 4.35
+BUDGET_CHARS = {"r8k": int(8000 * CHARS_PER_TOKEN), "r2k": int(2000 * CHARS_PER_TOKEN),
+                "r8ko": int(8000 * LUNA_CHARS_PER_TOKEN)}
 MAX_ATTEMPTS = 5
 _lock = threading.Lock()
 _cache: dict[str, dict] = {}
@@ -74,13 +78,53 @@ def load_cache(path: Path) -> None:
                 continue
 
 
+def backend() -> str:
+    """JUDGE_BACKEND=cpa sends answer and judge calls to the OpenAI-compatible CPA proxy
+    (.claude/hillclimb/cpa_judge/cpa_backend.py) instead of `claude -p`."""
+    return os.environ.get("JUDGE_BACKEND", "cli").strip().lower() or "cli"
+
+
+def _cpa_module():
+    here = Path(__file__).resolve().parent
+    for p in (here, *here.parents):
+        d = p / ".claude" / "hillclimb" / "cpa_judge"
+        if (d / "cpa_backend.py").is_file():
+            if str(d) not in sys.path:
+                sys.path.insert(0, str(d))
+            import cpa_backend
+            return cpa_backend
+    raise SystemExit("JUDGE_BACKEND=cpa but .claude/hillclimb/cpa_judge/cpa_backend.py not found")
+
+
+def cpa_call(prompt: str, model: str, system: str, schema: dict | None, kind: str, k: str, timeout_s: float) -> dict:
+    C = _cpa_module()
+    try:
+        # past.dev sends the prompt as the only (user) message; E2E_CPA_SYSTEM=keep sends ours
+        sys_msg = system if os.environ.get("E2E_CPA_SYSTEM", "none") == "keep" else None
+        r = C.chat(sys_msg, prompt, model=model, schema=schema, schema_name=kind, timeout_s=timeout_s)
+    except C.CPAError as e:
+        raise RuntimeError(f"cpa {e.kind}: {e}")
+    rec = {"key": k, "kind": kind, "model": model, "backend": "cpa", "served_model": r["model"],
+           "text": r["text"], "json": r["json"], "usage": r["usage"], "cost": 0.0}
+    with _lock:
+        _cache[k] = rec
+        with _cache_path.open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    return {**rec, "cached": False}
+
+
 def claude(prompt: str, model: str, system: str, schema: dict | None, kind: str, timeout_s: float = 300) -> dict:
     """{'text', 'json', 'usage', 'cost', 'cached'}; raises RuntimeError after retries."""
-    k = _key(model, system, json.dumps(schema, sort_keys=True) if schema else "", prompt)
+    parts = [model, system, json.dumps(schema, sort_keys=True) if schema else "", prompt]
+    if backend() != "cli":  # separate key namespace; cli keys unchanged
+        parts.insert(0, backend() + ("/sys" if os.environ.get("E2E_CPA_SYSTEM", "none") == "keep" else "/nosys"))
+    k = _key(*parts)
     with _lock:
         hit = _cache.get(k)
     if hit:
         return {**hit, "cached": True}
+    if backend() == "cpa":
+        return cpa_call(prompt, model, system, schema, kind, k, timeout_s)
     cmd = ["claude", "-p", "--model", model, "--tools", "", "--setting-sources", "",
            "--no-session-persistence", "--system-prompt", system, "--output-format", "json"]
     if schema:
@@ -192,7 +236,8 @@ def run_question(q: dict, packet: dict, a) -> dict:
         answer = ans["text"].strip()
         row["answer"] = answer
         row["answer_input_tokens"] = sum(int(ans["usage"].get(f) or 0) for f in
-                                         ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+                                         ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                                          "prompt_tokens"))
         if not answer:
             raise RuntimeError("empty answer")
     except RuntimeError as e:
@@ -276,7 +321,7 @@ def load_inputs(a):
 
 def cmd_run(a) -> None:
     a.out.mkdir(parents=True, exist_ok=True)
-    load_cache(a.out.parent / "cache.jsonl")
+    load_cache(a.out.parent / ("cache.jsonl" if backend() == "cli" else f"cache_{backend()}.jsonl"))
     qs, packets = load_inputs(a)
     res_path = a.out / "results.jsonl"
     done = set()
@@ -285,7 +330,8 @@ def cmd_run(a) -> None:
     todo = [q for q in qs if q["query_id"] not in done]
     (a.out / "config.json").write_text(json.dumps({
         "data": str(a.data), "packets": str(a.packets), "protocol": a.protocol, "arm": a.arm,
-        "answer_model": a.answer_model, "judge_model": a.judge_model, "thinking": "off (MAX_THINKING_TOKENS=0)",
+        "answer_model": a.answer_model, "judge_model": a.judge_model, "backend": backend(),
+        "thinking": "off (MAX_THINKING_TOKENS=0)" if backend() == "cli" else "off (reasoning_effort none)",
         "questions": len(qs)}, indent=1) + "\n")
     t0 = time.time()
     n = 0
@@ -405,7 +451,7 @@ def main() -> None:
         p = sub.add_parser(name)
         p.add_argument("--data", type=Path, required=True)
         p.add_argument("--packets", type=Path, required=True)
-        p.add_argument("--arm", choices=["full", "r8k", "r2k", "none", "oracle"], default="full")
+        p.add_argument("--arm", choices=["full", "r8k", "r8ko", "r2k", "none", "oracle"], default="full")
         p.add_argument("--limit", type=int, default=0)
         p.add_argument("--queries", default="")
         if name == "run":
