@@ -5,6 +5,7 @@
 #include "family_embedding_features_internal.hpp"
 #include "../store/memory_text_index_internal.hpp"
 #include "retrieval_trace_state.hpp"
+#include "member_vector_index_internal.hpp"
 #include "standing_memory_internal.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -1445,6 +1446,83 @@ LoadCrossModalSeedConfig ()
   return cfg;
 }
 
+// Member scoring for queries (member_vector_index_internal.hpp): a memory
+// grouped from several signals scores max(cosine of its pooled vector, its
+// best member's cosine) in the dense seed ranking, and the `limit` memories
+// with the best members join the seeds.
+struct MemberSeedConfig
+{
+  bool enabled = true;
+  std::size_t limit = 20;
+};
+
+// Experiment hooks only (CORTEXT_EXPERIMENT_HOOKS builds); release builds use
+// the defaults.
+MemberSeedConfig
+LoadMemberSeedConfig ()
+{
+  namespace env = internal::experimental_env;
+  MemberSeedConfig cfg;
+  cfg.enabled = env::Int ("CORTEXT_MEMBER_SEEDS").value_or (1) != 0;
+  cfg.limit = static_cast<std::size_t> (
+      std::max (0, env::Int ("CORTEXT_MEMBER_LIMIT").value_or (20)));
+  return cfg;
+}
+
+// The memories of the best members (member_vector_index_internal.hpp) with
+// their best member's cosine, best first, at most `limit`, each resolved to
+// its current memory through the store; members whose signal is gone are
+// dropped from the index.
+std::vector<std::pair<long long, double> >
+SearchMemberVectors (ProcessorContext &p_ctx, Transaction &tx,
+                     const Eigen::VectorXf &query, int embedding_dim,
+                     std::size_t limit, std::size_t *index_size)
+{
+  namespace members = member_vector_index_internal;
+  if (!p_ctx.member_vector_index)
+    p_ctx.member_vector_index
+        = std::make_shared<internal::MemberVectorIndex> ();
+  auto &index = *p_ctx.member_vector_index;
+  (void)members::Refresh (index, tx, embedding_dim);
+  if (index_size)
+    *index_size = index.signal_ids.size ();
+  // Over-fetch: several best members can share one memory.
+  const auto hits = members::Search (index, query, limit * 4);
+  if (hits.empty ())
+    return {};
+  std::string ids;
+  std::vector<std::any> params;
+  params.reserve (hits.size ());
+  for (const auto &[signal_id, score] : hits)
+    {
+      (void)score;
+      ids += ids.empty () ? "?" : ",?";
+      params.emplace_back (signal_id);
+    }
+  std::unordered_map<long long, long long> memory_of;
+  for (const auto &row : tx.Execute (
+           "SELECT s.signal_id AS signal_id, s.memory_id AS memory_id "
+           "FROM signals s WHERE s.signal_id IN (" + ids + ")",
+           params))
+    memory_of[AnyLongLong (row, "signal_id")] = AnyLongLong (row, "memory_id");
+  std::vector<std::pair<long long, double> > out;
+  std::unordered_set<long long> seen;
+  for (const auto &[signal_id, score] : hits)
+    {
+      const auto it = memory_of.find (signal_id);
+      if (it == memory_of.end () || it->second <= 0)
+        {
+          members::Drop (index, signal_id);
+          continue;
+        }
+      if (seen.insert (it->second).second)
+        out.emplace_back (it->second, static_cast<double> (score));
+      if (out.size () >= limit)
+        break;
+    }
+  return out;
+}
+
 struct CrossModalHit
 {
   long long memory_id = 0;
@@ -2155,6 +2233,80 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
             trace_candidates (build_seeded (*exact_control_rows, false)));
     }
   profile_timing ("GraphRetrieve.seed_rank", section_start);
+
+  // Member scoring for queries of any modality (see MemberSeedConfig).
+  start_profile_timing ();
+  static const MemberSeedConfig member_cfg = LoadMemberSeedConfig ();
+  std::size_t member_index_size = 0;
+  std::size_t member_hits = 0;
+  std::size_t member_raised = 0;
+  std::size_t member_added = 0;
+  if (member_cfg.enabled && member_cfg.limit > 0
+      && signal.retention == Retention::Ephemeral && embedding_dim > 0)
+    {
+      std::vector<std::pair<long long, double> > hits;
+      try
+        {
+          hits = SearchMemberVectors (p_ctx, tx, signal.embedding,
+                                      embedding_dim, member_cfg.limit,
+                                      &member_index_size);
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogWarn (
+              "cortext.graph_retrieval.member_unavailable",
+              { telemetry::Attribute::String ("error", e.what ()) });
+        }
+      member_hits = hits.size ();
+      if (!hits.empty ())
+        {
+          std::unordered_map<long long, std::size_t> seeded_at;
+          for (std::size_t i = 0; i < seeded.size (); ++i)
+            seeded_at.emplace (seeded[i].memory_id, i);
+          for (const auto &[memory_id, cosine] : hits)
+            {
+              const double member_score = core::Map01 (cosine);
+              const auto at = seeded_at.find (memory_id);
+              if (at != seeded_at.end ())
+                {
+                  auto &candidate = seeded[at->second];
+                  if (member_score > candidate.seed_score)
+                    {
+                      candidate.seed_score = member_score;
+                      candidate.score
+                          = core::Clamp (member_score, 0.0, 1.0);
+                      ++member_raised;
+                    }
+                  continue;
+                }
+              auto candidate = LexicalCandidate (
+                  p_ctx, tx, memory_id, static_cast<long long> (exclusion_ts),
+                  embedding_dim);
+              if (!candidate)
+                continue;
+              candidate->seed_score = std::max (
+                  member_score, core::Map01 (Cosine (signal.embedding,
+                                                     candidate->embedding)));
+              candidate->score = core::Clamp (candidate->seed_score, 0.0, 1.0);
+              seeded_at.emplace (memory_id, seeded.size ());
+              seeded.push_back (std::move (*candidate));
+              ++member_added;
+            }
+          std::stable_sort (seeded.begin (), seeded.end (),
+                            [] (const Candidate &a, const Candidate &b) {
+                              return a.seed_score > b.seed_score;
+                            });
+        }
+    }
+  profile_timing ("GraphRetrieve.member_seeds", section_start);
+  context.AddOperationTiming ("GraphRetrieve.member_index_size",
+                              static_cast<double> (member_index_size));
+  context.AddOperationTiming ("GraphRetrieve.member_hits",
+                              static_cast<double> (member_hits));
+  context.AddOperationTiming ("GraphRetrieve.member_raised",
+                              static_cast<double> (member_raised));
+  context.AddOperationTiming ("GraphRetrieve.member_added",
+                              static_cast<double> (member_added));
 
   std::unordered_map<long long, Candidate> candidates;
   candidates.reserve (seeded.size ());

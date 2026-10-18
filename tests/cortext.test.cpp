@@ -2943,6 +2943,66 @@ TEST_CASE ("A recalled multi-signal memory keeps the members the query is about"
   REQUIRE (with_marathon (ingest.retrieved_memory).size () > 3072);
 }
 
+TEST_CASE ("A query finds a grouped memory by its best member",
+           "[cortext][retrieval][retention][focus][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+  std::uint64_t ts = 1000;
+  // One grouped memory: the queried member among four unrelated ones, so
+  // its pooled vector sits far from the query.
+  const std::vector<std::string> topics = {
+    "My sourdough starter needs feeding twice a day with rye flour. ",
+    "The quarterly tax filing for the bakery is due on the fifteenth. ",
+    "The orchid conservatory renewal costs ninety dollars a year. ",
+    "Our cat Miso hates the vacuum and hides under the porch. ",
+    "The bathroom tiles are cracked and the plumber comes on Tuesday. ",
+  };
+  for (const auto &topic : topics)
+    {
+      std::string turn;
+      while (turn.size () < 600)
+        turn += topic;
+      (void)ctx->ProcessTextAt (turn, "chat/unit", ts,
+                                cortext::Retention::Natural);
+      ts += 60000;
+    }
+  ctx->Flush ();
+  // Single turns near the query's subject fill the anchor slots.
+  for (int i = 0; i < 40; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt (
+          "Greenhouse visit " + std::to_string (i)
+              + ": the botanical garden has ferns, cacti and a koi pond.",
+          "chat/garden/" + std::to_string (i), ts,
+          cortext::Retention::Durable);
+    }
+  const auto packet = ctx->ProcessTextAt (
+      "What do I pay annually for the flower greenhouse pass?",
+      "query/public", ts + 1000, cortext::Retention::Ephemeral);
+  bool found = false;
+  for (const auto &m : packet.retrieved_memory)
+    for (const auto &blob : m.content)
+      found = found
+              || std::string (blob.begin (), blob.end ())
+                         .find ("orchid conservatory renewal")
+                     != std::string::npos;
+  REQUIRE (found);
+  REQUIRE (packet.output.operation_ms.at ("GraphRetrieve.member_index_size")
+           >= 5.0);
+}
+
 TEST_CASE ("Contiguity attaches adjacent turns of any modality",
            "[cortext][retrieval][contiguity][media]")
 {

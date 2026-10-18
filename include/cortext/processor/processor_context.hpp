@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -19,6 +20,11 @@
 
 namespace cortext
 {
+
+namespace internal
+{
+struct MemberVectorIndex; // src/operations/member_vector_index_internal.hpp
+}
 
 struct BoundaryDiagnostics
 {
@@ -648,6 +654,10 @@ struct ProcessorContext
                      std::vector<RetrievalSurfaceSourceIndexEntry>>
       retrieval_surface_source_index;
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
+  // Query-time member channel (graph_retrieval.cpp); read from the store on
+  // demand and validated per hit, so it survives cache detach/restore and
+  // rollback snapshots share it.
+  std::shared_ptr<internal::MemberVectorIndex> member_vector_index;
 };
 
 } // namespace cortext

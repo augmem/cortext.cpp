@@ -20,6 +20,7 @@
 #include "operations/consolidation_epoch_profile_internal.hpp"
 #include "operations/consolidation_throughput_state_internal.hpp"
 #include "operations/historical_surface_search_cache_internal.hpp"
+#include "operations/member_vector_index_internal.hpp"
 #include "operations/signal_record_rollback_internal.hpp"
 #include "operations/sparse_retrieval_knobs_internal.hpp"
 #include "experimental_env.hpp"
@@ -866,6 +867,8 @@ InvalidateCustomOperationCaches (ProcessorContext &context)
 {
   operations::historical_surface_search_cache_internal::Erase (context);
   ClearDbDerivedProcessorCaches (context);
+  context.member_vector_index
+      = std::make_shared<internal::MemberVectorIndex> ();
 }
 
 bool
@@ -2693,6 +2696,10 @@ SignalProcessor::SignalProcessor (const Config &config,
           std::move (root_operation))),
       context_ (std::make_unique<ProcessorContext> ())
 {
+  // Created before any rollback snapshot copies the context, so queries
+  // that run inside a snapshot scope fill the one shared index.
+  context_->member_vector_index
+      = std::make_shared<internal::MemberVectorIndex> ();
   if (!config_.encoder)
     {
       throw std::invalid_argument (
