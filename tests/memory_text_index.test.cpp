@@ -178,6 +178,40 @@ TEST_CASE ("memory text search drops words common across the index",
   REQUIRE (search (100).size () == 41);
 }
 
+TEST_CASE ("memory text df cut is exact at its boundary on both count paths",
+           "[fts]")
+{
+  TempDbPath db;
+  auto store = OpenStore (db.path ());
+  cortext::store::ApplyMigrations (*store);
+  // "harbor" stems to a term porter keeps (counted through its posting
+  // list); "agreed" stems to "agre", which porter rewrites again ("agr"),
+  // so its count comes from the vocabulary.
+  for (long long id = 1; id <= 3; ++id)
+    Index (*store, id, "harbor agreed " + std::to_string (id));
+  Index (*store, 4, "zanzibar");
+  auto count = [&store] (const std::string &query, std::size_t max_df) {
+    auto tx = store->Begin ();
+    fts::SearchParams params;
+    params.limit = 50;
+    params.max_df_ratio = 0.0;
+    params.max_df_floor = max_df;
+    const auto hits = fts::Search (*tx, query, 1000, params);
+    tx->Commit ();
+    return hits.size ();
+  };
+  for (const char *word : { "harbor", "agreed" })
+    {
+      const std::string query = std::string (word) + " zanzibar";
+      REQUIRE (count (query, 3) == 4); // df == max_df: kept
+      REQUIRE (count (query, 2) == 1); // df == max_df + 1: dropped
+    }
+  // A deleted document no longer counts towards either path's df.
+  store->Execute ("DELETE FROM memory_text_fts WHERE rowid = 3");
+  REQUIRE (count ("harbor zanzibar", 2) == 3);
+  REQUIRE (count ("agreed zanzibar", 2) == 3);
+}
+
 TEST_CASE ("memory text index rolls back and deletes with its memory",
            "[fts]")
 {

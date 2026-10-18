@@ -124,31 +124,63 @@ DropCommonWords (Transaction &tx, std::vector<std::string> words,
     return words;
   try
     {
-      tx.Execute ("INSERT INTO memory_query_terms(memory_query_terms) "
-                  "VALUES ('delete-all')",
-                  {});
-      for (std::size_t k = 0; k < words.size (); ++k)
-        tx.Execute ("INSERT INTO memory_query_terms(rowid, text) "
-                    "VALUES (?, ?)",
-                    { static_cast<long long> (k + 1), words[k] });
+      // Index terms of each scratch row (rowid = 1-based slot).
+      const auto stems_of = [&tx] (const std::vector<std::string> &texts) {
+        tx.Execute ("INSERT INTO memory_query_terms(memory_query_terms) "
+                    "VALUES ('delete-all')",
+                    {});
+        for (std::size_t k = 0; k < texts.size (); ++k)
+          tx.Execute ("INSERT INTO memory_query_terms(rowid, text) "
+                      "VALUES (?, ?)",
+                      { static_cast<long long> (k + 1), texts[k] });
+        std::vector<std::vector<std::string>> stems (texts.size ());
+        for (const auto &row : tx.Execute (
+                 "SELECT doc, term FROM memory_query_term_stems", {}))
+          {
+            const auto doc = AnyToLongLong (row.at ("doc")).value_or (0);
+            if (doc <= 0 || doc > static_cast<long long> (texts.size ()))
+              continue;
+            stems[static_cast<std::size_t> (doc - 1)].push_back (
+                std::any_cast<std::string> (row.at ("term")));
+          }
+        return stems;
+      };
       // word index -> index terms of that word (unicode61 may split one).
-      std::vector<std::vector<std::string>> terms (words.size ());
+      const auto terms = stems_of (words);
+      std::vector<std::string> distinct;
+      std::unordered_set<std::string> seen;
+      for (const auto &word_terms : terms)
+        for (const auto &term : word_terms)
+          if (seen.insert (term).second)
+            distinct.push_back (term);
+      // Only "df <= max_df" matters, so a term whose quoted form tokenizes
+      // back to itself is counted through its posting list, stopping after
+      // max_df + 1 documents: the cost stays bounded by max_df however
+      // common the term is. A term the tokenizer would rewrite again (porter
+      // is not idempotent on every stem) keeps the vocabulary's full count.
+      const auto restemmed = stems_of (distinct);
+      std::unordered_map<std::string, long long> df;
       std::vector<std::any> params;
       std::string placeholders;
-      for (const auto &row : tx.Execute (
-               "SELECT doc, term FROM memory_query_term_stems", {}))
+      for (std::size_t j = 0; j < distinct.size (); ++j)
         {
-          const auto doc = AnyToLongLong (row.at ("doc")).value_or (0);
-          if (doc <= 0 || doc > static_cast<long long> (words.size ()))
-            continue;
-          auto term = std::any_cast<std::string> (row.at ("term"));
-          terms[static_cast<std::size_t> (doc - 1)].push_back (term);
+          const auto &term = distinct[j];
+          if (restemmed[j].size () == 1 && restemmed[j][0] == term)
+            {
+              const auto rows = tx.Execute (
+                  "SELECT count(*) AS n FROM (SELECT rowid FROM "
+                  "memory_text_fts WHERE memory_text_fts MATCH ? LIMIT ?)",
+                  { '"' + term + '"', static_cast<long long> (max_df) + 1 });
+              df[term] = rows.empty ()
+                             ? 0
+                             : AnyToLongLong (rows[0].at ("n")).value_or (0);
+              continue;
+            }
           if (!placeholders.empty ())
             placeholders += ", ";
           placeholders += "?";
-          params.emplace_back (std::move (term));
+          params.emplace_back (term);
         }
-      std::unordered_map<std::string, long long> df;
       if (!params.empty ())
         for (const auto &row : tx.Execute (
                  "SELECT term, doc FROM memory_text_vocab WHERE term IN ("
