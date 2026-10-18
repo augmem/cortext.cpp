@@ -122,6 +122,46 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
            >= Catch::Approx (before_strength).epsilon (1e-6));
 }
 
+TEST_CASE ("Alg24 a full slot takes no further chunk",
+           "[operations][working_memory][chunk]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.embedding[0] = 1.0f;
+  s.timestamp = 200000;
+  s.source_id = "test";
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 0.3;
+  cfg.stability = 0.6;
+
+  // Same source, same direction, but already holding the chunk budget: the
+  // incoming 3-signal unit would push it past WMChunkMaxSignals.
+  const int cap = core::WMChunkMaxSignals (cfg.stability);
+  REQUIRE (cap >= 3);
+  ProcessorContext::WMSlot slot;
+  slot.embedding = s.embedding;
+  slot.strength = 1.0;
+  slot.last_ts = static_cast<double> (s.timestamp) / 1000.0;
+  slot.source_id = s.source_id;
+  slot.n_signals = cap - 2;
+  pctx.wm_slots.push_back (slot);
+
+  pctx.T_dynamic = 0.2;
+  WorkingMemory op;
+  OperationContext ctx (s, pctx, cfg);
+  SetupMemoryGatingContext (ctx, pctx, s, 0.95);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (pctx.wm_last_accepted == true);
+  REQUIRE (pctx.wm_last_chunked == false);
+  REQUIRE (pctx.wm_slots.size () == 2);
+  REQUIRE (pctx.wm_slots.front ().n_signals == cap - 2);
+  REQUIRE (pctx.wm_slots.back ().n_signals == 3);
+}
+
 TEST_CASE ("Alg24 maintenance decays slots but preserves them with floor",
            "[operations][working_memory][maintenance]")
 {

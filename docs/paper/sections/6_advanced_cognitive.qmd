@@ -156,9 +156,21 @@ Chunking operates on memory embeddings to merge related content from the same so
 ```
 similar_memories ← {m ∈ active_memories | cos(m.embedding, memory.e_rep) > chunking_threshold AND
                               m.source_id == memory.source_id}
-if |similar_memories| > 0:
-    merge_into_chunk(similar_memories, memory)
+chunk_max(T) = round(lerp(8, 24, T))  # signals per slot (16 at T = 0.5)
+best ← argmax cos over similar_memories
+if best exists AND best.n_signals + memory.n_signals ≤ chunk_max(T):
+    merge_into_chunk(best, memory)
+else:
+    insert_new_slot(memory)  # capacity eviction as for any insert
 ```
+
+The chunk budget bounds what one slot carries into every packet. Without it,
+per-conversation Natural ingest let a slot absorb a whole stream: on BEAM
+(22,652 turns) three slots held 21,793 signals, each query packet carried
+~0.9 MB of working-memory text, and consolidation p95 reached 10 s. With
+`chunk_max` = 16 the same stream keeps gold recall (.110 retrieved), halves the
+working-memory text, cuts ingest instructions 62%, and brings consolidation
+p95 to 0.31 s. Durable ingest never chunks (each turn keeps its own trace).
 
 Earlier builds also rehearsed slots: an incoming unit within
 `lerp(0.5, 0.7, F)` cosine of a slot, or a retrieved memory within the chunking

@@ -287,6 +287,15 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     }
 
   const double chunk_threshold = core::WMChunkingThreshold (cfg.focus);
+  // A slot at its chunk budget takes no further chunk; the unit opens a new
+  // slot instead (and capacity eviction applies as for any insert).
+  if (best_idx >= 0
+      && p_ctx.wm_slots[static_cast<size_t> (best_idx)].n_signals
+                 + acc_signal_count
+             > core::WMChunkMaxSignals (cfg.stability))
+    {
+      best_idx = -1;
+    }
   if (best_idx >= 0 && best_sim >= chunk_threshold)
     {
       auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];

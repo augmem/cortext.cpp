@@ -1515,6 +1515,17 @@ WMChunkingThreshold (double F)
   return Lerp (0.7, 0.9, FocusBias (F));
 }
 
+// Working-memory chunk budget (signals per slot). A same-source unit merges
+// into its best-matching slot only while the slot stays within this budget;
+// otherwise it takes a new slot. Unbounded chunking let one slot hold tens of
+// thousands of signals on long streams (packet and consolidation blow-up).
+// Higher stability holds longer chunks.
+inline int
+WMChunkMaxSignals (double T)
+{
+  return static_cast<int> (std::round (Lerp (8.0, 24.0, Clamp (T, 0.0, 1.0))));
+}
+
 inline double
 WMGateThreshold (double F)
 {
