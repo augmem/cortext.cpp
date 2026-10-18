@@ -1305,6 +1305,10 @@ gates. The content-addressed aggregate digest is
 
 ### Activation-snapshot read-through reuse
 
+(Superseded: the route generation is now resident in memory in full, see
+the sparse-route paragraphs of the implementation section; the bounded
+shadow cache described here was removed.)
+
 The retained multi-entry route initially selected and decoded the same
 persisted activation snapshot on every query. A read-through repair places
 those generation-qualified node rows in the route's existing $24C$ shadow

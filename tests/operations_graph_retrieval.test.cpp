@@ -177,7 +177,8 @@ TEST_CASE ("SQLite sparse route restart and query work stay row bounded",
   auto route = SQLiteRoute::Create (
       *store, kEmbeddingDim, entries, *hnsw, parameters);
   REQUIRE (route != nullptr);
-  REQUIRE (route->RestartRowsLoaded () == 1);
+  REQUIRE (route->RestartRowsLoaded ()
+           == 1 + route->ResidentNodeRows ());
   REQUIRE (route->ActivationSearchEffort () == parameters.search_ef);
   REQUIRE (route->ActivationSearchNodeBudget ()
            == parameters.search_node_budget);
@@ -188,8 +189,7 @@ TEST_CASE ("SQLite sparse route restart and query work stay row bounded",
   REQUIRE (initial->front () == 1);
   REQUIRE (route->LastSearchNodeRows () == entries.size ());
   REQUIRE (route->LastSearchNodeRows () <= parameters.search_node_budget);
-  REQUIRE (route->CachedNodeRows () <= parameters.shadow_node_capacity);
-  REQUIRE (route->CacheOrderRows () <= parameters.shadow_node_capacity);
+  REQUIRE (route->ResidentNodeRows () == entries.size ());
 
   REQUIRE (route->ActivationEntryMemoryId () == 0);
   const auto recenter_target
@@ -231,7 +231,8 @@ TEST_CASE ("SQLite sparse route restart and query work stay row bounded",
 
   auto restarted = SQLiteRoute::Open (*store, kEmbeddingDim, parameters);
   REQUIRE (restarted != nullptr);
-  REQUIRE (restarted->RestartRowsLoaded () == 1);
+  REQUIRE (restarted->RestartRowsLoaded ()
+           == 1 + restarted->ResidentNodeRows ());
   REQUIRE (restarted->ActivationEntryMemoryId () == recenter_target->front ());
   REQUIRE (restarted->ActivationSearchEffort () == parameters.search_ef);
   REQUIRE (restarted->ActivationSearchNodeBudget ()
@@ -262,11 +263,13 @@ TEST_CASE ("SQLite sparse route restart and query work stay row bounded",
   REQUIRE (persisted_before_retry);
   REQUIRE (persisted_before_retry->HasDirtyMemoryIds ());
   store->Execute ("DROP TRIGGER fail_sparse_route_seal");
+  const std::size_t resident_before_seal = restarted->ResidentNodeRows ();
+  REQUIRE (resident_before_seal > 0);
   REQUIRE (restarted->Seal (hnsw.get ()));
   REQUIRE (restarted->DeltaSize () == 0);
-  // The seal drops only rewritten rows; the order keeps no stale entry.
-  REQUIRE (restarted->CacheOrderRows () == restarted->CachedNodeRows ());
-  REQUIRE (restarted->CachedNodeRows () <= parameters.shadow_node_capacity);
+  // The seal makes exactly the rows it wrote resident: the new node joins
+  // and the removed node stays as an inactive row of the generation.
+  REQUIRE (restarted->ResidentNodeRows () == resident_before_seal + 1);
   {
     const auto sealed = restarted->Search (UnitVec (0), 32);
     REQUIRE (sealed);
@@ -987,7 +990,6 @@ TEST_CASE ("Consolidation rebuilds and restarts a knob-bounded SQLite "
   REQUIRE (route->ActivationEntryMemoryId () == first_entry);
   const auto cold_ordinary = route->Search (observer_query, 16);
   REQUIRE (cold_ordinary);
-  REQUIRE (route->LastActivationSnapshotCacheMissRows () == 0);
   REQUIRE (route->LastActivationFrontierSeedCount () > 0);
   REQUIRE (route->LastActivationFrontierSeedCount ()
            < route->ActivationIdentityIds ().size ());
@@ -998,15 +1000,14 @@ TEST_CASE ("Consolidation rebuilds and restarts a knob-bounded SQLite "
   REQUIRE (route->Search (observer_query, 16) == cold_ordinary);
   REQUIRE (route->LastActivationFrontierSeedCount () == cold_seed_count);
   REQUIRE (route->SearchActivated (observer_query) == first_activation);
-  REQUIRE (route->LastActivationSnapshotCacheMissRows () > 0);
-  REQUIRE (route->LastActivationSnapshotCacheMissRows ()
+  REQUIRE (route->LastActivationSnapshotRows ()
            <= parameters.activation_identity_target);
   REQUIRE (route->SearchActivated (observer_query) == first_activation);
-  REQUIRE (route->LastActivationSnapshotCacheMissRows () == 0);
   REQUIRE (route->LastActivationFrontierSeedCount () > 0);
   REQUIRE (route->LastActivationFrontierSeedCount ()
            <= parameters.activation_identity_target);
-  REQUIRE (route->RestartRowsLoaded () == 1);
+  REQUIRE (route->RestartRowsLoaded ()
+           == 1 + route->ResidentNodeRows ());
 
   REQUIRE (route->Recenter (UnitVec (1)));
   REQUIRE (route->LastActivationFrontierSeedCount () == 0);
@@ -1061,7 +1062,8 @@ TEST_CASE ("Consolidation rebuilds and restarts a knob-bounded SQLite "
   REQUIRE (route->ActivationEntryMemoryId () == second_entry);
   REQUIRE (route->ActivationIdentityIds () == second_snapshot);
   REQUIRE (route->SearchActivated (observer_query) == second_activation);
-  REQUIRE (route->RestartRowsLoaded () == 1);
+  REQUIRE (route->RestartRowsLoaded ()
+           == 1 + route->ResidentNodeRows ());
 }
 
 Eigen::VectorXf
@@ -2109,12 +2111,15 @@ TEST_CASE ("Graph retrieval reopens SQLite sparse route on the existing path",
       REQUIRE (result.activated_identities
                <= static_cast<double> (
                    parameters.activation_identity_target));
-      REQUIRE (result.restart_rows == 1.0);
+      // The route reopened with each processor: its metadata row plus
+      // every resident generation row, at least the rows this query read.
+      REQUIRE (result.restart_rows >= 1.0 + result.node_rows);
     }
   auto restarted = operations::sparse_retrieval_route_sqlite_internal::Route::
       Open (*store, kEmbeddingDim, parameters);
   REQUIRE (restarted != nullptr);
-  REQUIRE (restarted->RestartRowsLoaded () == 1);
+  REQUIRE (restarted->RestartRowsLoaded ()
+           == 1 + restarted->ResidentNodeRows ());
   REQUIRE (
       restarted->Search (UnitVec (0), parameters.route_capacity).has_value ());
   REQUIRE (restarted->LastSearchNodeRows ()
@@ -2178,7 +2183,8 @@ TEST_CASE ("SQLite sparse route relinks moved active topology after restart",
   route.reset ();
   route = cache::OpenSQLiteSparseRoute (state, *store);
   REQUIRE (route);
-  REQUIRE (route->RestartRowsLoaded () == 1);
+  REQUIRE (route->RestartRowsLoaded ()
+           == 1 + route->ResidentNodeRows ());
   REQUIRE (route->DeltaSize () == 0);
   REQUIRE (route->HasDirtyMemoryIds ());
   const auto staged_dirty
@@ -2353,7 +2359,8 @@ TEST_CASE ("SQLite sparse route backfills a large existing surface in fixed "
       = operations::sparse_retrieval_route_sqlite_internal::Route::Open (
           *store, kEmbeddingDim, parameters);
   REQUIRE (restarted);
-  REQUIRE (restarted->RestartRowsLoaded () == 1);
+  REQUIRE (restarted->RestartRowsLoaded ()
+           == 1 + restarted->ResidentNodeRows ());
   const auto revised_result
       = restarted->Search (revised, parameters.route_capacity);
   REQUIRE (revised_result);
@@ -2789,7 +2796,8 @@ TEST_CASE ("Consolidation relinks moved active embeddings then seals and "
   auto reopened = sqlite_route::Route::Open (*store, kEmbeddingDim,
                                              parameters);
   REQUIRE (reopened);
-  REQUIRE (reopened->RestartRowsLoaded () == 1);
+  REQUIRE (reopened->RestartRowsLoaded ()
+           == 1 + reopened->ResidentNodeRows ());
   require_exact (*reopened);
 
   REQUIRE (route->Recenter (moved.front ().second));
@@ -2967,8 +2975,6 @@ TEST_CASE ("SQLite sparse route work budgets derive from every knob",
                    == parameters.activation_search_node_budget_min);
           REQUIRE (parameters.activation_search_ef_step
                    == parameters.reciprocal_update_count);
-          REQUIRE (parameters.shadow_node_capacity
-                   == parameters.route_capacity * 24);
           REQUIRE (parameters.construction_search_node_budget
                    == parameters.route_capacity * 4);
           REQUIRE (parameters.construction_search_ef

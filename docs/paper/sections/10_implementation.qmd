@@ -292,11 +292,9 @@ $\lceil\log_2 C\rceil$. At each level a new node may update at most
 $max(2,\lfloor B/16\rfloor)$ reciprocal rows. HNSW construction effort is
 $max(32,\operatorname{round}(25C/64))$ and query effort is
 $max(C,\operatorname{round}(5C/2))$. The bootstrap, maximum public visited-node,
-maximum public queue, shadow-cache, construction-node, and construction-queue limits
-are respectively $2C$, $9C$, $9C$, $24C$, $C+B$, and $2B$. The $9C$
-quantity is a hard routing-inspection ceiling, not the activated working set;
-the cache's node map and FIFO order are bounded together, and a successful
-seal clears both so invalidated rows cannot leave accumulating order entries.
+maximum public queue, construction-node, and construction-queue limits
+are respectively $2C$, $9C$, $9C$, $C+B$, and $2B$. The $9C$
+quantity is a hard routing-inspection ceiling, not the activated working set.
 After exact reranking, no more than $A$ identities may proceed into eligibility,
 family collapse, and final ranking. Exact cosine
 family checks have a separate $2C$ per-event ceiling. The breadth-first adjacency fetch
@@ -370,17 +368,12 @@ existing exact SQL seed path. Consequently the fixed sparse envelope is not
 misrepresented as complete after operation-specific filtering; the fallback
 may still perform store-sized exact work.
 
-Decoded activation-snapshot rows reuse the route's existing generation-qualified
-shadow-node cache rather than being selected and decoded again for every query.
-The first query after reopen loads only snapshot identities absent from that
-cache; later queries reuse those immutable decoded rows while continuing to
-compute query distance exactly. The shared cache remains bounded by $24C$, and
-every successful seal clears both its node map and FIFO order before any row
-from the next authoritative SQLite state can be reused. A separate physical
-snapshot-cache-miss counter distinguishes the fixed $A$ rows evaluated from the
-rows actually loaded from SQLite. This is a read-through optimization of the
-one persisted route, not an in-memory authority or a second write path, and it
-contains no modality or source-id predicate.
+Activation-snapshot rows are read from the same resident generation graph as
+every other traversal row, so no query decodes a node row from SQLite; query
+distances are still computed exactly per query. The resident graph mirrors the
+one persisted route (each seal commits to SQLite before its rows are replaced
+in memory) rather than acting as a second write path, and it contains no
+modality or source-id predicate.
 
 Emotional propagation uses the same first-source-wins semantics while avoiding
 duplicate downstream work. Its breadth-first kernel carries up to 64 source
@@ -531,13 +524,22 @@ $B=128$ historical rows, the implementation tests whether the in-memory
 ordered iterator has another entry. Thus 129 is the derived logical $B+1$
 boundary, not a physical 129th-row read and never a 129-row work batch. Opening the sparse
 route loads one metadata row, validates at most $A$ packed activation
-identities from that row, resolves only that knob-bounded ordered slice,
-and lazily fetches graph nodes under the $9C$ canonical plus $A$ snapshot
-public-query bounds; the route
-itself does not replay or mirror complete history. This is not a bounded
-whole-engine restart claim: `SignalProcessor` startup still materializes the
-complete current memory surface before retrieval begins, so startup remains
-$O(\text{history})$ until that separate hydration path is removed.
+identities from that row, and then loads every node row of the route
+generation into memory once, in fixed 4,096-row chunks. Traversal reads
+adjacency and vectors only from that resident graph; each committed seal
+replaces exactly the rows it wrote, and SQLite remains the durable authority
+the graph is reloaded from after restart or recovery. A resident node keeps
+its adjacency and a handle to an arena row: the memory's current raw row when
+normalizing it reproduces the stored normalized vector bit for bit (the
+distance then normalizes each component on the fly, exactly as the stored
+vector was formed), otherwise the stored vector itself. The per-query
+$9C$ canonical plus $A$ snapshot row envelope is unchanged, including the
+slot an identity outside the generation consumes. On the 111k-node
+BEAM-chain snapshot, 513 activated searches return identical identity lists
+(same hash) and per-search CPU falls from 16.4/24.8 ms (p50/p95) with
+per-node SQLite fetches to 3.8/4.6 ms. Route opening is therefore
+$O(\text{generation})$, like `SignalProcessor` startup, which already
+materializes the complete current memory surface before retrieval begins.
 
 Live writes do not grow an unbounded in-memory construction delta for either
 active or unpublished routes. Each construction edge drains at most $C$ dirty

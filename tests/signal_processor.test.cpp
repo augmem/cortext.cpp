@@ -3390,7 +3390,8 @@ TEST_CASE ("Engine consolidation seals an incrementally current sparse route "
             operations::sparse_retrieval_route_sqlite_internal::
                 DefaultParameters ());
   REQUIRE (restarted);
-  REQUIRE (restarted->RestartRowsLoaded () == 1);
+  REQUIRE (restarted->RestartRowsLoaded ()
+           == 1 + restarted->ResidentNodeRows ());
   // The sealed generation persisted the moved vector (memory 1, now on
   // dimension 0) in place.
   {

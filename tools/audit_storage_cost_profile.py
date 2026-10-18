@@ -183,7 +183,6 @@ OTHER_DIAGNOSTIC_OPERATION_KEYS = {
     "GraphRetrieve.sqlite_sparse_route_activated_identities",
     "GraphRetrieve.sqlite_sparse_route_node_rows",
     "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows",
-    "GraphRetrieve.sqlite_sparse_route_activation_snapshot_cache_miss_rows",
     "GraphRetrieve.sqlite_sparse_route_distance_evaluations",
     "GraphRetrieve.sqlite_sparse_route_restart_rows",
     "GraphRetrieve.sqlite_sparse_route_dirty_rows",

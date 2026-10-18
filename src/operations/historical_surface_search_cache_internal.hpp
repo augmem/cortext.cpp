@@ -162,6 +162,10 @@ FindSupersessionMemoryReference (const Entry &entry, long long memory_id)
 
 struct State
 {
+  /// Processor context this state is registered under. Route embedding
+  /// providers resolve the context's live state through it, so a route handle
+  /// carried across Reset keeps resolving current rows.
+  const ProcessorContext *owner = nullptr;
   bool recovery_failed = false;
   bool current_surface_database_current = false;
   bool current_surface_search_current = false;
@@ -200,6 +204,30 @@ struct State
   int sqlite_sparse_route_backfill_failure_code = 0;
   std::size_t sqlite_sparse_route_backfill_failure_count = 0;
 };
+
+inline std::shared_ptr<const State> Find (const ProcessorContext &ctx);
+
+/// Lets a SQLite route share the current surface's arena rows for resident
+/// graph nodes instead of holding its own normalized copies. The route
+/// verifies every shared row bit for bit, so a stale provider only costs a
+/// copy, never a different distance.
+inline sparse_retrieval_route_sqlite_internal::Route::EmbeddingProvider
+EmbeddingProviderFor (const State &state)
+{
+  const ProcessorContext *owner = state.owner;
+  if (owner == nullptr)
+    return {};
+  return [owner] (long long memory_id) -> internal::SharedEmbedding {
+        const auto current = Find (*owner);
+        if (!current || current->recovery_failed)
+          return {};
+        const auto index = current->current_memory_index.find (memory_id);
+        if (index == current->current_memory_index.end ()
+            || index->second >= current->current_entries.size ())
+          return {};
+        return current->current_entries[index->second].embedding;
+      };
+}
 
 inline std::shared_ptr<sparse_retrieval_route_internal::Route>
 EnsureSparseRoute (State &state)
@@ -240,7 +268,8 @@ OpenSQLiteSparseRoute (State &state, Store &store)
     return state.sqlite_sparse_route;
   state.sqlite_sparse_route
       = sparse_retrieval_route_sqlite_internal::Route::Open (
-          store, state.embedding_dim, state.sparse_route_parameters);
+          store, state.embedding_dim, state.sparse_route_parameters,
+          EmbeddingProviderFor (state));
   if (!state.sqlite_sparse_route)
     return nullptr;
 
@@ -309,7 +338,8 @@ AdvanceSQLiteSparseRouteBackfill (State &state, Store &store)
   if (!state.sqlite_sparse_route_backfill)
     state.sqlite_sparse_route_backfill
         = sparse_retrieval_route_sqlite_internal::Route::OpenOrBeginBuild (
-            store, state.embedding_dim, state.sparse_route_parameters);
+            store, state.embedding_dim, state.sparse_route_parameters,
+            EmbeddingProviderFor (state));
   auto &build = state.sqlite_sparse_route_backfill;
   if (!build || !build->IsBuilding ())
     return false;
@@ -437,7 +467,8 @@ ReconcileSQLiteSparseRoute (
     }
   if (auto persisted
       = sparse_retrieval_route_sqlite_internal::Route::Open (
-          store, state.embedding_dim, state.sparse_route_parameters))
+          store, state.embedding_dim, state.sparse_route_parameters,
+          EmbeddingProviderFor (state)))
     {
       state.sqlite_sparse_route = std::move (persisted);
       return true;
@@ -456,7 +487,7 @@ ReconcileSQLiteSparseRoute (
   state.sqlite_sparse_route
       = sparse_retrieval_route_sqlite_internal::Route::Create (
           store, state.embedding_dim, entries, *hnsw,
-          state.sparse_route_parameters);
+          state.sparse_route_parameters, EmbeddingProviderFor (state));
   return state.sqlite_sparse_route != nullptr;
 }
 
@@ -682,6 +713,7 @@ SetCurrentSurfaceDatabaseCurrent (const ProcessorContext &ctx,
   if (!state)
     {
       state = std::make_shared<State> ();
+      state->owner = &ctx;
     }
   state->current_surface_database_current = database_current;
 }
@@ -695,6 +727,7 @@ SetProcessorSurfaceComplete (const ProcessorContext &ctx, bool complete)
   if (!state)
     {
       state = std::make_shared<State> ();
+      state->owner = &ctx;
     }
   state->processor_surface_complete = complete;
 }
@@ -708,7 +741,10 @@ SetSparseRouteParameters (
   std::lock_guard<std::mutex> lock (registry.mutex);
   auto &state = registry.states[&ctx];
   if (!state)
-    state = std::make_shared<State> ();
+    {
+      state = std::make_shared<State> ();
+      state->owner = &ctx;
+    }
   state->sparse_route_parameters = std::move (parameters);
 }
 
@@ -717,6 +753,7 @@ MarkRecoveryFailed (const ProcessorContext &ctx,
                     bool preserve_surface_state = false)
 {
   auto state = std::make_shared<State> ();
+  state->owner = &ctx;
   state->recovery_failed = true;
   auto &registry = Registry ();
   std::lock_guard<std::mutex> lock (registry.mutex);
@@ -764,6 +801,7 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
 {
   const auto prior_state = FindMutable (ctx);
   auto state = std::make_shared<State> ();
+  state->owner = &ctx;
   std::unordered_map<long long, std::size_t> unique_embedding_index;
   state->entries.reserve (entries.size ());
   for (auto &entry : entries)

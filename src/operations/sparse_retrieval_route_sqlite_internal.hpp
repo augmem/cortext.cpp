@@ -6,8 +6,13 @@
 
 #include <Eigen/Dense>
 
+#include "cortext/internal/embedding_arena.hpp"
+
+#include <functional>
+
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -35,7 +40,6 @@ struct Parameters
   std::size_t search_ef = 0;
   std::size_t activation_search_ef_min = 0;
   std::size_t activation_search_ef_step = 0;
-  std::size_t shadow_node_capacity = 0;
   std::size_t backfill_batch_size = 0;
   std::size_t construction_search_node_budget = 0;
   std::size_t construction_search_ef = 0;
@@ -90,7 +94,6 @@ DeriveParameters (double focus, double sensitivity, double stability)
     retrieval_sawtooth_peak,
     retrieval_sawtooth_floor,
     retrieval_sawtooth_step,
-    route_capacity * 24,
     backfill_batch_size,
     construction_node_budget,
     construction_node_budget,
@@ -261,24 +264,34 @@ DefaultParameters ()
 class Route
 {
 public:
+  /// Resolves a memory's current raw embedding. A resident graph row whose
+  /// stored normalized vector equals Normalize (raw) bit for bit shares that
+  /// arena row and is normalized during distance evaluation instead of
+  /// holding its own copy. Without a provider, or on mismatch, the stored
+  /// normalized vector becomes its own arena row.
+  using EmbeddingProvider
+      = std::function<internal::SharedEmbedding (long long memory_id)>;
+
   ~Route ();
 
   static std::shared_ptr<Route> Create (
       Store &store, int embedding_dim,
       const std::vector<std::pair<long long, Eigen::VectorXf>> &entries,
       const sparse_retrieval_route_internal::Route &hnsw_route,
-      Parameters parameters);
+      Parameters parameters, EmbeddingProvider provider = {});
 
+  /// Opens the published route and loads every row of its generation into
+  /// memory (O(generation) once; traversal then reads no node rows).
   static std::shared_ptr<Route> Open (
       Store &store, int embedding_dim,
-      Parameters parameters);
+      Parameters parameters, EmbeddingProvider provider = {});
 
   /// Open or begin an unpublished generation used for bounded legacy-store
   /// backfill. The generation is invisible to normal retrieval until
   /// PublishBuild succeeds.
-  static std::shared_ptr<Route> OpenOrBeginBuild (Store &store,
-                                                  int embedding_dim,
-                                                  Parameters parameters);
+  static std::shared_ptr<Route> OpenOrBeginBuild (
+      Store &store, int embedding_dim, Parameters parameters,
+      EmbeddingProvider provider = {});
 
   bool Upsert (long long memory_id,
                const Eigen::Ref<const Eigen::VectorXf> &embedding);
@@ -316,17 +329,14 @@ public:
   /// Rows evaluated from the consolidation snapshot in addition to the
   /// current 8C-to-9C HNSW envelope. This is independently bounded by A.
   std::size_t LastActivationSnapshotRows () const;
-  /// Snapshot rows physically loaded from SQLite for the last query. A
-  /// repeated query may reuse the bounded generation-qualified shadow cache,
-  /// while SQLite remains authoritative across seals and restarts.
-  std::size_t LastActivationSnapshotCacheMissRows () const;
   /// Activation-snapshot identities admitted as level-zero frontier seeds by
   /// the last query. Recenter rebuilds must report zero because the prior
   /// snapshot cannot steer its replacement.
   std::size_t LastActivationFrontierSeedCount () const;
   std::size_t LastSearchDistanceEvaluations () const;
-  std::size_t CachedNodeRows () const;
-  std::size_t CacheOrderRows () const;
+  /// Rows of this generation resident in memory (every row, active or not:
+  /// adjacency plus an arena row handle).
+  std::size_t ResidentNodeRows () const;
   int LastSearchFailureCode () const;
   int LastSealFailureCode () const;
   /// Staged rows the last seal linked from their ingest-time activated walk

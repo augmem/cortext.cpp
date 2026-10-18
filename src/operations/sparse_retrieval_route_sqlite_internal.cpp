@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -48,6 +49,19 @@ struct NodeRow
   bool active = false;
 };
 
+/// A graph row held in memory for traversal: adjacency plus a shared arena
+/// row. The stored normalized vector is row[i] * scale (scale is the inverse
+/// norm of a shared raw row, or 1 when the row is the stored normalized
+/// vector itself), which reproduces Normalize bit for bit.
+struct ResidentNode
+{
+  int level = 0;
+  bool active = false;
+  std::vector<std::vector<long long>> links;
+  internal::SharedEmbedding row;
+  float scale = 1.0f;
+};
+
 std::optional<std::vector<float>>
 Normalize (const Eigen::Ref<const Eigen::VectorXf> &embedding,
            int embedding_dim)
@@ -80,6 +94,37 @@ Distance (const std::vector<float> &left, const std::vector<float> &right)
   for (std::size_t index = 0; index < left.size (); ++index)
     dot += static_cast<double> (left[index]) * right[index];
   return static_cast<float> (1.0 - dot);
+}
+
+/// Distance (left, stored normalized vector) for a resident row; each
+/// normalized component is formed exactly as Normalize formed it.
+float
+Distance (const std::vector<float> &left, const ResidentNode &node)
+{
+  const float *row = node.row.data ();
+  const float scale = node.scale;
+  double dot = 0.0;
+  for (std::size_t index = 0; index < left.size (); ++index)
+    dot += static_cast<double> (left[index]) * (row[index] * scale);
+  return static_cast<float> (1.0 - dot);
+}
+
+/// Inverse norm Normalize applies to @p embedding (nullopt when Normalize
+/// rejects it).
+std::optional<float>
+NormalizeScale (const float *embedding, int embedding_dim)
+{
+  double norm_squared = 0.0;
+  for (int index = 0; index < embedding_dim; ++index)
+    {
+      const float value = embedding[index];
+      if (!std::isfinite (value))
+        return std::nullopt;
+      norm_squared += static_cast<double> (value) * value;
+    }
+  if (!(norm_squared > 0.0) || !std::isfinite (norm_squared))
+    return std::nullopt;
+  return static_cast<float> (1.0 / std::sqrt (norm_squared));
 }
 
 int
@@ -541,13 +586,17 @@ struct Route::Impl
   mutable std::size_t activation_search_node_budget = 0;
   std::unordered_map<long long, std::vector<float>> delta_embeddings;
   std::unordered_set<long long> removed;
-  std::unordered_map<long long, std::shared_ptr<const NodeRow>> node_cache;
-  std::deque<long long> node_cache_order;
+  /// Every row of this generation, resident in memory: loaded once when the
+  /// route opens and replaced with exactly the rows each committed seal
+  /// writes. Traversal never reads a node row from SQLite; SQLite stays the
+  /// durable authority the graph is reloaded from.
+  std::unordered_map<long long, ResidentNode> resident;
+  std::function<internal::SharedEmbedding (long long)> embedding_provider;
+  std::size_t restart_rows_loaded = 0;
   std::vector<float> activation_centroid;
   std::vector<long long> activation_identity_ids;
   mutable std::size_t last_search_node_rows = 0;
   mutable std::size_t last_activation_snapshot_rows = 0;
-  mutable std::size_t last_activation_snapshot_cache_miss_rows = 0;
   mutable std::size_t last_activation_frontier_seed_count = 0;
   mutable std::size_t last_search_distance_evaluations = 0;
   mutable int last_search_failure_code = 0;
@@ -564,19 +613,107 @@ struct Route::Impl
       walked_neighborhoods;
   mutable std::deque<std::uint64_t> walked_order;
 
-  /// Drop only the rows a seal rewrote. Unchanged rows stay valid within the
-  /// generation, so the next queries keep their locality instead of
-  /// refetching the whole envelope. The FIFO order is compacted with the
-  /// cache so no stale order entry survives.
-  void InvalidateCachedRows (const std::vector<long long> &memory_ids)
+  /// Load every row of the generation in memory_id order, a bounded chunk
+  /// at a time so no whole-table result set is materialized.
+  bool LoadGeneration ()
   {
-    for (const long long memory_id : memory_ids)
-      node_cache.erase (memory_id);
-    std::deque<long long> kept;
-    for (const long long memory_id : node_cache_order)
-      if (node_cache.count (memory_id) != 0)
-        kept.push_back (memory_id);
-    node_cache_order.swap (kept);
+    resident.clear ();
+    constexpr long long kChunkRows = 4096;
+    long long cursor = 0;
+    std::size_t loaded = 0;
+    while (true)
+      {
+        const auto rows = store->Execute (
+            "SELECT memory_id, embedding, level, links, active "
+            "FROM cortext_sparse_route_nodes "
+            "WHERE +generation = ? AND memory_id > ? "
+            "ORDER BY memory_id LIMIT ?",
+            { generation, cursor, kChunkRows });
+        for (const auto &row : rows)
+          {
+            auto node = DecodeNode (row, embedding_dim, parameters);
+            if (!node)
+              return false;
+            cursor = node->memory_id;
+            Admit (std::move (*node));
+            ++loaded;
+          }
+        if (rows.size () < static_cast<std::size_t> (kChunkRows))
+          break;
+      }
+    restart_rows_loaded = 1 + loaded;
+    return true;
+  }
+
+  /// Re-read rows another write path committed (bounded by that write).
+  bool ReloadRows (const std::vector<long long> &memory_ids)
+  {
+    constexpr std::size_t kChunkIds = 4096;
+    for (std::size_t begin = 0; begin < memory_ids.size ();
+         begin += kChunkIds)
+      {
+        const std::vector<long long> chunk (
+            memory_ids.begin () + static_cast<std::ptrdiff_t> (begin),
+            memory_ids.begin ()
+                + static_cast<std::ptrdiff_t> (
+                    std::min (memory_ids.size (), begin + kChunkIds)));
+        for (const long long memory_id : chunk)
+          resident.erase (memory_id);
+        const auto rows = FetchNodes (*store, embedding_dim, parameters,
+                                      generation, chunk);
+        if (!rows)
+          return false;
+        for (auto node : *rows)
+          Admit (std::move (node));
+      }
+    return true;
+  }
+
+  /// Make a decoded generation row resident. Its embedding shares the
+  /// memory's current arena row when that row normalizes to the stored
+  /// vector bit for bit; otherwise the stored vector becomes the row.
+  const ResidentNode &Admit (NodeRow &&node)
+  {
+    ResidentNode resident_node;
+    resident_node.level = node.level;
+    resident_node.active = node.active;
+    resident_node.links = std::move (node.links);
+    if (embedding_provider)
+      {
+        internal::SharedEmbedding raw = embedding_provider (node.memory_id);
+        if (raw.size () == embedding_dim
+            && node.embedding.size ()
+                   == static_cast<std::size_t> (embedding_dim))
+          if (const auto scale = NormalizeScale (raw.data (), embedding_dim))
+            {
+              bool same = true;
+              const float *values = raw.data ();
+              for (int index = 0; index < embedding_dim && same; ++index)
+                {
+                  const float normalized = values[index] * *scale;
+                  same = std::memcmp (&normalized,
+                                      &node.embedding[static_cast<std::size_t> (
+                                          index)],
+                                      sizeof (float))
+                         == 0;
+                }
+              if (same)
+                {
+                  resident_node.row = std::move (raw);
+                  resident_node.scale = *scale;
+                }
+            }
+      }
+    if (resident_node.row.empty ())
+      {
+        resident_node.row = internal::SharedEmbedding (
+            node.embedding.data (),
+            static_cast<Eigen::Index> (node.embedding.size ()));
+        resident_node.scale = 1.0f;
+      }
+    return resident.insert_or_assign (node.memory_id,
+                                      std::move (resident_node))
+        .first->second;
   }
 };
 
@@ -589,7 +726,7 @@ Route::Create (
     Store &store, int embedding_dim,
     const std::vector<std::pair<long long, Eigen::VectorXf>> &entries,
     const sparse_retrieval_route_internal::Route &hnsw_route,
-    Parameters parameters)
+    Parameters parameters, EmbeddingProvider provider)
 {
   if (embedding_dim <= 0)
     return nullptr;
@@ -638,11 +775,15 @@ Route::Create (
             static_cast<long long> (snapshot->max_level),
             static_cast<long long> (snapshot->nodes.size ()) });
       tx->Commit ();
-      return std::shared_ptr<Route> (new Route (std::make_unique<Impl> (
+      auto impl = std::make_unique<Impl> (
           store, embedding_dim, snapshot->entry_memory_id,
           snapshot->max_level,
           static_cast<long long> (snapshot->nodes.size ()), 1,
-          std::move (parameters))));
+          std::move (parameters));
+      impl->embedding_provider = std::move (provider);
+      if (!impl->LoadGeneration ())
+        return nullptr;
+      return std::shared_ptr<Route> (new Route (std::move (impl)));
     }
   catch (...)
     {
@@ -651,7 +792,8 @@ Route::Create (
 }
 
 std::shared_ptr<Route>
-Route::Open (Store &store, int embedding_dim, Parameters parameters)
+Route::Open (Store &store, int embedding_dim, Parameters parameters,
+             EmbeddingProvider provider)
 {
   if (embedding_dim <= 0)
     return nullptr;
@@ -749,6 +891,9 @@ Route::Open (Store &store, int embedding_dim, Parameters parameters)
           impl->activation_centroid = *activation_centroid;
           impl->activation_identity_ids = *activation_identity_ids;
         }
+      impl->embedding_provider = std::move (provider);
+      if (!impl->LoadGeneration ())
+        return nullptr;
       return std::shared_ptr<Route> (new Route (std::move (impl)));
     }
   catch (...)
@@ -759,7 +904,7 @@ Route::Open (Store &store, int embedding_dim, Parameters parameters)
 
 std::shared_ptr<Route>
 Route::OpenOrBeginBuild (Store &store, int embedding_dim,
-                         Parameters parameters)
+                         Parameters parameters, EmbeddingProvider provider)
 {
   if (embedding_dim <= 0)
     return nullptr;
@@ -787,11 +932,15 @@ Route::OpenOrBeginBuild (Store &store, int embedding_dim,
               && max_level
                      <= static_cast<long long> (parameters.maximum_level)
               && active_count >= 0 && generation > 0)
-            return std::shared_ptr<Route> (new Route (
-                std::make_unique<Impl> (
-                    store, embedding_dim, entry,
-                    static_cast<int> (max_level), active_count, generation,
-                    parameters, true, cursor)));
+            {
+              auto impl = std::make_unique<Impl> (
+                  store, embedding_dim, entry, static_cast<int> (max_level),
+                  active_count, generation, parameters, true, cursor);
+              impl->embedding_provider = std::move (provider);
+              if (!impl->LoadGeneration ())
+                return nullptr;
+              return std::shared_ptr<Route> (new Route (std::move (impl)));
+            }
         }
 
       // A missing build record means the prior partial generation was not
@@ -817,9 +966,13 @@ Route::OpenOrBeginBuild (Store &store, int embedding_dim,
           { static_cast<long long> (kSchemaVersion),
             static_cast<long long> (embedding_dim), generation });
       tx->Commit ();
-      return std::shared_ptr<Route> (new Route (std::make_unique<Impl> (
-          store, embedding_dim, 0, 0, 0, generation,
-          std::move (parameters), true, 0)));
+      auto impl = std::make_unique<Impl> (store, embedding_dim, 0, 0, 0,
+                                          generation, std::move (parameters),
+                                          true, 0);
+      impl->embedding_provider = std::move (provider);
+      if (!impl->LoadGeneration ())
+        return nullptr;
+      return std::shared_ptr<Route> (new Route (std::move (impl)));
     }
   catch (...)
     {
@@ -955,7 +1108,6 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       impl_->last_search_failure_code = 0;
       impl_->last_search_node_rows = 0;
       impl_->last_activation_snapshot_rows = 0;
-      impl_->last_activation_snapshot_cache_miss_rows = 0;
       impl_->last_activation_frontier_seed_count = 0;
       impl_->last_search_distance_evaluations = 0;
       const bool use_construction_envelope
@@ -987,49 +1139,23 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       const std::size_t node_fetch_budget = persisted_node_budget;
       struct QueryNode
       {
-        std::shared_ptr<const NodeRow> row;
+        const ResidentNode *row = nullptr;
         std::optional<float> distance;
       };
       std::unordered_map<long long, QueryNode> cache;
       cache.reserve (node_fetch_budget + activation_identity_target);
-      std::vector<std::shared_ptr<const NodeRow>> activation_nodes;
+      std::vector<const ResidentNode *> activation_nodes;
       if (return_all_activated && !use_construction_envelope
           && !rebuild_activation && !impl_->activation_identity_ids.empty ())
         {
-          std::vector<long long> missing;
-          missing.reserve (impl_->activation_identity_ids.size ());
           activation_nodes.reserve (impl_->activation_identity_ids.size ());
           for (const long long memory_id : impl_->activation_identity_ids)
             {
-              const auto cached = impl_->node_cache.find (memory_id);
-              if (cached == impl_->node_cache.end ())
-                missing.push_back (memory_id);
-              else
-                {
-                  activation_nodes.push_back (cached->second);
-                  cache.emplace (memory_id,
-                                 QueryNode{ cached->second, {} });
-                }
-            }
-          const auto fetched = FetchNodes (
-              *impl_->store, impl_->embedding_dim, impl_->parameters,
-              impl_->generation, missing);
-          if (!fetched)
-            {
-              impl_->last_search_failure_code = 10;
-              return std::nullopt;
-            }
-          impl_->last_activation_snapshot_cache_miss_rows
-              = fetched->size ();
-          for (auto node : *fetched)
-            {
-              const long long memory_id = node.memory_id;
-              auto shared
-                  = std::make_shared<const NodeRow> (std::move (node));
-              impl_->node_cache[memory_id] = shared;
-              impl_->node_cache_order.push_back (memory_id);
-              activation_nodes.push_back (shared);
-              cache.emplace (memory_id, QueryNode{ std::move (shared), {} });
+              const auto resident = impl_->resident.find (memory_id);
+              if (resident == impl_->resident.end ())
+                continue;
+              activation_nodes.push_back (&resident->second);
+              cache.emplace (memory_id, QueryNode{ &resident->second, {} });
             }
           impl_->last_activation_snapshot_rows = activation_nodes.size ();
           if (impl_->last_activation_snapshot_rows
@@ -1040,14 +1166,6 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
               impl_->last_search_failure_code = 11;
               return std::nullopt;
             }
-          while (impl_->node_cache.size ()
-                     > impl_->parameters.shadow_node_capacity
-                 && !impl_->node_cache_order.empty ())
-            {
-              const long long oldest = impl_->node_cache_order.front ();
-              impl_->node_cache_order.pop_front ();
-              impl_->node_cache.erase (oldest);
-            }
         }
       std::unordered_set<long long> canonical_ids;
       canonical_ids.reserve (node_fetch_budget);
@@ -1056,7 +1174,7 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
         auto &node = cache.at (memory_id);
         if (node.distance)
           return *node.distance;
-        node.distance = Distance (*normalized, node.row->embedding);
+        node.distance = Distance (*normalized, *node.row);
         ++impl_->last_search_distance_evaluations;
         return *node.distance;
       };
@@ -1075,56 +1193,25 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
                               return cache.count (memory_id) != 0;
                             }),
             memory_ids.end ());
-        std::vector<long long> missing;
-        missing.reserve (memory_ids.size ());
+        // Links can point into an older unpublished generation while a
+        // bounded rebuild is in progress. Those identities are not part of
+        // this generation's traversal surface, but each still consumes one
+        // slot of the per-query row envelope, exactly as a requested row the
+        // generation-qualified fetch would not return.
+        std::size_t absent = 0;
         for (const long long memory_id : memory_ids)
           {
-            if (canonical_node_rows + missing.size () >= node_fetch_budget)
+            if (canonical_node_rows + absent >= node_fetch_budget)
               break;
-            const auto cached = impl_->node_cache.find (memory_id);
-            if (cached == impl_->node_cache.end ())
-              missing.push_back (memory_id);
-            else
+            const auto resident = impl_->resident.find (memory_id);
+            if (resident == impl_->resident.end ())
               {
-                cache.emplace (memory_id,
-                               QueryNode{ cached->second, {} });
-                canonical_ids.insert (memory_id);
-                ++canonical_node_rows;
+                ++absent;
+                continue;
               }
-          }
-        const std::size_t remaining
-            = node_fetch_budget - canonical_node_rows;
-        if (missing.size () > remaining)
-          missing.resize (remaining);
-        const auto nodes
-            = FetchNodes (*impl_->store, impl_->embedding_dim,
-                          impl_->parameters, impl_->generation, missing);
-        // Links can point into an older unpublished generation while a
-        // bounded rebuild is in progress. Those nodes are simply not part of
-        // this generation's traversal surface.
-        if (!nodes)
-          {
-            impl_->last_search_failure_code = 3;
-            return false;
-          }
-        for (auto node : *nodes)
-          {
-            const long long memory_id = node.memory_id;
-            auto shared
-                = std::make_shared<const NodeRow> (std::move (node));
-            impl_->node_cache[memory_id] = shared;
-            impl_->node_cache_order.push_back (memory_id);
-            cache.emplace (memory_id, QueryNode{ std::move (shared), {} });
+            cache.emplace (memory_id, QueryNode{ &resident->second, {} });
             canonical_ids.insert (memory_id);
             ++canonical_node_rows;
-          }
-        while (impl_->node_cache.size ()
-                   > impl_->parameters.shadow_node_capacity
-               && !impl_->node_cache_order.empty ())
-          {
-            const long long oldest = impl_->node_cache_order.front ();
-            impl_->node_cache_order.pop_front ();
-            impl_->node_cache.erase (oldest);
           }
         impl_->last_search_node_rows = canonical_node_rows;
         return true;
@@ -1712,8 +1799,6 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                         "WHERE singleton = 1");
               tx->Execute ("DELETE FROM cortext_sparse_route_dirty");
               tx->Commit ();
-              impl_->node_cache.clear ();
-              impl_->node_cache_order.clear ();
               impl_->delta_embeddings.clear ();
               impl_->removed.clear ();
               impl_->entry_memory_id = 0;
@@ -2123,7 +2208,9 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               impl_->activation_centroid.clear ();
               impl_->activation_identity_ids.clear ();
             }
-          impl_->InvalidateCachedRows (update_ids);
+          // The committed rows are exactly `updates`; make them resident.
+          for (const long long memory_id : update_ids)
+            impl_->Admit (NodeRow (updates.at (memory_id)));
           impl_->walked_neighborhoods.clear ();
           impl_->walked_order.clear ();
           impl_->delta_embeddings.clear ();
@@ -2265,7 +2352,12 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
         written.reserve (snapshot->nodes.size ());
         for (const auto &node : snapshot->nodes)
           written.push_back (node.memory_id);
-        impl_->InvalidateCachedRows (written);
+        if (!impl_->ReloadRows (written))
+          {
+            // The commit stands; a route that cannot mirror it is unusable.
+            impl_->last_seal_failure_code = 63;
+            return false;
+          }
       }
       impl_->delta_embeddings.clear ();
       impl_->removed.clear ();
@@ -2440,7 +2532,7 @@ Route::HasDirtyMemoryIds () const
 std::size_t
 Route::RestartRowsLoaded () const
 {
-  return impl_ ? 1 : 0;
+  return impl_ ? impl_->restart_rows_loaded : 0;
 }
 
 std::size_t
@@ -2462,15 +2554,6 @@ Route::LastActivationSnapshotRows () const
 }
 
 std::size_t
-Route::LastActivationSnapshotCacheMissRows () const
-{
-  if (!impl_)
-    return 0;
-  std::lock_guard<std::mutex> lock (impl_->mutex);
-  return impl_->last_activation_snapshot_cache_miss_rows;
-}
-
-std::size_t
 Route::LastActivationFrontierSeedCount () const
 {
   if (!impl_)
@@ -2489,22 +2572,15 @@ Route::LastSearchDistanceEvaluations () const
 }
 
 std::size_t
-Route::CachedNodeRows () const
+Route::ResidentNodeRows () const
 {
   if (!impl_)
     return 0;
   std::lock_guard<std::mutex> lock (impl_->mutex);
-  return impl_->node_cache.size ();
+  return impl_->resident.size ();
 }
 
-std::size_t
-Route::CacheOrderRows () const
-{
-  if (!impl_)
-    return 0;
-  std::lock_guard<std::mutex> lock (impl_->mutex);
-  return impl_->node_cache_order.size ();
-}
+
 
 int
 Route::LastSearchFailureCode () const

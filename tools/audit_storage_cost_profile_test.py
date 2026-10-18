@@ -1837,7 +1837,6 @@ class PlateauContractTest(unittest.TestCase):
             )
         )
         for name in (
-            "GraphRetrieve.sqlite_sparse_route_activation_snapshot_cache_miss_rows",
             "GraphRetrieve.sqlite_sparse_route_restart_rows",
             "GraphRetrieve.sqlite_sparse_route_dirty_rows",
         ):

@@ -63,7 +63,6 @@ struct SeedCacheProfile
   std::size_t sqlite_sparse_route_activated_identities = 0;
   std::size_t sqlite_sparse_route_node_rows = 0;
   std::size_t sqlite_sparse_route_activation_snapshot_rows = 0;
-  std::size_t sqlite_sparse_route_activation_snapshot_cache_miss_rows = 0;
   std::size_t sqlite_sparse_route_distance_evaluations = 0;
   std::size_t sqlite_sparse_route_search_effort = 0;
   std::size_t sqlite_sparse_route_search_node_budget = 0;
@@ -688,8 +687,6 @@ LoadCurrentSeedRowsFromCacheRoute (
               = sqlite_route->LastSearchNodeRows ();
           profile->sqlite_sparse_route_activation_snapshot_rows
               = sqlite_route->LastActivationSnapshotRows ();
-          profile->sqlite_sparse_route_activation_snapshot_cache_miss_rows
-              = sqlite_route->LastActivationSnapshotCacheMissRows ();
           profile->sqlite_sparse_route_distance_evaluations
               = sqlite_route->LastSearchDistanceEvaluations ();
           profile->sqlite_sparse_route_restart_rows
@@ -1902,11 +1899,6 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
           static_cast<double> (
               seed_cache_profile
                   .sqlite_sparse_route_activation_snapshot_rows));
-      context.AddOperationTiming (
-          "GraphRetrieve.sqlite_sparse_route_activation_snapshot_cache_miss_rows",
-          static_cast<double> (
-              seed_cache_profile
-                  .sqlite_sparse_route_activation_snapshot_cache_miss_rows));
       context.AddOperationTiming (
           "GraphRetrieve.sqlite_sparse_route_distance_evaluations",
           static_cast<double> (
