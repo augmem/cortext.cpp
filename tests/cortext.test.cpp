@@ -581,6 +581,53 @@ TEST_CASE ("Flush closes every open Natural unit",
     }
 }
 
+TEST_CASE ("A failed Flush keeps every open Natural unit for the next Flush",
+           "[cortext][retention][accumulator][flush][rollback][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+
+  (void)ctx->ProcessTextAt ("A calm sentence in one pending thought.",
+                            "stream/a", 1000ULL, cortext::Retention::Natural);
+  (void)ctx->ProcessTextAt ("A second calm sentence in the same thought.",
+                            "stream/a", 2000ULL, cortext::Retention::Natural);
+  (void)ctx->ProcessTextAt ("Another stream starts a different thought.",
+                            "stream/b", 2500ULL, cortext::Retention::Natural);
+
+  // The flush transaction fails after its open units were closed (state is
+  // persisted after the closes); the store rolls back, so the units must
+  // still be open afterwards.
+  store->Execute ("CREATE TEMP TRIGGER fail_state_persist "
+                  "BEFORE INSERT ON state "
+                  "BEGIN SELECT RAISE(ABORT, 'injected flush failure'); END");
+  REQUIRE_THROWS (ctx->Flush ());
+  store->Execute ("DROP TRIGGER fail_state_persist");
+  REQUIRE (store->Execute ("SELECT 1 FROM memories WHERE kind = 'LONG_TERM'")
+               .empty ());
+
+  ctx->Flush ();
+  const auto flushed = store->Execute (
+      "SELECT source_id, n_signals FROM memories WHERE kind = 'LONG_TERM' "
+      "ORDER BY source_id");
+  REQUIRE (flushed.size () == 2);
+  REQUIRE (std::any_cast<std::string> (flushed[0].at ("source_id"))
+           == "stream/a");
+  REQUIRE (AnyToLongLong (flushed[0].at ("n_signals")) == 2);
+  REQUIRE (std::any_cast<std::string> (flushed[1].at ("source_id"))
+           == "stream/b");
+  REQUIRE (AnyToLongLong (flushed[1].at ("n_signals")) == 1);
+}
+
 TEST_CASE ("Cortext recalls durable corrections at default knobs",
            "[cortext][belief_revision][eval][aist]")
 {

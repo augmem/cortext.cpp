@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cortext
@@ -132,10 +133,15 @@ public:
 private:
   void StartNewEpisode (Transaction *tx, uint64_t start_ts);
   void FinalizeEpisode (Transaction *tx, const OperationContext *op_context);
-  // Flush: close every source's open unit as at a boundary (write gate,
-  // storage, working memory, reset), so no accumulated signal outlives a
-  // commit request. Returns the number of units closed.
-  int CloseOpenUnits (Transaction &tx, ObjectTransaction *object_tx);
+  // Sources whose open unit Flush closes, oldest activity first. Empty for
+  // a custom root, which keeps its own meaning for open state.
+  std::vector<std::pair<uint64_t, std::string> > OpenUnits () const;
+  // Flush: close each listed source's open unit as at a boundary (write
+  // gate, storage, working memory, reset), so no accumulated signal outlives
+  // a commit request. Returns the number of units closed.
+  int CloseOpenUnits (
+      const std::vector<std::pair<uint64_t, std::string> > &open,
+      Transaction &tx, ObjectTransaction *object_tx);
 
   // State persistence helpers (called within Process transaction)
   // v2 schema: Unified state persistence

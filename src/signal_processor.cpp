@@ -3788,10 +3788,19 @@ SignalProcessor::Flush ()
       preserved_sqlite_sparse_route_backfill
           = state->sqlite_sparse_route_backfill;
     }
-  // Rollback snapshot. Flush never touches the per-source accumulators, and
-  // the DB-derived retrieval surface is reloaded from the rolled-back store
-  // on failure, so neither is copied: the snapshot stays independent of the
-  // store size and the number of sources.
+  // Rollback snapshot. Flush touches only the accumulators of the units it
+  // closes, so only those are copied; the DB-derived retrieval surface is
+  // reloaded from the rolled-back store on failure. The snapshot stays
+  // independent of the store size and of the number of idle sources.
+  const auto open_units = OpenUnits ();
+  std::vector<std::pair<std::string, AccumulatorState> > open_unit_snapshot;
+  open_unit_snapshot.reserve (open_units.size ());
+  for (const auto &[seq, source_id] : open_units)
+    {
+      (void)seq;
+      open_unit_snapshot.emplace_back (
+          source_id, context_->accumulator_states.at (source_id));
+    }
   ProcessorContext context_snapshot;
   const auto consolidation_throughput_snapshot
       = operations::consolidation_throughput_state_internal::Find (*context_);
@@ -3815,13 +3824,17 @@ SignalProcessor::Flush ()
 #if defined(CORTEXT_TESTING)
   g_flush_snapshot_copied_entry_count.fetch_add (
       context_snapshot.accumulator_states.size ()
-          + context_snapshot.retrieval_surface_cache.size (),
+          + context_snapshot.retrieval_surface_cache.size ()
+          + open_unit_snapshot.size (),
       std::memory_order_relaxed);
 #endif
   auto restore_context_snapshot = [&] {
     auto accumulators = std::move (context_->accumulator_states);
     *context_ = std::move (context_snapshot);
     context_->accumulator_states = std::move (accumulators);
+    // The rolled-back store never received the closed units: reopen them.
+    for (auto &[source_id, state] : open_unit_snapshot)
+      context_->accumulator_states[source_id] = std::move (state);
     operations::consolidation_throughput_state_internal::Reset (
         *context_, consolidation_throughput_snapshot);
   };
@@ -3836,7 +3849,8 @@ SignalProcessor::Flush ()
     }
   try
     {
-      const int closed_units = CloseOpenUnits (*tx, object_tx.get ());
+      const int closed_units
+          = CloseOpenUnits (open_units, *tx, object_tx.get ());
       if (closed_units > 0)
         telemetry::AddCounter ("cortext.flush.open_units_closed_total",
                                static_cast<std::uint64_t> (closed_units));
@@ -3907,21 +3921,29 @@ SignalProcessor::Flush ()
   CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
 }
 
-int
-SignalProcessor::CloseOpenUnits (Transaction &tx, ObjectTransaction *object_tx)
+std::vector<std::pair<uint64_t, std::string> >
+SignalProcessor::OpenUnits () const
 {
+  std::vector<std::pair<uint64_t, std::string> > open;
   // Only the engine pipeline owns accumulator semantics; a custom root keeps
   // its own meaning for open state.
   if (!context_ || !root_operation_
       || !static_cast<SnapshotOwningOperation &> (*root_operation_)
               .IsEngineOwned ())
-    return 0;
-  // Oldest activity first, so closes land in the order the units went quiet.
-  std::vector<std::pair<uint64_t, std::string>> open;
+    return open;
   for (const auto &[source_id, acc] : context_->accumulator_states)
     if (acc.n_signals > 0 && !acc.signals.empty ())
       open.emplace_back (acc.last_active_seq, source_id);
+  // Oldest activity first, so closes land in the order the units went quiet.
   std::sort (open.begin (), open.end ());
+  return open;
+}
+
+int
+SignalProcessor::CloseOpenUnits (
+    const std::vector<std::pair<uint64_t, std::string> > &open,
+    Transaction &tx, ObjectTransaction *object_tx)
+{
 
   static const operations::ComputeWriteGate write_gate;
   static const operations::MemoryStorage memory_storage;
