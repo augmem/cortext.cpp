@@ -186,6 +186,12 @@ ToFloatVector (const Eigen::VectorXf &v)
   return out;
 }
 
+std::vector<float>
+ToFloatVector (const internal::SharedEmbedding &v)
+{
+  return std::vector<float> (v.data (), v.data () + v.size ());
+}
+
 long long
 LoadCurrentSurfaceEmbeddingId (Transaction &tx, long long memory_id,
                                long long fallback_embedding_id)
@@ -246,7 +252,7 @@ RefreshCandidateFromProcessorSurface (const ProcessorContext &p_ctx,
       return false;
     }
   candidate.embedding_id = entry.embedding_id;
-  candidate.embedding = entry.embedding;
+  candidate.embedding = entry.embedding.ToVector ();
   return true;
 }
 
@@ -275,6 +281,13 @@ FamilyEmbeddingFeatures
 BuildFamilyEmbeddingFeatures (const Eigen::VectorXf &embedding)
 {
   return family_embedding_features_internal::Build (embedding);
+}
+
+FamilyEmbeddingFeatures
+BuildFamilyEmbeddingFeatures (const internal::SharedEmbedding &embedding)
+{
+  return family_embedding_features_internal::Build (embedding.data (),
+                                                    embedding.size ());
 }
 
 class FamilyRepresentativeIndex
@@ -453,18 +466,11 @@ LoadHistoricalSeedRowsFromCache (
   const int embedding_dim = static_cast<int> (query_embedding.size ());
   if (!state || state->recovery_failed || embedding_dim <= 0
       || candidate_limit <= 0
-      || state->embedding_dim != embedding_dim
-      || state->search.size ()
-             != embedding_count * static_cast<std::size_t> (embedding_dim))
+      || state->embedding_dim != embedding_dim)
     {
       return std::nullopt;
     }
 
-  using RowMajorMatrix
-      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-  const Eigen::Map<const RowMajorMatrix> matrix (
-      state->search.data (), static_cast<Eigen::Index> (embedding_count),
-      embedding_dim);
   const bool reference_full_distance_scan
       = profile && cortext::internal::experimental_env::Flag (
                        "CORTEXT_PROFILE_GRAPH_FULL_DISTANCE_SCAN");
@@ -473,11 +479,10 @@ LoadHistoricalSeedRowsFromCache (
     {
       const auto distance_started = std::chrono::steady_clock::now ();
       distance_scratch.resize (embedding_count);
-      Eigen::Map<Eigen::VectorXf> distances (
-          distance_scratch.data (), static_cast<Eigen::Index> (embedding_count));
-      distances = (matrix.rowwise () - query_embedding.transpose ())
-                      .rowwise ()
-                      .squaredNorm ();
+      for (std::size_t index = 0; index < embedding_count; ++index)
+        distance_scratch[index]
+            = historical_surface_search_cache_internal::RowSquaredDistance (
+                state->entries[index].embedding, query_embedding);
       profile->distance_rows += embedding_count;
       AddSeedCachePhaseTime (profile, &SeedCacheProfile::distance_ms,
                              distance_started);
@@ -535,10 +540,9 @@ LoadHistoricalSeedRowsFromCache (
       const auto distance_started = std::chrono::steady_clock::now ();
       for (auto &candidate : ranked)
         {
-          candidate.distance
-              = (matrix.row (static_cast<Eigen::Index> (candidate.index))
-                 - query_embedding.transpose ())
-                    .squaredNorm ();
+          candidate.distance = historical_surface_search_cache_internal::
+              RowBlockSquaredDistance (state->entries[candidate.index].embedding,
+                                       query_embedding);
         }
       if (profile)
         profile->distance_rows += ranked.size ();
@@ -616,9 +620,7 @@ LoadCurrentSeedRowsFromCacheRoute (
   const int embedding_dim = static_cast<int> (query_embedding.size ());
   if (!state || state->recovery_failed || embedding_dim <= 0
       || candidate_limit <= 0
-      || state->embedding_dim != embedding_dim
-      || state->current_search.size ()
-             != entry_count * static_cast<std::size_t> (embedding_dim))
+      || state->embedding_dim != embedding_dim)
     {
       return std::nullopt;
     }
@@ -711,7 +713,7 @@ LoadCurrentSeedRowsFromCacheRoute (
       distance_scratch.resize (entry_count);
       for (std::size_t index = 0; index < entry_count; ++index)
         distance_scratch[index]
-            = (state->current_entries[index].embedding - query_embedding)
+            = (state->current_entries[index].embedding.View () - query_embedding)
                   .squaredNorm ();
     }
   if (profile)
@@ -747,7 +749,7 @@ LoadCurrentSeedRowsFromCacheRoute (
         continue;
       ranked.push_back (
           { index, use_sparse_route
-                       ? (entry.embedding - query_embedding).squaredNorm ()
+                       ? (entry.embedding.View () - query_embedding).squaredNorm ()
                        : distance_scratch[index] });
     }
   if (profile)
@@ -881,7 +883,7 @@ LoadCurrentSeedRowsFromProcessorSurface (
           return std::nullopt;
         }
       ranked.push_back (
-          { index, (surface.embedding - query_embedding).squaredNorm () });
+          { index, (surface.embedding.View () - query_embedding).squaredNorm () });
     }
   std::sort (ranked.begin (), ranked.end (), [&p_ctx] (const auto &a,
                                                         const auto &b) {
@@ -1000,7 +1002,8 @@ RebuildSurfaceSearchCache (Transaction &tx, ProcessorContext &p_ctx,
               { AnyLongLong (row, "embedding_id"),
                 AnyLongLong (row, "memory_id"),
                 AnyLongLong (row, "start_ts"), string_value ("kind"),
-                string_value ("source_id"), std::move (embedding) });
+                string_value ("source_id"),
+                internal::SharedEmbedding (embedding) });
         }
 
       auto current_rows = tx.Execute (
@@ -1048,7 +1051,7 @@ RebuildSurfaceSearchCache (Transaction &tx, ProcessorContext &p_ctx,
                 AnyLongLong (row, "start_ts"),
                 std::any_cast<std::string> (row.at ("kind")),
                 std::any_cast<std::string> (row.at ("source_id")),
-                std::move (embedding),
+                internal::SharedEmbedding (embedding),
                 AnyLongLong (row, "base_embedding_id") });
         }
       bool current_surface_database_current = true;
@@ -1611,7 +1614,7 @@ LexicalCandidate (const ProcessorContext &p_ctx, Transaction &tx,
       candidate.memory_id = memory_id;
       candidate.embedding_id = surface.embedding_id;
       candidate.start_ts = surface.start_ts;
-      candidate.embedding = surface.embedding;
+      candidate.embedding = surface.embedding.ToVector ();
       return candidate;
     }
   if (!p_ctx.retrieval_surface_cache.empty ())

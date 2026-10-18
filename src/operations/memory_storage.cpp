@@ -127,7 +127,7 @@ ToFloatVector (const Eigen::VectorXf &v)
 struct BorrowedSupersessionCandidate
 {
   long long memory_id = 0;
-  const Eigen::VectorXf *embedding = nullptr;
+  const internal::SharedEmbedding *embedding = nullptr;
 };
 
 struct CurrentSupersessionSearchProof
@@ -226,7 +226,7 @@ HistoricalCandidatePopulationCovered (
           || entry.embedding.size () != query_embedding.size ())
         return std::nullopt;
       ranked.push_back (
-          { index, (entry.embedding - query_embedding).squaredNorm () });
+          { index, (entry.embedding.View () - query_embedding).squaredNorm () });
     }
   auto by_distance = [&state] (
                          const historical_surface_search_cache_internal::RankedEntry &a,
@@ -317,7 +317,7 @@ HistoricalCandidatePopulationCoveredByCurrentProof (
       if (base.embedding.size () != query_embedding.size ())
         return false;
       const float base_distance
-          = (base.embedding - query_embedding).squaredNorm ();
+          = (base.embedding.View () - query_embedding).squaredNorm ();
       const bool base_before_cutoff = base_order_less (
           base_distance, reference->memory_id, proof.cutoff_distance,
           proof.cutoff_memory_id);
@@ -382,7 +382,7 @@ LoadHistoricalMismatchRows (
   {
     float distance = 0.0f;
     long long memory_id = 0;
-    const Eigen::VectorXf *embedding = nullptr;
+    const internal::SharedEmbedding *embedding = nullptr;
   };
   std::vector<RankedMismatch> ranked;
   for (const long long mismatch_id : state.supersession_population_mismatches)
@@ -407,7 +407,7 @@ LoadHistoricalMismatchRows (
         continue;
       if (rows_visited)
         ++*rows_visited;
-      ranked.push_back ({ (base.embedding - query_embedding).squaredNorm (),
+      ranked.push_back ({ (base.embedding.View () - query_embedding).squaredNorm (),
                           mismatch_id, &base.embedding });
     }
   auto by_distance = [] (const RankedMismatch &a, const RankedMismatch &b) {
@@ -446,9 +446,7 @@ LoadHistoricalSupersessionRowsFromCache (
   const std::size_t embedding_count = state ? state->entries.size () : 0;
   const int embedding_dim = static_cast<int> (query_embedding.size ());
   if (!state || embedding_dim <= 0 || candidate_limit <= 0
-      || state->embedding_dim != embedding_dim
-      || state->search.size ()
-             != embedding_count * static_cast<std::size_t> (embedding_dim))
+      || state->embedding_dim != embedding_dim)
     {
       return std::nullopt;
     }
@@ -499,20 +497,8 @@ LoadHistoricalSupersessionRowsFromCache (
       return std::vector<BorrowedSupersessionCandidate>{};
     }
 
-  using RowMajorMatrix
-      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-  const Eigen::Map<const RowMajorMatrix> matrix (
-      state->search.data (), static_cast<Eigen::Index> (embedding_count),
-      embedding_dim);
   if (rows_visited)
     *rows_visited += embedding_count;
-  auto &distance_scratch = state->distance_scratch;
-  distance_scratch.resize (embedding_count);
-  Eigen::Map<Eigen::VectorXf> distances (
-      distance_scratch.data (), static_cast<Eigen::Index> (embedding_count));
-  distances = (matrix.rowwise () - query_embedding.transpose ())
-                  .rowwise ()
-                  .squaredNorm ();
   auto &ranked = state->ranked_scratch;
   ranked.clear ();
   ranked.reserve (embedding_count);
@@ -524,7 +510,8 @@ LoadHistoricalSupersessionRowsFromCache (
           return std::nullopt;
         }
       ranked.push_back (
-          { index, distances[static_cast<Eigen::Index> (index)] });
+          { index, historical_surface_search_cache_internal::RowSquaredDistance (
+                       entry.embedding, query_embedding) });
     }
   auto by_distance = [&state] (
                          const historical_surface_search_cache_internal::RankedEntry &a,
@@ -579,9 +566,7 @@ LoadCurrentSupersessionRowsFromCache (
   const std::size_t entry_count = state ? state->current_entries.size () : 0;
   const int embedding_dim = static_cast<int> (query_embedding.size ());
   if (!state || embedding_dim <= 0 || candidate_limit <= 0
-      || state->embedding_dim != embedding_dim
-      || state->current_search.size ()
-             != entry_count * static_cast<std::size_t> (embedding_dim))
+      || state->embedding_dim != embedding_dim)
     {
       return std::nullopt;
     }
@@ -629,11 +614,6 @@ LoadCurrentSupersessionRowsFromCache (
           proof->sparse_route_dirty_rows = *dirty_rows;
         }
     }
-  using RowMajorMatrix
-      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-  const Eigen::Map<const RowMajorMatrix> matrix (
-      state->current_search.data (), static_cast<Eigen::Index> (entry_count),
-      embedding_dim);
   const std::size_t comparison_count
       = use_sparse_route ? candidate_indices.size () : entry_count;
   if (rows_visited)
@@ -642,11 +622,10 @@ LoadCurrentSupersessionRowsFromCache (
   if (!use_sparse_route)
     {
       distance_scratch.resize (entry_count);
-      Eigen::Map<Eigen::VectorXf> distances (
-          distance_scratch.data (), static_cast<Eigen::Index> (entry_count));
-      distances = (matrix.rowwise () - query_embedding.transpose ())
-                      .rowwise ()
-                      .squaredNorm ();
+      for (std::size_t index = 0; index < entry_count; ++index)
+        distance_scratch[index]
+            = historical_surface_search_cache_internal::RowSquaredDistance (
+                state->current_entries[index].embedding, query_embedding);
     }
   auto &ranked = state->ranked_scratch;
   ranked.clear ();
@@ -677,7 +656,7 @@ LoadCurrentSupersessionRowsFromCache (
       ranked.push_back ({
         index,
         use_sparse_route
-            ? (entry.embedding - query_embedding).squaredNorm ()
+            ? (entry.embedding.View () - query_embedding).squaredNorm ()
             : distance_scratch[static_cast<std::size_t> (index)]
       });
     }
@@ -992,17 +971,21 @@ WriteSupersessionEdges (OperationContext &context, Transaction &tx,
         {
           continue;
         }
-      const Eigen::VectorXf *target_embedding = row.Embedding ();
-      if (target_embedding == nullptr
-          || target_embedding->size () != embedding_dim)
+      if (!row.HasEmbedding () || row.EmbeddingSize () != embedding_dim)
         {
           continue;
         }
       ++decoded_count;
       const double similarity
-          = historical_surface_search_cache_internal::
-              SupersessionCosineSimilarity (embedding_to_store, query_norm,
-                                             *target_embedding);
+          = row.borrowed_embedding != nullptr
+                ? historical_surface_search_cache_internal::
+                      SupersessionCosineSimilarity (
+                          embedding_to_store, query_norm,
+                          row.borrowed_embedding->View ())
+                : historical_surface_search_cache_internal::
+                      SupersessionCosineSimilarity (embedding_to_store,
+                                                    query_norm,
+                                                    *row.owned_embedding);
       best_similarity = std::max (best_similarity, similarity);
       if (similarity < similarity_threshold)
         {
@@ -1388,11 +1371,14 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           = mem_id_rows.empty ()
                 ? 0
                 : AnyToLongLong (mem_id_rows[0].at ("id")).value_or (0);
+      // One arena row serves the historical, current, and processor
+      // retrieval surfaces for this memory.
+      const internal::SharedEmbedding stored_embedding (embedding_to_store);
       std::vector<historical_surface_search_cache_internal::Entry>
           inserted_search_entries;
       inserted_search_entries.push_back (
           { embedding_id, memory_id, static_cast<long long> (start_ts),
-            "LONG_TERM", signal.source_id, embedding_to_store });
+            "LONG_TERM", signal.source_id, stored_embedding });
 
       // 10. Insert SIGNALS rows (one per tracked signal)
       std::optional<long long> stored_signal_id;
@@ -1617,7 +1603,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           surface_entry.kind = "LONG_TERM";
           surface_entry.source_id = signal.source_id;
           surface_entry.modality = memory_modality;
-          surface_entry.embedding = embedding_to_store;
+          surface_entry.embedding = stored_embedding;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
           retrieval_trace::RecordSurfaceUpsert (
               memory_id, embedding_id, ToFloatVector (embedding_to_store));
@@ -1627,7 +1613,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
               historical_surface_search_cache_internal::UpsertCurrent (
                   p_ctx,
                   { embedding_id, memory_id, 0, std::string (),
-                    std::string (), embedding_to_store });
+                    std::string (), stored_embedding });
             }
           if (!constructive_recall::Disabled ()
               && constructive_recall::CurrentSurfaceWritesDisabled ())

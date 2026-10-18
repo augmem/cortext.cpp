@@ -1328,7 +1328,7 @@ TEST_CASE ("Graph retrieval scores older exact matches beyond old recency cap",
   REQUIRE (out.candidate_memory_ids.front () == 1LL);
 }
 
-TEST_CASE ("Family features are cached and replaced with their embedding",
+TEST_CASE ("Family norms are cached and replaced with their embedding",
            "[operations][graph][retrieval][cache][family]")
 {
   namespace surface_cache
@@ -1340,21 +1340,22 @@ TEST_CASE ("Family features are cached and replaced with their embedding",
 
   auto state = surface_cache::Find (pctx);
   REQUIRE (state);
-  REQUIRE_FALSE (state->current_entries[0].family_features.has_value ());
-  const auto &first
+  REQUIRE_FALSE (state->current_entries[0].family_norms);
+  const auto first
       = surface_cache::FamilyFeatures (state->current_entries[0]);
   REQUIRE (first.normalized[0] == Catch::Approx (1.0f));
-  REQUIRE (state->current_entries[0].family_features.has_value ());
-  const auto *cached = &*state->current_entries[0].family_features;
-  REQUIRE (&surface_cache::FamilyFeatures (state->current_entries[0])
-           == cached);
+  REQUIRE (state->current_entries[0].family_norms);
+  const auto *cached = state->current_entries[0].family_norms.get ();
+  const auto again = surface_cache::FamilyFeatures (state->current_entries[0]);
+  REQUIRE (state->current_entries[0].family_norms.get () == cached);
+  REQUIRE (again.normalized == first.normalized);
 
   surface_cache::UpsertCurrent (
       pctx, { 200, 10, 1001, "LONG_TERM", "source-b", UnitVec (1), 100 });
   state = surface_cache::Find (pctx);
   REQUIRE (state);
-  REQUIRE_FALSE (state->current_entries[0].family_features.has_value ());
-  const auto &replacement
+  REQUIRE_FALSE (state->current_entries[0].family_norms);
+  const auto replacement
       = surface_cache::FamilyFeatures (state->current_entries[0]);
   REQUIRE (replacement.normalized[0] == Catch::Approx (0.0f));
   REQUIRE (replacement.normalized[1] == Catch::Approx (1.0f));
@@ -2375,7 +2376,7 @@ TEST_CASE ("SQLite sparse route backfills a large existing surface in fixed "
     {
       const auto result = restarted->Search (
           state.current_entries[static_cast<std::size_t> (memory_id - 1)]
-              .embedding,
+              .embedding.ToVector (),
           parameters.route_capacity);
       REQUIRE (result);
       REQUIRE_FALSE (result->empty ());
@@ -2473,7 +2474,8 @@ TEST_CASE ("SQLite sparse route keeps a full node's nearest neighbors as "
   // arrivals.
   constexpr long long kHub = kBaseCount / 2;
   const Eigen::VectorXf hub
-      = state.current_entries[static_cast<std::size_t> (kHub - 1)].embedding;
+      = state.current_entries[static_cast<std::size_t> (kHub - 1)]
+            .embedding.ToVector ();
   const std::size_t level_zero_links
       = parameters.row_addressed_level_zero_links;
   const long long arrivals = static_cast<long long> (level_zero_links) + 22;
@@ -2487,7 +2489,7 @@ TEST_CASE ("SQLite sparse route keeps a full node's nearest neighbors as "
       embedding[static_cast<Eigen::Index> (offset)] += 0.02f;
       append_entry (memory_id, embedding);
       REQUIRE (state.sqlite_sparse_route->Upsert (
-          memory_id, state.current_entries.back ().embedding));
+          memory_id, state.current_entries.back ().embedding.View ()));
       if (offset % static_cast<long long> (batch) == 0 || offset == arrivals)
         REQUIRE (cache::ReconcileSQLiteSparseRoute (
             state, *store, state.sqlite_sparse_route, nullptr));
@@ -2560,7 +2562,8 @@ TEST_CASE ("SQLite sparse route links a staged row from its ingest walk",
   // staged, then the seal links the staged row.
   constexpr long long kHub = kBaseCount / 2;
   Eigen::VectorXf arrival
-      = state.current_entries[static_cast<std::size_t> (kHub - 1)].embedding;
+      = state.current_entries[static_cast<std::size_t> (kHub - 1)]
+            .embedding.ToVector ();
   arrival[5] += 0.02f;
   arrival.normalize ();
   REQUIRE (route.SearchActivated (arrival));
@@ -2737,11 +2740,11 @@ TEST_CASE ("Consolidation relinks moved active embeddings then seals and "
       const Eigen::VectorXf direction = PseudoRandomUnit (
           static_cast<std::uint64_t> (store_size + memory_id));
       Eigen::VectorXf revised
-          = index % 2 == 0 ? Eigen::VectorXf (current.embedding
+          = index % 2 == 0 ? Eigen::VectorXf (current.embedding.View ()
                                               + 0.35f * direction)
                            : direction;
       revised.normalize ();
-      REQUIRE ((revised - current.embedding).norm () > 1e-3f);
+      REQUIRE ((revised - current.embedding.View ()).norm () > 1e-3f);
       current.embedding = revised;
       REQUIRE (route->Upsert (memory_id, revised));
       moved.emplace_back (memory_id, std::move (revised));
@@ -2772,7 +2775,8 @@ TEST_CASE ("Consolidation relinks moved active embeddings then seals and "
     std::size_t store_misses = 0;
     for (const auto &entry : state.current_entries)
       {
-        const auto result = candidate.Search (entry.embedding, 16);
+        const auto result
+            = candidate.Search (entry.embedding.ToVector (), 16);
         REQUIRE (result);
         store_misses
             += result->empty () || result->front () != entry.memory_id;
@@ -2842,7 +2846,7 @@ TEST_CASE ("SQLite sparse route drains live build mutations in knob-bounded "
     REQUIRE (build->Upsert (
         memory_id,
         state.current_entries[static_cast<std::size_t> (memory_id - 1)]
-            .embedding));
+            .embedding.View ()));
   REQUIRE (build->DeltaSize () == 0);
   REQUIRE (store->Execute (
                "SELECT memory_id FROM cortext_sparse_route_dirty")

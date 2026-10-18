@@ -280,10 +280,11 @@ public:
                                                   int embedding_dim,
                                                   Parameters parameters);
 
-  bool Upsert (long long memory_id, const Eigen::VectorXf &embedding);
+  bool Upsert (long long memory_id,
+               const Eigen::Ref<const Eigen::VectorXf> &embedding);
   bool Remove (long long memory_id);
-  bool StagePendingUpsert (long long memory_id,
-                           const Eigen::VectorXf &embedding);
+  bool StagePendingUpsert (
+      long long memory_id, const Eigen::Ref<const Eigen::VectorXf> &embedding);
   bool StagePendingRemove (long long memory_id);
   bool Seal (const sparse_retrieval_route_internal::Route *hnsw_route
              = nullptr);

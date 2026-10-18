@@ -923,7 +923,7 @@ TEST_CASE ("Typed supersession candidates retain borrowed cache vectors",
 
   auto owner = cache::Find (pctx);
   REQUIRE (owner != nullptr);
-  const Eigen::VectorXf *borrowed = &owner->entries[0].embedding;
+  const internal::SharedEmbedding *borrowed = &owner->entries[0].embedding;
   cache::SupersessionCandidateRows result;
   result.cache_owner = owner;
   result.rows.push_back ({ 10, borrowed, std::nullopt });
@@ -931,19 +931,21 @@ TEST_CASE ("Typed supersession candidates retain borrowed cache vectors",
   cache::Erase (pctx);
   owner.reset ();
   REQUIRE (cache::Find (pctx) == nullptr);
-  REQUIRE (result.rows[0].Embedding () == borrowed);
-  REQUIRE (result.rows[0].Embedding ()->size () == kEmbeddingDim);
-  REQUIRE (result.rows[0].Embedding ()->norm () == 0.0f);
+  REQUIRE (result.rows[0].borrowed_embedding == borrowed);
+  REQUIRE (result.rows[0].HasEmbedding ());
+  REQUIRE (result.rows[0].EmbeddingSize () == kEmbeddingDim);
+  REQUIRE (result.rows[0].borrowed_embedding->View ().norm () == 0.0f);
 
   cache::SupersessionCandidate owned;
   owned.memory_id = 11;
   owned.owned_embedding = Eigen::VectorXf::Ones (4);
-  REQUIRE (owned.Embedding () == &*owned.owned_embedding);
-  REQUIRE (owned.Embedding ()->size () == 4);
+  REQUIRE (owned.HasEmbedding ());
+  REQUIRE (owned.EmbeddingSize () == 4);
 
   cache::SupersessionCandidate invalid;
   invalid.memory_id = 12;
-  REQUIRE (invalid.Embedding () == nullptr);
+  REQUIRE_FALSE (invalid.HasEmbedding ());
+  REQUIRE (invalid.EmbeddingSize () == 0);
 }
 
 TEST_CASE ("Historical cache tracks only supersession-eligible embeddings",

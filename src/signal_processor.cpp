@@ -244,15 +244,11 @@ RetrievalSurfaceCachesConsistent (const ProcessorContext &ctx)
       = operations::historical_surface_search_cache_internal::Find (ctx);
   if (!state || state->recovery_failed || state->embedding_dim <= 0)
     return false;
-  const auto dim = static_cast<std::size_t> (state->embedding_dim);
   return ctx.retrieval_surface_index.size ()
              == ctx.retrieval_surface_cache.size ()
          && ctx.retrieval_surface_embedding_index.size ()
                 <= ctx.retrieval_surface_cache.size ()
-         && state->search.size () == state->entries.size () * dim
          && state->embedding_index.size () == state->entries.size ()
-         && state->current_search.size ()
-                == state->current_entries.size () * dim
          && state->current_memory_index.size ()
                 == state->current_entries.size ();
 }
@@ -1604,6 +1600,25 @@ BlobToEigen (const std::any &blob)
   return result;
 }
 
+/// Acquires the arena row for an embedding blob without an owning copy.
+internal::SharedEmbedding
+BlobToSharedEmbedding (const std::any &blob)
+{
+  const std::vector<unsigned char> *bytes = nullptr;
+  if (blob.type () == typeid (std::vector<unsigned char>))
+    bytes = &std::any_cast<const std::vector<unsigned char> &> (blob);
+  if (bytes == nullptr)
+    return internal::SharedEmbedding (BlobToEigen (blob));
+  const std::size_t size = bytes->size () / sizeof (float);
+  if (size == 0)
+    return {};
+  if (reinterpret_cast<std::uintptr_t> (bytes->data ()) % alignof (float) != 0)
+    return internal::SharedEmbedding (BlobToEigen (blob));
+  return internal::SharedEmbedding (
+      reinterpret_cast<const float *> (bytes->data ()),
+      static_cast<Eigen::Index> (size));
+}
+
 ActivationCentroid
 BuildActiveSignalRingCentroid (Store &store, int embedding_dim,
                                double focus, double sensitivity,
@@ -2173,7 +2188,7 @@ LoadHistoricalSurfaceSearchCache (
                 ExtractInt64 (row, "memory_id", 0),
                 ExtractInt64 (row, "start_ts", 0),
                 ExtractString (row, "kind"), ExtractString (row, "source_id"),
-                BlobToEigen (emb_it->second) });
+                BlobToSharedEmbedding (emb_it->second) });
         }
       std::vector<
           operations::historical_surface_search_cache_internal::Entry>
@@ -2323,7 +2338,7 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
           entry.modality = ExtractString (row, "modality");
           entry.vector_seed_eligible
               = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
-          entry.embedding = BlobToEigen (emb_it->second);
+          entry.embedding = BlobToSharedEmbedding (emb_it->second);
           ctx.UpsertRetrievalSurface (std::move (entry));
         }
       LoadHistoricalSurfaceSearchCache (store, ctx, &base_embedding_ids);
@@ -3708,6 +3723,14 @@ SignalProcessor::Process (const Signal &signal)
   const double ms = ElapsedMillis (t0, t1);
   telemetry::RecordHistogram ("cortext.process_duration_ms", ms);
   telemetry::AddCounter ("cortext.signals_processed_total", 1);
+  {
+    // Process-wide gauges sampled per signal; no attributes (cardinality 1).
+    const auto arena = internal::GetEmbeddingArenaStats ();
+    telemetry::RecordHistogram ("cortext.embedding_arena.live_rows",
+                                static_cast<double> (arena.live_rows));
+    telemetry::RecordHistogram ("cortext.embedding_arena.resident_bytes",
+                                static_cast<double> (arena.resident_bytes));
+  }
   if (out.at_boundary)
     {
       telemetry::AddCounter ("cortext.at_boundary_total", 1);
@@ -4437,7 +4460,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                   operations::historical_surface_search_cache_internal::Append (
                       *context_,
                       { embedding_id, 0, 0, std::string (), std::string (),
-                        slot.embedding });
+                        internal::SharedEmbedding (slot.embedding) });
                 }
             }
           if (embedding_id == 0)

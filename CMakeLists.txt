@@ -293,6 +293,7 @@ add_library(cortext
     src/signal_filter.cpp
     src/cortext.cpp
     src/core/thread_config.cpp
+    src/core/embedding_arena.cpp
     src/capi.cpp
     src/telemetry/telemetry.cpp
     src/data/centroids.cpp

@@ -2,6 +2,7 @@
 
 #include "cortext/data/centroids.hpp"
 #include "cortext/operations/metrics.hpp"
+#include "cortext/internal/embedding_arena.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
@@ -430,7 +431,7 @@ struct ProcessorContext
     std::string modality;
     bool is_association = false;
     bool vector_seed_eligible = true;
-    Eigen::VectorXf embedding;
+    internal::SharedEmbedding embedding;  ///< Arena row (shared, immutable)
     float embedding_norm = 0.0f;
   };
 
@@ -454,7 +455,7 @@ struct ProcessorContext
       {
         return;
       }
-    entry.embedding_norm = entry.embedding.norm ();
+    entry.embedding_norm = entry.embedding.Norm ();
     if (entry.embedding_norm <= 1e-9f)
       {
         return;

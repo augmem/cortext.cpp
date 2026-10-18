@@ -50,7 +50,8 @@ struct Fixture
     entry.kind = "LONG_TERM";
     entry.source_id = "test";
     entry.modality = "text";
-    entry.embedding = Eigen::Map<Eigen::VectorXf> (vec.data (), vec.size ());
+    entry.embedding = Eigen::VectorXf (
+        Eigen::Map<Eigen::VectorXf> (vec.data (), vec.size ()));
     pctx.UpsertRetrievalSurface (std::move (entry));
   }
 

@@ -593,7 +593,8 @@ struct ExerciseRollbackCacheRestoreOp : IOperation
         cache_only_entry.kind = "LONG_TERM";
         cache_only_entry.source_id = "cache/only";
         cache_only_entry.modality = "text";
-        cache_only_entry.embedding = Eigen::VectorXf::Constant (256, 0.25f);
+        cache_only_entry.embedding
+            = Eigen::VectorXf (Eigen::VectorXf::Constant (256, 0.25f));
         processor_context.UpsertRetrievalSurface (
             std::move (cache_only_entry));
         return;

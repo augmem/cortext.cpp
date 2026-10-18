@@ -718,9 +718,10 @@ AppendReconstructionWithEmbeddingUnchecked (
     }
   if (p_ctx != nullptr)
     {
+      const internal::SharedEmbedding shared_embedding (embedding);
       historical_surface_search_cache_internal::Append (
-          *p_ctx,
-          { embedding_id, 0, 0, std::string (), std::string (), embedding });
+          *p_ctx, { embedding_id, 0, 0, std::string (), std::string (),
+                    shared_embedding });
       const auto surface_it = p_ctx->retrieval_surface_index.find (memory_id);
       if (surface_it != p_ctx->retrieval_surface_index.end ()
           && surface_it->second < p_ctx->retrieval_surface_cache.size ())
@@ -728,7 +729,7 @@ AppendReconstructionWithEmbeddingUnchecked (
           historical_surface_search_cache_internal::UpsertCurrent (
               *p_ctx,
               { embedding_id, memory_id, 0, std::string (), std::string (),
-                embedding });
+                shared_embedding });
         }
     }
 

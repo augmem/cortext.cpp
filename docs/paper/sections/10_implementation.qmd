@@ -117,6 +117,23 @@ foreground auto-checkpoint up to 378 ms; with the background checkpointer
 Flush took at most 5 ms and the remaining commit stalls were the WAL page
 writes themselves.
 
+Resident embeddings live in one process-wide arena. Every in-memory consumer
+of a stored vector (the processor retrieval surface, the historical and
+current supersession/seed surfaces, rollback snapshots, and borrowed
+supersession candidates) holds an 8-byte handle to an immutable float32 row
+instead of its own copy. Rows are content-addressed bitwise and
+reference-counted, so the retrieval-surface, historical, and current entries of
+one memory share a single 1 KiB row, a reconstruction is a new row
+(copy-on-write), and a rollback snapshot copies handles rather than vectors.
+Stored embedding rows are append-only in SQLite (inserted and deleted, never
+updated), which is what makes content addressing exact. Rows sit in 64-byte
+aligned chunks that never move; exact scans read them in place, replacing the
+two flat search buffers that duplicated every historical and current vector,
+and evaluate the same per-row Eigen expressions as those buffers did, so
+ranking is bit-identical. The cosine-family collapse keeps only a side table of
+block norms per historical entry and re-expands the normalized vector from the
+row on use.
+
 ### Retrieval-inhibition state (removed)
 
 Migration 28 had added a lazy retrieval-induced-forgetting representation: a

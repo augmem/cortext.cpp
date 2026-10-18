@@ -49,7 +49,8 @@ struct NodeRow
 };
 
 std::optional<std::vector<float>>
-Normalize (const Eigen::VectorXf &embedding, int embedding_dim)
+Normalize (const Eigen::Ref<const Eigen::VectorXf> &embedding,
+           int embedding_dim)
 {
   if (embedding_dim <= 0 || embedding.size () != embedding_dim)
     return std::nullopt;
@@ -827,7 +828,8 @@ Route::OpenOrBeginBuild (Store &store, int embedding_dim,
 }
 
 bool
-Route::Upsert (long long memory_id, const Eigen::VectorXf &embedding)
+Route::Upsert (long long memory_id,
+               const Eigen::Ref<const Eigen::VectorXf> &embedding)
 {
   if (!impl_ || !impl_->store || memory_id <= 0)
     return false;
@@ -876,8 +878,8 @@ Route::Remove (long long memory_id)
 }
 
 bool
-Route::StagePendingUpsert (long long memory_id,
-                           const Eigen::VectorXf &embedding)
+Route::StagePendingUpsert (
+    long long memory_id, const Eigen::Ref<const Eigen::VectorXf> &embedding)
 {
   if (!impl_ || memory_id <= 0)
     return false;
