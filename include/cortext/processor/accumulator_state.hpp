@@ -43,7 +43,6 @@ struct AccumulatorState
   int n_signals = 0;            ///< Count of signals in group
   Eigen::VectorXf e_peak;       ///< Accumulator centroid at highest score
   uint64_t t_start = 0;         ///< Timestamp of accumulation start
-  uint64_t last_write_ts = 0;   ///< Timestamp of last write (for refractory)
   uint64_t last_signal_ts = 0;  ///< Timestamp of previous signal (for gap)
   double eta_acc = 0.0;         ///< Drift EWMA (η_acc)
   double coherence_prev = 0.0;  ///< Previous coherence value
@@ -121,7 +120,6 @@ struct AccumulatorState
     acc_signals_window.clear ();
     pending_interrupt_abort = false;
     pending_interrupt_embedding = Eigen::VectorXf ();
-    // Note: last_write_ts is preserved across accumulations
   }
 
   /**

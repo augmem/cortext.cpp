@@ -109,7 +109,7 @@ dirty so the next normal process persists both values.
 
 The manifold_complexity is defined as a normalized local variability proxy (see Appendix B): manifold_complexity ← clamp((1 − mean_cos_window) / 2, 0, 1).
 
-### Memory-Level Gating
+### Memory-Level Gating {#sec-wm-gating}
 
 Gating thresholds determine entry and chunking:
 

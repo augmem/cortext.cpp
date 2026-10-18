@@ -552,6 +552,18 @@ TEST_CASE ("Flush closes every open Natural unit",
                             "stream/b", 2500ULL, cortext::Retention::Natural);
   ctx->Flush ();
 
+  // Every closed unit is stored, whatever its window score.
+  const auto flushed = store->Execute (
+      "SELECT source_id, n_signals FROM memories WHERE kind = 'LONG_TERM' "
+      "ORDER BY source_id");
+  REQUIRE (flushed.size () == 2);
+  REQUIRE (std::any_cast<std::string> (flushed[0].at ("source_id"))
+           == "stream/a");
+  REQUIRE (AnyToLongLong (flushed[0].at ("n_signals")) == 2);
+  REQUIRE (std::any_cast<std::string> (flushed[1].at ("source_id"))
+           == "stream/b");
+  REQUIRE (AnyToLongLong (flushed[1].at ("n_signals")) == 1);
+
   // A later explicit turn starts a fresh unit on each source: it carries
   // only itself, not the signals that were open before Flush.
   for (const auto *source : { "stream/a", "stream/b" })

@@ -2375,24 +2375,6 @@ WindowScoreCoverageBeta (double S)
   return Lerp (0.05, 0.15, SensitivityBias (S));
 }
 
-// Section 4.4.5 - Write refractory time constant (seconds)
-inline double
-WriteRefractoryTau (double T)
-{
-  // τ_write_refrac(T) = lerp(5, 30, T) seconds
-  // Higher stability = longer refractory period
-  return Lerp (5.0, 30.0, Clamp (T, 0.0, 1.0));
-}
-
-// Section 4.4.5 - Write refractory gain
-inline double
-WriteRefractoryK (double T)
-{
-  // k_write_refrac = lerp(0.3, 0.1, T)
-  // Higher stability = weaker refractory suppression
-  return Lerp (0.3, 0.1, Clamp (T, 0.0, 1.0));
-}
-
 // Section 4.4.5 - Representative embedding blend factor
 inline double
 RepresentativeBlendRho (double F)
