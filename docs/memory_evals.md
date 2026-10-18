@@ -140,10 +140,20 @@ Useful adapter overrides:
 ## What It Measures
 
 `cortext_memory_eval_runner` ingests benchmark histories with
-`Retention::Durable`, then asks benchmark questions with
+`Retention::Durable` (one forced boundary and write per turn) or, with
+`--retention=natural`, with the engine default `Retention::Natural`, which
+leaves boundary detection, turn grouping and the write gate to the engine. It
+flushes at episode end, then asks benchmark questions with
 `Retention::Ephemeral`. This exercises the public "query without polluting"
 path: retrieval is expected, but the query itself is not written as a durable
 memory.
+
+Turns are ingested under one source id per conversation, as a host would send
+them: the dataset id `eval/<episode>[/<session>]/<turn>` becomes
+`eval/<episode>[/<session>]/conv`, or `.../<speaker>` with
+`--source-ids=speaker` (speaker parsed from the `[<time>] <speaker>:` prefix).
+The id keeps at least three segments so contiguity streams stay per episode.
+Rows and gold mapping keep the dataset's per-turn ids.
 
 The runner reports retrieval-packet coverage:
 

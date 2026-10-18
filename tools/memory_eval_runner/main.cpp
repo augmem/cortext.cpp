@@ -57,6 +57,14 @@ struct Options
   // sent under the text's source id; the text goes in as Natural and the
   // turn's last signal as Durable, so the engine stores them as one memory.
   bool turn_signals = false;
+  // Ingest source id. "conversation": one id per conversation/session
+  // (<dataset id prefix>/conv), "speaker": one per speaker in it
+  // (<prefix>/<speaker>). The dataset's per-turn ids stay in rows/logs.
+  bool speaker_sources = false;
+  // Durable forces a boundary and a write per turn; Natural leaves
+  // boundary detection, grouping and the write gate to the engine (a real
+  // host's default). Both flush at episode end, before queries.
+  cortext::Retention retention = cortext::Retention::Durable;
   std::filesystem::path ingest_log_path;
 };
 
@@ -130,6 +138,11 @@ void PrintUsage (std::ostream &out)
       << "  --stream-clock      Engine clock follows turn timestamps (needed\n"
       << "                      for image/audio, which have no *At API)\n"
       << "  --image-filter=on|off  Engine image signal filter, default on\n"
+      << "  --source-ids=conversation|speaker  Ingest source id per\n"
+      << "                      conversation (default) or per speaker\n"
+      << "  --retention=durable|natural  Ingest retention, default durable\n"
+      << "                      (one memory per turn); natural lets the\n"
+      << "                      engine group turns into memories\n"
       << "  --ingest-log PATH   Write one JSONL row per ingested signal\n"
       << "                      (modality, wall/encode/process ms, filter)\n"
       << "  -h, --help          Show this help\n";
@@ -215,6 +228,20 @@ Options ParseArgs (int argc, char **argv)
           if (*v != "on" && *v != "off")
             throw std::runtime_error ("--turn-signals must be on or off");
           opts.turn_signals = *v == "on";
+        }
+      else if (auto v = TakeArg (arg, "--source-ids="))
+        {
+          if (*v != "conversation" && *v != "speaker")
+            throw std::runtime_error (
+                "--source-ids must be conversation or speaker");
+          opts.speaker_sources = *v == "speaker";
+        }
+      else if (auto v = TakeArg (arg, "--retention="))
+        {
+          if (*v != "durable" && *v != "natural")
+            throw std::runtime_error ("--retention must be durable or natural");
+          opts.retention = *v == "natural" ? cortext::Retention::Natural
+                                           : cortext::Retention::Durable;
         }
       else if (auto v = TakeArg (arg, "--ingest-log="))
         {
@@ -622,6 +649,55 @@ int JsonInt (const nlohmann::json &j, const std::string &key)
         }
     }
   return 0;
+}
+
+// Dataset ids are <prefix>/<turn index>[/<attachment>...], prefix being
+// eval/<episode>[/<session>]. Returns the prefix (at least two segments).
+std::string ConversationPrefix (const std::string &dataset_source_id)
+{
+  std::vector<std::string> parts;
+  std::stringstream ss (dataset_source_id);
+  std::string part;
+  while (std::getline (ss, part, '/'))
+    parts.push_back (part);
+  auto numeric = [] (const std::string &x) {
+    return !x.empty ()
+           && std::all_of (x.begin (), x.end (), [] (unsigned char c) {
+                return std::isdigit (c) != 0;
+              });
+  };
+  while (parts.size () > 2 && !numeric (parts.back ()))
+    parts.pop_back ();
+  if (parts.size () > 2)
+    parts.pop_back ();
+  std::string out;
+  for (const auto &p : parts)
+    out += (out.empty () ? "" : "/") + p;
+  return out;
+}
+
+// "[<timestamp>] <speaker>: ..." -> lowercase speaker, else empty.
+std::string TurnSpeaker (const std::string &text)
+{
+  if (text.empty () || text[0] != '[')
+    return "";
+  const auto close = text.find (']');
+  if (close == std::string::npos)
+    return "";
+  std::size_t b = close + 1;
+  while (b < text.size () && text[b] == ' ')
+    ++b;
+  std::size_t e = b;
+  while (e < text.size ()
+         && (std::isalnum (static_cast<unsigned char> (text[e])) != 0
+             || text[e] == '_'))
+    ++e;
+  if (e == b || e >= text.size () || text[e] != ':')
+    return "";
+  std::string speaker = text.substr (b, e - b);
+  for (auto &c : speaker)
+    c = static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+  return speaker;
 }
 
 Signal ParseSignal (const nlohmann::json &j, const std::string &episode_id,
@@ -1076,6 +1152,20 @@ int Run (const Options &opts)
               turn_retention[j - 1] = cortext::Retention::Natural;
             }
         }
+      // Shared conversation (or speaker) ids instead of per-turn ids.
+      std::string speaker = "unknown";
+      for (std::size_t i = 0; i < episode.signals.size (); ++i)
+        {
+          if (episode.signals[i].modality == "text")
+            {
+              const auto s = TurnSpeaker (episode.signals[i].text);
+              speaker = s.empty () ? "unknown" : s;
+            }
+          turn_source[i] = ConversationPrefix (turn_source[i]) + "/"
+                           + (opts.speaker_sources ? speaker : "conv");
+          if (opts.retention == cortext::Retention::Natural)
+            turn_retention[i] = cortext::Retention::Natural;
+        }
       for (std::size_t signal_index = 0; signal_index < episode.signals.size ();
            ++signal_index)
         {
@@ -1334,6 +1424,10 @@ int Run (const Options &opts)
       {"stream_clock", opts.stream_clock},
       {"image_filter", opts.image_filter},
       {"turn_signals", opts.turn_signals},
+      {"source_ids", opts.speaker_sources ? "speaker" : "conversation"},
+      {"retention", opts.retention == cortext::Retention::Natural
+                        ? "natural"
+                        : "durable"},
       {"query_ms", Percentiles (query_ms_all)},
       {"media_bytes_ingested", media_bytes_by_modality},
       {"filtered_signals", filtered_by_modality},
