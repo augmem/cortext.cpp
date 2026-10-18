@@ -223,6 +223,13 @@ public:
   /// @brief Block until every requested background checkpoint has finished.
   void WaitForRequestedCheckpoints ();
 
+  /// @brief Sync the WAL on the calling thread (outside a transaction).
+  ///
+  /// A power-loss durability barrier for every transaction committed so far:
+  /// one fsync of the WAL file, without copying it into the database. No-op
+  /// for stores without a WAL. Throws StoreError if the sync fails.
+  void SyncWal ();
+
   /// @brief Get WAL status information.
   /// @return WAL status with page counts.
   WalStatus GetWalStatus () const;

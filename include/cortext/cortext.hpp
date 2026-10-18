@@ -316,7 +316,9 @@ public:
   /// SQLite WAL, so a process crash afterwards keeps it. It only requests the
   /// WAL checkpoint, which runs on a background connection; that checkpoint
   /// syncs the flushed rows against power loss without stalling ingest.
-  /// Durable retention keeps its synchronous checkpoint barrier per signal.
+  /// A Durable signal fsyncs the WAL after its commit, so it is power-loss
+  /// durable when Process returns; it too leaves the checkpoint to the
+  /// background connection.
   void Flush ();
 
   /// @brief Reset volatile in-memory processor state.

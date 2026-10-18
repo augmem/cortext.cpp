@@ -2147,6 +2147,22 @@ SQLiteStore::WaitForRequestedCheckpoints ()
     checkpointer_->Wait ();
 }
 
+void
+SQLiteStore::SyncWal ()
+{
+  // The pager's journal file is the WAL in WAL mode; a closed handle (no
+  // WAL yet, memory database, committed rollback journal) has nothing to sync.
+  sqlite3_file *wal = nullptr;
+  if (sqlite3_file_control (connection_->GetConnection (), "main",
+                            SQLITE_FCNTL_JOURNAL_POINTER, &wal)
+          != SQLITE_OK
+      || !wal || !wal->pMethods)
+    return;
+  const int rc = wal->pMethods->xSync (wal, SQLITE_SYNC_NORMAL);
+  if (rc != SQLITE_OK)
+    throw StoreError ("WAL sync failed: " + std::string (sqlite3_errstr (rc)));
+}
+
 SQLiteStore::WalStatus
 SQLiteStore::GetWalStatus () const
 {

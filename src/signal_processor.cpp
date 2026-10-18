@@ -61,7 +61,7 @@ constexpr int kClosedWorkingMemoryIncrementalPruneBatch = 8;
 constexpr int kClosedWorkingMemoryIncrementalPruneIntervalSignals = 8;
 
 #if defined(CORTEXT_TESTING)
-std::atomic<bool> g_sqlite_checkpoint_failure_once { false };
+std::atomic<bool> g_sqlite_wal_sync_failure_once { false };
 std::atomic<bool> g_retrieval_surface_reload_failure_once { false };
 std::atomic<std::size_t> g_retrieval_surface_reload_count { 0 };
 std::atomic<std::size_t> g_flush_snapshot_copied_entry_count { 0 };
@@ -1314,9 +1314,11 @@ AssembleOutputMemories (const OperationContext &op_context,
     }
 }
 
+// Durable's post-commit barrier: fsync the WAL that holds the committed
+// transaction, so it survives power loss before Process returns. Copying the
+// WAL into the database stays with the background checkpointer.
 void
-CheckpointSQLiteStore (Store *store, bool full, OperationContext *op_context,
-                       const char *timing_name)
+SyncSQLiteWal (Store *store, OperationContext &op_context)
 {
   auto *sqlite_store = dynamic_cast<SQLiteStore *> (store);
   if (!sqlite_store)
@@ -1328,27 +1330,26 @@ CheckpointSQLiteStore (Store *store, bool full, OperationContext *op_context,
   try
     {
 #if defined(CORTEXT_TESTING)
-      if (g_sqlite_checkpoint_failure_once.exchange (
-              false, std::memory_order_relaxed))
-        throw StoreError ("injected SQLite checkpoint failure");
+      if (g_sqlite_wal_sync_failure_once.exchange (false,
+                                                   std::memory_order_relaxed))
+        throw StoreError ("injected SQLite WAL sync failure");
 #endif
-      sqlite_store->Checkpoint (full);
+      sqlite_store->SyncWal ();
     }
   catch (const std::exception &e)
     {
       failed = true;
       telemetry::LogWarn (
-          "cortext.sqlite_checkpoint_failed",
+          "cortext.sqlite_wal_sync_failed",
           { telemetry::Attribute::String ("component", "signal_processor"),
             telemetry::Attribute::String ("error", e.what ()) });
     }
-  if (op_context && timing_name)
-    {
-      op_context->AddOperationTiming (
-          timing_name, ElapsedMillis (start, std::chrono::steady_clock::now ()));
-      op_context->AddOperationTiming (
-          std::string (timing_name) + "_failure_count", failed ? 1.0 : 0.0);
-    }
+  op_context.AddOperationTiming (
+      "SignalProcessor.sqlite_wal_sync",
+      ElapsedMillis (start, std::chrono::steady_clock::now ()));
+  op_context.AddOperationTiming ("SignalProcessor.sqlite_wal_sync_failure_count",
+                                 failed ? 1.0 : 0.0);
+  sqlite_store->RequestCheckpoint ();
 }
 
 void
@@ -2633,9 +2634,9 @@ SetSignalRecordSnapshotSetupThrowStageForTest (int stage)
 }
 
 void
-SetSQLiteCheckpointFailureOnceForTest ()
+SetSQLiteWalSyncFailureOnceForTest ()
 {
-  g_sqlite_checkpoint_failure_once.store (true, std::memory_order_relaxed);
+  g_sqlite_wal_sync_failure_once.store (true, std::memory_order_relaxed);
 }
 
 std::size_t
@@ -3561,11 +3562,9 @@ SignalProcessor::Process (const Signal &signal)
           if (signal.retention == Retention::Durable)
             {
               // Durable is the shared ingestion transaction plus this explicit
-              // post-commit SQLite edge.  It does not select a second write
+              // post-commit WAL sync.  It does not select a second write
               // pipeline or replay the committed mutation.
-              CheckpointSQLiteStore (
-                  store_.get (), true, &op_context,
-                  "SignalProcessor.sqlite_wal_checkpoint");
+              SyncSQLiteWal (store_.get (), op_context);
             }
 
         }
@@ -3855,7 +3854,7 @@ SignalProcessor::Flush ()
   // The commit above is the Flush point: process-crash durable once it
   // returns. Copying the WAL into the database (and the fsyncs that make it
   // power-loss durable) is the background checkpointer's job, never this
-  // thread's; Durable retention keeps its own synchronous barrier.
+  // thread's; Durable retention syncs its WAL commit per signal.
   if (RetrievalSurfaceCachesConsistent (*context_))
     {
       RequestSQLiteCheckpoint (store_.get ());

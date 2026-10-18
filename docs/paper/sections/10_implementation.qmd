@@ -108,7 +108,9 @@ and after every `Flush()`; commits only request one. `Flush()` therefore
 returns once its transaction is in the WAL (process-crash durable), and the
 background checkpoint syncs it against power loss; recovery replays only whole
 committed transactions, so the store is consistent after either crash. Durable
-retention keeps its synchronous post-commit TRUNCATE checkpoint barrier. Under
+retention's post-commit barrier is one fsync of the WAL that holds its commit
+(power-loss durable when `Process()` returns) instead of a TRUNCATE checkpoint;
+copying the WAL into the database is left to the background checkpointer. Under
 synthetic disk pressure (8 writers, 256 MB each with `F_FULLFSYNC`) a
 foreground Flush checkpoint stalled 99-161 ms and commits carrying SQLite's
 foreground auto-checkpoint up to 378 ms; with the background checkpointer

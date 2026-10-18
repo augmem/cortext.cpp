@@ -1046,10 +1046,10 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
           REQUIRE (output.operation_ms.contains (operation));
         if (retention == cortext::Retention::Durable)
           REQUIRE (output.operation_ms.contains (
-              "SignalProcessor.sqlite_wal_checkpoint"));
+              "SignalProcessor.sqlite_wal_sync"));
         else
           REQUIRE_FALSE (output.operation_ms.contains (
-              "SignalProcessor.sqlite_wal_checkpoint"));
+              "SignalProcessor.sqlite_wal_sync"));
         for (std::size_t index = 0; index < kCounters.size (); ++index)
           {
             const auto &spec = kCounters[index];

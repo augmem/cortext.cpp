@@ -3335,9 +3335,9 @@ RunPacketCorpusProfile (const Config &cfg,
             };
           row["durable_barrier_ms"]
               = ctx.output.operation_ms.count (
-                    "SignalProcessor.sqlite_wal_checkpoint")
+                    "SignalProcessor.sqlite_wal_sync")
                     ? ctx.output.operation_ms.at (
-                          "SignalProcessor.sqlite_wal_checkpoint")
+                          "SignalProcessor.sqlite_wal_sync")
                     : 0.0;
           row["end_to_end_ms"] = std::chrono::duration<double, std::milli> (
                                      event_ended - event_started)

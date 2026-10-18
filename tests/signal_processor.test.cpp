@@ -35,7 +35,7 @@ std::size_t ProcessorRollbackSnapshotReuseCountForTest ();
 std::size_t SignalRecordRollbackBackupCountForTest ();
 std::size_t SignalRecordRollbackCopiedRecordCountForTest ();
 void SetSignalRecordSnapshotSetupThrowStageForTest (int stage);
-void SetSQLiteCheckpointFailureOnceForTest ();
+void SetSQLiteWalSyncFailureOnceForTest ();
 void SetRetrievalSurfaceReloadFailureOnceForTest ();
 std::size_t RetrievalSurfaceReloadCountForTest ();
 std::size_t FlushSnapshotCopiedEntryCountForTest ();
@@ -1467,7 +1467,7 @@ TEST_CASE ("Bounded activation shadow is default-off and publishes Natural and "
 
     auto durable = MakeBoundedShadowSignal (1, "source-b", "audio");
     durable.retention = Retention::Durable;
-    cortext::testing::SetSQLiteCheckpointFailureOnceForTest ();
+    cortext::testing::SetSQLiteWalSyncFailureOnceForTest ();
     processor.Process (durable);
     snapshots = shadow::SnapshotsForTest ();
     const auto second = snapshots.back ();
@@ -2044,7 +2044,7 @@ TEST_CASE ("Processor supersession cache covers association-only SQL rows",
   REQUIRE (covered);
 }
 
-TEST_CASE ("Durable checkpoint failure cannot replay the committed signal",
+TEST_CASE ("Durable WAL sync failure cannot replay the committed signal",
            "[processor][durable][barrier]")
 {
   auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
@@ -2061,10 +2061,10 @@ TEST_CASE ("Durable checkpoint failure cannot replay the committed signal",
   signal.source_id = "source-a";
   signal.retention = Retention::Durable;
   signal.timestamp = 1000;
-  cortext::testing::SetSQLiteCheckpointFailureOnceForTest ();
+  cortext::testing::SetSQLiteWalSyncFailureOnceForTest ();
   const auto first = processor.Process (signal);
   REQUIRE (first.operation_ms.at (
-               "SignalProcessor.sqlite_wal_checkpoint_failure_count")
+               "SignalProcessor.sqlite_wal_sync_failure_count")
            == 1.0);
   REQUIRE (std::any_cast<long long> (
                store->Execute ("SELECT COUNT(*) AS n FROM t")[0].at ("n"))
@@ -2073,14 +2073,54 @@ TEST_CASE ("Durable checkpoint failure cannot replay the committed signal",
   signal.timestamp = 2000;
   const auto second = processor.Process (signal);
   REQUIRE (second.operation_ms.at (
-               "SignalProcessor.sqlite_wal_checkpoint_failure_count")
+               "SignalProcessor.sqlite_wal_sync_failure_count")
            == 0.0);
   REQUIRE (std::any_cast<long long> (
                store->Execute ("SELECT COUNT(*) AS n FROM t")[0].at ("n"))
            == 2LL);
 }
 
-TEST_CASE ("Natural consolidation does not borrow the Durable checkpoint",
+TEST_CASE ("Durable syncs its WAL commit and leaves the checkpoint to the "
+           "background",
+           "[processor][durable][barrier][wal]")
+{
+  const std::string path
+      = (std::filesystem::temp_directory_path () / "cortext_durable_sync.db")
+            .string ();
+  for (const char *suffix : { "", "-wal", "-shm" })
+    std::filesystem::remove (path + suffix);
+  {
+    auto sqlite = std::shared_ptr<SQLiteStore> (SQLiteStore::Create (path));
+    std::shared_ptr<Store> store = sqlite;
+    store->Execute (
+        "CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)");
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    SignalProcessor processor (
+        cfg, store,
+        std::make_unique<DynamicOperationSet> (std::make_unique<InsertOp> ()));
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Zero (256);
+    signal.source_id = "source-a";
+    signal.retention = Retention::Durable;
+    signal.timestamp = 1000;
+    const auto out = processor.Process (signal);
+    REQUIRE (out.operation_ms.at (
+                 "SignalProcessor.sqlite_wal_sync_failure_count")
+             == 0.0);
+    // No TRUNCATE checkpoint on the ingest thread: the commit stays in the
+    // WAL until the background checkpointer copies it.
+    REQUIRE (sqlite->WalFileBytes () > 0);
+    sqlite->WaitForRequestedCheckpoints ();
+    REQUIRE (std::any_cast<long long> (
+                 store->Execute ("SELECT COUNT(*) AS n FROM t")[0].at ("n"))
+             == 1LL);
+  }
+  for (const char *suffix : { "", "-wal", "-shm" })
+    std::filesystem::remove (path + suffix);
+}
+
+TEST_CASE ("Natural consolidation does not borrow the Durable WAL sync",
            "[processor][consolidation][durable][barrier]")
 {
   auto store = std::shared_ptr<Store> (SQLiteStore::Create (":memory:"));
@@ -2100,13 +2140,13 @@ TEST_CASE ("Natural consolidation does not borrow the Durable checkpoint",
   signal.timestamp = 1000;
   const auto natural = processor.Process (signal);
   REQUIRE_FALSE (natural.operation_ms.contains (
-      "SignalProcessor.sqlite_wal_checkpoint"));
+      "SignalProcessor.sqlite_wal_sync"));
 
   signal.retention = Retention::Durable;
   signal.timestamp = 2000;
   const auto durable = processor.Process (signal);
   REQUIRE (durable.operation_ms.contains (
-      "SignalProcessor.sqlite_wal_checkpoint"));
+      "SignalProcessor.sqlite_wal_sync"));
 }
 
 TEST_CASE ("SignalProcessor executes pipeline in order", "[processor][order]")

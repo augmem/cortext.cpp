@@ -370,9 +370,9 @@ def set_fixture_retention(
     for row in rows:
         row["retention"] = retention
         if retention == "durable":
-            row["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"] = 0.0
+            row["operation_ms"]["SignalProcessor.sqlite_wal_sync"] = 0.0
             row["operation_ms"][
-                "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+                "SignalProcessor.sqlite_wal_sync_failure_count"
             ] = 0.0
 
 
@@ -1730,10 +1730,10 @@ class PlateauContractTest(unittest.TestCase):
                     if retention == "durable":
                         row["durable_barrier_ms"] = 0.25
                         row["operation_ms"][
-                            "SignalProcessor.sqlite_wal_checkpoint"
+                            "SignalProcessor.sqlite_wal_sync"
                         ] = 0.25
                         row["operation_ms"][
-                            "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+                            "SignalProcessor.sqlite_wal_sync_failure_count"
                         ] = 0.0
                 for row in rows[-6:]:
                     row["process_ms"] = 30.0
@@ -1750,12 +1750,12 @@ class PlateauContractTest(unittest.TestCase):
         for row in rows:
             row["retention"] = "durable"
             row["durable_barrier_ms"] = 0.0
-            row["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"] = 0.0
+            row["operation_ms"]["SignalProcessor.sqlite_wal_sync"] = 0.0
             row["operation_ms"][
-                "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+                "SignalProcessor.sqlite_wal_sync_failure_count"
             ] = 0.0
         audit.validate_profile_rows(profile, rows)
-        del rows[0]["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"]
+        del rows[0]["operation_ms"]["SignalProcessor.sqlite_wal_sync"]
         with self.assertRaisesRegex(ValueError, "barrier attribution"):
             audit.validate_profile_rows(profile, rows)
 
@@ -1765,12 +1765,12 @@ class PlateauContractTest(unittest.TestCase):
         for row in rows:
             row["retention"] = "durable"
             row["durable_barrier_ms"] = 0.0
-            row["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"] = 0.0
+            row["operation_ms"]["SignalProcessor.sqlite_wal_sync"] = 0.0
             row["operation_ms"][
-                "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+                "SignalProcessor.sqlite_wal_sync_failure_count"
             ] = 0.0
         rows[-1]["operation_ms"][
-            "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+            "SignalProcessor.sqlite_wal_sync_failure_count"
         ] = 1.0
         with self.assertRaisesRegex(ValueError, "failed post-commit barrier"):
             audit.validate_profile_rows(profile, rows)
