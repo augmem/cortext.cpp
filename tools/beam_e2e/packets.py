@@ -3,11 +3,13 @@
 for every question (one runner process per conversation, at most --slots at once).
 
 usage: packets.py --data <split dir from build.py> --vdir <out dir> --runner <bin>
-                  [--slots 2] [--top-k 100] [--keep-stores]
+                  [--slots 2] [--top-k 100] [--keep-stores] [--query-from <vdir>]
 
 Per conversation: <vdir>/conv/<n>/{rows.jsonl, rows.summary.json, ingest.jsonl,
 runner.err (with /usr/bin/time -l)}. Merged rows: <vdir>/packets.jsonl.
 Re-running skips conversations whose rows.summary.json exists.
+--query-from reuses <vdir>/conv/<n>/store_0.sqlite (kept by an earlier --keep-stores run)
+and skips ingest: query-time-only variants (needs a runner with CORTEXT_ABL_QUERY_FROM).
 """
 
 from __future__ import annotations
@@ -32,6 +34,8 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=4, help="CORTEXT_EMBED/INFER_THREADS per runner")
     ap.add_argument("--keep-stores", action="store_true")
     ap.add_argument("--episodes", default="", help="comma list of episode ids (default all)")
+    ap.add_argument("--query-from", type=Path, default=None,
+                    help="vdir whose kept stores are queried without ingest")
     args = ap.parse_args()
 
     key = [json.loads(l) for l in (args.data / "answer_key.jsonl").open() if l.strip()]
@@ -62,9 +66,12 @@ def main() -> None:
                f"--answer-key={d / 'answer_key.jsonl'}", f"--out={d / 'rows.jsonl'}",
                f"--top-k={args.top_k}", "--consolidate=recommended", f"--db={store}",
                f"--ingest-log={d / 'ingest.jsonl'}"]
+        run_env = env
+        if args.query_from:
+            run_env = dict(env, CORTEXT_ABL_QUERY_FROM=str(args.query_from / "conv" / ep_id.split(":")[-1]))
         t0 = time.time()
         with (d / "runner.err").open("w") as err:
-            proc = subprocess.run(["/usr/bin/time", "-l", *cmd], env=env,
+            proc = subprocess.run(["/usr/bin/time", "-l", *cmd], env=run_env,
                                   stdout=subprocess.DEVNULL, stderr=err)
         wall = time.time() - t0
         store_bytes = sum(p.stat().st_size for p in d.glob("store*.sqlite*"))
@@ -94,6 +101,7 @@ def main() -> None:
     (args.vdir / "variant.json").write_text(json.dumps({
         "runner": str(args.runner), "top_k": args.top_k, "slots": args.slots, "threads": args.threads,
         "consolidate": "recommended", "wall_s": round(time.time() - t0, 1),
+        "query_from": str(args.query_from) if args.query_from else None,
     }, indent=1) + "\n")
     print(f"packets: {args.vdir / 'packets.jsonl'} in {time.time() - t0:.0f}s", file=sys.stderr)
 
