@@ -1635,6 +1635,116 @@ AttachSupersededPredecessors (
   return attached;
 }
 
+// Knowledge updates: a retrieved memory may be an older version of a fact
+// that a later memory restates ('supersedes' edge from the later memory). An
+// answer needs the latest version, which often ranks below the older one
+// (the question is phrased like the first statement). For each of the top
+// retrieved memories, its newest superseding memory is hydrated as an extra
+// content blob placed after the anchor's own content, so the packet reads
+// oldest to newest; clipped and under a per-context byte budget. One indexed
+// lookup on idx_associations_target for all anchors.
+constexpr std::size_t kSupersedingRecallAnchorLimit = 11;
+constexpr std::size_t kSupersedingRecallMaxBytes = 512;
+constexpr std::size_t kSupersedingRecallContextBudgetBytes = 4096;
+
+// Returns the number of superseding-successor blobs attached.
+std::size_t
+AttachSupersedingSuccessors (Store *store,
+                             std::vector<Cortext::Context::Memory> &retrieved,
+                             const std::unordered_map<long long, AnchorRow> &anchor_rows,
+                             std::unordered_set<long long> excluded_ids,
+                             AttachmentHydrations &hydrations)
+{
+  if (!store || retrieved.empty () || SourceBlobsDisabled ())
+    return 0;
+  for (const auto &memory : retrieved)
+    excluded_ids.insert (memory.id);
+  std::size_t budget = kSupersedingRecallContextBudgetBytes;
+  std::size_t attached = 0;
+  const std::size_t anchors
+      = std::min (kSupersedingRecallAnchorLimit, retrieved.size ());
+  try
+    {
+      std::vector<std::size_t> anchor_indexes;
+      std::string placeholders;
+      std::vector<std::any> params;
+      std::unordered_set<long long> seen_anchor_ids;
+      for (std::size_t i = 0; i < anchors; ++i)
+        {
+          const auto &anchor = retrieved[i];
+          if (anchor.id <= 0 || !HasTextContent (anchor)
+              || !HasHydratedContent (anchor)
+              || anchor_rows.find (anchor.id) == anchor_rows.end ())
+            continue;
+          anchor_indexes.push_back (i);
+          if (seen_anchor_ids.insert (anchor.id).second)
+            {
+              if (!placeholders.empty ())
+                placeholders += ", ";
+              placeholders += "?";
+              params.emplace_back (anchor.id);
+            }
+        }
+      if (params.empty ())
+        return 0;
+      // Newest first per anchor; two per anchor so an already-packeted
+      // successor does not starve it.
+      const auto rows = store->Execute (
+          "SELECT r.anchor_id, r.memory_id "
+          "FROM (SELECT a.target_memory_id AS anchor_id, "
+          "             a.source_memory_id AS memory_id, "
+          "             ROW_NUMBER() OVER ("
+          "               PARTITION BY a.target_memory_id "
+          "               ORDER BY m.start_ts DESC, a.source_memory_id DESC) "
+          "               AS edge_rank "
+          "      FROM associations a "
+          "      JOIN memories m ON m.memory_id = a.source_memory_id "
+          "      WHERE a.target_memory_id IN (" + placeholders + ") "
+          "        AND a.edge_type = 'supersedes' "
+          "        AND m.kind = 'LONG_TERM' "
+          "        AND m.modality IN ('text', 'mixed')) r "
+          "WHERE r.edge_rank <= 2 "
+          "ORDER BY r.anchor_id, r.edge_rank",
+          params);
+      std::unordered_map<long long, std::vector<long long> > successors;
+      for (const auto &row : rows)
+        successors[RowLongLong (row, "anchor_id")].push_back (
+            RowLongLong (row, "memory_id"));
+      for (const std::size_t i : anchor_indexes)
+        {
+          if (budget == 0)
+            break;
+          auto &anchor = retrieved[i];
+          const auto it = successors.find (anchor.id);
+          if (it == successors.end ())
+            continue;
+          for (const long long successor_id : it->second)
+            {
+              if (successor_id <= 0 || !excluded_ids.insert (successor_id).second)
+                continue;
+              auto text = hydrations.AttachedText (successor_id,
+                                                   kSupersedingRecallMaxBytes);
+              if (text.empty () || text.size () > budget)
+                continue;
+              budget -= text.size ();
+              AlignContentMimetypes (anchor);
+              anchor.content_mimetypes.push_back ("text/plain");
+              anchor.content.push_back (std::move (text));
+              ++attached;
+              break;
+            }
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to attach superseding successors",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  return attached;
+}
+
 void
 HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
                             std::vector<Cortext::Context::Memory> &out,
@@ -2396,6 +2506,12 @@ struct Cortext::Impl
         attachment_hydrations, contiguous_turn_ids);
     result.output.operation_ms["Cortext.contiguous_turns_attached"]
         = static_cast<double> (contiguous_turns_attached);
+    const std::size_t superseding_successors_attached
+        = AttachSupersedingSuccessors (store.get (), result.retrieved_memory,
+                                       anchor_rows, contiguous_turn_ids,
+                                       attachment_hydrations);
+    result.output.operation_ms["Cortext.superseding_successors_attached"]
+        = static_cast<double> (superseding_successors_attached);
     const std::size_t superseded_predecessors_attached
         = AttachSupersededPredecessors (
             store.get (), result.retrieved_memory, anchor_rows,

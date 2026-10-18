@@ -598,6 +598,57 @@ TEST_CASE ("Cortext recalls durable corrections at default knobs",
   assert_correction_recalled (pill_recall, corrected_pill);
 }
 
+TEST_CASE ("A retrieved fact brings back its newest restatement after it",
+           "[cortext][retrieval][supersession]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  const std::uint64_t hour = 60ULL * 60ULL * 1000ULL;
+  const auto first = ctx->ProcessTextAt (
+      "I logged 14 tasks in Jira for the sprint, aiming for 85% completion.",
+      "chat/a/1", 1000ULL, cortext::Retention::Durable);
+  const auto second = ctx->ProcessTextAt (
+      "I now have 16 tasks in Jira for the sprint.", "chat/b/1",
+      1000ULL + 5 * hour, cortext::Retention::Durable);
+  const auto latest = ctx->ProcessTextAt (
+      "Jira now shows 17 tasks for the sprint and the target is 88%.",
+      "chat/c/1", 1000ULL + 10 * hour, cortext::Retention::Durable);
+  REQUIRE (first.output.stored_memory_id.has_value ());
+  REQUIRE (second.output.stored_memory_id.has_value ());
+  REQUIRE (latest.output.stored_memory_id.has_value ());
+  const long long first_id = *first.output.stored_memory_id;
+  // Pin the edges so the test does not depend on similarity thresholds.
+  store->Execute ("DELETE FROM associations WHERE edge_type = 'supersedes'");
+  for (const long long source :
+       { *second.output.stored_memory_id, *latest.output.stored_memory_id })
+    store->Execute ("INSERT INTO associations (source_memory_id, "
+                    "target_memory_id, edge_type, weight) "
+                    "VALUES (?, ?, 'supersedes', 1.0)",
+                    { source, first_id });
+
+  const auto packet = ctx->DebugHydrateForTest ({ first_id }, {});
+  REQUIRE (packet.retrieved_memory.size () == 1);
+  const auto &memory = packet.retrieved_memory.front ();
+  std::vector<std::string> blobs;
+  for (const auto &blob : memory.content)
+    blobs.emplace_back (blob.begin (), blob.end ());
+  const auto at = [&blobs] (const std::string &needle) {
+    for (std::size_t i = 0; i < blobs.size (); ++i)
+      if (blobs[i].find (needle) != std::string::npos)
+        return static_cast<long long> (i);
+    return -1LL;
+  };
+  REQUIRE (at ("aiming for 85%") >= 0);
+  REQUIRE (at ("17 tasks") > at ("aiming for 85%"));
+  REQUIRE (at ("16 tasks") == -1); // newest restatement only
+  REQUIRE (packet.output.operation_ms.at (
+               "Cortext.superseding_successors_attached")
+           == 1.0);
+}
+
 TEST_CASE ("internal replay ingress preserves media event timestamps",
            "[cortext][replay][media][aist]")
 {

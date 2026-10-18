@@ -680,6 +680,16 @@ was 0.44 / 0.26 / 0.00 at 100K / 1M / 10M tokens before, and 0.88 / 0.79 /
 gold-turn share in that packet rose by 0.070 / 0.075 / 0.053 overall, with no
 other category losing more than 0.01.
 
+Knowledge updates also reach the packet from the newer side. A query phrased
+like a fact's first statement retrieves that older version, while the latest
+restatement, which links to it with a `supersedes` edge, ranks below it. For
+each of the eleven best-ranked memories, packet hydration therefore appends the
+newest superseding memory's text (at most 512 bytes) after the anchor's own
+content, so the packet reads oldest to newest; at most 4 KiB per packet, in
+one indexed lookup on the edge target for all anchors. On BEAM this added
+0.005 gold-turn share at each scale and 0.023 [0.010, 0.036] to the
+Haiku-answered 10M score.
+
 Production retrieval discovers a broad but bounded vector seed set from durable
 memory embeddings. Before the seed cap, it collapses near-duplicate embedding
 families to one representative; superseded targets stay eligible.
