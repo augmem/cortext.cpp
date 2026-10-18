@@ -65,6 +65,9 @@ struct Options
   // boundary detection, grouping and the write gate to the engine (a real
   // host's default). Both flush at episode end, before queries.
   cortext::Retention retention = cortext::Retention::Durable;
+  // Query-time-only variants: copy <dir>/store_<i>.sqlite (kept by an
+  // earlier run with the same --db stem) and skip ingest.
+  std::string query_from;
   // Natural only: send each conversation's last signal as Boundary, as a
   // host that knows a conversation ended (closes the open unit; the write
   // gate still decides).
@@ -149,6 +152,8 @@ void PrintUsage (std::ostream &out)
       << "                      engine group turns into memories\n"
       << "  --conversation-end=none|boundary  Natural only: boundary sends\n"
       << "                      each conversation's last signal as Boundary\n"
+      << "  --query-from=DIR    Query DIR/store_<i>.sqlite (copied) without\n"
+      << "                      ingesting; needs a per-episode --db file\n"
       << "  --ingest-log PATH   Write one JSONL row per ingested signal\n"
       << "                      (modality, wall/encode/process ms, filter)\n"
       << "  -h, --help          Show this help\n";
@@ -256,6 +261,10 @@ Options ParseArgs (int argc, char **argv)
                 "--conversation-end must be none or boundary");
           opts.close_conversations = *v == "boundary";
         }
+      else if (auto v = TakeArg (arg, "--query-from="))
+        {
+          opts.query_from = *v;
+        }
       else if (auto v = TakeArg (arg, "--ingest-log="))
         {
           opts.ingest_log_path = *v;
@@ -288,6 +297,12 @@ Options ParseArgs (int argc, char **argv)
     {
       throw std::runtime_error (
           "--conversation-end=boundary needs --retention=natural");
+    }
+  if (!opts.query_from.empty ()
+      && (opts.db_path == ":memory:" || opts.reuse_engine))
+    {
+      throw std::runtime_error (
+          "--query-from needs a per-episode --db file");
     }
   if (opts.out_path.empty ())
     {
@@ -1084,6 +1099,28 @@ int Run (const Options &opts)
       std::unique_ptr<cortext::Cortext> local_engine;
       std::shared_ptr<StreamClock> clock = shared_clock;
       cortext::Cortext *engine = shared_engine.get ();
+      const bool query_only = !opts.query_from.empty ();
+      if (query_only)
+        {
+          const auto name
+              = std::filesystem::path (DbPathForEpisode (opts, episode_index))
+                    .filename ()
+                    .string ();
+          const auto src = std::filesystem::path (opts.query_from) / name;
+          if (!std::filesystem::exists (src))
+            throw std::runtime_error ("--query-from store missing: "
+                                      + src.string ());
+          for (const char *suffix : {"", "-wal"})
+            {
+              const auto from = src.string () + suffix;
+              const auto to = DbPathForEpisode (opts, episode_index) + suffix;
+              std::filesystem::remove (to);
+              if (std::filesystem::exists (from))
+                std::filesystem::copy_file (from, to);
+            }
+          std::filesystem::remove (DbPathForEpisode (opts, episode_index)
+                                   + "-shm");
+        }
       if (!engine)
         {
           if (opts.stream_clock)
@@ -1193,7 +1230,11 @@ int Run (const Options &opts)
           for (const auto &[source, i] : last_of)
             turn_retention[i] = cortext::Retention::Boundary;
         }
-      for (std::size_t signal_index = 0; signal_index < episode.signals.size ();
+      if (query_only)
+        for (const auto &signal : episode.signals)
+          last_timestamp_ms = std::max (last_timestamp_ms, signal.timestamp_ms);
+      for (std::size_t signal_index = 0;
+           !query_only && signal_index < episode.signals.size ();
            ++signal_index)
         {
           const auto &signal = episode.signals[signal_index];

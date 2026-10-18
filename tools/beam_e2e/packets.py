@@ -9,7 +9,7 @@ Per conversation: <vdir>/conv/<n>/{rows.jsonl, rows.summary.json, ingest.jsonl,
 runner.err (with /usr/bin/time -l)}. Merged rows: <vdir>/packets.jsonl.
 Re-running skips conversations whose rows.summary.json exists.
 --query-from reuses <vdir>/conv/<n>/store_0.sqlite (kept by an earlier --keep-stores run)
-and skips ingest: query-time-only variants (needs a runner with CORTEXT_ABL_QUERY_FROM).
+and skips ingest: query-time-only variants (runner --query-from).
 """
 
 from __future__ import annotations
@@ -66,12 +66,11 @@ def main() -> None:
                f"--answer-key={d / 'answer_key.jsonl'}", f"--out={d / 'rows.jsonl'}",
                f"--top-k={args.top_k}", "--consolidate=recommended", f"--db={store}",
                f"--ingest-log={d / 'ingest.jsonl'}"]
-        run_env = env
         if args.query_from:
-            run_env = dict(env, CORTEXT_ABL_QUERY_FROM=str(args.query_from / "conv" / ep_id.split(":")[-1]))
+            cmd.append(f"--query-from={args.query_from / 'conv' / ep_id.split(':')[-1]}")
         t0 = time.time()
         with (d / "runner.err").open("w") as err:
-            proc = subprocess.run(["/usr/bin/time", "-l", *cmd], env=run_env,
+            proc = subprocess.run(["/usr/bin/time", "-l", *cmd], env=env,
                                   stdout=subprocess.DEVNULL, stderr=err)
         wall = time.time() - t0
         store_bytes = sum(p.stat().st_size for p in d.glob("store*.sqlite*"))
