@@ -101,6 +101,20 @@ flush. A failed `Flush()` rolls back and reopens exactly the units it closed;
 its snapshot copies only those accumulators, so it stays independent of idle
 sources and store size.
 
+WAL checkpoints never run on the ingest thread. Each file-backed SQLite store
+owns a background checkpointer (its own connection and thread) that runs
+PASSIVE checkpoints when the WAL reaches the auto-checkpoint size (1,000 pages)
+and after every `Flush()`; commits only request one. `Flush()` therefore
+returns once its transaction is in the WAL (process-crash durable), and the
+background checkpoint syncs it against power loss; recovery replays only whole
+committed transactions, so the store is consistent after either crash. Durable
+retention keeps its synchronous post-commit TRUNCATE checkpoint barrier. Under
+synthetic disk pressure (8 writers, 256 MB each with `F_FULLFSYNC`) a
+foreground Flush checkpoint stalled 99-161 ms and commits carrying SQLite's
+foreground auto-checkpoint up to 378 ms; with the background checkpointer
+Flush took at most 5 ms and the remaining commit stalls were the WAL page
+writes themselves.
+
 ### Retrieval-inhibition state (removed)
 
 Migration 28 had added a lazy retrieval-induced-forgetting representation: a

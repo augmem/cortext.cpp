@@ -17,6 +17,12 @@
 #include <string>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 namespace
 {
 
@@ -1435,3 +1441,156 @@ TEST_CASE ("Error recovery in WAL mode", "[store][wal]")
     REQUIRE (std::any_cast<long long> (results[0].at ("cnt")) == 1LL);
   }
 }
+
+namespace
+{
+// Rows of `table` visible in the database file alone, ignoring its WAL: a
+// byte copy of the main file opened on its own. -1 when the table is absent.
+long long
+RowsInDatabaseFileOnly (const std::string &path, const std::string &table)
+{
+  const std::string copy = path + ".fileonly";
+  cleanup_temp_db (copy);
+  std::filesystem::copy_file (path, copy,
+                              std::filesystem::copy_options::overwrite_existing);
+  long long rows = -1;
+  {
+    auto store = cortext::SQLiteStore::Create (copy);
+    const auto exists = store->Execute (
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?", { table });
+    if (std::any_cast<long long> (exists[0].at ("n")) > 0)
+      rows = std::any_cast<long long> (
+          store->Execute ("SELECT COUNT(*) AS n FROM " + table)[0].at ("n"));
+  }
+  cleanup_temp_db (copy);
+  return rows;
+}
+} // namespace
+
+TEST_CASE ("WAL checkpoints run on the background checkpointer",
+           "[store][wal][checkpoint]")
+{
+  const std::vector<unsigned char> payload (4096, 7);
+
+  SECTION ("A requested checkpoint copies committed rows into the database")
+  {
+    cortext::testing::ScopedEnvVar wal_autocheckpoint (
+        "CORTEXT_SQLITE_WAL_AUTOCHECKPOINT", "0");
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+    store->Execute ("CREATE TABLE rows (id INTEGER PRIMARY KEY, value BLOB)");
+    for (int i = 0; i < 200; ++i)
+      store->Execute ("INSERT INTO rows (value) VALUES (?)", { payload });
+
+    // No checkpoint ran on commit: the rows live only in the WAL.
+    REQUIRE (RowsInDatabaseFileOnly (temp_db.path (), "rows") == -1);
+
+    store->RequestCheckpoint ();
+    store->WaitForRequestedCheckpoints ();
+    REQUIRE (RowsInDatabaseFileOnly (temp_db.path (), "rows") == 200);
+    REQUIRE (store->WalFileBytes () > 0); // PASSIVE never truncates
+  }
+
+  SECTION ("The WAL page threshold requests a checkpoint by itself")
+  {
+    cortext::testing::ScopedEnvVar wal_autocheckpoint (
+        "CORTEXT_SQLITE_WAL_AUTOCHECKPOINT", "16");
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+    REQUIRE (store->WalAutoCheckpointPages () == 16);
+    store->Execute ("CREATE TABLE rows (id INTEGER PRIMARY KEY, value BLOB)");
+    for (int i = 0; i < 64; ++i)
+      store->Execute ("INSERT INTO rows (value) VALUES (?)", { payload });
+    store->WaitForRequestedCheckpoints ();
+    REQUIRE (RowsInDatabaseFileOnly (temp_db.path (), "rows") > 0);
+  }
+
+  SECTION ("A full checkpoint stays a synchronous barrier")
+  {
+    TempDatabase temp_db;
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+    store->Execute ("CREATE TABLE rows (id INTEGER PRIMARY KEY, value BLOB)");
+    for (int i = 0; i < 50; ++i)
+      store->Execute ("INSERT INTO rows (value) VALUES (?)", { payload });
+    store->RequestCheckpoint (); // may still be running
+    store->Checkpoint (true);
+    REQUIRE (store->WalFileBytes () == 0);
+    REQUIRE (RowsInDatabaseFileOnly (temp_db.path (), "rows") == 50);
+  }
+
+  SECTION ("Memory databases checkpoint inline as a no-op")
+  {
+    auto store = cortext::SQLiteStore::Create (":memory:");
+    store->Execute ("CREATE TABLE rows (id INTEGER)");
+    REQUIRE_NOTHROW (store->RequestCheckpoint ());
+    REQUIRE_NOTHROW (store->WaitForRequestedCheckpoints ());
+  }
+}
+
+#if !defined(_WIN32)
+TEST_CASE ("Committed transactions survive a crash during background "
+           "checkpoints",
+           "[store][wal][checkpoint][crash]")
+{
+  TempDatabase temp_db;
+  {
+    auto store = cortext::SQLiteStore::Create (temp_db.path ());
+    store->Execute ("CREATE TABLE rows (id INTEGER PRIMARY KEY, batch "
+                    "INTEGER NOT NULL, value BLOB NOT NULL)");
+  }
+  constexpr long long kBatch = 64;
+  long long committed_floor = 0;
+  for (int round = 0; round < 4; ++round)
+    {
+      int fds[2];
+      REQUIRE (pipe (fds) == 0);
+      const pid_t child = fork ();
+      REQUIRE (child >= 0);
+      if (child == 0)
+        {
+          // Child: commit whole batches forever, report each commit, and ask
+          // for a background checkpoint after it. The parent kills it at an
+          // arbitrary point, typically mid-checkpoint.
+          close (fds[0]);
+          auto store = cortext::SQLiteStore::Create (temp_db.path ());
+          const std::vector<unsigned char> payload (4096, 0x33);
+          for (long long batch = 0;; ++batch)
+            {
+              auto tx = store->Begin ();
+              for (long long i = 0; i < kBatch; ++i)
+                tx->Execute ("INSERT INTO rows (batch, value) VALUES (?, ?)",
+                             { batch, payload });
+              tx->Commit ();
+              const char tick = 1;
+              if (write (fds[1], &tick, 1) != 1)
+                _exit (2);
+              store->RequestCheckpoint ();
+            }
+        }
+      close (fds[1]);
+      long long reported = 0;
+      const long long target = 8 + 5 * round;
+      char tick = 0;
+      while (reported < target && read (fds[0], &tick, 1) == 1)
+        ++reported;
+      kill (child, SIGKILL);
+      int status = 0;
+      waitpid (child, &status, 0);
+      close (fds[0]);
+      REQUIRE (reported == target);
+      committed_floor += reported * kBatch;
+
+      auto store = cortext::SQLiteStore::Create (temp_db.path ());
+      const auto check = store->Execute ("PRAGMA integrity_check");
+      REQUIRE (std::any_cast<std::string> (check[0].at ("integrity_check"))
+               == "ok");
+      const auto rows = std::any_cast<long long> (
+          store->Execute ("SELECT COUNT(*) AS n FROM rows")[0].at ("n"));
+      INFO ("round " << round);
+      // Every reported commit survived, and only whole batches exist.
+      REQUIRE (rows >= committed_floor);
+      REQUIRE (rows % kBatch == 0);
+      committed_floor = rows;
+    }
+}
+#endif

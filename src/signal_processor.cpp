@@ -59,9 +59,6 @@ constexpr int kClosedWorkingMemoryPruneBatch = 1024;
 constexpr std::size_t kOrphanEmbeddingCandidateLimit = 65536;
 constexpr int kClosedWorkingMemoryIncrementalPruneBatch = 8;
 constexpr int kClosedWorkingMemoryIncrementalPruneIntervalSignals = 8;
-constexpr uint64_t kWalPassiveCheckpointIntervalSignals = 256;
-constexpr std::uintmax_t kWalPassiveCheckpointMinBytes
-    = 256ULL * 1024ULL * 1024ULL;
 
 #if defined(CORTEXT_TESTING)
 std::atomic<bool> g_sqlite_checkpoint_failure_once { false };
@@ -1355,48 +1352,10 @@ CheckpointSQLiteStore (Store *store, bool full, OperationContext *op_context,
 }
 
 void
-MaybeRunPassiveWalCheckpoint (Store *store, const Signal &signal,
-                              const ProcessorContext &context,
-                              OperationContext &op_context)
+RequestSQLiteCheckpoint (Store *store)
 {
-  static const bool enabled = [] {
-    const char *value = std::getenv ("CORTEXT_FOREGROUND_WAL_CHECKPOINT");
-    return value && (std::strcmp (value, "1") == 0
-                     || std::strcmp (value, "true") == 0
-                     || std::strcmp (value, "on") == 0);
-  } ();
-  if (!enabled)
-    {
-      return;
-    }
-  if (signal.force_consolidation)
-    {
-      return;
-    }
-  if (context.signals_processed == 0)
-    {
-      return;
-    }
-  if ((context.signals_processed % kWalPassiveCheckpointIntervalSignals) != 0)
-    {
-      return;
-    }
-
-  auto *sqlite_store = dynamic_cast<SQLiteStore *> (store);
-  if (!sqlite_store)
-    {
-      return;
-    }
-  if (sqlite_store->WalFileBytes () < kWalPassiveCheckpointMinBytes)
-    {
-      const auto start = std::chrono::steady_clock::now ();
-      op_context.AddOperationTiming (
-          "SignalProcessor.sqlite_wal_checkpoint_skip",
-          ElapsedMillis (start, std::chrono::steady_clock::now ()));
-      return;
-    }
-  CheckpointSQLiteStore (store, false, &op_context,
-                         "SignalProcessor.sqlite_wal_checkpoint_passive");
+  if (auto *sqlite_store = dynamic_cast<SQLiteStore *> (store))
+    sqlite_store->RequestCheckpoint ();
 }
 
 void
@@ -3608,11 +3567,7 @@ SignalProcessor::Process (const Signal &signal)
                   store_.get (), true, &op_context,
                   "SignalProcessor.sqlite_wal_checkpoint");
             }
-          else
-            {
-              MaybeRunPassiveWalCheckpoint (store_.get (), signal,
-                                            *context_, op_context);
-            }
+
         }
     }
   catch (const internal::CancellationError &)
@@ -3897,9 +3852,13 @@ SignalProcessor::Flush ()
   // by identity, so a healthy surface stays as is instead of paying a
   // store-sized reload at every consolidation edge. A missing, failed or
   // internally inconsistent surface still reloads from SQLite.
+  // The commit above is the Flush point: process-crash durable once it
+  // returns. Copying the WAL into the database (and the fsyncs that make it
+  // power-loss durable) is the background checkpointer's job, never this
+  // thread's; Durable retention keeps its own synchronous barrier.
   if (RetrievalSurfaceCachesConsistent (*context_))
     {
-      CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
+      RequestSQLiteCheckpoint (store_.get ());
       return;
     }
   LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
@@ -3921,7 +3880,7 @@ SignalProcessor::Flush ()
         state->sqlite_sparse_route_backfill
             = std::move (preserved_sqlite_sparse_route_backfill);
     }
-  CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
+  RequestSQLiteCheckpoint (store_.get ());
 }
 
 std::vector<std::pair<uint64_t, std::string> >

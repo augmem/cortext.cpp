@@ -311,6 +311,12 @@ public:
   ///
   /// Every source's open unit closes here as at a boundary: the write gate
   /// decides whether it is stored, and the next signal starts a new unit.
+  ///
+  /// Durability: Flush returns once its transaction is committed to the
+  /// SQLite WAL, so a process crash afterwards keeps it. It only requests the
+  /// WAL checkpoint, which runs on a background connection; that checkpoint
+  /// syncs the flushed rows against power loss without stalling ingest.
+  /// Durable retention keeps its synchronous checkpoint barrier per signal.
   void Flush ();
 
   /// @brief Reset volatile in-memory processor state.

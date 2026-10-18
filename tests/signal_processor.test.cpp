@@ -16,7 +16,9 @@
 #include "../src/operations/consolidation_throughput_state_internal.hpp"
 #include "../src/operations/signal_record_rollback_internal.hpp"
 #include "../src/processor/source_state_eviction_internal.hpp"
+#include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -3878,4 +3880,115 @@ TEST_CASE ("SignalProcessor evicts idle per-source state beyond its budget",
   // The least recent one-off sources are gone; the newest remain.
   CHECK_FALSE (states.contains ("turn/0"));
   CHECK (states.contains ("turn/" + std::to_string (turns - 1)));
+}
+
+namespace
+{
+// Writes `bytes` of payload per signal as one new row plus rewrites of a
+// few older rows, so the WAL carries a realistic mix of appended and
+// scattered pages between flushes.
+struct WalChurnOp : IOperation
+{
+  explicit WalChurnOp (int bytes) : payload (static_cast<std::size_t> (bytes), 0x5a) {}
+
+  void
+  Execute (OperationContext &ctx, Transaction &tx) const override
+  {
+    const auto serial = static_cast<long long> (ctx.GetSignal ().timestamp);
+    tx.Execute ("INSERT INTO wal_churn (id, payload) VALUES (?, ?)",
+                { serial, payload });
+    for (long long step = 1; step <= 4; ++step)
+      {
+        const long long target = (serial * 2654435761LL + step * 40503LL)
+                                 % std::max (1LL, serial);
+        tx.Execute ("UPDATE wal_churn SET payload = ? WHERE id = ?",
+                    { payload, target + 1 });
+      }
+  }
+
+  std::vector<unsigned char> payload;
+};
+
+long long
+WalStallEnv (const char *name, long long fallback)
+{
+  const char *value = std::getenv (name);
+  return value && value[0] ? std::atoll (value) : fallback;
+}
+
+double
+Quantile (std::vector<double> values, double q)
+{
+  if (values.empty ())
+    return 0.0;
+  std::sort (values.begin (), values.end ());
+  return values[std::min (values.size () - 1,
+                          static_cast<std::size_t> (
+                              q * static_cast<double> (values.size () - 1)
+                              + 0.5))];
+}
+} // namespace
+
+// Realtime repro for the ingest-thread WAL stall: run it while another
+// process saturates the disk with writes + fsync
+// (.claude/hillclimb/v4wal/iopressure.py). Every Process and Flush call on
+// the ingest thread must stay within the 250 ms single-stall budget.
+TEST_CASE ("SignalProcessor ingest and flush stay within the stall budget "
+           "under disk pressure",
+           "[.][wal_stall][processor][flush][realtime]")
+{
+  const auto signals = WalStallEnv ("WAL_STALL_SIGNALS", 4096);
+  const auto flush_every = WalStallEnv ("WAL_STALL_FLUSH_EVERY", 512);
+  const auto bytes = WalStallEnv ("WAL_STALL_ROW_BYTES", 16384);
+  const std::string path
+      = (std::filesystem::temp_directory_path () / "cortext_wal_stall.db")
+            .string ();
+  for (const char *suffix : { "", "-wal", "-shm" })
+    std::filesystem::remove (path + suffix);
+  {
+    std::shared_ptr<Store> store (SQLiteStore::Create (path));
+    store->Execute ("CREATE TABLE wal_churn (id INTEGER PRIMARY KEY, "
+                    "payload BLOB NOT NULL)");
+    auto ops = std::make_unique<DynamicOperationSet> (
+        std::make_unique<WalChurnOp> (static_cast<int> (bytes)));
+    SignalProcessor::Config cfg;
+    cortext::testing::RequireEncoder (cfg);
+    SignalProcessor processor (cfg, store, std::move (ops));
+
+    std::vector<double> process_ms;
+    std::vector<double> flush_ms;
+    Signal signal;
+    signal.embedding = Eigen::VectorXf::Ones (256);
+    signal.source_id = "wal/stall";
+    signal.retention = WalStallEnv ("WAL_STALL_DURABLE", 0) != 0
+                           ? Retention::Durable
+                           : Retention::Natural;
+    for (long long index = 1; index <= signals; ++index)
+      {
+        signal.timestamp = static_cast<uint64_t> (index);
+        auto t0 = std::chrono::steady_clock::now ();
+        processor.Process (signal);
+        auto t1 = std::chrono::steady_clock::now ();
+        process_ms.push_back (
+            std::chrono::duration<double, std::milli> (t1 - t0).count ());
+        if (index % flush_every == 0)
+          {
+            t0 = std::chrono::steady_clock::now ();
+            processor.Flush ();
+            t1 = std::chrono::steady_clock::now ();
+            flush_ms.push_back (
+                std::chrono::duration<double, std::milli> (t1 - t0).count ());
+          }
+      }
+    std::printf ("wal_stall signals=%lld flushes=%zu process p50 %.2f p99 %.2f "
+                 "max %.2f ms | flush p50 %.2f p99 %.2f max %.2f ms\n",
+                 signals, flush_ms.size (), Quantile (process_ms, 0.5),
+                 Quantile (process_ms, 0.99), Quantile (process_ms, 1.0),
+                 Quantile (flush_ms, 0.5), Quantile (flush_ms, 0.99),
+                 Quantile (flush_ms, 1.0));
+    CHECK (Quantile (process_ms, 1.0) <= 250.0);
+    CHECK (Quantile (flush_ms, 1.0) <= 250.0);
+  }
+  for (const char *suffix : { "", "-wal", "-shm" })
+    std::filesystem::remove (path + suffix);
 }

@@ -446,8 +446,7 @@ SQLiteProfileJson (const std::string &profile,
 {
   nlohmann::json env = nlohmann::json::object ();
   for (const char *name :
-       { "CORTEXT_FOREGROUND_WAL_CHECKPOINT",
-         "CORTEXT_SQLITE_JOURNAL_MODE",
+       { "CORTEXT_SQLITE_JOURNAL_MODE",
          "CORTEXT_SQLITE_SYNCHRONOUS",
          "CORTEXT_SQLITE_CACHE_SIZE_KB",
          "CORTEXT_SQLITE_TEMP_STORE",
@@ -474,11 +473,9 @@ ApplySQLiteProfile (const std::string &profile)
     return SQLiteProfileJson (profile, applied);
   if (profile == "durable")
     {
-      SetEnvValue ("CORTEXT_FOREGROUND_WAL_CHECKPOINT", "0", true);
       SetEnvValue ("CORTEXT_SQLITE_JOURNAL_MODE", "wal", true);
       SetEnvValue ("CORTEXT_SQLITE_SYNCHRONOUS", "normal", true);
       applied = {
-        "CORTEXT_FOREGROUND_WAL_CHECKPOINT",
         "CORTEXT_SQLITE_JOURNAL_MODE",
         "CORTEXT_SQLITE_SYNCHRONOUS",
       };
@@ -488,7 +485,6 @@ ApplySQLiteProfile (const std::string &profile)
     throw std::runtime_error (
         "--sqlite-profile must be realtime, durable, or inherit");
 
-  ApplyEnvDefault ("CORTEXT_FOREGROUND_WAL_CHECKPOINT", "0", applied);
   ApplyEnvDefault ("CORTEXT_SQLITE_JOURNAL_MODE", "memory", applied);
   ApplyEnvDefault ("CORTEXT_SQLITE_SYNCHRONOUS", "off", applied);
   return SQLiteProfileJson (profile, applied);

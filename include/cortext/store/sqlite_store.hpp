@@ -21,6 +21,8 @@ class SQLiteStore;
 
 namespace internal
 {
+class SQLiteWalCheckpointer;
+
 class SQLiteStoreQueryInterrupter
 {
 public:
@@ -195,16 +197,38 @@ public:
   /// @brief Close the database connection.
   void Close () override;
 
-  /// @brief Trigger WAL checkpoint.
-  /// @param full If true, use TRUNCATE mode (waits for readers and shrinks WAL);
-  /// otherwise PASSIVE (non-blocking).
+  /// @brief Run a WAL checkpoint on the calling thread.
+  /// @param full If true, use TRUNCATE mode (waits for readers, syncs the
+  /// database and shrinks the WAL): a power-loss durability barrier for every
+  /// committed transaction. Otherwise PASSIVE (never waits on other
+  /// connections).
   void Checkpoint (bool full = false);
+
+  /// @brief Ask for a PASSIVE checkpoint without blocking the caller.
+  ///
+  /// File databases in WAL mode own a background checkpointer: a separate
+  /// connection on its own thread copies committed WAL frames into the
+  /// database and syncs it, so neither the copy nor its fsyncs run on the
+  /// thread that writes. The WAL also requests one once it holds
+  /// WalAutoCheckpointPages() pages (0: only explicit requests). Other stores
+  /// (memory, non-WAL, exclusive locking) run the PASSIVE checkpoint inline.
+  ///
+  /// Durability: a committed transaction survives a process crash as soon as
+  /// it commits (it is in the WAL); with synchronous=NORMAL it survives power
+  /// loss once a checkpoint (background or Checkpoint) has synced it. The
+  /// database is consistent after either crash: recovery replays only whole
+  /// committed transactions.
+  void RequestCheckpoint ();
+
+  /// @brief Block until every requested background checkpoint has finished.
+  void WaitForRequestedCheckpoints ();
 
   /// @brief Get WAL status information.
   /// @return WAL status with page counts.
   WalStatus GetWalStatus () const;
 
-  /// @brief Return the connection-local SQLite auto-checkpoint threshold.
+  /// @brief Return the WAL size in pages at which a checkpoint is requested
+  /// automatically (background when available), or zero when disabled.
   int WalAutoCheckpointPages () const;
 
   /// @brief Return the current WAL file size in bytes, or zero when absent.
@@ -217,6 +241,9 @@ public:
 
 private:
   std::unique_ptr<SQLiteConnection> connection_;
+  // Declared after connection_ so it stops (and closes its own connection)
+  // before the store's connection closes.
+  std::unique_ptr<internal::SQLiteWalCheckpointer> checkpointer_;
   bool in_transaction_;
   std::vector<SQLiteTransaction *> transaction_stack_;
 
