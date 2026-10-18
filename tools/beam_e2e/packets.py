@@ -4,6 +4,7 @@ for every question (one runner process per conversation, at most --slots at once
 
 usage: packets.py --data <split dir from build.py> --vdir <out dir> --runner <bin>
                   [--slots 2] [--top-k 100] [--keep-stores] [--query-from <vdir>]
+                  [--retention durable|natural]
 
 Per conversation: <vdir>/conv/<n>/{rows.jsonl, rows.summary.json, ingest.jsonl,
 runner.err (with /usr/bin/time -l)}. Merged rows: <vdir>/packets.jsonl.
@@ -36,6 +37,8 @@ def main() -> None:
     ap.add_argument("--episodes", default="", help="comma list of episode ids (default all)")
     ap.add_argument("--query-from", type=Path, default=None,
                     help="vdir whose kept stores are queried without ingest")
+    ap.add_argument("--retention", choices=["durable", "natural"], default="durable",
+                    help="runner ingest retention (natural lets the engine group turns into memories)")
     args = ap.parse_args()
 
     key = [json.loads(l) for l in (args.data / "answer_key.jsonl").open() if l.strip()]
@@ -65,7 +68,7 @@ def main() -> None:
         cmd = [str(args.runner), f"--episodes={d / 'episodes.jsonl'}",
                f"--answer-key={d / 'answer_key.jsonl'}", f"--out={d / 'rows.jsonl'}",
                f"--top-k={args.top_k}", "--consolidate=recommended", f"--db={store}",
-               f"--ingest-log={d / 'ingest.jsonl'}"]
+               f"--ingest-log={d / 'ingest.jsonl'}", f"--retention={args.retention}"]
         if args.query_from:
             cmd.append(f"--query-from={args.query_from / 'conv' / ep_id.split(':')[-1]}")
         t0 = time.time()
@@ -99,7 +102,7 @@ def main() -> None:
                 out.write(line)
     (args.vdir / "variant.json").write_text(json.dumps({
         "runner": str(args.runner), "top_k": args.top_k, "slots": args.slots, "threads": args.threads,
-        "consolidate": "recommended", "wall_s": round(time.time() - t0, 1),
+        "consolidate": "recommended", "retention": args.retention, "wall_s": round(time.time() - t0, 1),
         "query_from": str(args.query_from) if args.query_from else None,
     }, indent=1) + "\n")
     print(f"packets: {args.vdir / 'packets.jsonl'} in {time.time() - t0:.0f}s", file=sys.stderr)
