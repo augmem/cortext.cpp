@@ -308,6 +308,9 @@ public:
   Context Consolidate (StopToken stop_token);
 
   /// @brief Flush/commit any pending episode writes.
+  ///
+  /// Every source's open unit closes here as at a boundary: the write gate
+  /// decides whether it is stored, and the next signal starts a new unit.
   void Flush ();
 
   /// @brief Reset volatile in-memory processor state.

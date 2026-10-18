@@ -132,6 +132,10 @@ public:
 private:
   void StartNewEpisode (Transaction *tx, uint64_t start_ts);
   void FinalizeEpisode (Transaction *tx, const OperationContext *op_context);
+  // Flush: close every source's open unit as at a boundary (write gate,
+  // storage, working memory, reset), so no accumulated signal outlives a
+  // commit request. Returns the number of units closed.
+  int CloseOpenUnits (Transaction &tx, ObjectTransaction *object_tx);
 
   // State persistence helpers (called within Process transaction)
   // v2 schema: Unified state persistence

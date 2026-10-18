@@ -89,6 +89,16 @@ accepted flush of that same pending unit; it does not construct a second
 single-signal memory alongside the accumulated unit. The Durable packet is the
 last signal in the flushed unit exactly once.
 
+`Flush()` closes every source's open unit before it commits: each unit takes
+the boundary path of its last signal (write gate, storage, working memory,
+accumulator reset), oldest activity first, under the boundary type `flush`.
+Natural units that had not yet met a boundary (a conversation's last turns, a
+two-turn conversation below the boundary warm-up) were otherwise volatile and
+lost at the next restart; under per-conversation Natural ingest that was 19%
+of turns. Units closed by `Flush()` reach the sparse route as ordinary writes
+do (dirty rows sealed by a later signal), so the published route survives the
+flush.
+
 ### Retrieval-inhibition state (removed)
 
 Migration 28 had added a lazy retrieval-induced-forgetting representation: a

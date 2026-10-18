@@ -526,6 +526,49 @@ TEST_CASE ("Durable flushes one shared Natural accumulator unit",
   REQUIRE (AnyToLongLong (signal_rows[2].at ("timestamp")) == 3000);
 }
 
+TEST_CASE ("Flush closes every open Natural unit",
+           "[cortext][retention][accumulator][flush][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+
+  // Two conversations end with their units still open; Flush is the host
+  // saying "commit what is pending", so neither unit may outlive it.
+  (void)ctx->ProcessTextAt ("A calm sentence in one pending thought.",
+                            "stream/a", 1000ULL, cortext::Retention::Natural);
+  (void)ctx->ProcessTextAt ("A second calm sentence in the same thought.",
+                            "stream/a", 2000ULL, cortext::Retention::Natural);
+  (void)ctx->ProcessTextAt ("Another stream starts a different thought.",
+                            "stream/b", 2500ULL, cortext::Retention::Natural);
+  ctx->Flush ();
+
+  // A later explicit turn starts a fresh unit on each source: it carries
+  // only itself, not the signals that were open before Flush.
+  for (const auto *source : { "stream/a", "stream/b" })
+    {
+      const auto durable = ctx->ProcessTextAt (
+          "An explicit turn after the flush.", source, 3000ULL,
+          cortext::Retention::Durable);
+      REQUIRE (durable.output.stored_memory_id.has_value ());
+      const auto rows = store->Execute (
+          "SELECT n_signals FROM memories WHERE memory_id = ?",
+          { static_cast<long long> (*durable.output.stored_memory_id) });
+      REQUIRE (rows.size () == 1);
+      INFO ("source=" << source);
+      REQUIRE (AnyToLongLong (rows[0].at ("n_signals")) == 1);
+    }
+}
+
 TEST_CASE ("Cortext recalls durable corrections at default knobs",
            "[cortext][belief_revision][eval][aist]")
 {

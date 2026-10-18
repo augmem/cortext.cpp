@@ -2,7 +2,11 @@
 #include "cortext/core/constants.hpp"
 #include "cortext/clock.hpp"
 #include "cortext/internal/cancellation.hpp"
+#include "cortext/operations/accumulator_reset.hpp"
 #include "cortext/operations/constants.hpp"
+#include "cortext/operations/memory_storage.hpp"
+#include "cortext/operations/working_memory.hpp"
+#include "cortext/operations/write_gate.hpp"
 #include "cortext/processor.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/store/sqlite_store.hpp"
@@ -3714,6 +3718,10 @@ SignalProcessor::Flush ()
     }
   try
     {
+      const int closed_units = CloseOpenUnits (*tx, object_tx.get ());
+      if (closed_units > 0)
+        telemetry::AddCounter ("cortext.flush.open_units_closed_total",
+                               static_cast<std::uint64_t> (closed_units));
       FinalizeEpisode (tx.get (), nullptr);
       PersistState (*tx);               // v2: Unified state
       PersistWorkingMemory (*tx, true); // v2: To MEMORIES
@@ -3753,10 +3761,11 @@ SignalProcessor::Flush ()
   if (auto state = operations::historical_surface_search_cache_internal::
           FindMutable (*context_))
     {
-      // Flush persists state and working-memory rows only. Those writes do not
-      // alter the LONG_TERM/ASSOCIATION route population, so the route
-      // lifecycle must survive the cache rebuild even if the historical
-      // surface itself had to fall back to exact SQL.
+      // Flush persists state, working-memory rows and the units it closed.
+      // Closed units reach the route the way ordinary writes do (dirty rows
+      // sealed by a later signal), so the route lifecycle must survive the
+      // cache rebuild even if the historical surface itself had to fall back
+      // to exact SQL.
       if (preserved_sparse_route)
         state->sparse_route = std::move (preserved_sparse_route);
       if (preserved_sqlite_sparse_route)
@@ -3767,6 +3776,64 @@ SignalProcessor::Flush ()
             = std::move (preserved_sqlite_sparse_route_backfill);
     }
   CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
+}
+
+int
+SignalProcessor::CloseOpenUnits (Transaction &tx, ObjectTransaction *object_tx)
+{
+  // Only the engine pipeline owns accumulator semantics; a custom root keeps
+  // its own meaning for open state.
+  if (!context_ || !root_operation_
+      || !static_cast<SnapshotOwningOperation &> (*root_operation_)
+              .IsEngineOwned ())
+    return 0;
+  // Oldest activity first, so closes land in the order the units went quiet.
+  std::vector<std::pair<uint64_t, std::string>> open;
+  for (const auto &[source_id, acc] : context_->accumulator_states)
+    if (acc.n_signals > 0 && !acc.signals.empty ())
+      open.emplace_back (acc.last_active_seq, source_id);
+  std::sort (open.begin (), open.end ());
+
+  static const operations::ComputeWriteGate write_gate;
+  static const operations::MemoryStorage memory_storage;
+  static const operations::WorkingMemory working_memory;
+  static const operations::ResetAccumulatorAfterFlush reset_accumulator;
+  int closed = 0;
+  for (const auto &[seq, source_id] : open)
+    {
+      (void)seq;
+      const auto &acc = context_->accumulator_states.at (source_id);
+      const auto last = std::max_element (
+          acc.signals.begin (), acc.signals.end (),
+          [] (const SignalRecord &a, const SignalRecord &b) {
+            return a.serial_position < b.serial_position;
+          });
+      // The close carries the unit's last signal as its trigger: the same
+      // source, time and modality a boundary on that signal would have had.
+      Signal close;
+      close.source_id = source_id;
+      close.timestamp = std::max (acc.last_signal_ts, last->timestamp);
+      close.retention = Retention::Natural;
+      close.embedding = last->embedding;
+      close.modality = last->modality;
+      close.mimetype = last->mime;
+      OperationContext op (close, *context_, config_, store_.get (),
+                           object_tx);
+      op.SetThresholdTDynamic (context_->T_dynamic);
+      op.SetFlushRequired (true);
+      op.SetSpikeBypass (false);
+      op.SetAtBoundary (true);
+      op.SetBoundaryScore (1.0);
+      op.SetBoundaryType (std::string ("flush"));
+      write_gate.Execute (op, tx);
+      memory_storage.Execute (op, tx);
+      working_memory.Execute (op, tx);
+      reset_accumulator.Execute (op, tx);
+      if (op.GetWriteDecision ())
+        context_->write_rate_window_.Record (close.timestamp);
+      ++closed;
+    }
+  return closed;
 }
 
 void
