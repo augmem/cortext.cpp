@@ -1641,38 +1641,52 @@ LexicalCandidate (const ProcessorContext &p_ctx, Transaction &tx,
   return candidate;
 }
 
-// The standing memories (standing_memory_internal.hpp) a query packet joins:
-// the set's members that started before the query, ranked within the set by
-// reciprocal-rank fusion of cosine to the query and, for text queries, BM25
-// of the members' stored terms with document frequencies from the set
-// itself (store-wide frequencies would drop the topic words that tell
-// directives apart). Best first, at most kPacketMembers. Cost follows the
-// bounded set: one row scan, one vector lookup per member.
-std::vector<long long>
-SelectStandingMemories (const ProcessorContext &p_ctx, Transaction &tx,
-                        const Signal &signal, long long exclusion_ts,
-                        int embedding_dim, double rrf_k)
+// The standing signals (standing_memory_internal.hpp) a query packet joins:
+// the set's members whose memory is a seed-eligible LONG_TERM surface older
+// than the query, ranked within the set by reciprocal-rank fusion of cosine
+// to the query (the signal's stored shared-space vector, else its memory's)
+// and, for text queries, BM25 of the members' stored terms with document
+// frequencies from the set itself (store-wide frequencies would drop the
+// topic words that tell directives apart). Best first, at most
+// kPacketMembers. Cost follows the bounded set: one row scan, one vector
+// lookup per member.
+std::vector<retrieval_trace::StandingPick>
+SelectStandingSignals (const ProcessorContext &p_ctx, Transaction &tx,
+                       const Signal &signal, long long exclusion_ts,
+                       int embedding_dim, double rrf_k)
 {
   namespace standing = standing_memory_internal;
   const auto rows = tx.Execute (
-      "SELECT memory_id, terms FROM standing_memories WHERE start_ts < ?",
+      "SELECT ss.signal_id AS signal_id, ss.terms AS terms, "
+      "       s.memory_id AS memory_id, v.embedding AS embedding "
+      "FROM standing_signals ss "
+      "JOIN signals s ON s.signal_id = ss.signal_id "
+      "LEFT JOIN memory_signal_vectors v ON v.blob_id = s.blob_id "
+      "WHERE ss.start_ts < ?",
       { exclusion_ts });
   std::vector<std::pair<long long, double> > dense;
   std::vector<std::pair<long long, std::string> > members;
+  std::unordered_map<long long, long long> memory_of;
   dense.reserve (rows.size ());
   members.reserve (rows.size ());
+  Eigen::VectorXf vec;
   for (const auto &row : rows)
     {
+      const long long signal_id = AnyLongLong (row, "signal_id");
       const long long memory_id = AnyLongLong (row, "memory_id");
       const auto candidate
           = LexicalCandidate (p_ctx, tx, memory_id, exclusion_ts, embedding_dim);
       if (!candidate)
         continue;
-      dense.emplace_back (memory_id,
-                          Cosine (signal.embedding, candidate->embedding));
+      const auto emb = row.find ("embedding");
+      const bool own = emb != row.end () && emb->second.has_value ()
+                       && AnyToEmbedding (emb->second, embedding_dim, vec);
+      dense.emplace_back (signal_id, Cosine (signal.embedding,
+                                             own ? vec : candidate->embedding));
+      memory_of[signal_id] = memory_id;
       const auto terms = row.find ("terms");
       members.emplace_back (
-          memory_id,
+          signal_id,
           terms != row.end () && terms->second.type () == typeid (std::string)
               ? std::any_cast<std::string> (terms->second)
               : std::string ());
@@ -1705,13 +1719,13 @@ SelectStandingMemories (const ProcessorContext &p_ctx, Transaction &tx,
       return a.second > b.second;
     return a.first > b.first;
   });
-  std::vector<long long> picked;
-  for (const auto &[memory_id, score] : ranked)
+  std::vector<retrieval_trace::StandingPick> picked;
+  for (const auto &[signal_id, score] : ranked)
     {
       (void)score;
       if (picked.size () >= standing::kPacketMembers)
         break;
-      picked.push_back (memory_id);
+      picked.push_back ({ memory_of[signal_id], signal_id });
     }
   return picked;
 }
@@ -1725,7 +1739,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   auto started = std::chrono::steady_clock::now ();
   retrieval_trace::ClearLastSelectedEmbeddingOrder ();
   retrieval_trace::ClearLastRankedCandidates ();
-  retrieval_trace::ClearLastStandingMemoryIds ();
+  retrieval_trace::ClearLastStandingPicks ();
   retrieval_trace::ClearLastSeedCandidates ();
   retrieval_trace::ClearLastExactSeedCandidates ();
   retrieval_trace::ClearLastRejectedCandidates ();
@@ -2315,10 +2329,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   if (signal.retention == Retention::Ephemeral && embedding_dim > 0)
     {
       start_profile_timing ();
-      std::vector<long long> standing_ids;
+      std::vector<retrieval_trace::StandingPick> standing_ids;
       try
         {
-          standing_ids = SelectStandingMemories (
+          standing_ids = SelectStandingSignals (
               p_ctx, tx, signal, static_cast<long long> (exclusion_ts),
               embedding_dim, lexical_cfg.rrf_k);
         }
@@ -2330,7 +2344,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         }
       context.AddOperationTiming ("GraphRetrieve.standing_selected",
                                   static_cast<double> (standing_ids.size ()));
-      retrieval_trace::SetLastStandingMemoryIds (standing_ids);
+      retrieval_trace::SetLastStandingPicks (standing_ids);
       profile_timing ("GraphRetrieve.standing", section_start);
     }
   const auto direct_count = std::min<std::size_t> (

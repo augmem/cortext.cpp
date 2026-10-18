@@ -247,14 +247,14 @@ RunPendingBackfill (Store &store, ObjectStore *object_store)
   bool standing_pending = false;
   for (const auto &row : store.Execute (
            "SELECT name FROM cortext_pending_backfills "
-           "WHERE name IN ('memory_text_fts', 'standing_memories')"))
+           "WHERE name IN ('memory_text_fts', 'standing_signals')"))
     {
       const auto &value = row.at ("name");
       const std::string name = value.type () == typeid (std::string)
                                    ? std::any_cast<std::string> (value)
                                    : std::string ();
       fts_pending = fts_pending || name == "memory_text_fts";
-      standing_pending = standing_pending || name == "standing_memories";
+      standing_pending = standing_pending || name == "standing_signals";
     }
   if (!fts_pending && !standing_pending)
     return;
@@ -265,48 +265,74 @@ RunPendingBackfill (Store &store, ObjectStore *object_store)
   if (object_store && dynamic_cast<SqlObjectStore *> (object_store) == nullptr)
     object_tx = object_store->Begin ();
   std::size_t indexed = 0;
-  // start_ts, id, terms
+  // start_ts, signal id, terms
   std::vector<std::tuple<long long, long long, std::string> > directives;
   try
     {
-      const auto rows = tx->Execute (
-          "SELECT m.memory_id, m.start_ts, m.blob_id FROM memories m "
-          "WHERE m.kind = 'LONG_TERM' AND m.modality = 'text' "
-          "  AND m.blob_id IS NOT NULL",
-          {});
-      for (const auto &row : rows)
+      if (fts_pending)
         {
-          const auto memory_id
-              = AnyToLongLong (row.at ("memory_id")).value_or (0);
-          const auto blob_id = BlobFromAny (row.at ("blob_id"));
-          if (memory_id <= 0 || blob_id.empty ())
-            continue;
-          const auto payload = GetObject (object_tx.get (), *tx, blob_id);
-          if (!payload || payload->empty ())
-            continue;
-          const std::string_view text (
-              reinterpret_cast<const char *> (payload->data ()),
-              payload->size ());
-          if (fts_pending)
+          const auto rows = tx->Execute (
+              "SELECT m.memory_id, m.blob_id FROM memories m "
+              "WHERE m.kind = 'LONG_TERM' AND m.modality = 'text' "
+              "  AND m.blob_id IS NOT NULL",
+              {});
+          for (const auto &row : rows)
             {
-              IndexMemoryText (*tx, memory_id, text);
+              const auto memory_id
+                  = AnyToLongLong (row.at ("memory_id")).value_or (0);
+              const auto blob_id = BlobFromAny (row.at ("blob_id"));
+              if (memory_id <= 0 || blob_id.empty ())
+                continue;
+              const auto payload = GetObject (object_tx.get (), *tx, blob_id);
+              if (!payload || payload->empty ())
+                continue;
+              IndexMemoryText (
+                  *tx, memory_id,
+                  std::string_view (
+                      reinterpret_cast<const char *> (payload->data ()),
+                      payload->size ()));
               ++indexed;
             }
-          if (standing_pending && standing::IsStandingDirective (text))
-            directives.emplace_back (
-                AnyToLongLong (row.at ("start_ts")).value_or (0), memory_id,
-                standing::TermsOf (text));
+        }
+      if (standing_pending)
+        {
+          // The detector bounds directive length, so only short signal
+          // payloads are read.
+          const auto rows = tx->Execute (
+              "SELECT s.signal_id, s.timestamp, s.blob_id FROM signals s "
+              "JOIN memories m ON m.memory_id = s.memory_id "
+              "WHERE m.kind = 'LONG_TERM' AND s.modality = 'text' "
+              "  AND s.blob_id IS NOT NULL",
+              {});
+          for (const auto &row : rows)
+            {
+              const auto signal_id
+                  = AnyToLongLong (row.at ("signal_id")).value_or (0);
+              const auto blob_id = BlobFromAny (row.at ("blob_id"));
+              if (signal_id <= 0 || blob_id.empty ())
+                continue;
+              const auto payload = GetObject (object_tx.get (), *tx, blob_id);
+              if (!payload || payload->empty ())
+                continue;
+              const std::string_view text (
+                  reinterpret_cast<const char *> (payload->data ()),
+                  payload->size ());
+              if (standing::IsStandingDirective (text))
+                directives.emplace_back (
+                    AnyToLongLong (row.at ("timestamp")).value_or (0),
+                    signal_id, standing::TermsOf (text));
+            }
         }
       // The newest members fill the bounded set.
       std::sort (directives.rbegin (), directives.rend ());
       if (directives.size () > standing::kCapacity)
         directives.resize (standing::kCapacity);
-      for (const auto &[start_ts, memory_id, terms] : directives)
-        tx->Execute ("INSERT OR IGNORE INTO standing_memories "
-                     "(memory_id, start_ts, terms) VALUES (?, ?, ?)",
-                     { memory_id, start_ts, terms });
+      for (const auto &[start_ts, signal_id, terms] : directives)
+        tx->Execute ("INSERT OR IGNORE INTO standing_signals "
+                     "(signal_id, start_ts, terms) VALUES (?, ?, ?)",
+                     { signal_id, start_ts, terms });
       tx->Execute ("DELETE FROM cortext_pending_backfills "
-                   "WHERE name IN ('memory_text_fts', 'standing_memories')",
+                   "WHERE name IN ('memory_text_fts', 'standing_signals')",
                    {});
       if (object_tx)
         object_tx->Commit ();

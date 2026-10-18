@@ -55,8 +55,8 @@ void IndexMemoryText (Transaction &tx, long long memory_id,
 
 /// Runs the queued one-time backfills over stored text memories: the
 /// keyword index for memories written before migration 49 created it, and
-/// the standing set (operations/standing_memory_internal.hpp) for memories
-/// written before migration 51. The migrations queue them; this clears them.
+/// the standing set (operations/standing_memory_internal.hpp) for signals
+/// stored before migration 53. The migrations queue them; this clears them.
 void RunPendingBackfill (Store &store, ObjectStore *object_store);
 
 } // namespace cortext::store::memory_text_index_internal

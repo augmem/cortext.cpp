@@ -8,10 +8,12 @@
 // on its own: the best few members join every query packet, ranked within
 // the set, whatever their rank among all memories.
 //
-// Membership is a property of the stored memory (table standing_memories,
-// schema migration 51), not of its modality. The detector here is the one
-// that exists today, a cheap pattern check over a memory's text content;
-// memories without text are never members until another modality has a
+// Membership is a property of the stored signal that states the directive
+// (table standing_signals, schema migration 53), not of its modality or of
+// the memory that groups it: a Natural unit holds a directive among longer
+// turns, and the packet joins that signal, not the whole unit. The detector
+// here is the one that exists today, a cheap pattern check over a signal's
+// text; signals without text are never members until another modality has a
 // detector of its own.
 
 #include <cstddef>
@@ -30,7 +32,7 @@ inline constexpr std::size_t kCapacity = 256;
 /// Members joined to each query packet.
 inline constexpr std::size_t kPacketMembers = 5;
 
-/// Longest memory text (bytes) the detector considers: a standing directive
+/// Longest signal text (bytes) the detector considers: a standing directive
 /// is a short statement, while long turns that merely contain "always" are
 /// explanations or code.
 inline constexpr std::size_t kMaxTextBytes = 480;
@@ -51,7 +53,7 @@ inline constexpr std::size_t kStemBytes = 6;
 
 /// BM25 (k1 = 1.2, b = 0.75, document frequencies from the set itself) of
 /// each member's stored terms against the query text. Members without a
-/// shared term are left out; best first, ties by newer memory id.
+/// shared term are left out; best first, ties by newer (larger) id.
 std::vector<std::pair<long long, double> >
 RankByTerms (std::string_view query_text,
              const std::vector<std::pair<long long, std::string> > &members);

@@ -711,20 +711,25 @@ lexical seeds there cost per-turn time without improving recall.
 Standing memories are a small query-independent channel for lasting
 directives and preferences ("Always include version numbers when I ask about
 libraries", "From now on, answer in French"). Membership is a property of the
-stored memory (table `standing_memories`, schema migration 51), set when the
-memory is written; today's only detector is a pattern check over a memory's
-text content (at most 480 bytes, a clause opening with *always*, *never*,
+stored signal that states the directive (table `standing_signals`, schema
+migration 53, which replaced the memory-level set of migration 51), set when
+its memory is written: under Natural retention a directive is one turn of a
+grouped memory several kilobytes long, which a memory-level check never
+admits. Today's only detector is a pattern check over a signal's text (at most
+480 bytes, a clause opening with *always*, *never*,
 *from now on*, *going forward*, *whenever I*, *I prefer* and similar,
 optionally after *please*). The set keeps the newest 256 members; stores
-written before migration 51 fill it once on open. Every query ranks the members
-written before it within the set, fusing cosine to the query with a BM25
+written before migration 53 fill it once on open. Every query ranks the members
+written before it within the set, fusing cosine to the query (the signal's own
+stored vector) with a BM25
 rank by reciprocal rank. The BM25 runs over word stems (first six bytes of
 each non-stopword word) stored with each member, with document frequencies
 from the set itself: store-wide frequencies would discount the topic words
 that tell directives apart, and the store's FTS5 index cannot be restricted to
 the set cheaply (a full posting-list scan cost about 20 ms per query on a 10M
-store). The best five lead the packet without neighbours; a member that was
-already retrieved moves to the front. Query p95 at 100K / 1M / 10M stays within
+store). The best five lead the packet without neighbours, each as its own signal
+rather than its whole memory; a memory that was already retrieved moves to the
+front, with query focus (below) keeping its standing signal. Query p95 at 100K / 1M / 10M stays within
 0.98 / 0.96 / 1.14 of the engine without the channel. A directive is stated once and must shape answers long after it
 falls out of query similarity: on BEAM the share of instruction-following
 gold turns (the instruction and its acknowledgement) in the 8k-token packet

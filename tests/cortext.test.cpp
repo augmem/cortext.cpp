@@ -2658,6 +2658,66 @@ TEST_CASE ("Standing directives lead query packets whatever their rank",
   REQUIRE ((joined == ingest.output.operation_ms.end () || joined->second == 0.0));
 }
 
+TEST_CASE ("A directive inside a grouped memory leads query packets",
+           "[cortext][retrieval][standing][retention][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  // A Natural unit: a long turn, the directive, another long turn.
+  std::string before = "The bakery oven runs hot on the left side. ";
+  while (before.size () < 2000)
+    before += "The bakery oven runs hot on the left side. ";
+  std::string after = "The delivery van needs new tires next month. ";
+  while (after.size () < 2000)
+    after += "The delivery van needs new tires next month. ";
+  const std::string directive
+      = "Always include version numbers when I ask about software libraries.";
+  for (const std::string &text : std::vector<std::string>{ before, directive, after })
+    {
+      (void)ctx->ProcessTextAt (text, "chat/unit", ts,
+                                cortext::Retention::Natural);
+      ts += 60000;
+    }
+  ctx->Flush ();
+  const auto members = store->Execute (
+      "SELECT m.n_signals AS n FROM standing_signals ss "
+      "JOIN signals s ON s.signal_id = ss.signal_id "
+      "JOIN memories m ON m.memory_id = s.memory_id");
+  REQUIRE (members.size () == 1);
+  REQUIRE (AnyToLongLong (members[0].at ("n")) >= 2);
+  for (int i = 0; i < 16; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt (
+          "Which libraries does the reporting service use, part "
+              + std::to_string (i) + "? It uses pandas and requests.",
+          "chat/libs/" + std::to_string (i), ts, cortext::Retention::Durable);
+    }
+  const auto packet = ctx->ProcessTextAt (
+      "Which libraries does the reporting service use?", "query/public",
+      ts + 1000, cortext::Retention::Ephemeral);
+  REQUIRE_FALSE (packet.retrieved_memory.empty ());
+  std::string front;
+  for (const auto &blob : packet.retrieved_memory.front ().content)
+    front.append (blob.begin (), blob.end ());
+  // The directive leads, kept by query focus within the unit's budget
+  // (pinned ahead of members more similar to the query), or joined alone
+  // when its memory was not retrieved.
+  REQUIRE (front.find (directive) != std::string::npos);
+  REQUIRE (front.size () <= 3072);
+  REQUIRE (packet.output.operation_ms.at ("Cortext.standing_joined") == 1.0);
+}
+
 TEST_CASE ("Stores from before the standing set fill it once on open",
            "[cortext][standing][migration]")
 {
@@ -2677,12 +2737,12 @@ TEST_CASE ("Stores from before the standing set fill it once on open",
     ctx->Flush ();
   }
   {
-    // A store written before migration 51: no members, backfill queued.
+    // A store written before migration 53: no members, backfill queued.
     auto store = std::shared_ptr<cortext::Store> (
         cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
-    store->Execute ("DELETE FROM standing_memories");
+    store->Execute ("DELETE FROM standing_signals");
     store->Execute ("INSERT INTO cortext_pending_backfills(name) "
-                    "VALUES ('standing_memories')");
+                    "VALUES ('standing_signals')");
   }
   auto store = std::shared_ptr<cortext::Store> (
       cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
@@ -2690,11 +2750,13 @@ TEST_CASE ("Stores from before the standing set fill it once on open",
   (void)ctx->ProcessTextAt ("What language should replies use?",
                             "query/public", 5000ULL,
                             cortext::Retention::Ephemeral);
-  const auto members = store->Execute ("SELECT memory_id FROM standing_memories");
+  const auto members = store->Execute (
+      "SELECT s.memory_id AS memory_id FROM standing_signals ss "
+      "JOIN signals s ON s.signal_id = ss.signal_id");
   REQUIRE (members.size () == 1);
   REQUIRE (AnyToLongLong (members[0].at ("memory_id")) == directive_id);
   REQUIRE (store->Execute ("SELECT 1 FROM cortext_pending_backfills "
-                           "WHERE name = 'standing_memories'")
+                           "WHERE name = 'standing_signals'")
                .empty ());
 }
 

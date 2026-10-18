@@ -1104,6 +1104,35 @@ GetCoreMigrations ()
               "DELETE FROM cortext_sparse_route_nodes",
           },
       },
+      {
+          53,
+          "Standing set per stored signal",
+          {
+              // Membership moves from the memory to the stored signal that
+              // states the directive: a memory grouped from several signals
+              // (a Natural unit) is far longer than any directive, so a
+              // memory-level check never admits it, and a query packet
+              // joins the directive itself, not the whole unit.
+              // terms: the signal's word stems (TermsOf).
+              "DROP TRIGGER IF EXISTS memories_standing_delete",
+              "DROP TABLE IF EXISTS standing_memories",
+              "DELETE FROM cortext_pending_backfills "
+              "WHERE name = 'standing_memories'",
+              "CREATE TABLE IF NOT EXISTS standing_signals ("
+              "  signal_id INTEGER PRIMARY KEY,"
+              "  start_ts INTEGER NOT NULL,"
+              "  terms TEXT NOT NULL DEFAULT '')",
+              "CREATE TRIGGER IF NOT EXISTS signals_standing_delete "
+              "AFTER DELETE ON signals "
+              "BEGIN DELETE FROM standing_signals "
+              "WHERE signal_id = old.signal_id; END",
+              // Signals stored before this migration join the set once,
+              // from C++ (memory_text_index_internal::RunPendingBackfill).
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'standing_signals' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
   };
 }
 
