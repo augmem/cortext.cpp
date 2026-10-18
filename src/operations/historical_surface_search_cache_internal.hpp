@@ -713,30 +713,6 @@ Erase (const ProcessorContext &ctx)
   registry.states.erase (&ctx);
 }
 
-inline void
-InvalidateHistoricalPreserveCurrent (const ProcessorContext &ctx)
-{
-  auto state = FindMutable (ctx);
-  if (!state)
-    return;
-  state->entries.clear ();
-  state->search.clear ();
-  state->embedding_index.clear ();
-  state->long_term_entry_indices.clear ();
-  state->long_term_index_positions.clear ();
-  state->supersession_entry_indices.clear ();
-  state->supersession_index_positions.clear ();
-  state->supersession_entry_by_memory.clear ();
-  state->supersession_population_mismatches.clear ();
-  state->supersession_population_ambiguous = false;
-  state->supersession_tie_order_equivalent = true;
-  state->supersession_embedding_fanout = false;
-  state->supersession_max_embedding_id = 0;
-  state->supersession_max_memory_id = 0;
-  state->distance_scratch.clear ();
-  state->ranked_scratch.clear ();
-}
-
 inline bool
 Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
        std::vector<Entry> current_entries = {})

@@ -2488,6 +2488,121 @@ TEST_CASE ("SignalProcessor engine read-only rollback reloads a surface the "
                                      MakeReadOnlyQuery (query, 4000)));
 }
 
+namespace
+{
+// Historical surface identities plus current-surface memory ids, as the
+// sparse route and supersession search see them.
+using HistoricalSurfaceCapture
+    = std::pair<std::map<long long, std::vector<long long>>,
+                std::vector<long long>>;
+
+struct CaptureHistoricalSurfaceOp : IOperation
+{
+  explicit CaptureHistoricalSurfaceOp (
+      std::vector<HistoricalSurfaceCapture> *captures)
+      : captures (captures)
+  {
+  }
+
+  void
+  Execute (OperationContext &ctx, Transaction & /*tx*/) const override
+  {
+    HistoricalSurfaceCapture capture;
+    const auto state = operations::historical_surface_search_cache_internal::
+        Find (ctx.GetProcessorContext ());
+    if (state)
+      {
+        for (const auto &entry : state->entries)
+          {
+            auto &memories = capture.first[entry.embedding_id];
+            memories.push_back (entry.memory_id);
+            for (const auto &reference : entry.memory_references)
+              memories.push_back (reference.memory_id);
+            std::sort (memories.begin (), memories.end ());
+          }
+        for (const auto &entry : state->current_entries)
+          capture.second.push_back (entry.memory_id);
+        std::sort (capture.second.begin (), capture.second.end ());
+      }
+    captures->push_back (std::move (capture));
+  }
+
+  std::vector<HistoricalSurfaceCapture> *captures = nullptr;
+};
+} // namespace
+
+TEST_CASE ("SignalProcessor flush keeps the retrieval surface without "
+           "reloading it",
+           "[processor][flush][cache][retrieval_surface]")
+{
+  Eigen::VectorXf query = Eigen::VectorXf::Zero (256);
+  query[0] = 1.0f;
+  auto store = MakeReadOnlySurfaceStore (query);
+  // A closed working-memory row with its own embedding, and an orphan
+  // embedding: the forced flush prunes both from the store.
+  Eigen::VectorXf working = Eigen::VectorXf::Zero (256);
+  working[2] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 53LL, working, 1200LL);
+  cortext::testing::SeedMemoryV2 (*store, 43LL, 53LL, "seed/working",
+                                  "WORKING", 1.0, 1200LL);
+  store->Execute ("UPDATE memories SET end_ts = 1300 WHERE memory_id = 43");
+  Eigen::VectorXf orphan = Eigen::VectorXf::Zero (256);
+  orphan[3] = 1.0f;
+  cortext::testing::SeedEmbeddingV2 (*store, 54LL, orphan, 1250LL);
+
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  std::vector<RetrievalSurfaceCapture> surfaces;
+  std::vector<HistoricalSurfaceCapture> historical;
+  auto pipeline = std::make_unique<DynamicOperationSet> (
+      std::make_unique<CaptureRetrievalSurfaceOp> (&surfaces),
+      std::make_unique<CaptureHistoricalSurfaceOp> (&historical));
+  SignalProcessor processor (
+      cfg, store,
+      operations::signal_record_rollback_internal::
+          MarkEngineOwnedJournalAware (std::move (pipeline)));
+  processor.Process (MakeReadOnlyQuery (query, 2000));
+  REQUIRE (historical.size () == 1);
+  REQUIRE (historical[0].first.count (53LL) == 1);
+  REQUIRE (historical[0].first.count (54LL) == 1);
+
+  const auto reloads_before
+      = cortext::testing::RetrievalSurfaceReloadCountForTest ();
+  processor.Flush ();
+  // Flush rewrites only working-memory rows, episode and state rows; it
+  // must not pay a store-sized surface reload.
+  REQUIRE (cortext::testing::RetrievalSurfaceReloadCountForTest ()
+           == reloads_before);
+  REQUIRE (store->Execute ("SELECT 1 FROM embeddings WHERE embedding_id IN "
+                           "(53, 54)")
+               .empty ());
+
+  processor.Process (MakeReadOnlyQuery (query, 3000));
+  REQUIRE (surfaces.size () == 2);
+  REQUIRE (historical.size () == 2);
+  // The pruned working row leaves the surface; nothing else changes.
+  REQUIRE (surfaces[0].contains (43LL));
+  REQUIRE_FALSE (surfaces[1].contains (43LL));
+  auto expected_surface = surfaces[0];
+  expected_surface.erase (43LL);
+  REQUIRE (surfaces[1] == expected_surface);
+  REQUIRE (historical[1].first.count (53LL) == 0);
+  REQUIRE (historical[1].first.count (54LL) == 0);
+
+  // The kept caches equal what a fresh processor loads from the store.
+  std::vector<RetrievalSurfaceCapture> fresh_surfaces;
+  std::vector<HistoricalSurfaceCapture> fresh_historical;
+  SignalProcessor fresh (
+      cfg, store,
+      std::make_unique<DynamicOperationSet> (
+          std::make_unique<CaptureRetrievalSurfaceOp> (&fresh_surfaces),
+          std::make_unique<CaptureHistoricalSurfaceOp> (&fresh_historical)));
+  fresh.Process (MakeReadOnlyQuery (query, 4000));
+  REQUIRE (fresh_surfaces.size () == 1);
+  REQUIRE (surfaces[1] == fresh_surfaces[0]);
+  REQUIRE (historical[1] == fresh_historical[0]);
+}
+
 TEST_CASE ("SignalProcessor rollback preserves pending Natural record storage",
            "[processor][rollback][accumulator][scaling]")
 {

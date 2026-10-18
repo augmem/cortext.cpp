@@ -235,6 +235,29 @@ struct RetrievalSurfaceShape
   bool operator== (const RetrievalSurfaceShape &) const = default;
 };
 
+// True when the in-memory retrieval surface and historical registry exist
+// and their indexes agree with their rows, so identity-level maintenance can
+// stand in for a reload.
+bool
+RetrievalSurfaceCachesConsistent (const ProcessorContext &ctx)
+{
+  const auto state
+      = operations::historical_surface_search_cache_internal::Find (ctx);
+  if (!state || state->recovery_failed || state->embedding_dim <= 0)
+    return false;
+  const auto dim = static_cast<std::size_t> (state->embedding_dim);
+  return ctx.retrieval_surface_index.size ()
+             == ctx.retrieval_surface_cache.size ()
+         && ctx.retrieval_surface_embedding_index.size ()
+                <= ctx.retrieval_surface_cache.size ()
+         && state->search.size () == state->entries.size () * dim
+         && state->embedding_index.size () == state->entries.size ()
+         && state->current_search.size ()
+                == state->current_entries.size () * dim
+         && state->current_memory_index.size ()
+                == state->current_entries.size ();
+}
+
 RetrievalSurfaceShape
 CaptureRetrievalSurfaceShape (const ProcessorContext &ctx)
 {
@@ -1042,14 +1065,16 @@ private:
   ProcessorContext *context_ = nullptr;
 };
 
-void
+// Returns the embedding rows it deleted, so in-memory surfaces can drop
+// exactly those identities.
+std::vector<long long>
 DeleteStaleWorkingMemoryRows (Transaction &tx,
                               const std::vector<long long> &memory_ids,
                               bool delete_payloads)
 {
   if (memory_ids.empty ())
     {
-      return;
+      return {};
     }
 
   const std::string placeholders = Placeholders (memory_ids.size ());
@@ -1107,12 +1132,13 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
               "WHERE kind = 'WORKING' AND memory_id IN (" + placeholders + ")",
               memory_params);
 
-  if (!embedding_ids.empty ())
-    {
-      const std::string embedding_placeholders
-          = Placeholders (embedding_ids.size ());
+  if (embedding_ids.empty ())
+    return {};
+  const std::string embedding_placeholders
+      = Placeholders (embedding_ids.size ());
+  const auto unreferenced = ExtractInt64Column (
       tx.Execute (
-          "DELETE FROM embeddings "
+          "SELECT embedding_id FROM embeddings "
           "WHERE embedding_id IN (" + embedding_placeholders + ") "
           "  AND NOT EXISTS ("
           "    SELECT 1 FROM memories m "
@@ -1126,15 +1152,20 @@ DeleteStaleWorkingMemoryRows (Transaction &tx,
           "    SELECT 1 FROM memory_reconstructions mr "
           "    WHERE mr.embedding_id = embeddings.embedding_id"
           "  )",
-          MakeParams (embedding_ids));
-    }
+          MakeParams (embedding_ids)),
+      "embedding_id");
+  if (!unreferenced.empty ())
+    tx.Execute ("DELETE FROM embeddings WHERE embedding_id IN ("
+                    + Placeholders (unreferenced.size ()) + ")",
+                MakeParams (unreferenced));
+  return unreferenced;
 }
 
-void
+std::vector<long long>
 DeleteUnreferencedEmbeddings (Transaction &tx)
 {
-  tx.Execute (
-      "DELETE FROM embeddings "
+  const auto unreferenced = ExtractInt64Column (tx.Execute (
+      "SELECT embedding_id FROM embeddings "
       "WHERE NOT EXISTS ("
       "    SELECT 1 FROM memories m "
       "    WHERE m.embedding_id = embeddings.embedding_id"
@@ -1147,7 +1178,12 @@ DeleteUnreferencedEmbeddings (Transaction &tx)
       "    SELECT 1 FROM memory_reconstructions mr "
       "    WHERE mr.embedding_id = embeddings.embedding_id"
       "  )",
-      {});
+      {}), "embedding_id");
+  if (!unreferenced.empty ())
+    tx.Execute ("DELETE FROM embeddings WHERE embedding_id IN ("
+                    + Placeholders (unreferenced.size ()) + ")",
+                MakeParams (unreferenced));
+  return unreferenced;
 }
 
 long long
@@ -3760,6 +3796,16 @@ SignalProcessor::Flush ()
       LoadHistoricalSurfaceSearchCache (*store_, *context_);
       throw;
     }
+  // Flush persists episode, state and working-memory rows. Working-memory
+  // persistence maintains the retrieval surface and the historical registry
+  // by identity, so a healthy surface stays as is instead of paying a
+  // store-sized reload at every consolidation edge. A missing, failed or
+  // internally inconsistent surface still reloads from SQLite.
+  if (RetrievalSurfaceCachesConsistent (*context_))
+    {
+      CheckpointSQLiteStore (store_.get (), true, nullptr, nullptr);
+      return;
+    }
   LoadRetrievalSurfaceCache (*store_, *context_, config_.focus,
                              config_.sensitivity, config_.stability);
   if (auto state = operations::historical_surface_search_cache_internal::
@@ -4113,17 +4159,11 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
   if (!context_)
     return;
 
-  if (op_context == nullptr)
-    {
-      // The process-wide historical registry is not part of the processor
-      // snapshot. Flush only mutates working-memory rows, which are outside
-      // the current LONG_TERM/ASSOCIATION sparse route. Invalidate historical
-      // material while preserving the independently maintained route and any
-      // unpublished bounded backfill progress.
-      operations::historical_surface_search_cache_internal::
-          InvalidateHistoricalPreserveCurrent (*context_);
-    }
-
+  // Working-memory persistence keeps the in-memory surfaces exact: pruned
+  // rows and the embedding rows deleted with them leave the retrieval
+  // surface and the historical registry by identity, and new slot
+  // embeddings are appended below. The historical registry is not part of
+  // the processor snapshot; a failed transaction reloads it.
   auto add_timing
       = [op_context] (const char *name,
                       std::chrono::steady_clock::time_point start) {
@@ -4214,13 +4254,6 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
             == 0);
   if (force || should_incremental_prune)
     {
-      if (force)
-        {
-          // Force pruning can delete a broad set of embedding rows. Exact
-          // incremental ownership is not available here, so fail closed.
-          operations::historical_surface_search_cache_internal::
-              InvalidateHistoricalPreserveCurrent (*context_);
-        }
       const int prune_batch = force ? kClosedWorkingMemoryPruneBatch
                                     : kClosedWorkingMemoryIncrementalPruneBatch;
       const auto t_prune_select_start = std::chrono::steady_clock::now ();
@@ -4234,16 +4267,28 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
       add_timing ("SignalProcessor.wm_prune_select",
                   t_prune_select_start);
       const auto t_prune_delete_start = std::chrono::steady_clock::now ();
-      DeleteStaleWorkingMemoryRows (tx, stale_ids, force);
+      auto deleted_embedding_ids
+          = DeleteStaleWorkingMemoryRows (tx, stale_ids, force);
       add_timing ("SignalProcessor.wm_prune_delete",
                   t_prune_delete_start);
       if (force)
         {
           const auto t_orphan_delete_start = std::chrono::steady_clock::now ();
-          DeleteUnreferencedEmbeddings (tx);
+          const auto orphans = DeleteUnreferencedEmbeddings (tx);
+          deleted_embedding_ids.insert (deleted_embedding_ids.end (),
+                                        orphans.begin (), orphans.end ());
           add_timing ("SignalProcessor.wm_prune_orphan_embeddings",
                       t_orphan_delete_start);
         }
+      for (const long long memory_id : stale_ids)
+        {
+          context_->RemoveRetrievalSurface (memory_id);
+          operations::historical_surface_search_cache_internal::RemoveCurrent (
+              *context_, memory_id);
+        }
+      for (const long long embedding_id : deleted_embedding_ids)
+        operations::historical_surface_search_cache_internal::RemoveEmbedding (
+            *context_, embedding_id);
     }
 
   const double working_source_reliability = core::SourceReliabilityPrior (
