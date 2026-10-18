@@ -65,6 +65,10 @@ struct Options
   // boundary detection, grouping and the write gate to the engine (a real
   // host's default). Both flush at episode end, before queries.
   cortext::Retention retention = cortext::Retention::Durable;
+  // Natural only: send each conversation's last signal as Boundary, as a
+  // host that knows a conversation ended (closes the open unit; the write
+  // gate still decides).
+  bool close_conversations = false;
   std::filesystem::path ingest_log_path;
 };
 
@@ -143,6 +147,8 @@ void PrintUsage (std::ostream &out)
       << "  --retention=durable|natural  Ingest retention, default durable\n"
       << "                      (one memory per turn); natural lets the\n"
       << "                      engine group turns into memories\n"
+      << "  --conversation-end=none|boundary  Natural only: boundary sends\n"
+      << "                      each conversation's last signal as Boundary\n"
       << "  --ingest-log PATH   Write one JSONL row per ingested signal\n"
       << "                      (modality, wall/encode/process ms, filter)\n"
       << "  -h, --help          Show this help\n";
@@ -243,6 +249,13 @@ Options ParseArgs (int argc, char **argv)
           opts.retention = *v == "natural" ? cortext::Retention::Natural
                                            : cortext::Retention::Durable;
         }
+      else if (auto v = TakeArg (arg, "--conversation-end="))
+        {
+          if (*v != "none" && *v != "boundary")
+            throw std::runtime_error (
+                "--conversation-end must be none or boundary");
+          opts.close_conversations = *v == "boundary";
+        }
       else if (auto v = TakeArg (arg, "--ingest-log="))
         {
           opts.ingest_log_path = *v;
@@ -269,6 +282,12 @@ Options ParseArgs (int argc, char **argv)
   if (opts.answer_key_path.empty ())
     {
       throw std::runtime_error ("Missing --answer-key");
+    }
+  if (opts.close_conversations
+      && opts.retention != cortext::Retention::Natural)
+    {
+      throw std::runtime_error (
+          "--conversation-end=boundary needs --retention=natural");
     }
   if (opts.out_path.empty ())
     {
@@ -1166,6 +1185,14 @@ int Run (const Options &opts)
           if (opts.retention == cortext::Retention::Natural)
             turn_retention[i] = cortext::Retention::Natural;
         }
+      if (opts.close_conversations)
+        {
+          std::map<std::string, std::size_t> last_of;
+          for (std::size_t i = 0; i < turn_source.size (); ++i)
+            last_of[turn_source[i]] = i;
+          for (const auto &[source, i] : last_of)
+            turn_retention[i] = cortext::Retention::Boundary;
+        }
       for (std::size_t signal_index = 0; signal_index < episode.signals.size ();
            ++signal_index)
         {
@@ -1425,6 +1452,7 @@ int Run (const Options &opts)
       {"image_filter", opts.image_filter},
       {"turn_signals", opts.turn_signals},
       {"source_ids", opts.speaker_sources ? "speaker" : "conversation"},
+      {"conversation_end", opts.close_conversations ? "boundary" : "none"},
       {"retention", opts.retention == cortext::Retention::Natural
                         ? "natural"
                         : "durable"},

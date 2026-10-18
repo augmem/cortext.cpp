@@ -143,7 +143,10 @@ Useful adapter overrides:
 `Retention::Durable` (one forced boundary and write per turn) or, with
 `--retention=natural`, with the engine default `Retention::Natural`, which
 leaves boundary detection, turn grouping and the write gate to the engine. It
-flushes at episode end, then asks benchmark questions with
+flushes at episode end (`Flush` does not commit a unit that is still open;
+`--conversation-end=boundary` sends each conversation's last signal as
+`Retention::Boundary`, as a host that knows the conversation ended would),
+then asks benchmark questions with
 `Retention::Ephemeral`. This exercises the public "query without polluting"
 path: retrieval is expected, but the query itself is not written as a durable
 memory.
