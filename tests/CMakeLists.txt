@@ -54,6 +54,7 @@ add_executable(cortext_tests
 
   operations_graph_retrieval.test.cpp
   memory_text_index.test.cpp
+  standing_memory.test.cpp
 
   operations_consolidation.test.cpp
 	  operations_write_gate.test.cpp

@@ -101,6 +101,11 @@ struct SurfaceMutation
 void ClearLastSelectedEmbeddingOrder ();
 void SetLastSelectedEmbeddingOrder (const std::vector<long long> &embedding_ids);
 const std::vector<long long> &GetLastSelectedEmbeddingOrder ();
+// Standing memories (standing_memory_internal.hpp) the last query packet
+// joins, best first.
+void ClearLastStandingMemoryIds ();
+void SetLastStandingMemoryIds (const std::vector<long long> &memory_ids);
+const std::vector<long long> &GetLastStandingMemoryIds ();
 void ClearLastRankedCandidates ();
 void SetLastRankedCandidates (const std::vector<RankedCandidate> &candidates);
 const std::vector<RankedCandidate> &GetLastRankedCandidates ();

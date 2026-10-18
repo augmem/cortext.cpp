@@ -8,6 +8,7 @@ namespace
 
 thread_local std::vector<long long> g_last_selected_embedding_order;
 thread_local std::vector<RankedCandidate> g_last_ranked_candidates;
+thread_local std::vector<long long> g_last_standing_memory_ids;
 thread_local std::vector<RankedCandidate> g_last_seed_candidates;
 thread_local std::vector<RankedCandidate> g_last_exact_seed_candidates;
 thread_local std::vector<RejectedCandidate> g_last_rejected_candidates;
@@ -69,6 +70,24 @@ const std::vector<SurfaceMutation> &
 GetSurfaceMutations ()
 {
   return g_surface_mutations;
+}
+
+void
+ClearLastStandingMemoryIds ()
+{
+  g_last_standing_memory_ids.clear ();
+}
+
+void
+SetLastStandingMemoryIds (const std::vector<long long> &memory_ids)
+{
+  g_last_standing_memory_ids = memory_ids;
+}
+
+const std::vector<long long> &
+GetLastStandingMemoryIds ()
+{
+  return g_last_standing_memory_ids;
 }
 
 void

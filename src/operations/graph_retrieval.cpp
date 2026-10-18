@@ -5,6 +5,7 @@
 #include "family_embedding_features_internal.hpp"
 #include "../store/memory_text_index_internal.hpp"
 #include "retrieval_trace_state.hpp"
+#include "standing_memory_internal.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -1640,6 +1641,81 @@ LexicalCandidate (const ProcessorContext &p_ctx, Transaction &tx,
   return candidate;
 }
 
+// The standing memories (standing_memory_internal.hpp) a query packet joins:
+// the set's members that started before the query, ranked within the set by
+// reciprocal-rank fusion of cosine to the query and, for text queries, BM25
+// of the members' stored terms with document frequencies from the set
+// itself (store-wide frequencies would drop the topic words that tell
+// directives apart). Best first, at most kPacketMembers. Cost follows the
+// bounded set: one row scan, one vector lookup per member.
+std::vector<long long>
+SelectStandingMemories (const ProcessorContext &p_ctx, Transaction &tx,
+                        const Signal &signal, long long exclusion_ts,
+                        int embedding_dim, double rrf_k)
+{
+  namespace standing = standing_memory_internal;
+  const auto rows = tx.Execute (
+      "SELECT memory_id, terms FROM standing_memories WHERE start_ts < ?",
+      { exclusion_ts });
+  std::vector<std::pair<long long, double> > dense;
+  std::vector<std::pair<long long, std::string> > members;
+  dense.reserve (rows.size ());
+  members.reserve (rows.size ());
+  for (const auto &row : rows)
+    {
+      const long long memory_id = AnyLongLong (row, "memory_id");
+      const auto candidate
+          = LexicalCandidate (p_ctx, tx, memory_id, exclusion_ts, embedding_dim);
+      if (!candidate)
+        continue;
+      dense.emplace_back (memory_id,
+                          Cosine (signal.embedding, candidate->embedding));
+      const auto terms = row.find ("terms");
+      members.emplace_back (
+          memory_id,
+          terms != row.end () && terms->second.type () == typeid (std::string)
+              ? std::any_cast<std::string> (terms->second)
+              : std::string ());
+    }
+  if (dense.empty ())
+    return {};
+  std::sort (dense.begin (), dense.end (), [] (const auto &a, const auto &b) {
+    if (a.second != b.second)
+      return a.second > b.second;
+    return a.first > b.first;
+  });
+  std::unordered_map<long long, double> fused;
+  for (std::size_t rank = 0; rank < dense.size (); ++rank)
+    fused[dense[rank].first] = 1.0 / (rrf_k + static_cast<double> (rank + 1));
+  if (signal.modality == "text" && signal.payload && !signal.payload->empty ())
+    {
+      const auto lexical = standing::RankByTerms (
+          std::string_view (
+              reinterpret_cast<const char *> (signal.payload->data ()),
+              signal.payload->size ()),
+          members);
+      for (std::size_t rank = 0; rank < lexical.size (); ++rank)
+        fused[lexical[rank].first]
+            += 1.0 / (rrf_k + static_cast<double> (rank + 1));
+    }
+  std::vector<std::pair<long long, double> > ranked (fused.begin (),
+                                                     fused.end ());
+  std::sort (ranked.begin (), ranked.end (), [] (const auto &a, const auto &b) {
+    if (a.second != b.second)
+      return a.second > b.second;
+    return a.first > b.first;
+  });
+  std::vector<long long> picked;
+  for (const auto &[memory_id, score] : ranked)
+    {
+      (void)score;
+      if (picked.size () >= standing::kPacketMembers)
+        break;
+      picked.push_back (memory_id);
+    }
+  return picked;
+}
+
 } // namespace
 
 void
@@ -1649,6 +1725,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   auto started = std::chrono::steady_clock::now ();
   retrieval_trace::ClearLastSelectedEmbeddingOrder ();
   retrieval_trace::ClearLastRankedCandidates ();
+  retrieval_trace::ClearLastStandingMemoryIds ();
   retrieval_trace::ClearLastSeedCandidates ();
   retrieval_trace::ClearLastExactSeedCandidates ();
   retrieval_trace::ClearLastRejectedCandidates ();
@@ -2238,6 +2315,29 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         p_ctx, tx, ranked_all, static_cast<std::size_t> (output_limit));
   context.AddOperationTiming ("GraphRetrieve.neighbours_deferred",
                               static_cast<double> (neighbours_deferred));
+
+  // Standing memories join query packets whatever their rank here.
+  if (signal.retention == Retention::Ephemeral && embedding_dim > 0)
+    {
+      start_profile_timing ();
+      std::vector<long long> standing_ids;
+      try
+        {
+          standing_ids = SelectStandingMemories (
+              p_ctx, tx, signal, static_cast<long long> (exclusion_ts),
+              embedding_dim, lexical_cfg.rrf_k);
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogWarn (
+              "cortext.graph_retrieval.standing_unavailable",
+              { telemetry::Attribute::String ("error", e.what ()) });
+        }
+      context.AddOperationTiming ("GraphRetrieve.standing_selected",
+                                  static_cast<double> (standing_ids.size ()));
+      retrieval_trace::SetLastStandingMemoryIds (standing_ids);
+      profile_timing ("GraphRetrieve.standing", section_start);
+    }
   const auto direct_count = std::min<std::size_t> (
       ranked_all.size (), static_cast<std::size_t> (output_limit));
   std::vector<Candidate> ranked (

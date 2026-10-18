@@ -53,8 +53,10 @@ std::vector<Hit> Search (Transaction &tx, std::string_view query_text,
 void IndexMemoryText (Transaction &tx, long long memory_id,
                       std::string_view text);
 
-/// Indexes LONG_TERM text memories written before migration 49 created the
-/// table, once: migration 49 queues the backfill and this clears it.
+/// Runs the queued one-time backfills over stored text memories: the
+/// keyword index for memories written before migration 49 created it, and
+/// the standing set (operations/standing_memory_internal.hpp) for memories
+/// written before migration 51. The migrations queue them; this clears them.
 void RunPendingBackfill (Store &store, ObjectStore *object_store);
 
 } // namespace cortext::store::memory_text_index_internal

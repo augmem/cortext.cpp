@@ -2450,6 +2450,101 @@ PacketText (const cortext::Cortext::Context &context)
 
 } // namespace
 
+TEST_CASE ("Standing directives lead query packets whatever their rank",
+           "[cortext][retrieval][standing]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  const auto directive = ctx->ProcessTextAt (
+      "Always include version numbers when I ask about software libraries.",
+      "chat/rules/1", ts, cortext::Retention::Durable);
+  REQUIRE (directive.output.stored_memory_id.has_value ());
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  // A long turn that mentions "always" is not a standing directive.
+  std::string explanation = "Always check the lockfile first. ";
+  for (int i = 0; i < 12; ++i)
+    explanation += "The resolver reads the manifest and pins transitive "
+                   "dependencies to exact versions. ";
+  const auto long_turn = ctx->ProcessTextAt (explanation, "chat/notes/1", ts,
+                                             cortext::Retention::Durable);
+  REQUIRE (long_turn.output.stored_memory_id.has_value ());
+  // Turns about the query topic fill every anchor slot ahead of the
+  // directive.
+  for (int i = 0; i < 16; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt (
+          "Which libraries does the reporting service use, part "
+              + std::to_string (i) + "? It uses pandas and requests.",
+          "chat/libs/" + std::to_string (i), ts, cortext::Retention::Durable);
+    }
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+
+  const auto packet = ctx->ProcessTextAt (
+      "Which libraries does the reporting service use?", "query/public",
+      ts + 1000, cortext::Retention::Ephemeral);
+  REQUIRE_FALSE (packet.retrieved_memory.empty ());
+  REQUIRE (packet.retrieved_memory.front ().id
+           == *directive.output.stored_memory_id);
+  REQUIRE (packet.output.operation_ms.at ("Cortext.standing_joined") == 1.0);
+  for (const auto &memory : packet.retrieved_memory)
+    if (memory.id == *long_turn.output.stored_memory_id)
+      REQUIRE (&memory != &packet.retrieved_memory.front ());
+
+  // Ingest does not join standing memories.
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  const auto ingest = ctx->ProcessTextAt (
+      "Which libraries does the reporting service use?", "chat/libs/x", ts,
+      cortext::Retention::Durable);
+  const auto joined = ingest.output.operation_ms.find ("Cortext.standing_joined");
+  REQUIRE ((joined == ingest.output.operation_ms.end () || joined->second == 0.0));
+}
+
+TEST_CASE ("Stores from before the standing set fill it once on open",
+           "[cortext][standing][migration]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  long long directive_id = 0;
+  {
+    auto ctx = cortext::Cortext::Create (cfg, temp_db.path ());
+    const auto directive = ctx->ProcessTextAt (
+        "From now on, answer in French.", "chat/rules/1", 1000ULL,
+        cortext::Retention::Durable);
+    (void)ctx->ProcessTextAt ("I always forget my keys on Mondays.",
+                              "chat/notes/1", 2000ULL,
+                              cortext::Retention::Durable);
+    REQUIRE (directive.output.stored_memory_id.has_value ());
+    directive_id = *directive.output.stored_memory_id;
+    ctx->Flush ();
+  }
+  {
+    // A store written before migration 51: no members, backfill queued.
+    auto store = std::shared_ptr<cortext::Store> (
+        cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+    store->Execute ("DELETE FROM standing_memories");
+    store->Execute ("INSERT INTO cortext_pending_backfills(name) "
+                    "VALUES ('standing_memories')");
+  }
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  (void)ctx->ProcessTextAt ("What language should replies use?",
+                            "query/public", 5000ULL,
+                            cortext::Retention::Ephemeral);
+  const auto members = store->Execute ("SELECT memory_id FROM standing_memories");
+  REQUIRE (members.size () == 1);
+  REQUIRE (AnyToLongLong (members[0].at ("memory_id")) == directive_id);
+  REQUIRE (store->Execute ("SELECT 1 FROM cortext_pending_backfills "
+                           "WHERE name = 'standing_memories'")
+               .empty ());
+}
+
 TEST_CASE ("Query retrieval defers the adjacent turn of a higher anchor",
            "[cortext][retrieval][contiguity]")
 {

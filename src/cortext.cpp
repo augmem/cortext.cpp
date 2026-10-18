@@ -2416,6 +2416,43 @@ struct Cortext::Impl
       }
     result.output.operation_ms["Cortext.superseded_predecessors_attached"]
         = static_cast<double> (superseded_predecessors_attached);
+
+    // Standing memories (operations/standing_memory_internal.hpp) lead the
+    // packet: short lasting directives an answer must honour, chosen within
+    // their own set. One already retrieved moves to the front as is; the
+    // others are joined bare, without neighbours.
+    std::vector<Cortext::Context::Memory> standing;
+    for (const long long memory_id :
+         operations::retrieval_trace::GetLastStandingMemoryIds ())
+      {
+        if (!seen_output_memory_ids.insert (memory_id).second)
+          {
+            const auto it = std::find_if (
+                result.retrieved_memory.begin (),
+                result.retrieved_memory.end (),
+                [memory_id] (const auto &m) { return m.id == memory_id; });
+            if (it != result.retrieved_memory.end ())
+              {
+                standing.push_back (std::move (*it));
+                result.retrieved_memory.erase (it);
+              }
+            continue;
+          }
+        Cortext::Context::Memory m;
+        m.id = memory_id;
+        HydrateMemory (store.get (), object_store.get (), memory_id, m,
+                       max_fallback_signal_blobs,
+                       &loaded_fallback_signal_blobs);
+        if (!HasHydratedContent (m))
+          continue;
+        StripSourceBlobsIfDisabled (m);
+        standing.push_back (std::move (m));
+      }
+    result.output.operation_ms["Cortext.standing_joined"]
+        = static_cast<double> (standing.size ());
+    result.retrieved_memory.insert (result.retrieved_memory.begin (),
+                                    std::make_move_iterator (standing.begin ()),
+                                    std::make_move_iterator (standing.end ()));
     result.output.operation_ms["Cortext.fallback_hydration_signal_rows"]
         = static_cast<double> (loaded_fallback_signal_blobs);
     return result;

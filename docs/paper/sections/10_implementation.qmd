@@ -655,6 +655,31 @@ recall rose from 0.41 to 0.67 and judged sufficiency from 0.53 to 0.82, with
 query p95 and ingest time within 2% of the vector-only engine. Ingest-time retrieval stays vector-only;
 lexical seeds there cost per-turn time without improving recall.
 
+Standing memories are a small query-independent channel for lasting
+directives and preferences ("Always include version numbers when I ask about
+libraries", "From now on, answer in French"). Membership is a property of the
+stored memory (table `standing_memories`, schema migration 51), set when the
+memory is written; today's only detector is a pattern check over a memory's
+text content (at most 480 bytes, a clause opening with *always*, *never*,
+*from now on*, *going forward*, *whenever I*, *I prefer* and similar,
+optionally after *please*). The set keeps the newest 256 members; stores
+written before migration 51 fill it once on open. Every query ranks the members
+written before it within the set, fusing cosine to the query with a BM25
+rank by reciprocal rank. The BM25 runs over word stems (first six bytes of
+each non-stopword word) stored with each member, with document frequencies
+from the set itself: store-wide frequencies would discount the topic words
+that tell directives apart, and the store's FTS5 index cannot be restricted to
+the set cheaply (a full posting-list scan cost about 20 ms per query on a 10M
+store). The best five lead the packet without neighbours; a member that was
+already retrieved moves to the front. Query p95 at 100K / 1M / 10M stays within
+0.98 / 0.96 / 1.14 of the engine without the channel. A directive is stated once and must shape answers long after it
+falls out of query similarity: on BEAM the share of instruction-following
+gold turns (the instruction and its acknowledgement) in the 8k-token packet
+was 0.44 / 0.26 / 0.00 at 100K / 1M / 10M tokens before, and 0.88 / 0.79 /
+0.43 after;
+gold-turn share in that packet rose by 0.070 / 0.075 / 0.053 overall, with no
+other category losing more than 0.01.
+
 Production retrieval discovers a broad but bounded vector seed set from durable
 memory embeddings. Before the seed cap, it collapses near-duplicate embedding
 families to one representative; superseded targets stay eligible.

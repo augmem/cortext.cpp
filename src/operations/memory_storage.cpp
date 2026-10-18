@@ -5,6 +5,7 @@
 #include "historical_surface_search_cache_internal.hpp"
 #include "retrieval_trace_state.hpp"
 #include "signal_record_rollback_internal.hpp"
+#include "standing_memory_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
@@ -1543,6 +1544,25 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
               *savepoint, memory_id, memory_text);
           context.AddOperationTiming ("MemoryStorage.memory_text_fts",
                                       ElapsedMillis (fts_start));
+        }
+
+      // Standing set: a memory whose text states a lasting directive joins
+      // the bounded set queries rank on their own; a full set drops its
+      // oldest member.
+      if (memory_id > 0
+          && standing_memory_internal::IsStandingDirective (memory_text))
+        {
+          namespace standing = standing_memory_internal;
+          savepoint->Execute ("INSERT OR IGNORE INTO standing_memories "
+                              "(memory_id, start_ts, terms) VALUES (?, ?, ?)",
+                              { memory_id, static_cast<long long> (start_ts),
+                                standing::TermsOf (memory_text) });
+          savepoint->Execute (
+              "DELETE FROM standing_memories WHERE memory_id IN ("
+              "  SELECT memory_id FROM standing_memories "
+              "  ORDER BY start_ts DESC, memory_id DESC LIMIT -1 OFFSET ?)",
+              { static_cast<long long> (standing::kCapacity) });
+          context.AddOperationTiming ("MemoryStorage.standing_joined", 1.0);
         }
 
       // Commit external object content before releasing the DB savepoint. If

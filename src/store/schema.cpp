@@ -1065,6 +1065,31 @@ GetCoreMigrations ()
               "  SELECT 1 FROM signals WHERE blob_id = old.blob_id); END",
           },
       },
+      {
+          51,
+          "Standing memories: bounded set of lasting directives",
+          {
+              // Memories that state a lasting directive or preference
+              // (operations/standing_memory_internal.hpp). Queries rank
+              // this set on its own, so its members reach packets whatever
+              // their rank among all memories.
+              // terms: the member's word stems (TermsOf), so queries rank
+              // the set without reading member text or the store-wide index.
+              "CREATE TABLE IF NOT EXISTS standing_memories ("
+              "  memory_id INTEGER PRIMARY KEY,"
+              "  start_ts INTEGER NOT NULL,"
+              "  terms TEXT NOT NULL DEFAULT '')",
+              "CREATE TRIGGER IF NOT EXISTS memories_standing_delete "
+              "AFTER DELETE ON memories "
+              "BEGIN DELETE FROM standing_memories "
+              "WHERE memory_id = old.memory_id; END",
+              // Memories stored before this migration join the set once,
+              // from C++ (memory_text_index_internal::RunPendingBackfill).
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'standing_memories' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
   };
 }
 

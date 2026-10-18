@@ -43,6 +43,7 @@ const cortext_cpp_sources = &.{
     "src/operations/sparse_retrieval_route_internal.cpp",
     "src/operations/sparse_retrieval_route_sqlite_internal.cpp",
     "src/operations/retrieval_trace_state.cpp",
+    "src/operations/standing_memory_internal.cpp",
     "src/operations/neuromodulators.cpp",
     "src/operations/signal_metrics_persistence.cpp",
     "src/operations/write_gate.cpp",

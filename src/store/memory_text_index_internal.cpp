@@ -1,5 +1,6 @@
 #include "memory_text_index_internal.hpp"
 
+#include "../operations/standing_memory_internal.hpp"
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
@@ -7,10 +8,15 @@
 #include <chrono>
 #include <exception>
 #include <iterator>
+#include <map>
+#include <string>
 #include <string_view>
 #include <any>
 #include <unordered_map>
 #include <unordered_set>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 namespace cortext::store::memory_text_index_internal
 {
@@ -177,25 +183,25 @@ DropCommonWords (Transaction &tx, std::vector<std::string> words,
 
 } // namespace
 
-std::vector<Hit>
-Search (Transaction &tx, std::string_view query_text, std::size_t documents,
-        const SearchParams &params)
+namespace
 {
-  std::vector<Hit> hits;
-  if (params.limit == 0)
-    return hits;
+
+std::string
+MatchFor (Transaction &tx, std::string_view query_text, std::size_t documents,
+          const SearchParams &params)
+{
   const auto max_df = std::max (
       params.max_df_floor,
       static_cast<std::size_t> (params.max_df_ratio
                                 * static_cast<double> (documents)));
-  const std::string match = BuildMatchQuery (
+  return BuildMatchQuery (
       DropCommonWords (tx, QueryWords (query_text, params.max_terms), max_df));
-  if (match.empty ())
-    return hits;
-  const auto rows = tx.Execute (
-      "SELECT rowid AS memory_id, rank AS score FROM memory_text_fts "
-      "WHERE memory_text_fts MATCH ? ORDER BY rank LIMIT ?",
-      { match, static_cast<long long> (params.limit) });
+}
+
+std::vector<Hit>
+HitsOf (const std::vector<std::map<std::string, std::any> > &rows)
+{
+  std::vector<Hit> hits;
   hits.reserve (rows.size ());
   for (const auto &row : rows)
     {
@@ -205,6 +211,23 @@ Search (Transaction &tx, std::string_view query_text, std::size_t documents,
         hits.push_back ({ memory_id, AnyToDouble (row.at ("score"), 0.0) });
     }
   return hits;
+}
+
+} // namespace
+
+std::vector<Hit>
+Search (Transaction &tx, std::string_view query_text, std::size_t documents,
+        const SearchParams &params)
+{
+  if (params.limit == 0)
+    return {};
+  const std::string match = MatchFor (tx, query_text, documents, params);
+  if (match.empty ())
+    return {};
+  return HitsOf (tx.Execute (
+      "SELECT rowid AS memory_id, rank AS score FROM memory_text_fts "
+      "WHERE memory_text_fts MATCH ? ORDER BY rank LIMIT ?",
+      { match, static_cast<long long> (params.limit) }));
 }
 
 void
@@ -219,10 +242,21 @@ IndexMemoryText (Transaction &tx, long long memory_id, std::string_view text)
 void
 RunPendingBackfill (Store &store, ObjectStore *object_store)
 {
-  const auto pending = store.Execute (
-      "SELECT 1 FROM cortext_pending_backfills "
-      "WHERE name = 'memory_text_fts' LIMIT 1");
-  if (pending.empty ())
+  namespace standing = operations::standing_memory_internal;
+  bool fts_pending = false;
+  bool standing_pending = false;
+  for (const auto &row : store.Execute (
+           "SELECT name FROM cortext_pending_backfills "
+           "WHERE name IN ('memory_text_fts', 'standing_memories')"))
+    {
+      const auto &value = row.at ("name");
+      const std::string name = value.type () == typeid (std::string)
+                                   ? std::any_cast<std::string> (value)
+                                   : std::string ();
+      fts_pending = fts_pending || name == "memory_text_fts";
+      standing_pending = standing_pending || name == "standing_memories";
+    }
+  if (!fts_pending && !standing_pending)
     return;
   const auto started = std::chrono::steady_clock::now ();
   auto tx = store.Begin ();
@@ -231,10 +265,12 @@ RunPendingBackfill (Store &store, ObjectStore *object_store)
   if (object_store && dynamic_cast<SqlObjectStore *> (object_store) == nullptr)
     object_tx = object_store->Begin ();
   std::size_t indexed = 0;
+  // start_ts, id, terms
+  std::vector<std::tuple<long long, long long, std::string> > directives;
   try
     {
       const auto rows = tx->Execute (
-          "SELECT m.memory_id, m.blob_id FROM memories m "
+          "SELECT m.memory_id, m.start_ts, m.blob_id FROM memories m "
           "WHERE m.kind = 'LONG_TERM' AND m.modality = 'text' "
           "  AND m.blob_id IS NOT NULL",
           {});
@@ -248,15 +284,29 @@ RunPendingBackfill (Store &store, ObjectStore *object_store)
           const auto payload = GetObject (object_tx.get (), *tx, blob_id);
           if (!payload || payload->empty ())
             continue;
-          IndexMemoryText (
-              *tx, memory_id,
-              std::string_view (
-                  reinterpret_cast<const char *> (payload->data ()),
-                  payload->size ()));
-          ++indexed;
+          const std::string_view text (
+              reinterpret_cast<const char *> (payload->data ()),
+              payload->size ());
+          if (fts_pending)
+            {
+              IndexMemoryText (*tx, memory_id, text);
+              ++indexed;
+            }
+          if (standing_pending && standing::IsStandingDirective (text))
+            directives.emplace_back (
+                AnyToLongLong (row.at ("start_ts")).value_or (0), memory_id,
+                standing::TermsOf (text));
         }
+      // The newest members fill the bounded set.
+      std::sort (directives.rbegin (), directives.rend ());
+      if (directives.size () > standing::kCapacity)
+        directives.resize (standing::kCapacity);
+      for (const auto &[start_ts, memory_id, terms] : directives)
+        tx->Execute ("INSERT OR IGNORE INTO standing_memories "
+                     "(memory_id, start_ts, terms) VALUES (?, ?, ?)",
+                     { memory_id, start_ts, terms });
       tx->Execute ("DELETE FROM cortext_pending_backfills "
-                   "WHERE name = 'memory_text_fts'",
+                   "WHERE name IN ('memory_text_fts', 'standing_memories')",
                    {});
       if (object_tx)
         object_tx->Commit ();
@@ -276,6 +326,8 @@ RunPendingBackfill (Store &store, ObjectStore *object_store)
       "cortext.memory_text_fts.backfilled",
       { telemetry::Attribute::Int64 ("memories",
                                      static_cast<std::int64_t> (indexed)),
+        telemetry::Attribute::Int64 (
+            "standing", static_cast<std::int64_t> (directives.size ())),
         telemetry::Attribute::Double (
             "ms", std::chrono::duration<double, std::milli> (
                       std::chrono::steady_clock::now () - started)
