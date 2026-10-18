@@ -1165,6 +1165,10 @@ RemoveEmbedding (const ProcessorContext &ctx, long long embedding_id)
       return;
     }
   const std::size_t last = state.entries.size () - 1;
+  // Only removing a fan-out entry can clear the fan-out flag; otherwise it
+  // is unchanged and needs no store-sized rescan.
+  const bool removed_fanout
+      = SupersessionReferenceCount (state.entries[index]) > 1;
   std::vector<long long> removed_supersession_memory_ids;
   if (IsSupersessionCandidateEntry (state.entries[index]))
     for (const auto &reference : state.entries[index].memory_references)
@@ -1253,10 +1257,11 @@ RemoveEmbedding (const ProcessorContext &ctx, long long embedding_id)
   state.entries.pop_back ();
   state.search.resize (state.entries.size ()
       * static_cast<std::size_t> (state.embedding_dim));
-  state.supersession_embedding_fanout = std::any_of (
-      state.entries.begin (), state.entries.end (), [] (const auto &entry) {
-        return SupersessionReferenceCount (entry) > 1;
-      });
+  if (removed_fanout)
+    state.supersession_embedding_fanout = std::any_of (
+        state.entries.begin (), state.entries.end (), [] (const auto &entry) {
+          return SupersessionReferenceCount (entry) > 1;
+        });
   for (const long long memory_id : removed_supersession_memory_ids)
     RefreshSupersessionPopulationMismatch (
         state, memory_id);
