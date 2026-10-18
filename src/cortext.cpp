@@ -1107,6 +1107,210 @@ private:
   std::unordered_map<long long, Hydrated> cache_;
 };
 
+// Query focus for retrieved multi-signal memories.
+//
+// A memory the engine grouped from several signals (a Natural unit: a stretch
+// of conversation, a turn with its images) is recalled as a whole, but a
+// query usually concerns one or two of its members. For a query, each
+// retrieved memory with more than one stored signal keeps its members most
+// similar to the query embedding (their stored shared-space vectors,
+// memory_signal_vectors) within kUnitFocusBudgetBytes: the best member of
+// each modality comes first (cosines are not comparable across modalities),
+// then members best first; text is charged by its bytes and other media as
+// one clipped neighbour each, the first member is always kept, and the kept
+// members are
+// returned in their original order (consecutive text joined by newlines, as
+// the stored memory text is). A memory whose members all fit, or with any
+// member lacking a vector or payload, keeps its stored content. Cost: one
+// indexed signal read for all retrieved memories plus the payloads of their
+// members, query-time only.
+constexpr std::size_t kUnitFocusBudgetBytes = 3072;
+
+// Experiment hook only (CORTEXT_EXPERIMENT_HOOKS builds); 0 disables focus.
+std::size_t
+UnitFocusBudgetBytes ()
+{
+  static const std::size_t budget = static_cast<std::size_t> (std::max (
+      0, internal::experimental_env::Int ("CORTEXT_UNIT_FOCUS_BYTES")
+             .value_or (static_cast<int> (kUnitFocusBudgetBytes))));
+  return budget;
+}
+
+std::size_t
+FocusUnitMembers (Store *store, ObjectStore *object_store,
+                  SharedObjectReads *shared,
+                  std::vector<Cortext::Context::Memory> &memories,
+                  const Eigen::VectorXf &query)
+{
+  if (!store || memories.empty () || query.size () == 0
+      || UnitFocusBudgetBytes () == 0)
+    return 0;
+  const float query_norm = query.norm ();
+  if (query_norm <= 0.0f)
+    return 0;
+  struct Member
+  {
+    long long position = 0;
+    std::vector<unsigned char> blob_id;
+    std::string modality;
+    std::string mime;
+    double score = -2.0;
+    bool has_vector = false;
+  };
+  std::string ids;
+  std::vector<std::any> params;
+  for (const auto &m : memories)
+    {
+      if (m.id <= 0)
+        continue;
+      ids += ids.empty () ? "?" : ",?";
+      params.emplace_back (static_cast<long long> (m.id));
+    }
+  if (params.empty ())
+    return 0;
+  std::unordered_map<long long, std::vector<Member> > members;
+  try
+    {
+      const auto rows = store->Execute (
+          "SELECT s.memory_id AS memory_id, s.serial_position AS position, "
+          "       s.blob_id AS blob_id, s.modality AS modality, "
+          "       s.mime AS mime, v.embedding AS embedding "
+          "FROM signals s "
+          "LEFT JOIN memory_signal_vectors v ON v.blob_id = s.blob_id "
+          "WHERE s.memory_id IN (" + ids + ") "
+          "ORDER BY s.memory_id, s.serial_position, s.signal_id",
+          params);
+      const int dim = static_cast<int> (query.size ());
+      Eigen::VectorXf vec;
+      for (const auto &row : rows)
+        {
+          Member member;
+          member.position = RowLongLong (row, "position");
+          if (const auto it = row.find ("blob_id");
+              it != row.end () && it->second.has_value ())
+            member.blob_id = store::BlobFromAny (it->second);
+          if (const auto it = row.find ("modality");
+              it != row.end () && it->second.type () == typeid (std::string))
+            member.modality = std::any_cast<std::string> (it->second);
+          if (const auto it = row.find ("mime");
+              it != row.end () && it->second.type () == typeid (std::string))
+            member.mime = std::any_cast<std::string> (it->second);
+          if (const auto it = row.find ("embedding");
+              it != row.end () && it->second.has_value ()
+              && core::DecodeFloatBlob (it->second, dim, vec))
+            {
+              const float n = vec.norm ();
+              if (n > 0.0f)
+                {
+                  member.score = static_cast<double> (
+                      query.dot (vec) / (query_norm * n));
+                  member.has_vector = true;
+                }
+            }
+          members[RowLongLong (row, "memory_id")].push_back (
+              std::move (member));
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to read retrieved memory members",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+      return 0;
+    }
+
+  std::size_t focused = 0;
+  for (auto &m : memories)
+    {
+      const auto it = members.find (m.id);
+      if (it == members.end () || it->second.size () < 2)
+        continue;
+      auto &list = it->second;
+      if (std::any_of (list.begin (), list.end (), [] (const Member &x) {
+            return !x.has_vector || x.blob_id.empty ();
+          }))
+        continue;
+      std::vector<std::size_t> order (list.size ());
+      for (std::size_t i = 0; i < order.size (); ++i)
+        order[i] = i;
+      // The best member of each modality (cosines across modalities
+      // are not comparable: a text query sits closer to every text member
+      // than to any image), then the rest by cosine.
+      std::unordered_map<std::string, std::size_t> best_of;
+      for (std::size_t i = 0; i < list.size (); ++i)
+        {
+          const auto it = best_of.find (list[i].modality);
+          if (it == best_of.end () || list[i].score > list[it->second].score)
+            best_of[list[i].modality] = i;
+        }
+      const auto is_modality_best = [&] (std::size_t i) {
+        return best_of.at (list[i].modality) == i;
+      };
+      std::stable_sort (order.begin (), order.end (),
+                        [&] (std::size_t a, std::size_t b) {
+                          const bool ba = is_modality_best (a);
+                          const bool bb = is_modality_best (b);
+                          if (ba != bb)
+                            return ba;
+                          return list[a].score > list[b].score;
+                        });
+      std::vector<std::vector<unsigned char> > payloads (list.size ());
+      std::vector<bool> keep (list.size (), false);
+      std::size_t used = 0;
+      std::size_t kept = 0;
+      bool complete = true;
+      for (const std::size_t i : order)
+        {
+          if (!LoadObjectPayload (store, object_store, list[i].blob_id,
+                                  payloads[i], shared))
+            {
+              complete = false;
+              break;
+            }
+          const bool text = IsTextMime (list[i].mime)
+                            && (list[i].modality.empty ()
+                                || list[i].modality == "text");
+          const std::size_t cost
+              = text ? payloads[i].size () : kContiguityNeighborMaxBytes;
+          if (kept > 0 && used + cost > UnitFocusBudgetBytes ())
+            continue;
+          keep[i] = true;
+          used += cost;
+          ++kept;
+        }
+      if (!complete || kept == list.size ())
+        continue;
+      std::vector<std::vector<unsigned char> > content;
+      std::vector<std::string> mimetypes;
+      bool last_text = false;
+      for (std::size_t i = 0; i < list.size (); ++i)
+        {
+          if (!keep[i])
+            continue;
+          const bool text = IsTextMime (list[i].mime)
+                            && (list[i].modality.empty ()
+                                || list[i].modality == "text");
+          if (text && last_text)
+            {
+              content.back ().push_back ('\n');
+              content.back ().insert (content.back ().end (),
+                                      payloads[i].begin (),
+                                      payloads[i].end ());
+              continue;
+            }
+          content.push_back (std::move (payloads[i]));
+          mimetypes.push_back (text ? std::string ("text/plain")
+                                    : list[i].mime);
+          last_text = text;
+        }
+      m.content = std::move (content);
+      m.content_mimetypes = std::move (mimetypes);
+      ++focused;
+    }
+  return focused;
+}
+
 // A step from a turn to the adjacent LONG_TERM turn in an anchor's stream.
 struct ContiguityProbe
 {
@@ -2495,6 +2699,16 @@ struct Cortext::Impl
         store.get (), object_store.get (), &attachment_reads,
         max_fallback_signal_blobs, &loaded_fallback_signal_blobs,
         ClipTermsOf (query_signal));
+    // Query focus on retrieved multi-signal memories (FocusUnitMembers);
+    // only queries (Ephemeral) pay for it, as with the attached-turn clip.
+    if (!SourceBlobsDisabled () && query_embedding && query_signal
+        && query_signal->retention == Retention::Ephemeral)
+      {
+        result.output.operation_ms["Cortext.unit_members_focused"]
+            = static_cast<double> (FocusUnitMembers (
+                store.get (), object_store.get (), &attachment_reads,
+                result.retrieved_memory, *query_embedding));
+      }
     const auto anchor_rows = SourceBlobsDisabled ()
         ? std::unordered_map<long long, AnchorRow> ()
         : LoadAnchorRows (store.get (), result.retrieved_memory,

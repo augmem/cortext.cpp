@@ -2808,6 +2808,79 @@ TEST_CASE ("Attached turns keep the window that covers the query",
   REQUIRE (window_clips == 0);
 }
 
+TEST_CASE ("A recalled multi-signal memory keeps the members the query is about",
+           "[cortext][retrieval][retention][focus][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+
+  // Natural units of long turns on different subjects (the engine groups
+  // them; every unit here holds more than the focus budget).
+  const std::vector<std::string> topics = {
+    "My sourdough starter needs feeding twice a day with rye flour. ",
+    "The quarterly tax filing for the bakery is due on the fifteenth. ",
+    "Our cat Miso hates the vacuum and hides under the porch. ",
+    "The marathon training plan has a long run every Sunday morning. ",
+    "The bathroom tiles are cracked and the plumber comes on Tuesday. ",
+    "The garden needs tomato cages before the heat wave in July. ",
+  };
+  std::uint64_t ts = 1000;
+  for (const auto &topic : topics)
+    {
+      std::string turn;
+      while (turn.size () < 1600)
+        turn += topic;
+      (void)ctx->ProcessTextAt (turn, "chat/unit", ts,
+                                cortext::Retention::Natural);
+      ts += 60000;
+    }
+  ctx->Flush ();
+  const auto units = store->Execute (
+      "SELECT n_signals FROM memories WHERE kind = 'LONG_TERM' "
+      "AND n_signals >= 2");
+  REQUIRE (!units.empty ());
+
+  const auto joined = [] (const cortext::Cortext::Context::Memory &m) {
+    std::string s;
+    for (const auto &blob : m.content)
+      s.append (blob.begin (), blob.end ());
+    return s;
+  };
+  const auto with_marathon
+      = [&] (const std::vector<cortext::Cortext::Context::Memory> &ms) {
+          for (const auto &m : ms)
+            if (joined (m).find ("marathon training plan")
+                != std::string::npos)
+              return joined (m);
+          return std::string ();
+        };
+  const std::string query
+      = "When is the marathon long run in my training plan?";
+  const auto packet = ctx->ProcessTextAt (query, "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral);
+  const std::string focused = with_marathon (packet.retrieved_memory);
+  REQUIRE (!focused.empty ());
+  REQUIRE (focused.size () <= 3072);
+  for (std::size_t i = 0; i < topics.size (); ++i)
+    if (i != 3)
+      REQUIRE (focused.find (topics[i]) == std::string::npos);
+
+  // Ingest-time hydration returns the stored memory whole.
+  const auto ingest = ctx->ProcessTextAt (query, "chat/other", ts + 2000,
+                                          cortext::Retention::Durable);
+  REQUIRE (with_marathon (ingest.retrieved_memory).size () > 3072);
+}
+
 TEST_CASE ("Contiguity attaches adjacent turns of any modality",
            "[cortext][retrieval][contiguity][media]")
 {
