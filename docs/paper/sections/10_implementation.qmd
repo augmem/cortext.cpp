@@ -757,11 +757,17 @@ Natural retention with one source per conversation, BEAM conversations are
 stored as units of three to five turns (about 10 KB each with their attached
 neighbours), so an 8,000-token evidence budget held three or four retrieved
 memories, and a unit's pooled vector sits between its members, close to none
-of them. *Query focus*: for a query, each retrieved memory with more than one
-stored signal keeps the members most similar to the query (their stored
-shared-space vectors, `memory_signal_vectors`) within 3 KiB, the best member
-of each modality first, in their original order; ingest-time hydration returns
-memories whole. *Member scoring*: query seeding scores a grouped memory by
+of them. *Evidence budget*: the engine cannot know a reader's budget, so a
+caller may pass one per query, in bytes (text by its bytes, other media 480
+bytes each); unset, memories come back whole. Set, the standing block and the
+retrieved memories with their attached neighbours are fitted to it once the
+packet is complete: memories join in rank order at their floor (a grouped
+memory's member most similar to the query in each modality, by stored
+shared-space vector, `memory_signal_vectors`), with their neighbours when
+those fit, without them when only the memory does, or not at all; then one
+member cap shared by every grouped memory grows to the largest with which the
+packet fits, kept members in their original order. More distinct memories
+are kept trimmed before lower-ranked ones are left out. *Member scoring*: query seeding scores a grouped memory by
 the higher of its pooled cosine and its best member's cosine, and the twenty
 memories with the best members join the seeds. Member vectors of grouped
 LONG_TERM memories stay resident as int8 codes (dimension + 4 bytes per
@@ -777,10 +783,18 @@ the 8,000-token packet rose from 0.385 / 0.195 / 0.125 to 0.617 / 0.420 /
 past.dev-protocol score answered and judged by gpt-5.6-luna from 0.793 /
 0.750 / 0.651 to 0.847 / 0.813 / 0.718 (+0.054 [0.019, 0.095], +0.062
 [0.044, 0.081], +0.067 [0.029, 0.100]); knowledge update rose most (+0.24 at
-1M). The cost falls on unbudgeted packets: judged Eval 1 sufficiency changed
-by -0.016 ± 0.016 (query focus about half of it), LongMemEval-S by
--0.006 ± 0.026, LongMemEval-M by -0.006 ± 0.043 and MemLens by
-+0.000 ± 0.026. Paired query p50 / p95 at 1M and 10M, first queries after
+1M). A fixed 3 KiB member cap per memory, the first form of this trimming,
+cost judged Eval 1 sufficiency -0.016 ± 0.016 when the reader saw the whole
+packet (LongMemEval-S -0.006 ± 0.026, LongMemEval-M -0.006 ± 0.043, MemLens
++0.000 ± 0.026); the budget leaves such packets whole. Unset, judged against the Natural
+baseline by gpt-5.6-luna (both arms, four repetitions), Eval 1 is
+-0.006 ± 0.012 and LongMemEval-S -0.003 ± 0.013 (two repetitions:
+LongMemEval-M +0.018 ± 0.020, MemLens +0.008 ± 0.025). With the BEAM reader's
+budget passed (8,000 luna tokens, 34,800 bytes) the gold-turn share of its
+context equals the 3 KiB cap's (-0.002 / +0.001 / +0.002) and the e2e score
+is 0.842 / 0.806 / 0.715 against 0.844 / 0.811 / 0.695 (paired -0.002
+[-0.018, 0.014], -0.005 [-0.019, 0.008], +0.021 [0.005, 0.037]); unset, the
+whole memories overflow that reader (gold share -0.144 / -0.115 / -0.093). Paired query p50 / p95 at 1M and 10M, first queries after
 open included, are within 1.05 / 1.04 and 1.07 / 1.03 of the engine without
 both steps.
 

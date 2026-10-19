@@ -1109,8 +1109,8 @@ private:
 
 // Standing block budget (Context::standing_memory): directive signals are
 // short (standing_memory_internal::kMaxTextBytes each), so this holds the
-// best few; text is charged by its bytes, other media as one clipped
-// neighbour.
+// best few; text is charged by its bytes, other media as
+// Cortext::kMediaEvidenceBytes each.
 constexpr std::size_t kStandingPacketBytes = 2048;
 
 // Appends a stored directive signal's payload to `memory`'s content and
@@ -1144,7 +1144,7 @@ LoadStandingSignal (Store *store, ObjectStore *object_store,
       const bool text = IsTextMime (mimetype)
                         && (modality.empty () || modality == "text");
       const std::size_t cost
-          = text ? payload.size () : kContiguityNeighborMaxBytes;
+          = text ? payload.size () : Cortext::kMediaEvidenceBytes;
       memory.content.push_back (std::move (payload));
       memory.content_mimetypes.push_back (std::move (mimetype));
       return cost;
@@ -1159,208 +1159,400 @@ LoadStandingSignal (Store *store, ObjectStore *object_store,
     }
 }
 
-// Query focus for retrieved multi-signal memories.
-//
-// A memory the engine grouped from several signals (a Natural unit: a stretch
-// of conversation, a turn with its images) is recalled as a whole, but a
-// query usually concerns one or two of its members. For a query, each
-// retrieved memory with more than one stored signal keeps its members most
-// similar to the query embedding (their stored shared-space vectors,
-// memory_signal_vectors) within kUnitFocusBudgetBytes: the best member of
-// each modality comes first (cosines are not comparable across modalities),
-// then members best first; text is charged by its bytes and other media as
-// one clipped neighbour each, the first member is always kept, and the kept
-// members are
-// returned in their original order (consecutive text joined by newlines, as
-// the stored memory text is). A memory whose members all fit, or with any
-// member lacking a vector or payload, keeps its stored content. Cost: one
-// indexed signal read for all retrieved memories plus the payloads of their
-// members, query-time only.
-constexpr std::size_t kUnitFocusBudgetBytes = 3072;
-
-// Experiment hook only (CORTEXT_EXPERIMENT_HOOKS builds); 0 disables focus.
+// Evidence budget (Cortext::EvidenceBudget): the bytes of evidence a query
+// packet (standing block, retrieved memories and their attached neighbours)
+// may hold. Text is charged by its bytes and other media as
+// Cortext::kMediaEvidenceBytes each.
 std::size_t
-UnitFocusBudgetBytes ()
+EvidenceCharge (const std::string &mime, const std::string &modality,
+                std::size_t bytes)
 {
-  static const std::size_t budget = static_cast<std::size_t> (std::max (
-      0, internal::experimental_env::Int ("CORTEXT_UNIT_FOCUS_BYTES")
-             .value_or (static_cast<int> (kUnitFocusBudgetBytes))));
-  return budget;
+  const bool text
+      = IsTextMime (mime) && (modality.empty () || modality == "text");
+  return text ? bytes : Cortext::kMediaEvidenceBytes;
 }
 
+// A packet blob is text by its MIME type, or by the memory's modality when
+// it has none.
 std::size_t
-FocusUnitMembers (Store *store, ObjectStore *object_store,
-                  SharedObjectReads *shared,
-                  std::vector<Cortext::Context::Memory> &memories,
-                  const Eigen::VectorXf &query)
+BlobCharge (const Cortext::Context::Memory &m, std::size_t i)
 {
-  if (!store || memories.empty () || query.size () == 0
-      || UnitFocusBudgetBytes () == 0)
-    return 0;
-  const float query_norm = query.norm ();
-  if (query_norm <= 0.0f)
-    return 0;
+  const std::string &mime = i < m.content_mimetypes.size ()
+                                ? m.content_mimetypes[i]
+                                : m.mimetype;
+  const bool text = mime.empty ()
+                        ? m.modality.empty () || m.modality == "text"
+                        : mime.rfind ("text/", 0) == 0;
+  return text ? m.content[i].size () : Cortext::kMediaEvidenceBytes;
+}
+
+// A retrieved memory's own content before neighbours are attached around it:
+// its first blob's buffer (moved, never copied, by the attachment steps) and
+// its blob count.
+struct OwnContent
+{
+  const unsigned char *first = nullptr;
+  std::size_t count = 0;
+};
+
+std::vector<OwnContent>
+OwnContentOf (const std::vector<Cortext::Context::Memory> &memories)
+{
+  std::vector<OwnContent> own (memories.size ());
+  for (std::size_t i = 0; i < memories.size (); ++i)
+    if (!memories[i].content.empty () && !memories[i].content[0].empty ())
+      own[i] = { memories[i].content[0].data (), memories[i].content.size () };
+  return own;
+}
+
+struct EvidenceFit
+{
+  std::size_t bytes = 0;      // evidence charge after the fit
+  std::size_t trimmed = 0;    // grouped memories cut to their best members
+  std::size_t stripped = 0;   // memories that dropped attached neighbours
+  std::size_t dropped = 0;    // memories left out
+  std::size_t member_cap = 0; // member cap the fit settled on
+};
+
+// Fits retrieved memories (and their attached neighbours) to `budget` less
+// `standing_bytes`. A memory grouped from several signals is focusable when
+// each member has a stored shared-space vector (memory_signal_vectors) and a
+// payload and its own content is found among its attached neighbours; its
+// floor is the best member of each modality by cosine to the query (cosines
+// are not comparable across modalities: a text query sits closer to every
+// text member than to any image). Memories join in rank order at their
+// floor (focusable) or whole, with their neighbours when those fit too,
+// else without them, else not at all. One member cap shared by every
+// focusable memory then grows to the largest with which the packet fits:
+// each keeps its floor, then its other members best first while its
+// members fit the cap. Kept members return in their original order
+// (consecutive text joined by newlines, as the stored memory text is) in
+// place of the memory's own content, between its attached neighbours.
+// Cost: query-time only, and only for packets over the budget: one indexed
+// signal read for the retrieved memories plus their members' payloads.
+EvidenceFit
+FitEvidenceToBudget (Store *store, ObjectStore *object_store,
+                     SharedObjectReads *shared,
+                     std::vector<Cortext::Context::Memory> &memories,
+                     const std::vector<OwnContent> &own,
+                     std::size_t standing_bytes,
+                     const Eigen::VectorXf *query, std::size_t budget)
+{
+  EvidenceFit fit;
+  std::size_t total = standing_bytes;
+  for (const auto &m : memories)
+    for (std::size_t i = 0; i < m.content.size (); ++i)
+      total += BlobCharge (m, i);
+  fit.bytes = total;
+  if (total <= budget || memories.empty ())
+    return fit;
+
   struct Member
   {
-    long long position = 0;
     std::vector<unsigned char> blob_id;
     std::string modality;
     std::string mime;
     double score = -2.0;
     bool has_vector = false;
+    bool floor = false;
+    bool keep = true;
+    std::size_t cost = 0;
+    std::vector<unsigned char> payload;
   };
-  std::string ids;
-  std::vector<std::any> params;
-  for (const auto &m : memories)
-    {
-      if (m.id <= 0)
-        continue;
-      ids += ids.empty () ? "?" : ",?";
-      params.emplace_back (static_cast<long long> (m.id));
-    }
-  if (params.empty ())
-    return 0;
   std::unordered_map<long long, std::vector<Member> > members;
-  try
+  const float query_norm = query ? query->norm () : 0.0f;
+  if (store && query && query->size () > 0 && query_norm > 0.0f)
     {
-      const auto rows = store->Execute (
-          "SELECT s.memory_id AS memory_id, s.serial_position AS position, "
-          "       s.blob_id AS blob_id, s.modality AS modality, "
-          "       s.mime AS mime, v.embedding AS embedding "
-          "FROM signals s "
-          "LEFT JOIN memory_signal_vectors v ON v.blob_id = s.blob_id "
-          "WHERE s.memory_id IN (" + ids + ") "
-          "ORDER BY s.memory_id, s.serial_position, s.signal_id",
-          params);
-      const int dim = static_cast<int> (query.size ());
-      Eigen::VectorXf vec;
-      for (const auto &row : rows)
+      std::string ids;
+      std::vector<std::any> params;
+      for (const auto &m : memories)
         {
-          Member member;
-          member.position = RowLongLong (row, "position");
-          if (const auto it = row.find ("blob_id");
-              it != row.end () && it->second.has_value ())
-            member.blob_id = store::BlobFromAny (it->second);
-          if (const auto it = row.find ("modality");
-              it != row.end () && it->second.type () == typeid (std::string))
-            member.modality = std::any_cast<std::string> (it->second);
-          if (const auto it = row.find ("mime");
-              it != row.end () && it->second.type () == typeid (std::string))
-            member.mime = std::any_cast<std::string> (it->second);
-          if (const auto it = row.find ("embedding");
-              it != row.end () && it->second.has_value ()
-              && core::DecodeFloatBlob (it->second, dim, vec))
+          if (m.id <= 0)
+            continue;
+          ids += ids.empty () ? "?" : ",?";
+          params.emplace_back (static_cast<long long> (m.id));
+        }
+      try
+        {
+          const auto rows = params.empty ()
+              ? std::vector<std::map<std::string, std::any> > ()
+              : store->Execute (
+                    "SELECT s.memory_id AS memory_id, s.blob_id AS blob_id, "
+                    "       s.modality AS modality, s.mime AS mime, "
+                    "       v.embedding AS embedding "
+                    "FROM signals s "
+                    "LEFT JOIN memory_signal_vectors v "
+                    "  ON v.blob_id = s.blob_id "
+                    "WHERE s.memory_id IN (" + ids + ") "
+                    "ORDER BY s.memory_id, s.serial_position, s.signal_id",
+                    params);
+          const int dim = static_cast<int> (query->size ());
+          Eigen::VectorXf vec;
+          for (const auto &row : rows)
             {
-              const float n = vec.norm ();
-              if (n > 0.0f)
+              Member member;
+              if (const auto it = row.find ("blob_id");
+                  it != row.end () && it->second.has_value ())
+                member.blob_id = store::BlobFromAny (it->second);
+              member.modality = RowString (row, "modality");
+              member.mime = RowString (row, "mime");
+              if (const auto it = row.find ("embedding");
+                  it != row.end () && it->second.has_value ()
+                  && core::DecodeFloatBlob (it->second, dim, vec))
                 {
-                  member.score = static_cast<double> (
-                      query.dot (vec) / (query_norm * n));
-                  member.has_vector = true;
+                  const float n = vec.norm ();
+                  if (n > 0.0f)
+                    {
+                      member.score = static_cast<double> (
+                          query->dot (vec) / (query_norm * n));
+                      member.has_vector = true;
+                    }
                 }
+              members[RowLongLong (row, "memory_id")].push_back (
+                  std::move (member));
             }
-          members[RowLongLong (row, "memory_id")].push_back (
-              std::move (member));
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogWarn (
+              "Failed to read retrieved memory members",
+              { telemetry::Attribute::String ("component", "cortext"),
+                telemetry::Attribute::String ("error", e.what ()) });
+          members.clear ();
         }
     }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to read retrieved memory members",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::String ("error", e.what ()) });
-      return 0;
-    }
 
-  std::size_t focused = 0;
-  for (auto &m : memories)
+  struct Entry
+  {
+    std::size_t own_begin = 0;
+    std::size_t own_count = 0;
+    std::size_t own_charge = 0;
+    std::size_t attach_charge = 0;
+    std::vector<Member> *list = nullptr; // set when focusable
+    std::vector<std::size_t> order;      // floor first, then by cosine
+    std::size_t floor_charge = 0;
+    std::size_t member_charge = 0;
+    bool joined = false;
+    bool with_neighbours = false;
+  };
+  std::vector<Entry> entries (memories.size ());
+  for (std::size_t rank = 0; rank < memories.size (); ++rank)
     {
+      auto &m = memories[rank];
+      auto &e = entries[rank];
+      AlignContentMimetypes (m);
+      e.own_count = m.content.size ();
+      bool located = false;
+      if (rank < own.size () && own[rank].first)
+        for (std::size_t i = 0; i < m.content.size (); ++i)
+          if (m.content[i].data () == own[rank].first
+              && i + own[rank].count <= m.content.size ())
+            {
+              e.own_begin = i;
+              e.own_count = own[rank].count;
+              located = true;
+              break;
+            }
+      for (std::size_t i = 0; i < m.content.size (); ++i)
+        {
+          const bool own_blob
+              = i >= e.own_begin && i < e.own_begin + e.own_count;
+          (own_blob ? e.own_charge : e.attach_charge) += BlobCharge (m, i);
+        }
       const auto it = members.find (m.id);
-      if (it == members.end () || it->second.size () < 2)
+      if (it == members.end () || it->second.size () < 2 || !located)
         continue;
       auto &list = it->second;
       if (std::any_of (list.begin (), list.end (), [] (const Member &x) {
             return !x.has_vector || x.blob_id.empty ();
           }))
         continue;
-      std::vector<std::size_t> order (list.size ());
-      for (std::size_t i = 0; i < order.size (); ++i)
-        order[i] = i;
-      // The best member of each modality (cosines across modalities
-      // are not comparable: a text query sits closer to every text member
-      // than to any image), then the rest by cosine.
-      std::unordered_map<std::string, std::size_t> best_of;
-      for (std::size_t i = 0; i < list.size (); ++i)
-        {
-          const auto it = best_of.find (list[i].modality);
-          if (it == best_of.end () || list[i].score > list[it->second].score)
-            best_of[list[i].modality] = i;
-        }
-      const auto is_modality_best = [&] (std::size_t i) {
-        return best_of.at (list[i].modality) == i;
-      };
-      std::stable_sort (order.begin (), order.end (),
-                        [&] (std::size_t a, std::size_t b) {
-                          const bool ba = is_modality_best (a);
-                          const bool bb = is_modality_best (b);
-                          if (ba != bb)
-                            return ba;
-                          return list[a].score > list[b].score;
-                        });
-      std::vector<std::vector<unsigned char> > payloads (list.size ());
-      std::vector<bool> keep (list.size (), false);
-      std::size_t used = 0;
-      std::size_t kept = 0;
       bool complete = true;
-      for (const std::size_t i : order)
+      for (auto &x : list)
         {
-          if (!LoadObjectPayload (store, object_store, list[i].blob_id,
-                                  payloads[i], shared))
+          if (!LoadObjectPayload (store, object_store, x.blob_id, x.payload,
+                                  shared))
             {
               complete = false;
               break;
             }
-          const bool text = IsTextMime (list[i].mime)
-                            && (list[i].modality.empty ()
-                                || list[i].modality == "text");
-          const std::size_t cost
-              = text ? payloads[i].size () : kContiguityNeighborMaxBytes;
-          if (kept > 0 && used + cost > UnitFocusBudgetBytes ())
-            continue;
-          keep[i] = true;
-          used += cost;
-          ++kept;
+          // Text members are charged one more byte for the newline that
+          // joins consecutive kept text.
+          x.cost = EvidenceCharge (x.mime, x.modality, x.payload.size ());
+          if (x.cost == x.payload.size ())
+            ++x.cost;
+          e.member_charge += x.cost;
         }
-      if (!complete || kept == list.size ())
-        continue;
-      std::vector<std::vector<unsigned char> > content;
-      std::vector<std::string> mimetypes;
-      bool last_text = false;
+      if (!complete)
+        {
+          e.member_charge = 0;
+          continue;
+        }
+      std::unordered_map<std::string, std::size_t> best_of;
       for (std::size_t i = 0; i < list.size (); ++i)
         {
-          if (!keep[i])
-            continue;
-          const bool text = IsTextMime (list[i].mime)
-                            && (list[i].modality.empty ()
-                                || list[i].modality == "text");
-          if (text && last_text)
-            {
-              content.back ().push_back ('\n');
-              content.back ().insert (content.back ().end (),
-                                      payloads[i].begin (),
-                                      payloads[i].end ());
-              continue;
-            }
-          content.push_back (std::move (payloads[i]));
-          mimetypes.push_back (text ? std::string ("text/plain")
-                                    : list[i].mime);
-          last_text = text;
+          const auto b = best_of.find (list[i].modality);
+          if (b == best_of.end () || list[i].score > list[b->second].score)
+            best_of[list[i].modality] = i;
         }
+      for (const auto &[modality, i] : best_of)
+        {
+          list[i].floor = true;
+          e.floor_charge += list[i].cost;
+        }
+      e.order.resize (list.size ());
+      for (std::size_t i = 0; i < list.size (); ++i)
+        e.order[i] = i;
+      std::stable_sort (e.order.begin (), e.order.end (),
+                        [&] (std::size_t a, std::size_t b) {
+                          if (list[a].floor != list[b].floor)
+                            return list[a].floor;
+                          return list[a].score > list[b].score;
+                        });
+      e.list = &list;
+    }
+
+  // Memories join in rank order at their floor.
+  std::size_t used = standing_bytes;
+  std::size_t fixed = standing_bytes;
+  std::size_t widest = 0;
+  for (auto &e : entries)
+    {
+      const std::size_t least = e.list ? e.floor_charge : e.own_charge;
+      if (used + e.attach_charge + least <= budget)
+        {
+          e.joined = true;
+          e.with_neighbours = true;
+          used += e.attach_charge + least;
+          fixed += e.attach_charge;
+        }
+      else if (used + least <= budget)
+        {
+          e.joined = true;
+          used += least;
+        }
+      else
+        continue;
+      if (e.list)
+        widest = std::max (widest, e.member_charge);
+      else
+        fixed += e.own_charge;
+    }
+  // Packet bytes with member cap `cap`; marks kept members when `mark`.
+  const auto fill = [&] (std::size_t cap, bool mark) {
+    std::size_t sum = fixed;
+    for (auto &e : entries)
+      {
+        if (!e.joined || !e.list)
+          continue;
+        std::size_t kept = 0;
+        for (const std::size_t i : e.order)
+          {
+            auto &x = (*e.list)[i];
+            const bool keep = x.floor || kept + x.cost <= cap;
+            if (mark)
+              x.keep = keep;
+            if (keep)
+              kept += x.cost;
+          }
+        sum += kept;
+      }
+    return sum;
+  };
+  std::size_t lo = 0;
+  std::size_t hi = widest;
+  while (lo < hi)
+    {
+      const std::size_t mid = lo + (hi - lo + 1) / 2;
+      if (fill (mid, false) <= budget)
+        lo = mid;
+      else
+        hi = mid - 1;
+    }
+  fit.member_cap = lo;
+  (void)fill (lo, true);
+
+  std::vector<Cortext::Context::Memory> fitted;
+  fitted.reserve (memories.size ());
+  for (std::size_t rank = 0; rank < memories.size (); ++rank)
+    {
+      auto &m = memories[rank];
+      auto &e = entries[rank];
+      if (!e.joined)
+        {
+          ++fit.dropped;
+          continue;
+        }
+      const bool trim
+          = e.list
+            && std::any_of (e.list->begin (), e.list->end (),
+                            [] (const Member &x) { return !x.keep; });
+      if (!trim && e.with_neighbours)
+        {
+          fitted.push_back (std::move (m));
+          continue;
+        }
+      std::vector<std::vector<unsigned char> > content;
+      std::vector<std::string> mimetypes;
+      const auto take = [&] (std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i)
+          {
+            content.push_back (std::move (m.content[i]));
+            mimetypes.push_back (std::move (m.content_mimetypes[i]));
+          }
+      };
+      if (e.with_neighbours)
+        take (0, e.own_begin);
+      if (trim)
+        {
+          bool last_text = false;
+          for (auto &x : *e.list)
+            {
+              if (!x.keep)
+                continue;
+              const bool text = IsTextMime (x.mime)
+                                && (x.modality.empty ()
+                                    || x.modality == "text");
+              if (text && last_text)
+                {
+                  content.back ().push_back ('\n');
+                  content.back ().insert (content.back ().end (),
+                                          x.payload.begin (),
+                                          x.payload.end ());
+                  continue;
+                }
+              content.push_back (std::move (x.payload));
+              mimetypes.push_back (text ? std::string ("text/plain")
+                                        : x.mime);
+              last_text = text;
+            }
+          ++fit.trimmed;
+        }
+      else
+        take (e.own_begin, e.own_begin + e.own_count);
+      if (e.with_neighbours)
+        take (e.own_begin + e.own_count, m.content.size ());
+      else if (e.attach_charge > 0)
+        ++fit.stripped;
       m.content = std::move (content);
       m.content_mimetypes = std::move (mimetypes);
-      ++focused;
+      fitted.push_back (std::move (m));
     }
-  return focused;
+  // The charges above bound the fitted content; this keeps the bound if a
+  // stored memory's own content is larger than its members.
+  fit.bytes = standing_bytes;
+  for (const auto &m : fitted)
+    for (std::size_t i = 0; i < m.content.size (); ++i)
+      fit.bytes += BlobCharge (m, i);
+  while (fit.bytes > budget && !fitted.empty ())
+    {
+      for (std::size_t i = 0; i < fitted.back ().content.size (); ++i)
+        fit.bytes -= BlobCharge (fitted.back (), i);
+      fitted.pop_back ();
+      ++fit.dropped;
+    }
+  memories = std::move (fitted);
+  return fit;
 }
 
 // A step from a turn to the adjacent LONG_TERM turn in an anchor's stream.
@@ -2552,7 +2744,8 @@ struct Cortext::Impl
                   bool hydrate_working_memory = true,
                   const Eigen::VectorXf *query_embedding = nullptr,
                   bool hydrate_retrieved_memory = true,
-                  const cortext::Signal *query_signal = nullptr)
+                  const cortext::Signal *query_signal = nullptr,
+                  Cortext::EvidenceBudget evidence_budget = std::nullopt)
   {
     Cortext::Context result;
     if (query_embedding)
@@ -2751,16 +2944,12 @@ struct Cortext::Impl
         store.get (), object_store.get (), &attachment_reads,
         max_fallback_signal_blobs, &loaded_fallback_signal_blobs,
         ClipTermsOf (query_signal));
-    // Query focus on retrieved multi-signal memories (FocusUnitMembers);
-    // only queries (Ephemeral) pay for it, as with the attached-turn clip.
-    if (!SourceBlobsDisabled () && query_embedding && query_signal
-        && query_signal->retention == Retention::Ephemeral)
-      {
-        result.output.operation_ms["Cortext.unit_members_focused"]
-            = static_cast<double> (FocusUnitMembers (
-                store.get (), object_store.get (), &attachment_reads,
-                result.retrieved_memory, *query_embedding));
-      }
+    // The evidence budget fit (FitEvidenceToBudget) runs once the packet is
+    // complete; it finds each memory's own content among its attached
+    // neighbours.
+    const auto own_content = evidence_budget
+                                 ? OwnContentOf (result.retrieved_memory)
+                                 : std::vector<OwnContent> ();
     const auto anchor_rows = SourceBlobsDisabled ()
         ? std::unordered_map<long long, AnchorRow> ()
         : LoadAnchorRows (store.get (), result.retrieved_memory,
@@ -2782,20 +2971,6 @@ struct Cortext::Impl
         = AttachSupersededPredecessors (
             store.get (), result.retrieved_memory, anchor_rows,
             std::move (contiguous_turn_ids), attachment_hydrations);
-    if (attachment_object_tx)
-      {
-        try
-          {
-            attachment_object_tx->Commit ();
-          }
-        catch (const std::exception &e)
-          {
-            telemetry::LogWarn (
-                "Failed to end attachment object reads",
-                { telemetry::Attribute::String ("component", "cortext"),
-                  telemetry::Attribute::String ("error", e.what ()) });
-          }
-      }
     result.output.operation_ms["Cortext.superseded_predecessors_attached"]
         = static_cast<double> (superseded_predecessors_attached);
 
@@ -2803,8 +2978,12 @@ struct Cortext::Impl
     // lasting directives an answer must honour, chosen within their own set.
     // They form a block of their own (Context::standing_memory), outside the
     // retrieved ranking: each entry holds only the directive signals of one
-    // memory, best first, within kStandingPacketBytes, and the retrieved
-    // memories keep their ranks and content whether or not they hold one.
+    // memory, best first, within kStandingPacketBytes (and the evidence
+    // budget), and the retrieved memories keep their ranks and content
+    // whether or not they hold one.
+    const std::size_t standing_limit
+        = evidence_budget ? std::min (kStandingPacketBytes, *evidence_budget)
+                          : kStandingPacketBytes;
     std::size_t standing_bytes = 0;
     for (const auto &pick :
          operations::retrieval_trace::GetLastStandingPicks ())
@@ -2815,8 +2994,8 @@ struct Cortext::Impl
                                               pick.signal_id, directive);
         if (cost == 0)
           continue;
-        if (!result.standing_memory.empty ()
-            && standing_bytes + cost > kStandingPacketBytes)
+        if ((evidence_budget || !result.standing_memory.empty ())
+            && standing_bytes + cost > standing_limit)
           continue;
         standing_bytes += cost;
         const auto joined = std::find_if (
@@ -2848,6 +3027,43 @@ struct Cortext::Impl
       }
     result.output.operation_ms["Cortext.standing_joined"]
         = static_cast<double> (result.standing_memory.size ());
+
+    if (evidence_budget)
+      {
+        const auto fit = FitEvidenceToBudget (
+            store.get (), object_store.get (), &attachment_reads,
+            result.retrieved_memory, own_content, standing_bytes,
+            query_embedding, *evidence_budget);
+        result.output.operation_ms["Cortext.evidence_bytes"]
+            = static_cast<double> (fit.bytes);
+        result.output.operation_ms["Cortext.evidence_member_cap"]
+            = static_cast<double> (fit.member_cap);
+        result.output.operation_ms["Cortext.evidence_memories_trimmed"]
+            = static_cast<double> (fit.trimmed);
+        result.output.operation_ms["Cortext.evidence_neighbours_stripped"]
+            = static_cast<double> (fit.stripped);
+        result.output.operation_ms["Cortext.evidence_memories_dropped"]
+            = static_cast<double> (fit.dropped);
+        telemetry::AddCounter ("cortext.evidence_budget.fits_total", 1);
+        telemetry::AddCounter ("cortext.evidence_budget.memories_trimmed_total",
+                               fit.trimmed);
+        telemetry::AddCounter ("cortext.evidence_budget.memories_dropped_total",
+                               fit.dropped);
+      }
+    if (attachment_object_tx)
+      {
+        try
+          {
+            attachment_object_tx->Commit ();
+          }
+        catch (const std::exception &e)
+          {
+            telemetry::LogWarn (
+                "Failed to end attachment object reads",
+                { telemetry::Attribute::String ("component", "cortext"),
+                  telemetry::Attribute::String ("error", e.what ()) });
+          }
+      }
     result.output.operation_ms["Cortext.fallback_hydration_signal_rows"]
         = static_cast<double> (loaded_fallback_signal_blobs);
     return result;
@@ -2966,7 +3182,8 @@ Cortext::~Cortext () = default;
 
 Cortext::Context
 Cortext::ProcessText (const std::string &text, const std::string &source_id,
-                      Retention retention)
+                      Retention retention,
+                      EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -3006,7 +3223,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -3019,7 +3237,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
 
 Cortext::Context
 Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
-                        std::uint64_t timestamp, Retention retention)
+                        std::uint64_t timestamp, Retention retention,
+                        EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -3059,7 +3278,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -3072,7 +3292,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
 
 Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
-                       const std::string &source_id, Retention retention)
+                       const std::string &source_id, Retention retention,
+                       EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -3130,7 +3351,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -3145,7 +3367,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
 Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
                        const std::string &source_id, const Media &media,
-                       Retention retention)
+                       Retention retention,
+                       EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -3200,7 +3423,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -3215,7 +3439,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
 Cortext::Context
 Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
                        int channels, const std::string &source_id,
-                       Retention retention)
+                       Retention retention,
+                       EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -3275,7 +3500,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -3290,7 +3516,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
 Cortext::Context
 Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
                        int channels, const std::string &source_id,
-                       const Media &media, Retention retention)
+                       const Media &media, Retention retention,
+                       EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -3345,7 +3572,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);

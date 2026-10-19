@@ -43,6 +43,9 @@ struct Options
   double sensitivity = 0.5;
   double stability = 0.5;
   std::size_t top_k = 8;
+  // Per-query evidence budget in bytes (Cortext::EvidenceBudget); unset
+  // returns whole memories.
+  cortext::Cortext::EvidenceBudget evidence_budget;
   int max_episodes = 0;
   int max_queries = 0;
   bool reuse_engine = false;
@@ -137,6 +140,8 @@ void PrintUsage (std::ostream &out)
       << "  --sensitivity X     S knob in [0,1], default 0.5\n"
       << "  --stability X       T knob in [0,1], default 0.5\n"
       << "  --top-k N           Retrieval packet depth to score, default 8\n"
+      << "  --evidence-budget-bytes=N  Per-query evidence budget in bytes\n"
+      << "                      (standing + retrieved packet); default unset\n"
       << "  --max-episodes N    Limit episodes, 0 means all\n"
       << "  --max-queries N     Limit queries, 0 means all\n"
       << "  --reuse-engine      Reuse one engine/DB across episodes\n"
@@ -215,6 +220,13 @@ Options ParseArgs (int argc, char **argv)
       else if (auto v = TakeArg (arg, "--top-k="))
         {
           opts.top_k = static_cast<std::size_t> (std::stoul (*v));
+        }
+      else if (auto v = TakeArg (arg, "--evidence-budget-bytes="))
+        {
+          const auto bytes = std::stoull (*v);
+          if (bytes == 0)
+            throw std::runtime_error ("--evidence-budget-bytes must be > 0");
+          opts.evidence_budget = static_cast<std::size_t> (bytes);
         }
       else if (auto v = TakeArg (arg, "--max-episodes="))
         {
@@ -1363,9 +1375,10 @@ int Run (const Options &opts)
                     ? engine->ProcessTextAt (
                           query.question, "eval/query",
                           std::max (query.timestamp_ms, last_timestamp_ms),
-                          cortext::Retention::Ephemeral)
+                          cortext::Retention::Ephemeral, opts.evidence_budget)
                     : engine->ProcessText (query.question, "eval/query",
-                                           cortext::Retention::Ephemeral);
+                                           cortext::Retention::Ephemeral,
+                                           opts.evidence_budget);
           const auto end = std::chrono::steady_clock::now ();
           const double query_ms =
               std::chrono::duration<double, std::milli> (end - start).count ();
@@ -1511,6 +1524,9 @@ int Run (const Options &opts)
       {"totals", CountsJson (totals)},
       {"by_question_type", by_type_json},
       {"query_rows", opts.out_path.string ()},
+      {"evidence_budget_bytes",
+       opts.evidence_budget ? nlohmann::json (*opts.evidence_budget)
+                            : nlohmann::json ()},
       {"stream_clock", opts.stream_clock},
       {"image_filter", opts.image_filter},
       {"turn_signals", opts.turn_signals},

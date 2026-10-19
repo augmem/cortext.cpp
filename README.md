@@ -291,6 +291,17 @@ Top-level fields include:
   against a cut of the retrieved list.
 - `working_memory`: active short-term memory slots.
 - `embedding`: the current signal embedding when requested.
+
+Every process call takes an optional evidence budget in bytes (C++
+`Cortext::EvidenceBudget`, C `cortext_process_json_options.evidence_budget_bytes`,
+bindings `evidence_budget_bytes` / `evidenceBudgetBytes`). Unset, memories come
+back whole. Set, `standing_memory` plus `retrieved_memory` (with attached
+neighbours) fit within it: text counts its UTF-8 bytes and every other payload
+480 bytes, grouped memories keep their members most similar to the query (the
+best of each modality always), and more distinct memories are kept trimmed
+before lower-ranked ones are left out. A reader budgeted in tokens converts
+with its tokenizer's rate (8,000 tokens at 4.35 characters per token is 34,800
+bytes of ASCII text).
 - `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior.
 - `consolidation_state`: ordered `None`, `Recommended`, or `Required`
   maintenance urgency derived from the current throughput range.

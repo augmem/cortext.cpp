@@ -104,7 +104,8 @@ public:
     /// each entry holds only the stored signals that state a directive
     /// (one entry per memory), best first, within its own byte budget.
     /// Empty for writes. Consumers place it ahead of retrieved_memory and
-    /// do not count it against a retrieved-item cut.
+    /// do not count it against a retrieved-item cut; an evidence budget
+    /// (EvidenceBudget) counts it.
     std::vector<Memory> standing_memory;
     std::vector<float> embedding;          ///< Canonical embedding used for this process call.
     bool should_interrupt = false;
@@ -133,6 +134,32 @@ public:
     double hydrate_ms = 0.0;
     double total_ms = 0.0;
   };
+
+  /// @brief Optional per-call evidence budget, in bytes.
+  ///
+  /// Evidence is what a returned Context offers as recalled content:
+  /// standing_memory plus retrieved_memory (with the neighbours attached to
+  /// each retrieved memory); working_memory is not evidence. Text content is
+  /// charged by its UTF-8 bytes and every other payload (image, audio) as
+  /// kMediaEvidenceBytes. A reader budgeted in tokens converts with its own
+  /// tokenizer's rate: for example 8,000 tokens at 4.35 characters per token
+  /// is 34,800 bytes of ASCII text.
+  ///
+  /// Unset (std::nullopt, the default): every recalled memory comes back
+  /// whole, with no trimming. Set: the engine fits the evidence within the
+  /// budget. Directives are placed first (within their own block budget and
+  /// this one), then retrieved memories in rank order; a memory grouped from
+  /// several signals keeps its members most similar to the query (the best
+  /// member of each modality always, then the rest best first) under one
+  /// member cap shared by all memories, the largest cap with which the
+  /// evidence fits, so more distinct memories are kept trimmed rather than
+  /// fewer whole. A memory that does not fit even at its best members drops
+  /// its attached neighbours, then the memory itself; lower-ranked memories
+  /// that fit still join. The evidence never exceeds the budget.
+  using EvidenceBudget = std::optional<std::size_t>;
+
+  /// @brief Evidence charge of one non-text payload (see EvidenceBudget).
+  static constexpr std::size_t kMediaEvidenceBytes = 480;
 
   /// @brief Three-knob configuration preserved across the system.
   struct Config
@@ -221,9 +248,12 @@ public:
   /// @param retention Natural by default; episode algorithms decide. Pass
   /// Durable for explicit turn commit, Boundary for explicit turn edge only,
   /// or Ephemeral for no-storage query.
+  /// @param evidence_budget Optional evidence budget in bytes for the
+  /// returned packet (EvidenceBudget); every Process* call takes one.
   /// @return Context with retrieved memories and processing output.
   Context ProcessText (const std::string &text, const std::string &source_id,
-                       Retention retention = Retention::Natural);
+                       Retention retention = Retention::Natural,
+                       EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process text input with an explicit timestamp (ms since epoch).
   /// @param text The text content to process.
@@ -237,7 +267,8 @@ public:
   /// @return Context with retrieved memories and processing output.
   Context ProcessTextAt (const std::string &text, const std::string &source_id,
                          std::uint64_t timestamp,
-                         Retention retention = Retention::Natural);
+                         Retention retention = Retention::Natural,
+                         EvidenceBudget evidence_budget = std::nullopt);
 
 
   /// @brief Process audio PCM input.
@@ -251,7 +282,8 @@ public:
   /// @return Context with retrieved memories and processing output.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id,
-                        Retention retention = Retention::Natural);
+                        Retention retention = Retention::Natural,
+                        EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process audio PCM while storing caller-provided source media.
   ///
@@ -260,7 +292,8 @@ public:
   /// media.mimetype. If media is empty, no audio payload is persisted.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id, const Media &media,
-                        Retention retention = Retention::Natural);
+                        Retention retention = Retention::Natural,
+                        EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process image input.
   /// @param data Raw pixel data (RGB/RGBA).
@@ -275,7 +308,8 @@ public:
   /// @return Context with retrieved memories and processing output.
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
-                        Retention retention = Retention::Natural);
+                        Retention retention = Retention::Natural,
+                        EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process image pixels while storing caller-provided source media.
   ///
@@ -285,7 +319,8 @@ public:
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
                         const Media &media,
-                        Retention retention = Retention::Natural);
+                        Retention retention = Retention::Natural,
+                        EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Encode text and return the configured encoder's raw embedding.
   ///

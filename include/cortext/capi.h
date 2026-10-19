@@ -226,13 +226,26 @@ extern "C"
   ///
   /// retention defaults to CORTEXT_RETENTION_NATURAL. Older clients that only
   /// set struct_size + include_embedding keep Natural (false/false forces).
+  ///
+  /// evidence_budget_bytes is the per-call evidence budget
+  /// (cortext::Cortext::EvidenceBudget): 0 (the default) returns every
+  /// recalled memory whole; a positive value fits standing_memory plus
+  /// retrieved_memory (with attached neighbours) within that many bytes,
+  /// text charged by its UTF-8 bytes and every other payload as
+  /// CORTEXT_MEDIA_EVIDENCE_BYTES. A reader budgeted in tokens converts with
+  /// its tokenizer's rate (8,000 tokens at 4.35 characters per token is
+  /// 34,800 bytes of ASCII text).
   typedef struct cortext_process_json_options
   {
     size_t struct_size;
     int include_embedding;
     int retention; ///< cortext_retention; Natural when field absent/unknown
     int reserved;  ///< Must be zero; distinguishes this layout from v1.1.10.
+    size_t evidence_budget_bytes; ///< 0 = unset; read when struct_size covers it
   } cortext_process_json_options;
+
+/// @brief Evidence charge of one non-text payload under evidence_budget_bytes.
+#define CORTEXT_MEDIA_EVIDENCE_BYTES 480
 
   /// @brief Initializes process JSON options to current defaults.
   ///
