@@ -1,6 +1,7 @@
 #include "cortext/operations/graph_retrieval.hpp"
 
 #include "constructive_recall_internal.hpp"
+#include "cross_modal_index_internal.hpp"
 #include "historical_surface_search_cache_internal.hpp"
 #include "family_embedding_features_internal.hpp"
 #include "../store/memory_text_index_internal.hpp"
@@ -1537,35 +1538,26 @@ struct CrossModalHit
 // the query, best first (per memory, its best signal's z-score among all
 // vectors of that modality, kept when >= min_z).
 std::map<std::string, std::vector<CrossModalHit>>
-SearchCrossModalVectors (Transaction &tx, const Eigen::VectorXf &query,
+SearchCrossModalVectors (const ProcessorContext &p_ctx, Transaction &tx,
+                         const Eigen::VectorXf &query,
                          const std::string &query_modality,
                          const CrossModalSeedConfig &cfg)
 {
-  // The engine's signal modalities; each other one is read through the
-  // modality index, so a query never scans its own modality's vectors.
+  // The engine's signal modalities; each other one is scored from its
+  // resident population (cross_modal_index_internal.hpp), so a query never
+  // scans its own modality's vectors and reads from SQLite only the rows
+  // stored since the previous query.
   static const char *const kModalities[] = { "text", "image", "audio" };
-  const int dim = static_cast<int> (query.size ());
   std::map<std::string, std::vector<std::pair<long long, double>>> scored;
-  Eigen::VectorXf vec;
   for (const char *modality : kModalities)
     {
       if (query_modality == modality)
         continue;
-      const auto rows = tx.Execute (
-          "SELECT s.memory_id AS memory_id, v.embedding AS embedding "
-          "FROM memory_signal_vectors v "
-          "JOIN signals s ON s.blob_id = v.blob_id "
-          "JOIN memories m ON m.memory_id = s.memory_id "
-          "WHERE v.modality = ? AND m.kind = 'LONG_TERM'",
-          { std::string (modality) });
-      for (const auto &row : rows)
-        {
-          const auto emb = row.find ("embedding");
-          if (emb == row.end () || !AnyToEmbedding (emb->second, dim, vec))
-            continue;
-          scored[modality].emplace_back (AnyLongLong (row, "memory_id"),
-                                         Cosine (query, vec));
-        }
+      std::vector<std::pair<long long, double>> list;
+      cross_modal_index_internal::ScoreModality (p_ctx, tx, modality, query,
+                                                 list);
+      if (!list.empty ())
+        scored[modality] = std::move (list);
     }
   std::map<std::string, std::vector<CrossModalHit>> out;
   for (const auto &[modality, list] : scored)
@@ -2406,7 +2398,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       std::map<std::string, std::vector<CrossModalHit>> lists;
       try
         {
-          lists = SearchCrossModalVectors (tx, signal.embedding,
+          lists = SearchCrossModalVectors (p_ctx, tx, signal.embedding,
                                            signal.modality, xmodal_cfg);
         }
       catch (const std::exception &e)

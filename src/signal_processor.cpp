@@ -19,6 +19,7 @@
 #include "operations/bounded_activation_shadow_internal.hpp"
 #include "operations/consolidation_epoch_profile_internal.hpp"
 #include "operations/consolidation_throughput_state_internal.hpp"
+#include "operations/cross_modal_index_internal.hpp"
 #include "operations/historical_surface_search_cache_internal.hpp"
 #include "operations/member_vector_index_internal.hpp"
 #include "operations/signal_record_rollback_internal.hpp"
@@ -866,6 +867,7 @@ void
 InvalidateCustomOperationCaches (ProcessorContext &context)
 {
   operations::historical_surface_search_cache_internal::Erase (context);
+  operations::cross_modal_index_internal::Erase (context);
   ClearDbDerivedProcessorCaches (context);
   context.member_vector_index
       = std::make_shared<internal::MemberVectorIndex> ();
@@ -996,6 +998,17 @@ public:
     if (CustomQueryMayMutate (query))
       InvalidateCustomOperationCaches (*context_);
     return transaction_->Execute (query, params);
+  }
+
+  void
+  ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit) override
+  {
+    if (CustomQueryMayMutate (query))
+      InvalidateCustomOperationCaches (*context_);
+    transaction_->ExecuteEach (query, params, visit);
   }
 
   void
@@ -2802,6 +2815,7 @@ SignalProcessor::~SignalProcessor ()
       // Erasing it prevents a later allocation at the same address from
       // inheriting state from this processor or store.
       operations::historical_surface_search_cache_internal::Erase (*context_);
+      operations::cross_modal_index_internal::Erase (*context_);
       operations::bounded_activation_shadow_internal::Erase (*context_);
       operations::consolidation_throughput_state_internal::Erase (*context_);
       operations::consolidation_epoch_profile_internal::Erase (*context_);
@@ -2991,6 +3005,7 @@ SignalProcessor::Process (const Signal &signal)
   };
   auto restore_context_snapshot = [&] {
     operations::historical_surface_search_cache_internal::Erase (*context_);
+    operations::cross_modal_index_internal::Erase (*context_);
     signal_record_journal.RestoreRecordsInto (rollback_snapshot.context);
     *context_ = std::move (rollback_snapshot.context);
     operations::consolidation_throughput_state_internal::Reset (

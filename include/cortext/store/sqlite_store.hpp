@@ -72,6 +72,13 @@ public:
   Execute (const std::string &query,
            const std::vector<std::any> &params = {}) override;
 
+  /// @brief Execute a query within this transaction, visiting each row as
+  /// SQLite steps to it. The visitor must not use this transaction or store.
+  void ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit) override;
+
   /// @brief Commit this transaction.
   void Commit () override;
 

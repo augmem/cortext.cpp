@@ -40,6 +40,7 @@ const cortext_cpp_sources = &.{
     "src/operations/precision.cpp",
     "src/operations/constructive_recall_internal.cpp",
     "src/operations/graph_retrieval.cpp",
+    "src/operations/cross_modal_index_internal.cpp",
     "src/operations/sparse_retrieval_route_internal.cpp",
     "src/operations/sparse_retrieval_route_sqlite_internal.cpp",
     "src/operations/retrieval_trace_state.cpp",

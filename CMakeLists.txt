@@ -319,6 +319,7 @@ add_library(cortext
     src/operations/constructive_recall_internal.cpp
     src/operations/graph_retrieval.cpp
     src/operations/member_vector_index_internal.cpp
+    src/operations/cross_modal_index_internal.cpp
     src/operations/sparse_retrieval_route_internal.cpp
     src/operations/sparse_retrieval_route_sqlite_internal.cpp
     src/operations/retrieval_trace_state.cpp

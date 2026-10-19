@@ -1604,6 +1604,28 @@ SQLiteTransaction::Execute (const std::string &query,
 }
 
 void
+SQLiteTransaction::ExecuteEach (
+    const std::string &query, const std::vector<std::any> &params,
+    const std::function<void (const std::map<std::string, std::any> &)>
+        &visit)
+{
+  if (is_committed_ || is_rolled_back_)
+    {
+      throw TransactionAlreadyFinishedError (
+          "Transaction is already committed or rolled back");
+    }
+  if (!store_ || store_->transaction_stack_.empty ()
+      || store_->transaction_stack_.back () != this)
+    {
+      throw TransactionNotCurrentError (
+          "Transaction is not the current transaction");
+    }
+  store_->ExecuteDirectEach (
+      query, params,
+      [&visit] (std::map<std::string, std::any> &&row) { visit (row); });
+}
+
+void
 SQLiteTransaction::Commit ()
 {
   if (is_committed_ || is_rolled_back_)

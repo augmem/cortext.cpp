@@ -84,6 +84,22 @@ public:
   Execute (const std::string &query, const std::vector<std::any> &params = {})
       = 0;
 
+  /// @brief Execute a query within transaction context and visit its rows in
+  /// order (same contract as Store::ExecuteEach). The default visits
+  /// Execute's result.
+  /// @param query The SQL query to execute.
+  /// @param params The parameters for the query.
+  /// @param visit Called once per result row.
+  virtual void
+  ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit)
+  {
+    for (const auto &row : Execute (query, params))
+      visit (row);
+  }
+
   /// @brief Commit the current transaction.
   virtual void Commit () = 0;
 

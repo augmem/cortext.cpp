@@ -25,6 +25,7 @@ add_executable(cortext_tests
   data.test.cpp
   operations_centroids.test.cpp
   store.test.cpp
+  cross_modal_index.test.cpp
   store_extensions.test.cpp
   object_store.test.cpp
   core_algorithms.test.cpp
