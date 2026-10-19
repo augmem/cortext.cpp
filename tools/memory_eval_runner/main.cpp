@@ -1401,6 +1401,27 @@ int Run (const Options &opts)
               retrieved.push_back (std::move (item));
             }
 
+          // The standing block is outside the top-k cut (retrieved).
+          nlohmann::json standing = nlohmann::json::array ();
+          for (std::size_t i = 0; i < context.standing_memory.size (); ++i)
+            {
+              const auto &memory = context.standing_memory[i];
+              const auto [text, media]
+                  = MemoryTextAndMedia (memory, media_registry);
+              nlohmann::json item = {
+                  {"rank", i + 1},
+                  {"id", memory.id},
+                  {"source_id", memory.source_id},
+                  {"modality", memory.modality},
+                  {"text", text},
+              };
+              if (!media.empty ())
+                {
+                  item["media"] = media;
+                }
+              standing.push_back (std::move (item));
+            }
+
           nlohmann::json working = nlohmann::json::array ();
           for (std::size_t i = 0; i < context.working_memory.size (); ++i)
             {
@@ -1456,6 +1477,7 @@ int Run (const Options &opts)
                      {"consolidations", consolidations},
                      {"query_timestamp_ms", query.timestamp_ms},
                      {"retrieved", retrieved},
+                     {"standing", standing},
                      {"working", working},
                  }.dump ()
               << "\n";

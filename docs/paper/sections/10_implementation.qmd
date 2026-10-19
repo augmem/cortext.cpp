@@ -727,9 +727,13 @@ each non-stopword word) stored with each member, with document frequencies
 from the set itself: store-wide frequencies would discount the topic words
 that tell directives apart, and the store's FTS5 index cannot be restricted to
 the set cheaply (a full posting-list scan cost about 20 ms per query on a 10M
-store). The best five lead the packet without neighbours, each as its own signal
-rather than its whole memory; a memory that was already retrieved moves to the
-front, with query focus (below) keeping its standing signal. Query p95 at 100K / 1M / 10M stays within
+store). The best five, within 2 KiB, form a standing block of their own ahead
+of the retrieved memories (`Context::standing_memory`), each entry holding only
+the directive signals of one memory, never its whole memory or neighbours. The
+block takes no retrieved slot: a consumer that cuts the retrieved list at k
+keeps the same k retrieved memories (LongMemEval-M gold recall at k = 11 fell by
+0.087 while standing items took ranked slots, and by 0.024 [-0.071, 0.000]
+with the block). Query p95 at 100K / 1M / 10M stays within
 0.98 / 0.96 / 1.14 of the engine without the channel. A directive is stated once and must shape answers long after it
 falls out of query similarity: on BEAM the share of instruction-following
 gold turns (the instruction and its acknowledgement) in the 8k-token packet

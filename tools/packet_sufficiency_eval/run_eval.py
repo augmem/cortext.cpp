@@ -268,14 +268,16 @@ def build_packets(args, cases: list[dict], vdir: Path) -> dict[str, dict]:
 
 
 def packet_items(packet: dict) -> list[tuple[str, str]]:
-    items = [(f"R{i + 1}", m["text"]) for i, m in enumerate(packet.get("retrieved", []))]
+    # The standing block (directives, outside the retrieved ranking) leads.
+    items = [(f"S{i + 1}", m["text"]) for i, m in enumerate(packet.get("standing", []))]
+    items += [(f"R{i + 1}", m["text"]) for i, m in enumerate(packet.get("retrieved", []))]
     items += [(f"W{i + 1}", m["text"]) for i, m in enumerate(packet.get("working", []))]
     return items
 
 
 def packet_media(packet: dict) -> dict[str, list[dict]]:
     out = {}
-    for prefix, key in (("R", "retrieved"), ("W", "working")):
+    for prefix, key in (("S", "standing"), ("R", "retrieved"), ("W", "working")):
         for i, m in enumerate(packet.get(key, [])):
             if m.get("media"):
                 out[f"{prefix}{i + 1}"] = m["media"]

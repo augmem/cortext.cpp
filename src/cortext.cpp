@@ -1107,40 +1107,47 @@ private:
   std::unordered_map<long long, Hydrated> cache_;
 };
 
-// Appends a stored signal's payload to a packet memory's content (a joined
-// standing directive). False when the signal or its payload is missing.
-bool
-AppendStandingSignal (Store *store, ObjectStore *object_store,
-                      long long signal_id, Cortext::Context::Memory &memory)
+// Standing block budget (Context::standing_memory): directive signals are
+// short (standing_memory_internal::kMaxTextBytes each), so this holds the
+// best few; text is charged by its bytes, other media as one clipped
+// neighbour.
+constexpr std::size_t kStandingPacketBytes = 2048;
+
+// Appends a stored directive signal's payload to `memory`'s content and
+// returns its charge against kStandingPacketBytes; 0 when the signal or its
+// payload is missing.
+std::size_t
+LoadStandingSignal (Store *store, ObjectStore *object_store,
+                    long long signal_id, Cortext::Context::Memory &memory)
 {
   if (!store || signal_id <= 0)
-    return false;
+    return 0;
   try
     {
       const auto rows = store->Execute (
           "SELECT blob_id, modality, mime FROM signals WHERE signal_id = ?",
           { signal_id });
       if (rows.empty ())
-        return false;
+        return 0;
       const auto blob = rows[0].find ("blob_id");
       if (blob == rows[0].end () || !blob->second.has_value ())
-        return false;
+        return 0;
       std::vector<unsigned char> payload;
       if (!LoadObjectPayload (store, object_store,
-                              store::BlobFromAny (blob->second), payload))
-        return false;
-      const auto mime = rows[0].find ("mime");
-      std::string mimetype = mime != rows[0].end ()
-                                     && mime->second.type ()
-                                            == typeid (std::string)
-                                 ? std::any_cast<std::string> (mime->second)
-                                 : std::string ();
+                              store::BlobFromAny (blob->second), payload)
+          || payload.empty ())
+        return 0;
+      std::string mimetype = RowString (rows[0], "mime");
+      const std::string modality = RowString (rows[0], "modality");
       if (mimetype.empty ())
         mimetype = "text/plain";
-      AlignContentMimetypes (memory);
+      const bool text = IsTextMime (mimetype)
+                        && (modality.empty () || modality == "text");
+      const std::size_t cost
+          = text ? payload.size () : kContiguityNeighborMaxBytes;
       memory.content.push_back (std::move (payload));
       memory.content_mimetypes.push_back (std::move (mimetype));
-      return true;
+      return cost;
     }
   catch (const std::exception &e)
     {
@@ -1148,7 +1155,7 @@ AppendStandingSignal (Store *store, ObjectStore *object_store,
           "Failed to load standing signal",
           { telemetry::Attribute::String ("component", "cortext"),
             telemetry::Attribute::String ("error", e.what ()) });
-      return false;
+      return 0;
     }
 }
 
@@ -1182,11 +1189,10 @@ UnitFocusBudgetBytes ()
 }
 
 std::size_t
-FocusUnitMembers (
-    Store *store, ObjectStore *object_store, SharedObjectReads *shared,
-    std::vector<Cortext::Context::Memory> &memories,
-    const Eigen::VectorXf &query,
-    const std::unordered_map<long long, std::unordered_set<long long> > &pinned)
+FocusUnitMembers (Store *store, ObjectStore *object_store,
+                  SharedObjectReads *shared,
+                  std::vector<Cortext::Context::Memory> &memories,
+                  const Eigen::VectorXf &query)
 {
   if (!store || memories.empty () || query.size () == 0
       || UnitFocusBudgetBytes () == 0)
@@ -1196,7 +1202,6 @@ FocusUnitMembers (
     return 0;
   struct Member
   {
-    long long signal_id = 0;
     long long position = 0;
     std::vector<unsigned char> blob_id;
     std::string modality;
@@ -1219,8 +1224,7 @@ FocusUnitMembers (
   try
     {
       const auto rows = store->Execute (
-          "SELECT s.memory_id AS memory_id, s.signal_id AS signal_id, "
-          "       s.serial_position AS position, "
+          "SELECT s.memory_id AS memory_id, s.serial_position AS position, "
           "       s.blob_id AS blob_id, s.modality AS modality, "
           "       s.mime AS mime, v.embedding AS embedding "
           "FROM signals s "
@@ -1233,7 +1237,6 @@ FocusUnitMembers (
       for (const auto &row : rows)
         {
           Member member;
-          member.signal_id = RowLongLong (row, "signal_id");
           member.position = RowLongLong (row, "position");
           if (const auto it = row.find ("blob_id");
               it != row.end () && it->second.has_value ())
@@ -1280,15 +1283,10 @@ FocusUnitMembers (
             return !x.has_vector || x.blob_id.empty ();
           }))
         continue;
-      // Pinned members (standing signals the packet joins) come first.
-      const auto pin = pinned.find (m.id);
-      const auto is_pinned = [&] (const Member &x) {
-        return pin != pinned.end () && pin->second.count (x.signal_id) != 0;
-      };
       std::vector<std::size_t> order (list.size ());
       for (std::size_t i = 0; i < order.size (); ++i)
         order[i] = i;
-      // Then the best member of each modality (cosines across modalities
+      // The best member of each modality (cosines across modalities
       // are not comparable: a text query sits closer to every text member
       // than to any image), then the rest by cosine.
       std::unordered_map<std::string, std::size_t> best_of;
@@ -1303,10 +1301,6 @@ FocusUnitMembers (
       };
       std::stable_sort (order.begin (), order.end (),
                         [&] (std::size_t a, std::size_t b) {
-                          const bool pa = is_pinned (list[a]);
-                          const bool pb = is_pinned (list[b]);
-                          if (pa != pb)
-                            return pa;
                           const bool ba = is_modality_best (a);
                           const bool bb = is_modality_best (b);
                           if (ba != bb)
@@ -1331,8 +1325,7 @@ FocusUnitMembers (
                                 || list[i].modality == "text");
           const std::size_t cost
               = text ? payloads[i].size () : kContiguityNeighborMaxBytes;
-          if (kept > 0 && !is_pinned (list[i])
-              && used + cost > UnitFocusBudgetBytes ())
+          if (kept > 0 && used + cost > UnitFocusBudgetBytes ())
             continue;
           keep[i] = true;
           used += cost;
@@ -2763,14 +2756,10 @@ struct Cortext::Impl
     if (!SourceBlobsDisabled () && query_embedding && query_signal
         && query_signal->retention == Retention::Ephemeral)
       {
-        std::unordered_map<long long, std::unordered_set<long long> > pinned;
-        for (const auto &pick :
-             operations::retrieval_trace::GetLastStandingPicks ())
-          pinned[pick.memory_id].insert (pick.signal_id);
         result.output.operation_ms["Cortext.unit_members_focused"]
             = static_cast<double> (FocusUnitMembers (
                 store.get (), object_store.get (), &attachment_reads,
-                result.retrieved_memory, *query_embedding, pinned));
+                result.retrieved_memory, *query_embedding));
       }
     const auto anchor_rows = SourceBlobsDisabled ()
         ? std::unordered_map<long long, AnchorRow> ()
@@ -2810,60 +2799,55 @@ struct Cortext::Impl
     result.output.operation_ms["Cortext.superseded_predecessors_attached"]
         = static_cast<double> (superseded_predecessors_attached);
 
-    // Standing signals (operations/standing_memory_internal.hpp) lead the
-    // packet: short lasting directives an answer must honour, chosen within
-    // their own set. A memory already retrieved moves to the front as is
-    // (query focus kept its standing members); for the others the packet
-    // joins the directive's own signal, bare, without neighbours or the rest
-    // of its memory.
-    std::vector<Cortext::Context::Memory> standing;
+    // Standing signals (operations/standing_memory_internal.hpp): short
+    // lasting directives an answer must honour, chosen within their own set.
+    // They form a block of their own (Context::standing_memory), outside the
+    // retrieved ranking: each entry holds only the directive signals of one
+    // memory, best first, within kStandingPacketBytes, and the retrieved
+    // memories keep their ranks and content whether or not they hold one.
+    std::size_t standing_bytes = 0;
     for (const auto &pick :
          operations::retrieval_trace::GetLastStandingPicks ())
       {
-        const long long memory_id = pick.memory_id;
-        if (!seen_output_memory_ids.insert (memory_id).second)
+        Cortext::Context::Memory directive;
+        directive.id = pick.memory_id;
+        const auto cost = LoadStandingSignal (store.get (), object_store.get (),
+                                              pick.signal_id, directive);
+        if (cost == 0)
+          continue;
+        if (!result.standing_memory.empty ()
+            && standing_bytes + cost > kStandingPacketBytes)
+          continue;
+        standing_bytes += cost;
+        const auto joined = std::find_if (
+            result.standing_memory.begin (), result.standing_memory.end (),
+            [&] (const auto &m) { return m.id == pick.memory_id; });
+        if (joined != result.standing_memory.end ())
           {
-            const auto it = std::find_if (
-                result.retrieved_memory.begin (),
-                result.retrieved_memory.end (),
-                [memory_id] (const auto &m) { return m.id == memory_id; });
-            if (it != result.retrieved_memory.end ())
+            // A second directive signal of a memory already in the block.
+            AlignContentMimetypes (*joined);
+            for (std::size_t i = 0; i < directive.content.size (); ++i)
               {
-                standing.push_back (std::move (*it));
-                result.retrieved_memory.erase (it);
-              }
-            else
-              {
-                // A second standing signal of a memory already joined.
-                const auto joined = std::find_if (
-                    standing.begin (), standing.end (),
-                    [memory_id] (const auto &m) { return m.id == memory_id; });
-                if (joined != standing.end ())
-                  AppendStandingSignal (store.get (), object_store.get (),
-                                        pick.signal_id, *joined);
+                joined->content.push_back (std::move (directive.content[i]));
+                joined->content_mimetypes.push_back (
+                    std::move (directive.content_mimetypes[i]));
               }
             continue;
           }
         Cortext::Context::Memory m;
-        m.id = memory_id;
-        HydrateMemory (store.get (), object_store.get (), memory_id, m,
+        m.id = pick.memory_id;
+        HydrateMemory (store.get (), object_store.get (), pick.memory_id, m,
                        max_fallback_signal_blobs,
                        &loaded_fallback_signal_blobs);
         if (!HasHydratedContent (m))
           continue;
-        m.content.clear ();
-        m.content_mimetypes.clear ();
-        if (!AppendStandingSignal (store.get (), object_store.get (),
-                                   pick.signal_id, m))
-          continue;
+        m.content = std::move (directive.content);
+        m.content_mimetypes = std::move (directive.content_mimetypes);
         StripSourceBlobsIfDisabled (m);
-        standing.push_back (std::move (m));
+        result.standing_memory.push_back (std::move (m));
       }
     result.output.operation_ms["Cortext.standing_joined"]
-        = static_cast<double> (standing.size ());
-    result.retrieved_memory.insert (result.retrieved_memory.begin (),
-                                    std::make_move_iterator (standing.begin ()),
-                                    std::make_move_iterator (standing.end ()));
+        = static_cast<double> (result.standing_memory.size ());
     result.output.operation_ms["Cortext.fallback_hydration_signal_rows"]
         = static_cast<double> (loaded_fallback_signal_blobs);
     return result;

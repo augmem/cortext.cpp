@@ -151,6 +151,11 @@ std::string FormatTimestamp (std::uint64_t timestamp_ms)
 void PrintRetrieved (const cortext::Cortext::Context &context,
                      std::size_t top)
 {
+  for (const auto &memory : context.standing_memory)
+    {
+      std::cout << "  standing [#" << memory.id << "] "
+                << ClipForDisplay (MemoryText (memory), 160) << "\n";
+    }
   if (context.retrieved_memory.empty ())
     {
       std::cout << "  (no long-term memories surfaced)\n";

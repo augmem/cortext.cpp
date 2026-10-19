@@ -284,6 +284,11 @@ and language bindings.
 Top-level fields include:
 
 - `retrieved_memory`: long-term memories selected for the current signal.
+- `standing_memory`: standing directives for a query ("Always ...", "I
+  prefer ..."), outside the retrieved ranking: each entry holds only the
+  stored signals that state a directive, best first, within its own small
+  byte budget. Place it ahead of `retrieved_memory`; it does not count
+  against a cut of the retrieved list.
 - `working_memory`: active short-term memory slots.
 - `embedding`: the current signal embedding when requested.
 - `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior.

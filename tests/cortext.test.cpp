@@ -2603,7 +2603,21 @@ PacketText (const cortext::Cortext::Context &context)
 
 } // namespace
 
-TEST_CASE ("Standing directives lead query packets whatever their rank",
+namespace
+{
+
+std::string
+StandingText (const cortext::Cortext::Context::Memory &memory)
+{
+  std::string text;
+  for (const auto &blob : memory.content)
+    text.append (blob.begin (), blob.end ());
+  return text;
+}
+
+} // namespace
+
+TEST_CASE ("Standing directives join query packets outside the retrieved ranking",
            "[cortext][retrieval][standing]")
 {
   ScopedTempDb temp_db;
@@ -2642,23 +2656,60 @@ TEST_CASE ("Standing directives lead query packets whatever their rank",
       "Which libraries does the reporting service use?", "query/public",
       ts + 1000, cortext::Retention::Ephemeral);
   REQUIRE_FALSE (packet.retrieved_memory.empty ());
-  REQUIRE (packet.retrieved_memory.front ().id
+  REQUIRE (packet.standing_memory.size () == 1);
+  REQUIRE (packet.standing_memory.front ().id
            == *directive.output.stored_memory_id);
+  REQUIRE (StandingText (packet.standing_memory.front ())
+           == "Always include version numbers when I ask about software "
+              "libraries.");
   REQUIRE (packet.output.operation_ms.at ("Cortext.standing_joined") == 1.0);
-  for (const auto &memory : packet.retrieved_memory)
-    if (memory.id == *long_turn.output.stored_memory_id)
-      REQUIRE (&memory != &packet.retrieved_memory.front ());
+  for (const auto &memory : packet.standing_memory)
+    REQUIRE (memory.id != *long_turn.output.stored_memory_id);
 
   // Ingest does not join standing memories.
   ts += 3ULL * 60ULL * 60ULL * 1000ULL;
   const auto ingest = ctx->ProcessTextAt (
       "Which libraries does the reporting service use?", "chat/libs/x", ts,
       cortext::Retention::Durable);
+  REQUIRE (ingest.standing_memory.empty ());
   const auto joined = ingest.output.operation_ms.find ("Cortext.standing_joined");
   REQUIRE ((joined == ingest.output.operation_ms.end () || joined->second == 0.0));
 }
 
-TEST_CASE ("A directive inside a grouped memory leads query packets",
+TEST_CASE ("The standing block stays within its byte budget",
+           "[cortext][retrieval][standing]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  // Five directives of about 450 bytes: the set holds all five, the block
+  // (2 KiB) only four.
+  for (int i = 0; i < 5; ++i)
+    {
+      std::string text = "Always mention the library version number "
+                         + std::to_string (i) + " when I ask about it";
+      while (text.size () < 440)
+        text += " and the release date";
+      text += ".";
+      REQUIRE (ctx->ProcessTextAt (text, "chat/rules/" + std::to_string (i),
+                                   ts, cortext::Retention::Durable)
+                   .output.stored_memory_id.has_value ());
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+    }
+  const auto packet = ctx->ProcessTextAt (
+      "Which library version do we use?", "query/public", ts + 1000,
+      cortext::Retention::Ephemeral);
+  std::size_t bytes = 0;
+  for (const auto &memory : packet.standing_memory)
+    bytes += StandingText (memory).size ();
+  REQUIRE (packet.standing_memory.size () == 4);
+  REQUIRE (bytes <= 2048);
+}
+
+TEST_CASE ("A directive inside a grouped memory joins query packets alone",
            "[cortext][retrieval][standing][retention][aist]")
 {
   cortext::testing::ScopedEnvVar disable_natural_boundary (
@@ -2706,15 +2757,9 @@ TEST_CASE ("A directive inside a grouped memory leads query packets",
   const auto packet = ctx->ProcessTextAt (
       "Which libraries does the reporting service use?", "query/public",
       ts + 1000, cortext::Retention::Ephemeral);
-  REQUIRE_FALSE (packet.retrieved_memory.empty ());
-  std::string front;
-  for (const auto &blob : packet.retrieved_memory.front ().content)
-    front.append (blob.begin (), blob.end ());
-  // The directive leads, kept by query focus within the unit's budget
-  // (pinned ahead of members more similar to the query), or joined alone
-  // when its memory was not retrieved.
-  REQUIRE (front.find (directive) != std::string::npos);
-  REQUIRE (front.size () <= 3072);
+  // The standing block holds the directive signal alone, not its unit.
+  REQUIRE (packet.standing_memory.size () == 1);
+  REQUIRE (StandingText (packet.standing_memory.front ()) == directive);
   REQUIRE (packet.output.operation_ms.at ("Cortext.standing_joined") == 1.0);
 }
 

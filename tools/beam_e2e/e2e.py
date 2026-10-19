@@ -173,7 +173,9 @@ def context_items(packet: dict, arm: str, q: dict | None = None) -> list[tuple[s
         return [(f"G{i + 1}", g["text"]) for i, g in enumerate(turns)]
     if arm == "none":  # memory-free control: what the protocol scores with no packet at all
         return []
-    items = [(f"R{i + 1}", m["text"]) for i, m in enumerate(packet.get("retrieved", []))]
+    # The standing block (directives, outside the retrieved ranking) leads.
+    items = [(f"S{i + 1}", m["text"]) for i, m in enumerate(packet.get("standing", []))]
+    items += [(f"R{i + 1}", m["text"]) for i, m in enumerate(packet.get("retrieved", []))]
     if arm == "full":
         return items + [(f"W{i + 1}", m["text"]) for i, m in enumerate(packet.get("working", []))]
     budget, out, used = BUDGET_CHARS[arm], [], 0

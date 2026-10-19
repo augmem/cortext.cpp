@@ -1007,6 +1007,12 @@ context_to_json (const cortext::Cortext::Context &ctx,
       retrieved_memory.push_back (memory_to_json (memory));
     }
 
+  nlohmann::json standing_memory = nlohmann::json::array ();
+  for (const auto &memory : ctx.standing_memory)
+    {
+      standing_memory.push_back (memory_to_json (memory));
+    }
+
   nlohmann::json metrics = nlohmann::json::object ();
   for (const auto &[metric_id, value] : ctx.output.metrics)
     {
@@ -1062,6 +1068,7 @@ context_to_json (const cortext::Cortext::Context &ctx,
   nlohmann::json result = {
     { "working_memory", std::move (working_memory) },
     { "retrieved_memory", std::move (retrieved_memory) },
+    { "standing_memory", std::move (standing_memory) },
     { "should_interrupt", ctx.should_interrupt },
     { "interrupt_aborted", ctx.interrupt_aborted },
     { "at_boundary", ctx.at_boundary },

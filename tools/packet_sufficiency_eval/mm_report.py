@@ -52,7 +52,7 @@ def pct(xs: list[float], q: float) -> float:
 
 
 def tier1(cases: list[dict], packets: dict[str, dict], scope: str) -> dict:
-    keys = ("retrieved", "working") if scope == "RW" else ("retrieved",)
+    keys = ("standing", "retrieved", "working") if scope == "RW" else ("standing", "retrieved")
     c = defaultdict(int)
     for case in cases:
         pkt = packets.get(case["query_id"])
@@ -147,7 +147,7 @@ def realtime(vdir: Path) -> dict:
         "image_signals": n_img,
         "images_filtered": (summary.get("filtered_signals") or {}).get("image", 0),
         "media_bytes_per_image": media / n_img if n_img else 0,
-        "packets_with_media": sum(1 for p in packets if any(m.get("media") for k in ("retrieved", "working") for m in p.get(k, []))),
+        "packets_with_media": sum(1 for p in packets if any(m.get("media") for k in ("standing", "retrieved", "working") for m in p.get(k, []))),
         "packets": len(packets),
     }
 

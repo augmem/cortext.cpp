@@ -100,6 +100,12 @@ public:
 
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
     std::vector<Memory> retrieved_memory;  ///< Long-term retrieval results (injected context)
+    /// Standing directives for this query, outside the retrieved ranking:
+    /// each entry holds only the stored signals that state a directive
+    /// (one entry per memory), best first, within its own byte budget.
+    /// Empty for writes. Consumers place it ahead of retrieved_memory and
+    /// do not count it against a retrieved-item cut.
+    std::vector<Memory> standing_memory;
     std::vector<float> embedding;          ///< Canonical embedding used for this process call.
     bool should_interrupt = false;
     bool interrupt_aborted = false;
