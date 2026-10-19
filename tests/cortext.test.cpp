@@ -2621,12 +2621,19 @@ TEST_CASE ("Cortext recalls memories across modalities in both directions",
       cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
   auto clock = std::make_shared<cortext::FixedClock> (1000);
   auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  // The stand-in vector replaces what the signal shows, so its
+  // late-interaction codes (computed from the real payload) are dropped too:
+  // the reranker then sees the member through the stand-in vector alone.
   const auto set_vector = [&] (long long memory_id, const std::string &modality,
                                const std::vector<float> &v) {
     store->Execute ("UPDATE memory_signal_vectors SET embedding = ? "
                     "WHERE blob_id IN (SELECT blob_id FROM signals "
                     "WHERE memory_id = ? AND modality = ?)",
                     { v, memory_id, modality });
+    store->Execute ("DELETE FROM memory_signal_li_codes "
+                    "WHERE blob_id IN (SELECT blob_id FROM signals "
+                    "WHERE memory_id = ? AND modality = ?)",
+                    { memory_id, modality });
   };
 
   // Photos (image memories). Their stored vectors stand in for what each
@@ -2725,6 +2732,15 @@ TEST_CASE ("Cortext recalls memories across modalities in both directions",
 
 namespace
 {
+// Contiguity tests pin the engine's own anchor order: without late-interaction
+// codes the reranker keeps every memory in its slot (graph_retrieval
+// RerankLateInteraction), so deferral and attachment decide the packet.
+void
+DropLateInteractionCodes (cortext::Store &store)
+{
+  store.Execute ("DELETE FROM memory_signal_li_codes", {});
+}
+
 // Unrelated turns, each its own stream and hours apart, so a query has more
 // candidates than packet anchors and none of them is anyone's neighbour.
 void
@@ -2977,6 +2993,45 @@ TEST_CASE ("Stores from before the standing set fill it once on open",
                .empty ());
 }
 
+TEST_CASE ("Late interaction reranks text queries and leaves audio queries "
+           "in engine order",
+           "[cortext][retrieval][late_interaction][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_audio_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+  // Stored text signals carry late-interaction codes.
+  REQUIRE (AnyToLongLong (store->Execute ("SELECT COUNT(*) AS n FROM "
+                                          "memory_signal_li_codes")[0]
+                              .at ("n"))
+           > 0);
+  const auto text = ctx->ProcessTextAt ("When is the tax filing due?",
+                                        "query/public", ts + 1000,
+                                        cortext::Retention::Ephemeral);
+  REQUIRE (text.output.operation_ms.count ("GraphRetrieve.li_moved") == 1);
+  // A repeated query reuses its cached query set: same rerank, same packet.
+  const auto again = ctx->ProcessTextAt ("When is the tax filing due?",
+                                         "query/public", ts + 2000,
+                                         cortext::Retention::Ephemeral);
+  REQUIRE (again.output.operation_ms.at ("GraphRetrieve.li_moved")
+           == text.output.operation_ms.at ("GraphRetrieve.li_moved"));
+  REQUIRE (again.retrieved_memory.size () == text.retrieved_memory.size ());
+  for (std::size_t i = 0; i < text.retrieved_memory.size (); ++i)
+    REQUIRE (again.retrieved_memory[i].id == text.retrieved_memory[i].id);
+  // The audio tower has no trained position map: no query vectors, so the
+  // reranker does not run and the engine order stands.
+  std::vector<float> pcm (16000, 0.01F);
+  const auto audio = ctx->ProcessAudio (pcm.data (), pcm.size (),
+                                        "query/audio",
+                                        cortext::Retention::Ephemeral);
+  REQUIRE (audio.output.operation_ms.count ("GraphRetrieve.li_moved") == 0);
+}
+
 TEST_CASE ("Query retrieval defers the adjacent turn of a higher anchor",
            "[cortext][retrieval][contiguity]")
 {
@@ -3000,6 +3055,7 @@ TEST_CASE ("Query retrieval defers the adjacent turn of a higher anchor",
   REQUIRE (reply.output.stored_memory_id.has_value ());
   ts += 3ULL * 60ULL * 60ULL * 1000ULL;
   AddUnrelatedTurns (*ctx, nullptr, ts);
+  DropLateInteractionCodes (*store);
 
   const auto packet = ctx->ProcessTextAt ("zebra kite festival Marlow beach",
                                           "query/public", ts + 1000,
@@ -3040,6 +3096,7 @@ TEST_CASE ("Attached turns keep the window that covers the query",
                             cortext::Retention::Durable);
   ts += 3ULL * 60ULL * 60ULL * 1000ULL;
   AddUnrelatedTurns (*ctx, nullptr, ts);
+  DropLateInteractionCodes (*store);
 
   const auto packet = ctx->ProcessTextAt ("orchid conservatory tickets",
                                           "query/public", ts + 1000,

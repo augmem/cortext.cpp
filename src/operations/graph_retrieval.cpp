@@ -16,6 +16,7 @@
 #include "cortext/telemetry/telemetry.hpp"
 #include "../contiguity_internal.hpp"
 #include "../experimental_env.hpp"
+#include "../models/aist_late_interaction.hpp"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,7 @@
 #include <cstdint>
 #include <exception>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1804,7 +1806,105 @@ SelectStandingSignals (const ProcessorContext &p_ctx, Transaction &tx,
   return picked;
 }
 
+// Learned late-interaction rerank of the head of a query's candidate pool
+// (models/aist_late_interaction.hpp). Members load in serial order with their
+// stored retrieval vector and late-interaction codes. A memory none of whose
+// members has codes (a tower without a trained position map, or a signal
+// stored before codes existed) keeps its slot: one global vector cannot
+// compete with code sets, so moving it would bias against that modality. The
+// memories with codes are reordered among the remaining slots. Returns how many
+// of the head candidates changed position.
+std::size_t
+RerankLateInteraction (const internal::LateInteractionModel &model,
+                       const Signal &signal, Transaction &tx,
+                       std::vector<Candidate> &ranked_all)
+{
+  const std::size_t depth = std::min<std::size_t> (
+      ranked_all.size (), static_cast<std::size_t> (std::max (0, model.Depth ())));
+  if (depth < 2)
+    return 0;
+  std::unordered_map<long long, std::size_t> slot;
+  slot.reserve (depth);
+  std::string placeholders;
+  std::vector<std::any> params;
+  params.reserve (depth);
+  for (std::size_t i = 0; i < depth; ++i)
+    {
+      slot.emplace (ranked_all[i].memory_id, i);
+      placeholders += (i == 0 ? "?" : ",?");
+      params.emplace_back (ranked_all[i].memory_id);
+    }
+  const auto rows = tx.Execute (
+      "SELECT s.memory_id AS memory_id, v.embedding AS embedding, "
+      "       c.codes AS li_codes "
+      "FROM signals s "
+      "LEFT JOIN memory_signal_vectors v ON v.blob_id = s.blob_id "
+      "LEFT JOIN memory_signal_li_codes c ON c.blob_id = s.blob_id "
+      "WHERE s.memory_id IN (" + placeholders + ") "
+      "ORDER BY s.memory_id, s.serial_position, s.signal_id",
+      params);
+  std::vector<std::vector<internal::LateInteractionModel::Member> > members (
+      depth);
+  const auto cap = static_cast<std::size_t> (std::max (1, model.MaxMembers ()));
+  for (const auto &row : rows)
+    {
+      const auto it = slot.find (AnyLongLong (row, "memory_id"));
+      if (it == slot.end () || members[it->second].size () >= cap)
+        continue;
+      internal::LateInteractionModel::Member member;
+      const auto emb = row.find ("embedding");
+      if (emb != row.end () && emb->second.has_value ())
+        (void)AnyToEmbedding (emb->second, static_cast<int> (
+                                               signal.embedding.size ()),
+                              member.global);
+      const auto codes = row.find ("li_codes");
+      if (codes != row.end () && codes->second.type () == typeid (std::vector<char>))
+        {
+          const auto &blob = std::any_cast<const std::vector<char> &> (codes->second);
+          (void)internal::LateInteractionModel::Deserialize (
+              reinterpret_cast<const unsigned char *> (blob.data ()), blob.size (),
+              member.codes);
+        }
+      if (member.global.size () == 0 && member.codes.count == 0)
+        continue;
+      members[it->second].push_back (std::move (member));
+    }
+  const std::vector<float> scores
+      = model.Score (signal.late_interaction, signal.embedding, members);
+  std::vector<std::size_t> movable;
+  movable.reserve (depth);
+  for (std::size_t i = 0; i < depth; ++i)
+    {
+      const bool coded = std::any_of (
+          members[i].begin (), members[i].end (),
+          [] (const internal::LateInteractionModel::Member &m) {
+            return m.codes.count > 0;
+          });
+      if (coded)
+        movable.push_back (i);
+    }
+  std::vector<std::size_t> reordered = movable;
+  std::stable_sort (reordered.begin (), reordered.end (),
+                    [&scores] (std::size_t a, std::size_t b) {
+                      return scores[a] > scores[b];
+                    });
+  std::vector<std::size_t> order (depth);
+  std::iota (order.begin (), order.end (), std::size_t{ 0 });
+  for (std::size_t k = 0; k < movable.size (); ++k)
+    order[movable[k]] = reordered[k];
+  std::vector<Candidate> head;
+  head.reserve (depth);
+  std::size_t moved = 0;
+  for (std::size_t i = 0; i < depth; ++i)
+    {
+      moved += order[i] != i ? 1 : 0;
+      head.push_back (std::move (ranked_all[order[i]]));
+    }
+  std::move (head.begin (), head.end (), ranked_all.begin ());
+  return moved;
+}
 } // namespace
+
 
 void
 GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
@@ -2472,6 +2572,7 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                  return a.memory_id > b.memory_id;
                });
 
+
   // Queries only: ingest-time retrieval feeds the engine's own operations,
   // not a hydrated packet.
   std::size_t neighbours_deferred = 0;
@@ -2480,6 +2581,45 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         p_ctx, tx, ranked_all, static_cast<std::size_t> (output_limit));
   context.AddOperationTiming ("GraphRetrieve.neighbours_deferred",
                               static_cast<double> (neighbours_deferred));
+
+  // Queries only: the learned late-interaction reranker reorders the head of
+  // the pool after neighbour deferral and before the output cut, so the
+  // packet follows its order. It runs after deferral on purpose: deferring
+  // the neighbours of its picks lowered Eval1 packet gold-turn recall from
+  // 0.938 to 0.892; deferral still orders memories it does not move.
+  // A query whose tower has no trained position map (no query vectors, e.g.
+  // audio today) keeps the engine order: the model never learned to rank
+  // from a lone global vector.
+  if (signal.retention == Retention::Ephemeral
+      && context.GetConfig ().late_interaction != nullptr
+      && signal.late_interaction.count > 0)
+    {
+      const auto li_start = std::chrono::steady_clock::now ();
+      telemetry::ScopedSpan li_span ("cortext.retrieval.late_interaction");
+      std::size_t li_moved = 0;
+      try
+        {
+          li_moved = RerankLateInteraction (
+              *context.GetConfig ().late_interaction, signal, tx, ranked_all);
+          li_span.SetAttribute ("cortext.li.moved",
+                                static_cast<std::int64_t> (li_moved));
+          li_span.SetStatusOk ();
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogWarn (
+              "cortext.graph_retrieval.late_interaction_unavailable",
+              { telemetry::Attribute::String ("error", e.what ()) });
+        }
+      context.AddOperationTiming ("GraphRetrieve.li_moved",
+                                  static_cast<double> (li_moved));
+      context.AddOperationTiming (
+          "GraphRetrieve.late_interaction_ms",
+          std::chrono::duration<double, std::milli> (
+              std::chrono::steady_clock::now () - li_start)
+              .count ());
+    }
+
 
   // Standing memories join query packets whatever their rank here.
   if (signal.retention == Retention::Ephemeral && embedding_dim > 0)

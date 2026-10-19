@@ -708,6 +708,50 @@ recall rose from 0.41 to 0.67 and judged sufficiency from 0.53 to 0.82, with
 query p95 and ingest time within 2% of the vector-only engine. Ingest-time retrieval stays vector-only;
 lexical seeds there cost per-turn time without improving recall.
 
+Queries rerank the head of the fused candidate pool with a learned
+late-interaction model over the frozen AIST encoder
+(`models/AIST-87M-GGUF/AIST-87M-LI.gguf`, 0.2M parameters,
+`src/models/aist_late_interaction.cpp`; training in `tools/reranker`). Every
+item, in any modality, becomes a set of unit vectors in one 64-d space. The
+first source is its AIST position features: text token hidden states and
+12x12 image patches, each tower with its own linear map. The second is its
+stored 256-d retrieval vector, through one map shared by all modalities. A
+stored signal keeps 16 spherical k-means codes of its positions as int8
+(table `memory_signal_li_codes`, schema migration 54, about 1.4 KB per stored
+payload). A query keeps all of its positions, each with a learned gate weight.
+A member scores the gate-weighted mean over query vectors of the best cosine
+to its own vectors (MaxSim); a memory scores a soft maximum over its first
+eight members plus a rank prior. The model is distilled from a text
+cross-encoder (MiniLM-L6) with listwise KL. A listwise loss on gold memories
+is added. Image members get soft labels through their captions and hard labels
+through MemLens gold, so cross-modal pairs are trained directly.
+
+The rerank runs on the top 64 candidates after neighbour deferral and before
+the output cut. Deferring the neighbours of the reranked picks instead lowered
+Eval1 packet recall from 0.938 to 0.892. Some memories have no member with
+codes: towers without a trained map (audio) and signals stored before the
+model. These keep their slots, and the coded memories reorder among the
+remaining ones; a lone global vector cannot compete with a code set. A query
+without position vectors keeps the engine order.
+
+Packet gold-turn recall rose on every set. Eval1 rose from 0.846 to 0.938;
+its conversations held out from training rose from 0.878 to 0.955. On
+LongMemEval-S, S rose from 0.808 to 0.992 and M from 0.770 to 0.894. On
+MemLens, text gold rose from 0.415 to 0.575 and image gold from 0.344 to
+0.396. On BEAM at a 34,800-byte budget, recall at 100K / 1M / 10M rose from
+0.615 / 0.413 / 0.274 to 0.696 / 0.518 / 0.369; 100K and 10M were never
+trained on.
+
+Judged packet sufficiency was near ceiling. Eval1 went from 0.955 to 0.973
+and the MemLens image rubric from 0.852 to 0.878. On BEAM end to end, the
+judged score at 100K / 1M / 10M moved from 0.816 / 0.778 / 0.667 to
+0.843 / 0.799 / 0.699. DolphinBench passed 0.812 against 0.788 (600 tests),
+with abstention flat to slightly lower.
+
+The rerank step costs 1 to 3 ms per query. Query p95 stayed within 1.02x to
+1.14x of the engine without it at 10K to 443K memories. Its codes added 11%
+to Eval1 store size.
+
 Standing memories are a small query-independent channel for lasting
 directives and preferences ("Always include version numbers when I ask about
 libraries", "From now on, answer in French"). Membership is a property of the

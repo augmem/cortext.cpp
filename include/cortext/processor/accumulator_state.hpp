@@ -22,6 +22,7 @@ struct SignalRecord
   std::vector<unsigned char> blob_id;     ///< objstore hash (may be empty)
   std::vector<unsigned char> payload;     ///< Raw payload held until write acceptance
   std::string text_payload;               ///< Transient text cache for active WM
+  std::vector<unsigned char> li_codes;    ///< Serialized late-interaction codes (may be empty)
   double score = 0.0;                     ///< Composite score
   int serial_position = 0;                ///< Order within memory (0-based)
 };

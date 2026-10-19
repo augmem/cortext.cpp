@@ -8,6 +8,8 @@
 #include "cortext/models/embedding_model_pin.hpp"
 #include "cortext/internal/replay_ingress.hpp"
 #include "encoder/text_encoder_factory.hpp"
+#include "models/aist_late_interaction.hpp"
+#include "models/aist_semantic_cache_internal.hpp"
 #include "operations/constructive_recall_internal.hpp"
 #include "operations/retrieval_trace_state.hpp"
 #include "operations/signal_record_rollback_internal.hpp"
@@ -2559,6 +2561,92 @@ struct Cortext::Impl
   std::unique_ptr<cortext::SignalProcessor> processor;
 
   std::string embedding_model_pin;
+  /// Learned late-interaction reranker (required with the AIST encoder).
+  std::unique_ptr<internal::LateInteractionModel> late_interaction;
+
+  /// @brief Encodes a signal and builds its late-interaction set (query set
+  /// for Ephemeral signals, stored codes otherwise) from the encoder's
+  /// position features.
+  void
+  EncodeTextSignal (const std::string &text, Retention retention,
+                    std::vector<float> &v, LateInteractionSet &li)
+  {
+    // A repeated query reuses its query set; the encoder's own semantic
+    // cache then serves the embedding, as it did before position features.
+    if (retention == Retention::Ephemeral)
+      {
+        if (const std::vector<float> *hit = query_set_cache.Find (text))
+          {
+            UnpackQuerySet (*hit, li);
+            encoder->EncodeText (text, v);
+            return;
+          }
+      }
+    EncoderPositions positions;
+    encoder->EncodeTextPositions (text, v, positions);
+    li = BuildLateInteraction (positions, retention);
+    if (retention == Retention::Ephemeral)
+      {
+        query_set_cache.Put (text, PackQuerySet (li));
+      }
+  }
+
+  /// Query sets of recent text queries, packed as
+  /// [count, dim, values (count x dim), gate (count)], byte-bounded LRU.
+  internal::AistSemanticCache query_set_cache;
+
+  static std::vector<float>
+  PackQuerySet (const LateInteractionSet &set)
+  {
+    std::vector<float> out;
+    out.reserve (2 + set.values.size () + set.gate.size ());
+    out.push_back (static_cast<float> (set.count));
+    out.push_back (static_cast<float> (set.dim));
+    out.insert (out.end (), set.values.begin (), set.values.end ());
+    out.insert (out.end (), set.gate.begin (), set.gate.end ());
+    return out;
+  }
+
+  static void
+  UnpackQuerySet (const std::vector<float> &packed, LateInteractionSet &set)
+  {
+    set = {};
+    set.count = static_cast<int> (packed[0]);
+    set.dim = static_cast<int> (packed[1]);
+    const auto n = static_cast<std::ptrdiff_t> (set.count) * set.dim;
+    set.values.assign (packed.begin () + 2, packed.begin () + 2 + n);
+    set.gate.assign (packed.begin () + 2 + n, packed.end ());
+  }
+
+  void
+  EncodeImageSignal (const std::uint8_t *data, int width, int height,
+                     int channels, Retention retention, std::vector<float> &v,
+                     LateInteractionSet &li)
+  {
+    EncoderPositions positions;
+    encoder->EncodeImagePositions (data, width, height, channels, v,
+                                   positions);
+    li = BuildLateInteraction (positions, retention);
+  }
+
+  void
+  EncodeAudioSignal (const float *pcm, std::size_t num_samples,
+                     Retention retention, std::vector<float> &v,
+                     LateInteractionSet &li)
+  {
+    EncoderPositions positions;
+    encoder->EncodeAudioPositions (pcm, num_samples, v, positions);
+    li = BuildLateInteraction (positions, retention);
+  }
+
+  LateInteractionSet
+  BuildLateInteraction (const EncoderPositions &positions,
+                        Retention retention) const
+  {
+    return retention == Retention::Ephemeral
+               ? late_interaction->QuerySet (positions)
+               : late_interaction->MemorySet (positions);
+  }
 
   Impl (const Config &c, std::shared_ptr<cortext::Store> supplied_store,
         std::shared_ptr<cortext::ObjectStore> supplied_object_store,
@@ -2588,6 +2676,19 @@ struct Cortext::Impl
         text_encoder.backend_name, text_encoder.resolved_path, 256);
     VerifyEmbeddingModel (*store, embedding_model_pin);
     encoder = std::move (text_encoder.encoder);
+    // The late-interaction reranker ships with the AIST model (Git shards
+    // linked into the library) and is required with it, like the encoder.
+    const auto li_path = internal::ResolveLateInteractionModelPath (
+        text_encoder.resolved_path);
+    if (!li_path)
+      {
+        throw std::runtime_error (
+            "AIST late-interaction reranker (AIST-87M-LI.gguf) not found beside "
+            + text_encoder.resolved_path.string ()
+            + " and not linked into this build; set CORTEXT_LI_MODEL_PATH "
+              "to its .gguf file");
+      }
+    late_interaction = internal::LateInteractionModel::Load (*li_path);
 
     root_operations = BuildRootOperationSet (false);
     processor = std::make_unique<cortext::SignalProcessor> (
@@ -2669,6 +2770,7 @@ struct Cortext::Impl
     pcfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
     pcfg.encoder = encoder.get ();
     pcfg.clock = clock;
+    pcfg.late_interaction = late_interaction.get ();
 
     return pcfg;
   }
@@ -3260,7 +3362,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeText (text, v);
+  LateInteractionSet li;
+  impl_->EncodeTextSignal (text, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3271,6 +3374,7 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
@@ -3315,7 +3419,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeText (text, v);
+  LateInteractionSet li;
+  impl_->EncodeTextSignal (text, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3326,6 +3431,7 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   s.timestamp = timestamp;
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
@@ -3383,7 +3489,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  LateInteractionSet li;
+  impl_->EncodeAudioSignal (pcm, num_samples, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3394,6 +3501,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.modality = "audio";
   ApplyStoredMedia (s, Media{}, pcm, num_samples * sizeof (float),
                     MakeAudioMimePcmF32 ());
@@ -3457,7 +3565,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  LateInteractionSet li;
+  impl_->EncodeAudioSignal (pcm, num_samples, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3467,6 +3576,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.modality = "audio";
   ApplyStoredMedia (s, media, pcm, num_samples * sizeof (float),
                     MakeAudioMimePcmF32 ());
@@ -3527,7 +3637,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeImage (data, width, height, channels, v);
+  LateInteractionSet li;
+  impl_->EncodeImageSignal (data, width, height, channels, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3538,6 +3649,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.modality = "image";
   ApplyStoredMedia (s, Media{}, data, RawImageBytes (width, height, channels),
                     RawImageMime (width, height, channels));
@@ -3601,7 +3713,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeImage (data, width, height, channels, v);
+  LateInteractionSet li;
+  impl_->EncodeImageSignal (data, width, height, channels, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3611,6 +3724,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.modality = "image";
   ApplyStoredMedia (s, media, data, RawImageBytes (width, height, channels),
                     RawImageMime (width, height, channels));
@@ -3727,7 +3841,8 @@ internal::ReplayIngress::ProcessTextAt (Cortext &cortext,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  cortext.impl_->encoder->EncodeText (text, v);
+  LateInteractionSet li;
+  cortext.impl_->EncodeTextSignal (text, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3737,6 +3852,7 @@ internal::ReplayIngress::ProcessTextAt (Cortext &cortext,
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
@@ -3797,7 +3913,8 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  cortext.impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  LateInteractionSet li;
+  cortext.impl_->EncodeAudioSignal (pcm, num_samples, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3807,6 +3924,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   const std::size_t byte_len = num_samples * sizeof (float);
   s.payload = std::vector<unsigned char> (byte_len);
   std::memcpy (s.payload->data (), pcm, byte_len);
@@ -3871,7 +3989,8 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  cortext.impl_->encoder->EncodeImage (data, width, height, channels, v);
+  LateInteractionSet li;
+  cortext.impl_->EncodeImageSignal (data, width, height, channels, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -3881,6 +4000,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   const std::size_t byte_len
       = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
         * static_cast<std::size_t> (channels);

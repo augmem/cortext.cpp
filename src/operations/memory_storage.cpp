@@ -1444,6 +1444,13 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                           "(blob_id, modality, embedding) VALUES (?, ?, ?)",
                           { sig_rec.blob_id, sig_rec.modality,
                             EigenToFloatVec (sig_rec.embedding) });
+                      if (!sig_rec.li_codes.empty ())
+                        {
+                          savepoint->Execute (
+                              "INSERT OR IGNORE INTO memory_signal_li_codes "
+                              "(blob_id, codes) VALUES (?, ?)",
+                              { sig_rec.blob_id, sig_rec.li_codes });
+                        }
                       signal_vector_insert_ms += ElapsedMillis (vector_start);
                     }
                   if (sig_rec.timestamp == signal.timestamp

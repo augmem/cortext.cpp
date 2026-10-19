@@ -6,6 +6,7 @@
 #include "cortext/signal.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "../experimental_env.hpp"
+#include "../models/aist_late_interaction.hpp"
 #include "signal_record_rollback_internal.hpp"
 
 #include <algorithm>
@@ -27,6 +28,8 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position)
   rec.mime = signal.mimetype;
   rec.score = score;
   rec.serial_position = serial_position;
+  rec.li_codes = internal::LateInteractionModel::Serialize (
+      signal.late_interaction);
   if ((signal.modality == "text" || signal.mimetype == "text/plain")
       && signal.payload && !signal.payload->empty ())
     {

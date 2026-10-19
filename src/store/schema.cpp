@@ -1133,6 +1133,27 @@ GetCoreMigrations ()
               "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
           },
       },
+      {
+          54,
+          "Late-interaction reranker codes per stored signal payload",
+          {
+              // codes: k-means codes of the payload's AIST position features
+              // in the reranker's late-interaction space
+              // (models/aist_late_interaction.hpp Serialize format). Keyed
+              // like memory_signal_vectors (content id), in their own rowid
+              // table: a ~1 KB code blob beside the 1 KB vector would hold
+              // one vector row per page and make every vector read pull it.
+              // Queries rerank the head of the candidate pool with them.
+              "CREATE TABLE IF NOT EXISTS memory_signal_li_codes ("
+              "  blob_id BLOB NOT NULL UNIQUE,"
+              "  codes BLOB NOT NULL)",
+              "CREATE TRIGGER IF NOT EXISTS signals_li_codes_delete "
+              "AFTER DELETE ON signals WHEN old.blob_id IS NOT NULL "
+              "BEGIN DELETE FROM memory_signal_li_codes "
+              "WHERE blob_id = old.blob_id AND NOT EXISTS ("
+              "  SELECT 1 FROM signals WHERE blob_id = old.blob_id); END",
+          },
+      },
   };
 }
 

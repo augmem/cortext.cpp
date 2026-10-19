@@ -21,6 +21,10 @@ struct Signal;
 class OperationContext;
 class Encoder;
 class Clock;
+namespace internal
+{
+class LateInteractionModel;
+}
 
 /// @brief Orchestrates the signal processing.
 ///
@@ -42,6 +46,9 @@ public:
 
     Encoder *encoder = nullptr; // Required for embedding-based operations
     std::shared_ptr<Clock> clock;
+    /// Learned late-interaction reranker (queries rerank the head of the
+    /// candidate pool); null when the encoder has no position features.
+    const internal::LateInteractionModel *late_interaction = nullptr;
   };
 
   /// @brief Constructs a SignalProcessor with a defined set of operations.
