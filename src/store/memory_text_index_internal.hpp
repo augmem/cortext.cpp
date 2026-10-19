@@ -14,6 +14,8 @@
 #include <string_view>
 #include <vector>
 
+struct sqlite3;
+
 namespace cortext::store::memory_text_index_internal
 {
 
@@ -48,6 +50,11 @@ struct SearchParams
 /// number of indexed memories.
 std::vector<Hit> Search (Transaction &tx, std::string_view query_text,
                          std::size_t documents, const SearchParams &params);
+
+/// Registers the connection's top-k BM25 collector (an FTS5 auxiliary
+/// function Search uses); call once per connection. Returns false when the
+/// connection has no FTS5.
+bool RegisterRankingFunction (sqlite3 *db);
 
 /// Indexes a stored memory's text (call inside the memory's savepoint).
 void IndexMemoryText (Transaction &tx, long long memory_id,

@@ -1,5 +1,6 @@
 #include "cortext/store/sqlite_store.hpp"
 #include "store/commit_profile_internal.hpp"
+#include "store/memory_text_index_internal.hpp"
 #include "store/mutation_audit_internal.hpp"
 
 #include <algorithm>
@@ -1764,6 +1765,8 @@ SQLiteStore::SQLiteStore (std::unique_ptr<SQLiteConnection> connection)
   // fallbacks.
   RegisterBuiltInExtensions ();
   RegisterBuiltInExtensionsOnDb (connection_->GetConnection ());
+  (void)store::memory_text_index_internal::RegisterRankingFunction (
+      connection_->GetConnection ());
 #if defined(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS) && !defined(__EMSCRIPTEN__)
   TryLoadDynamicExtensions (connection_->GetConnection ());
 #endif

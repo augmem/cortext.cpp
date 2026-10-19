@@ -4,8 +4,13 @@
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
+#include <sqlite3.h>
+
+#include "../../third_party/sqlite/ext/fts5/fts5.h"
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <iterator>
 #include <map>
@@ -230,22 +235,198 @@ MatchFor (Transaction &tx, std::string_view query_text, std::size_t documents,
       DropCommonWords (tx, QueryWords (query_text, params.max_terms), max_df));
 }
 
-std::vector<Hit>
-HitsOf (const std::vector<std::map<std::string, std::any> > &rows)
+} // namespace
+
+namespace
 {
-  std::vector<Hit> hits;
-  hits.reserve (rows.size ());
-  for (const auto &row : rows)
+
+// Top-k BM25 without ranking every match. FTS5's "ORDER BY rank" scores
+// each matching row with bm25() (one docsize b-tree read per row) and sorts
+// them all, so its cost grows with the store. The collector below computes
+// the same score, term for term in bm25()'s order, keeps the best `limit`
+// rows in a heap, and skips the document-length read (and the score) of a
+// row whose bound with the shortest possible document already falls below
+// the current k-th score. Ties keep the lower rowid first, as FTS5's stable
+// rank sort over its rowid-ordered scan does.
+struct RankedRow
+{
+  double score = 0.0; // bm25() is -score
+  long long rowid = 0;
+};
+
+bool
+RanksBefore (const RankedRow &a, const RankedRow &b)
+{
+  return a.score != b.score ? a.score > b.score : a.rowid < b.rowid;
+}
+
+struct TopKCollector
+{
+  std::size_t limit = 0;
+  std::vector<RankedRow> heap; // heap.front() is the worst kept row
+  std::size_t scored = 0;
+  std::size_t matched = 0;
+};
+
+thread_local TopKCollector *active_collector = nullptr;
+
+// fts5Bm25GetData's per-query values (fts5_aux.c), computed the same way.
+struct Bm25Data
+{
+  double avgdl = 0.0;
+  std::vector<double> idf;
+  std::vector<double> freq;
+};
+
+int
+CountHit (const Fts5ExtensionApi *, Fts5Context *, void *count)
+{
+  ++*static_cast<sqlite3_int64 *> (count);
+  return SQLITE_OK;
+}
+
+Bm25Data *
+QueryData (const Fts5ExtensionApi *api, Fts5Context *fts, int *rc)
+{
+  if (auto *data = static_cast<Bm25Data *> (api->xGetAuxdata (fts, 0)))
+    return data;
+  auto data = std::make_unique<Bm25Data> ();
+  const int phrases = api->xPhraseCount (fts);
+  data->idf.assign (static_cast<std::size_t> (phrases), 0.0);
+  data->freq.assign (static_cast<std::size_t> (phrases), 0.0);
+  sqlite3_int64 rows = 0;
+  sqlite3_int64 tokens = 0;
+  *rc = api->xRowCount (fts, &rows);
+  if (*rc == SQLITE_OK)
+    *rc = api->xColumnTotalSize (fts, -1, &tokens);
+  if (*rc == SQLITE_OK)
+    data->avgdl = (double)tokens / (double)rows;
+  for (int i = 0; *rc == SQLITE_OK && i < phrases; ++i)
     {
-      const auto memory_id
-          = AnyToLongLong (row.at ("memory_id")).value_or (0);
-      if (memory_id > 0)
-        hits.push_back ({ memory_id, AnyToDouble (row.at ("score"), 0.0) });
+      sqlite3_int64 hits = 0;
+      *rc = api->xQueryPhrase (fts, i, &hits, CountHit);
+      if (*rc == SQLITE_OK)
+        {
+          double idf = log ((rows - hits + 0.5) / (hits + 0.5));
+          if (idf <= 0.0)
+            idf = 1e-6;
+          data->idf[static_cast<std::size_t> (i)] = idf;
+        }
     }
-  return hits;
+  if (*rc != SQLITE_OK)
+    return nullptr;
+  auto *raw = data.release ();
+  *rc = api->xSetAuxdata (fts, raw, [] (void *p) {
+    delete static_cast<Bm25Data *> (p);
+  });
+  return *rc == SQLITE_OK ? raw : nullptr;
+}
+
+void
+CollectTopK (const Fts5ExtensionApi *api, Fts5Context *fts,
+             sqlite3_context *ctx, int, sqlite3_value **)
+{
+  TopKCollector *collector = active_collector;
+  if (collector == nullptr || collector->limit == 0)
+    {
+      sqlite3_result_error (ctx, "cortext_bm25_topk outside Search", -1);
+      return;
+    }
+  int rc = SQLITE_OK;
+  Bm25Data *data = QueryData (api, fts, &rc);
+  if (data == nullptr)
+    {
+      sqlite3_result_error_code (ctx, rc);
+      return;
+    }
+  const double k1 = 1.2;
+  const double b = 0.75;
+  std::fill (data->freq.begin (), data->freq.end (), 0.0);
+  int instances = 0;
+  rc = api->xInstCount (fts, &instances);
+  for (int i = 0; rc == SQLITE_OK && i < instances; ++i)
+    {
+      int phrase = 0;
+      int column = 0;
+      int offset = 0;
+      rc = api->xInst (fts, i, &phrase, &column, &offset);
+      if (rc == SQLITE_OK)
+        data->freq[static_cast<std::size_t> (phrase)] += 1.0;
+    }
+  if (rc != SQLITE_OK)
+    {
+      sqlite3_result_error_code (ctx, rc);
+      return;
+    }
+  ++collector->matched;
+  const std::size_t phrases = data->idf.size ();
+  if (collector->heap.size () >= collector->limit)
+    {
+      // D >= 0, so each term is at most its value at D = 0. The margin
+      // covers rounding: only rows clearly below the k-th score are skipped.
+      double bound = 0.0;
+      for (std::size_t i = 0; i < phrases; ++i)
+        bound += data->idf[i]
+                 * ((data->freq[i] * (k1 + 1.0))
+                    / (data->freq[i] + k1 * (1 - b)));
+      if (bound * (1.0 + 1e-9) < collector->heap.front ().score)
+        {
+          sqlite3_result_null (ctx);
+          return;
+        }
+    }
+  int tokens = 0;
+  rc = api->xColumnSize (fts, -1, &tokens);
+  if (rc != SQLITE_OK)
+    {
+      sqlite3_result_error_code (ctx, rc);
+      return;
+    }
+  const double D = (double)tokens;
+  double score = 0.0;
+  for (std::size_t i = 0; i < phrases; ++i)
+    score += data->idf[i]
+             * ((data->freq[i] * (k1 + 1.0))
+                / (data->freq[i] + k1 * (1 - b + b * D / data->avgdl)));
+  ++collector->scored;
+  const RankedRow row{ score, api->xRowid (fts) };
+  auto &heap = collector->heap;
+  if (heap.size () < collector->limit)
+    {
+      heap.push_back (row);
+      std::push_heap (heap.begin (), heap.end (), RanksBefore);
+    }
+  else if (RanksBefore (row, heap.front ()))
+    {
+      std::pop_heap (heap.begin (), heap.end (), RanksBefore);
+      heap.back () = row;
+      std::push_heap (heap.begin (), heap.end (), RanksBefore);
+    }
+  sqlite3_result_null (ctx);
 }
 
 } // namespace
+
+bool
+RegisterRankingFunction (sqlite3 *db)
+{
+  fts5_api *api = nullptr;
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2 (db, "SELECT fts5(?1)", -1, &stmt, nullptr)
+      != SQLITE_OK)
+    {
+      sqlite3_finalize (stmt);
+      return false;
+    }
+  sqlite3_bind_pointer (stmt, 1, static_cast<void *> (&api), "fts5_api_ptr",
+                        nullptr);
+  (void)sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return api != nullptr
+         && api->xCreateFunction (api, "cortext_bm25_topk", nullptr,
+                                  CollectTopK, nullptr)
+                == SQLITE_OK;
+}
 
 std::vector<Hit>
 Search (Transaction &tx, std::string_view query_text, std::size_t documents,
@@ -256,10 +437,27 @@ Search (Transaction &tx, std::string_view query_text, std::size_t documents,
   const std::string match = MatchFor (tx, query_text, documents, params);
   if (match.empty ())
     return {};
-  return HitsOf (tx.Execute (
-      "SELECT rowid AS memory_id, rank AS score FROM memory_text_fts "
-      "WHERE memory_text_fts MATCH ? ORDER BY rank LIMIT ?",
-      { match, static_cast<long long> (params.limit) }));
+  TopKCollector collector;
+  collector.limit = params.limit;
+  struct Scope
+  {
+    TopKCollector *previous;
+    ~Scope () { active_collector = previous; }
+  } scope{ active_collector };
+  active_collector = &collector;
+  // One result row: the subquery's LIMIT keeps it from being flattened
+  // into the aggregate, where FTS5 auxiliary functions cannot run.
+  (void)tx.Execute ("SELECT count(x) AS n FROM (SELECT "
+                    "cortext_bm25_topk(memory_text_fts) AS x FROM "
+                    "memory_text_fts WHERE memory_text_fts MATCH ? LIMIT -1)",
+                    { match });
+  auto &heap = collector.heap;
+  std::sort_heap (heap.begin (), heap.end (), RanksBefore);
+  std::vector<Hit> hits;
+  hits.reserve (heap.size ());
+  for (const auto &row : heap)
+    hits.push_back ({ row.rowid, -row.score });
+  return hits;
 }
 
 void

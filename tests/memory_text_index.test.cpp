@@ -212,6 +212,60 @@ TEST_CASE ("memory text df cut is exact at its boundary on both count paths",
   REQUIRE (count ("agreed zanzibar", 2) == 3);
 }
 
+TEST_CASE ("memory text top-k search ranks exactly as FTS5 rank order",
+           "[fts]")
+{
+  TempDbPath db;
+  auto store = OpenStore (db.path ());
+  cortext::store::ApplyMigrations (*store);
+  // Varied lengths and repeats give distinct scores; identical documents
+  // give exact ties, which keep the lower rowid first.
+  const std::vector<std::string> words = { "harbor", "ferry",  "lantern",
+                                           "quartz", "meadow", "pylon",
+                                           "violet", "anchor" };
+  std::uint64_t state = 42;
+  auto next = [&state] () {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return static_cast<std::size_t> (state >> 33);
+  };
+  for (long long id = 1; id <= 600; ++id)
+    {
+      std::string text;
+      const std::size_t length = 1 + next () % 12;
+      for (std::size_t w = 0; w < length; ++w)
+        text += words[next () % words.size ()] + " ";
+      if (id % 50 == 0)
+        text = "harbor ferry";
+      Index (*store, id, text);
+    }
+  store->Execute ("DELETE FROM memory_text_fts WHERE rowid = 100");
+  for (const std::string query :
+       { "harbor", "harbor ferry", "lantern quartz meadow", "pylon violet",
+         "anchor harbor lantern ferry quartz meadow pylon violet" })
+    for (const std::size_t limit : { 1, 7, 44, 1000 })
+      {
+        auto tx = store->Begin ();
+        fts::SearchParams params;
+        params.limit = limit;
+        params.max_df_ratio = 1.0;
+        const auto hits = fts::Search (*tx, query, 600, params);
+        const auto expected = tx->Execute (
+            "SELECT rowid AS id FROM memory_text_fts WHERE memory_text_fts "
+            "MATCH ? ORDER BY rank LIMIT ?",
+            { fts::BuildMatchQuery (fts::QueryWords (query, 16)),
+              static_cast<long long> (limit) });
+        tx->Commit ();
+        std::vector<long long> got;
+        for (const auto &hit : hits)
+          got.push_back (hit.memory_id);
+        std::vector<long long> want;
+        for (const auto &row : expected)
+          want.push_back (std::any_cast<long long> (row.at ("id")));
+        INFO (query << " limit " << limit);
+        REQUIRE (got == want);
+      }
+}
+
 TEST_CASE ("memory text index rolls back and deletes with its memory",
            "[fts]")
 {
