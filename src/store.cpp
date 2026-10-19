@@ -2221,6 +2221,33 @@ SQLiteStore::WalFileBytes () const
   return ec ? 0 : bytes;
 }
 
+std::string
+SQLiteStore::ConcurrentReadPath () const
+{
+  if (!connection_ || !connection_->IsValid () || sqlite3_threadsafe () == 0)
+    return {};
+  sqlite3 *db = connection_->GetConnection ();
+  const char *filename = sqlite3_db_filename (db, "main");
+  if (!filename || filename[0] == '\0'
+      || std::string_view (filename) == ":memory:")
+    return {};
+  std::string mode;
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2 (db, "PRAGMA journal_mode", -1, &stmt, nullptr)
+          == SQLITE_OK
+      && sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const auto *text = sqlite3_column_text (stmt, 0);
+      mode = text ? reinterpret_cast<const char *> (text) : "";
+    }
+  sqlite3_finalize (stmt);
+  std::transform (mode.begin (), mode.end (), mode.begin (),
+                  [] (unsigned char c) {
+                    return static_cast<char> (std::tolower (c));
+                  });
+  return mode == "wal" ? std::string (filename) : std::string ();
+}
+
 void
 SQLiteStore::UnregisterTransaction (SQLiteTransaction *tx)
 {

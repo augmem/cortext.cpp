@@ -241,6 +241,11 @@ public:
   /// @brief Return the current WAL file size in bytes, or zero when absent.
   std::uintmax_t WalFileBytes () const;
 
+  /// @brief Path of the database file when other connections can read it
+  /// concurrently (a file database in WAL mode on a thread-safe SQLite
+  /// build), else empty.
+  std::string ConcurrentReadPath () const;
+
   /// @brief Unregister a transaction from the transaction stack.
   /// Called by SQLiteTransaction destructor to prevent dangling pointers.
   /// @param tx Pointer to the transaction to unregister.

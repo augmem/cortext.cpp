@@ -2730,6 +2730,12 @@ SignalProcessor::SignalProcessor (const Config &config,
   if (store_)
     {
       cortext::store::ApplyMigrations (*store_);
+      // The member index reads the rows already stored on a connection and
+      // thread of its own while the rest of open runs
+      // (member_vector_index_internal.hpp).
+      if (const auto *sqlite = dynamic_cast<const SQLiteStore *> (store_.get ()))
+        operations::member_vector_index_internal::StartWarm (
+            *context_->member_vector_index, sqlite->ConcurrentReadPath ());
       if (!object_store_)
         {
           object_store_ = std::make_shared<SqlObjectStore> (store_);

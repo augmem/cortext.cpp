@@ -3048,6 +3048,49 @@ TEST_CASE ("A query finds a grouped memory by its best member",
            >= 5.0);
 }
 
+TEST_CASE ("A reopened store reads its member vectors at open",
+           "[cortext][retrieval][retention][focus][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::vector<std::string> topics = {
+    "My sourdough starter needs feeding twice a day with rye flour. ",
+    "The quarterly tax filing for the bakery is due on the fifteenth. ",
+    "The orchid conservatory renewal costs ninety dollars a year. ",
+    "Our cat Miso hates the vacuum and hides under the porch. ",
+    "The bathroom tiles are cracked and the plumber comes on Tuesday. ",
+  };
+  std::uint64_t ts = 1000;
+  {
+    auto ctx = cortext::Cortext::Create (cfg, temp_db.path ());
+    for (const auto &topic : topics)
+      {
+        std::string turn;
+        while (turn.size () < 600)
+          turn += topic;
+        (void)ctx->ProcessTextAt (turn, "chat/unit", ts,
+                                  cortext::Retention::Natural);
+        ts += 60000;
+      }
+    ctx->Flush ();
+  }
+  auto ctx = cortext::Cortext::Create (cfg, temp_db.path ());
+  const auto packet = ctx->ProcessTextAt (
+      "What do I pay annually for the flower greenhouse pass?",
+      "query/public", ts + 1000, cortext::Retention::Ephemeral);
+  REQUIRE (packet.output.operation_ms.at ("GraphRetrieve.member_index_size")
+           >= 5.0);
+  // The warm read at open holds every member; the query reads none itself.
+  REQUIRE (packet.output.operation_ms.at ("GraphRetrieve.member_refresh_rows")
+           == 0.0);
+}
+
 TEST_CASE ("Contiguity attaches adjacent turns of any modality",
            "[cortext][retrieval][contiguity][media]")
 {

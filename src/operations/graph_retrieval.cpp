@@ -1476,14 +1476,18 @@ LoadMemberSeedConfig ()
 std::vector<std::pair<long long, double> >
 SearchMemberVectors (ProcessorContext &p_ctx, Transaction &tx,
                      const Eigen::VectorXf &query, int embedding_dim,
-                     std::size_t limit, std::size_t *index_size)
+                     std::size_t limit, std::size_t *index_size,
+                     std::size_t *refresh_rows, double *warm_wait_ms)
 {
   namespace members = member_vector_index_internal;
   if (!p_ctx.member_vector_index)
     p_ctx.member_vector_index
         = std::make_shared<internal::MemberVectorIndex> ();
   auto &index = *p_ctx.member_vector_index;
-  (void)members::Refresh (index, tx, embedding_dim);
+  const std::size_t read
+      = members::Refresh (index, tx, embedding_dim, warm_wait_ms);
+  if (refresh_rows)
+    *refresh_rows = read;
   if (index_size)
     *index_size = index.signal_ids.size ();
   // Over-fetch: several best members can share one memory.
@@ -2238,6 +2242,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   start_profile_timing ();
   static const MemberSeedConfig member_cfg = LoadMemberSeedConfig ();
   std::size_t member_index_size = 0;
+  std::size_t member_refresh_rows = 0;
+  double member_warm_wait_ms = 0.0;
   std::size_t member_hits = 0;
   std::size_t member_raised = 0;
   std::size_t member_added = 0;
@@ -2249,7 +2255,9 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
         {
           hits = SearchMemberVectors (p_ctx, tx, signal.embedding,
                                       embedding_dim, member_cfg.limit,
-                                      &member_index_size);
+                                      &member_index_size,
+                                      &member_refresh_rows,
+                                      &member_warm_wait_ms);
         }
       catch (const std::exception &e)
         {
@@ -2301,6 +2309,10 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   profile_timing ("GraphRetrieve.member_seeds", section_start);
   context.AddOperationTiming ("GraphRetrieve.member_index_size",
                               static_cast<double> (member_index_size));
+  context.AddOperationTiming ("GraphRetrieve.member_refresh_rows",
+                              static_cast<double> (member_refresh_rows));
+  context.AddOperationTiming ("GraphRetrieve.member_warm_wait_ms",
+                              member_warm_wait_ms);
   context.AddOperationTiming ("GraphRetrieve.member_hits",
                               static_cast<double> (member_hits));
   context.AddOperationTiming ("GraphRetrieve.member_raised",

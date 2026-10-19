@@ -767,16 +767,22 @@ memories with the best members join the seeds. Member vectors of grouped
 LONG_TERM memories stay resident as int8 codes (dimension + 4 bytes per
 member, read incrementally by signal id; single-signal memories are not held,
 so Durable stores are unchanged), and each hit is resolved to its current
-memory through the store. On BEAM under Natural ingest the gold-turn share of
+memory through the store. Opening a file store in WAL mode reads the stored
+member vectors on a read-only connection and thread of its own while the
+rest of open runs, and the first query adopts that read: at 10M the first
+query after open took 54 ms when it read them itself and takes 26 ms (26 ms
+without the member channel). On BEAM under Natural ingest the gold-turn share of
 the 8,000-token packet rose from 0.385 / 0.195 / 0.125 to 0.617 / 0.420 /
 0.272 at 100K / 1M / 10M (Durable ingest: 0.675 / 0.472 / 0.296), and the
 past.dev-protocol score answered and judged by gpt-5.6-luna from 0.793 /
 0.750 / 0.651 to 0.847 / 0.813 / 0.718 (+0.054 [0.019, 0.095], +0.062
 [0.044, 0.081], +0.067 [0.029, 0.100]); knowledge update rose most (+0.24 at
 1M). The cost falls on unbudgeted packets: judged Eval 1 sufficiency changed
-by -0.018 ± 0.016, LongMemEval-S by -0.012 ± 0.029 and MemLens by
-+0.000 ± 0.026. Query p50 at 1M / 10M is within 1.03 / 1.06 of the engine
-without both steps.
+by -0.016 ± 0.016 (query focus about half of it), LongMemEval-S by
+-0.006 ± 0.026, LongMemEval-M by -0.006 ± 0.043 and MemLens by
++0.000 ± 0.026. Paired query p50 / p95 at 1M and 10M, first queries after
+open included, are within 1.05 / 1.04 and 1.07 / 1.03 of the engine without
+both steps.
 
 Production retrieval discovers a broad but bounded vector seed set from durable
 memory embeddings. Before the seed cap, it collapses near-duplicate embedding
