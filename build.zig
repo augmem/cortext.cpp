@@ -61,6 +61,7 @@ const cortext_cpp_sources = &.{
     "src/models/embedding_model_pin.cpp",
     "src/models/aist_embedded_model.cpp",
     "src/models/aist_gguf_encoder.cpp",
+    "src/models/aist_late_interaction.cpp",
 };
 
 const objstore_c_sources = &.{
@@ -331,6 +332,7 @@ pub fn build(b: *std.Build) void {
         prepare_embed.addFileInput(b.path("scripts/prepare_embedded_aist.py"));
         prepare_embed.addFileInput(b.path("models/manifest.json"));
         prepare_embed.addFileInput(b.path("models/mdbr-leaf-ir/vocab.txt"));
+        prepare_embed.addFileInput(b.path("models/AIST-87M-GGUF/chunks/AIST-87M-LI.gguf.part-000"));
         lib.step.dependOn(&prepare_embed.step);
         mod.addIncludePath(embed_dir);
         mod.addCMacro("CORTEXT_HAS_EMBEDDED_AIST_MODEL", "1");

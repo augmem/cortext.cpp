@@ -91,8 +91,10 @@ if((CORTEXT_FETCH_AIST_MODEL OR EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
    AND CORTEXT_ENABLE_IMAGE)
   target_sources(cortext_tests PRIVATE
     aist_gguf_encoder_integration.test.cpp
+    aist_late_interaction.test.cpp
   )
-  target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_AIST_MODEL=1)
+  target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_AIST_MODEL=1
+                             CORTEXT_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 endif()
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2 nlohmann_json::nlohmann_json)

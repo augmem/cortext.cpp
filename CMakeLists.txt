@@ -151,7 +151,8 @@ if(CORTEXT_EMBED_AIST_MODEL)
   set(_cortext_embed_table "${CORTEXT_EMBEDDED_AIST_GEN_DIR}/aist_embedded_table.inc")
   # Prefer tracked Git shards (no LFS). Full .gguf is never required in the tree.
   file(GLOB _cortext_aist_shard_files
-       "${CMAKE_CURRENT_SOURCE_DIR}/models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*")
+       "${CMAKE_CURRENT_SOURCE_DIR}/models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*"
+       "${CMAKE_CURRENT_SOURCE_DIR}/models/AIST-87M-GGUF/chunks/AIST-87M-LI.gguf.part-*")
   add_custom_command(
     OUTPUT
       "${_cortext_embed_stamp}"
@@ -534,7 +535,8 @@ endif()
 
 # The AIST GGUF encoder is Cortext's required embedding model; its native
 # runtime always builds.
-target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp)
+target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp
+                               src/models/aist_late_interaction.cpp)
 
 add_library(cortext::cortext ALIAS cortext)
 

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Download the AIST GGUF runtime model used by Cortext."""
+"""Download the AIST GGUF runtime model used by Cortext.
+
+The late-interaction reranker (AIST-87M-LI.gguf, required with the model) is
+not downloaded: it is assembled beside the model from the Git shards this repo
+tracks (models/manifest.json), the same parts embedded builds link.
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import pathlib
 import sys
@@ -99,6 +105,29 @@ def download(url: str, dest: pathlib.Path, expected_sha256: str, expected_size: 
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
+
+
+REPO_MODELS = pathlib.Path(__file__).resolve().parents[1] / "models"
+LI_REL = "AIST-87M-GGUF/AIST-87M-LI.gguf"
+
+
+def assemble_late_interaction(output_dir: pathlib.Path, force: bool) -> None:
+    """Concatenate the tracked reranker parts into output_dir; verify the whole file."""
+    manifest = json.loads((REPO_MODELS / "manifest.json").read_text(encoding="utf-8"))
+    asset = next(a for a in manifest["assets"] if a["filename"] == LI_REL)
+    dest = output_dir / LI_REL
+    if not force and verify(dest, asset["sha256"], int(asset["size"])):
+        print(f"[OK] {dest} already present and verified")
+        return
+    data = b"".join((REPO_MODELS / c["filename"]).read_bytes() for c in asset["chunks"])
+    if len(data) != int(asset["size"]) or hashlib.sha256(data).hexdigest() != asset["sha256"]:
+        raise RuntimeError(f"late-interaction shards do not match the manifest: {LI_REL}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", suffix=".tmp", dir=dest.parent)
+    with os.fdopen(fd, "wb") as out:
+        out.write(data)
+    os.replace(tmp_name, dest)
+    print(f"[OK] assembled {dest} from Git shards")
 
 
 def selected_quants(value: str) -> list[str]:
@@ -200,6 +229,11 @@ def main(argv: list[str]) -> int:
             return 1
         print(f"[OK] downloaded and verified {tokenizer_dest}")
 
+    try:
+        assemble_late_interaction(output_dir, args.force)
+    except (OSError, RuntimeError, KeyError, StopIteration) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

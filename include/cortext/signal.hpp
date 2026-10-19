@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -9,6 +10,20 @@
 
 namespace cortext
 {
+
+/// @brief Late-interaction vector set the engine attaches when it encodes a
+/// signal (learned reranker input). Callers leave it empty.
+///
+/// Stored signals carry `codes` (int8 directions of the memory-side code
+/// vectors); query signals carry float `values` and per-vector `gate` logits.
+struct LateInteractionSet
+{
+  int count = 0;                   ///< Number of vectors
+  int dim = 0;                     ///< Vector width
+  std::vector<std::int8_t> codes;  ///< Memory side: row-major [count x dim]
+  std::vector<float> values;       ///< Query side: row-major [count x dim]
+  std::vector<float> gate;         ///< Query side: gate logit per vector
+};
 
 /// @brief Represents a single unit of data to be processed.
 ///
@@ -47,6 +62,9 @@ struct Signal
   // Audio-specific metadata (when modality == "audio").
   int sample_rate = 0;
   std::size_t num_samples = 0;
+
+  // Engine-computed reranker vectors (see LateInteractionSet).
+  LateInteractionSet late_interaction;
 
 };
 

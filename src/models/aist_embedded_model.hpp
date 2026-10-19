@@ -20,6 +20,15 @@ bool HasEmbeddedAistModel ();
 /// When the build has no embedded shards, returns nullopt.
 std::optional<std::filesystem::path> MaterializeEmbeddedAistModel ();
 
+/// @brief Assemble the linked late-interaction reranker shards
+/// (`AIST-87M-LI.gguf`) into the process model cache and return its path.
+///
+/// The reranker ships with the AIST model as Git shards linked into
+/// `libcortext`; callers that supply their own AIST model path (bindings,
+/// `CORTEXT_AIST_MODEL_PATH`) still get it from here when no file sits beside
+/// that model. Returns nullopt when the build has no embedded shards.
+std::optional<std::filesystem::path> MaterializeEmbeddedLateInteractionModel ();
+
 /// @brief Path to the materialized vocab.txt next to the assembled model cache.
 std::optional<std::filesystem::path> MaterializeEmbeddedAistVocab ();
 
