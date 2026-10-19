@@ -31,6 +31,7 @@ add_executable(cortext_tests
   core_algorithms.test.cpp
   core_knobs.test.cpp
   env_scrub.test.cpp
+  sqlite_busy.test.cpp
   thread_config.test.cpp
   operation_context.test.cpp
   operation_set.test.cpp

@@ -147,8 +147,17 @@ public:
     return connection_ != nullptr;
   }
 
+  /// @brief How long this connection waits on a busy lock (ms); every other
+  /// connection the store opens to the same file waits as long.
+  int
+  BusyTimeoutMs () const
+  {
+    return busy_timeout_ms_;
+  }
+
 private:
   sqlite3 *connection_;
+  int busy_timeout_ms_ = 0;
 };
 
 /// @brief SQLite database store with transaction support.

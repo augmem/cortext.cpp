@@ -74,7 +74,7 @@ public:
   // connection (memory or temporary database, non-WAL journal, exclusive
   // locking, single-threaded SQLite build).
   static std::unique_ptr<SQLiteWalCheckpointer>
-  Open (sqlite3 *store_connection, int request_pages)
+  Open (sqlite3 *store_connection, int request_pages, int busy_timeout_ms)
   {
     if (sqlite3_threadsafe () == 0)
       return nullptr;
@@ -122,6 +122,10 @@ public:
         sqlite3_close (connection);
         return nullptr;
       }
+    // PASSIVE checkpoints never wait on a lock, but this connection still
+    // reads the database (it opens the WAL with a read transaction) and
+    // must wait on a busy lock exactly as the store's connection does.
+    sqlite3_busy_timeout (connection, busy_timeout_ms);
     sqlite3_wal_autocheckpoint (connection, 0);
     return std::make_unique<SQLiteWalCheckpointer> (connection,
                                                     request_pages);
@@ -893,15 +897,20 @@ ResolveBeginTransactionSql ()
     return out;
   } ();
 
-  if (mode == "immediate")
+  if (mode == "deferred")
     {
-      return "BEGIN IMMEDIATE";
+      return "BEGIN";
     }
   if (mode == "exclusive")
     {
       return "BEGIN EXCLUSIVE";
     }
-  return "BEGIN";
+  // IMMEDIATE by default: the write lock is taken at BEGIN, where SQLite runs
+  // the busy handler. A deferred transaction reads first and takes the lock
+  // on its first write; SQLite never runs the busy handler for that
+  // read-to-write upgrade, so any other connection holding the write lock for
+  // a moment failed the statement at once with "database is locked".
+  return "BEGIN IMMEDIATE";
 }
 
 sqlite3_stmt *
@@ -1338,7 +1347,7 @@ ConsumeSQLiteCommitProfile (Store *store)
 // SQLiteConnection implementation
 SQLiteConnection::SQLiteConnection (const std::string &database_path,
                                     const SQLiteConfig &config)
-    : connection_ (nullptr)
+    : connection_ (nullptr), busy_timeout_ms_ (config.busy_timeout_ms)
 {
   if (sqlite3_open (database_path.c_str (), &connection_) != SQLITE_OK)
     {
@@ -1455,7 +1464,7 @@ SQLiteConnection::~SQLiteConnection ()
 }
 
 SQLiteConnection::SQLiteConnection (SQLiteConnection &&other) noexcept
-    : connection_ (other.connection_)
+    : connection_ (other.connection_), busy_timeout_ms_ (other.busy_timeout_ms_)
 {
   other.connection_ = nullptr;
 }
@@ -1470,6 +1479,7 @@ SQLiteConnection::operator= (SQLiteConnection &&other) noexcept
           sqlite3_close (connection_);
         }
       connection_ = other.connection_;
+      busy_timeout_ms_ = other.busy_timeout_ms_;
       other.connection_ = nullptr;
     }
   return *this;
@@ -1795,7 +1805,8 @@ SQLiteStore::SQLiteStore (std::unique_ptr<SQLiteConnection> connection)
   // WAL checkpoints leave the writing thread: commits only request one
   // (sqlite3_wal_hook replaces SQLite's foreground auto-checkpoint).
   checkpointer_ = internal::SQLiteWalCheckpointer::Open (
-      connection_->GetConnection (), ResolveWalAutoCheckpointPages ());
+      connection_->GetConnection (), ResolveWalAutoCheckpointPages (),
+      connection_->BusyTimeoutMs ());
   if (checkpointer_)
     sqlite3_wal_hook (connection_->GetConnection (),
                       &internal::SQLiteWalCheckpointer::OnCommit,
