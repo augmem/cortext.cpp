@@ -7,6 +7,16 @@
 namespace cortext
 {
 
+/// @brief Per-position encoder features (text tokens, image patches, audio
+/// frames) that the late-interaction reranker consumes.
+struct EncoderPositions
+{
+  std::string tower;          ///< "text" | "image" | "audio"; empty = none
+  int count = 0;              ///< Number of positions
+  int dim = 0;                ///< Feature width per position
+  std::vector<float> values;  ///< Row-major [count x dim]
+};
+
 /// @brief Interface for tri-modal encoding generation.
 class Encoder
 {
@@ -47,6 +57,39 @@ public:
   virtual void EncodeImage (const std::uint8_t *data, int width, int height,
                             int channels, std::vector<float> &out_embedding)
       = 0;
+
+  /// @brief EncodeText plus per-token position features. Encoders without
+  /// position features leave out_positions empty.
+  virtual void
+  EncodeTextPositions (const std::string &text,
+                       std::vector<float> &out_embedding,
+                       EncoderPositions &out_positions)
+  {
+    EncodeText (text, out_embedding);
+    out_positions = {};
+  }
+
+  /// @brief EncodeImage plus per-patch position features (empty when the
+  /// encoder has none).
+  virtual void
+  EncodeImagePositions (const std::uint8_t *data, int width, int height,
+                        int channels, std::vector<float> &out_embedding,
+                        EncoderPositions &out_positions)
+  {
+    EncodeImage (data, width, height, channels, out_embedding);
+    out_positions = {};
+  }
+
+  /// @brief EncodeAudio plus per-frame position features (empty when the
+  /// encoder has none).
+  virtual void
+  EncodeAudioPositions (const float *pcm, std::size_t num_samples,
+                        std::vector<float> &out_embedding,
+                        EncoderPositions &out_positions)
+  {
+    EncodeAudio (pcm, num_samples, out_embedding);
+    out_positions = {};
+  }
 };
 
 } // namespace cortext

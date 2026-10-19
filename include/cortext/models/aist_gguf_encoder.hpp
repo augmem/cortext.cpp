@@ -104,6 +104,14 @@ public:
                     std::vector<float> &out_embedding) override;
   void EncodeImage (const std::uint8_t *data, int width, int height,
                     int channels, std::vector<float> &out_embedding) override;
+  /// @brief Text tower last hidden states [tokens x 384] (CLS ... SEP).
+  void EncodeTextPositions (const std::string &text,
+                            std::vector<float> &out_embedding,
+                            EncoderPositions &out_positions) override;
+  /// @brief Image trunk patch map [144 x 960] (12x12, native image path).
+  void EncodeImagePositions (const std::uint8_t *data, int width, int height,
+                             int channels, std::vector<float> &out_embedding,
+                             EncoderPositions &out_positions) override;
 
 private:
   class NativeRuntime;

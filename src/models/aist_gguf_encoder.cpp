@@ -1554,9 +1554,11 @@ AveragePoolChannels (const HwcTensor &x)
   return out;
 }
 
-std::vector<float>
-EncodeAistImageFeaturesNative (const RuntimeTensorStore &store,
-                                 const std::vector<float> &input_hwc)
+/// @brief MobileNetV4 trunk through blocks.4: the 12x12x960 patch map that
+/// the pooled head summarizes (row-major HWC: patch index y * 12 + x).
+HwcTensor
+EncodeAistImagePatchesNative (const RuntimeTensorStore &store,
+                              const std::vector<float> &input_hwc)
 {
   if (input_hwc.size () != static_cast<std::size_t> (384 * 384 * 3))
     {
@@ -1594,14 +1596,22 @@ EncodeAistImageFeaturesNative (const RuntimeTensorStore &store,
     {
       x = ImageUniversalBlockNative (store, x, block.first, block.second);
     }
-  x = ImageConvBnActNative (store, x, "image_encoder.blocks.4.0.conv",
-                            "image_encoder.blocks.4.0.bn1", 1, 0, false,
-                            true);
-  std::vector<float> pooled = AveragePoolChannels (x);
+  return ImageConvBnActNative (store, x, "image_encoder.blocks.4.0.conv",
+                               "image_encoder.blocks.4.0.bn1", 1, 0, false,
+                               true);
+}
+
+/// @brief Pooled image head over the patch map: average pool, conv_head,
+/// norm_head (folded BN + ReLU).
+std::vector<float>
+EncodeAistImageHeadNative (const RuntimeTensorStore &store,
+                           const HwcTensor &patches)
+{
+  std::vector<float> pooled = AveragePoolChannels (patches);
   HwcTensor pooled_tensor (1, 1, static_cast<int> (pooled.size ()));
   pooled_tensor.data = std::move (pooled);
-  x = PointwiseConv2dHwc (pooled_tensor,
-                          store.Required ("image_encoder.conv_head.weight"));
+  HwcTensor x = PointwiseConv2dHwc (
+      pooled_tensor, store.Required ("image_encoder.conv_head.weight"));
   ApplyBatchNormAndActivationInPlace (
       x, LoadFoldedBatchNorm (store, "image_encoder.norm_head"), true);
   return x.data;
@@ -2004,7 +2014,8 @@ public:
   }
 
   std::vector<float>
-  EncodeTextTokensFullGraph (const std::vector<int> &ids)
+  EncodeTextTokensFullGraph (const std::vector<int> &ids,
+                             std::vector<float> *hidden = nullptr)
   {
     if (!IsReady ())
       {
@@ -2049,6 +2060,14 @@ public:
         static_cast<std::size_t> (ggml_nelements (plan.output)), 0.0F);
     ggml_backend_tensor_get (plan.output, out.data (), 0,
                              sizeof (float) * out.size ());
+    if (hidden != nullptr)
+      {
+        // ne0 = hidden width, ne1 = seq: row-major [seq x width]
+        hidden->assign (
+            static_cast<std::size_t> (ggml_nelements (plan.hidden)), 0.0F);
+        ggml_backend_tensor_get (plan.hidden, hidden->data (), 0,
+                                 sizeof (float) * hidden->size ());
+      }
     full_text_graph_used_ = true;
     return out;
   }
@@ -2196,6 +2215,7 @@ private:
     struct ggml_tensor *position_ids = nullptr;
     struct ggml_tensor *token_type_ids = nullptr;
     struct ggml_tensor *mean_weights = nullptr;
+    struct ggml_tensor *hidden = nullptr;
     struct ggml_tensor *output = nullptr;
     struct ggml_cgraph *graph = nullptr;
   };
@@ -2766,6 +2786,10 @@ private:
                          prefix + ".output.LayerNorm", 1e-12F);
       }
 
+    // Last hidden states stay readable after compute: the late-interaction
+    // reranker consumes them as per-token position features.
+    plan->hidden = x;
+    ggml_set_output (plan->hidden);
     struct ggml_tensor *x_t = ggml_cont (ctx, ggml_transpose (ctx, x));
     struct ggml_tensor *pooled = ggml_mul_mat (ctx, x_t, plan->mean_weights);
     struct ggml_tensor *features = LinearOp (ctx, pooled,
@@ -3071,7 +3095,8 @@ public:
   }
 
   std::vector<float>
-  EncodeTextTokensFullGraph (const std::vector<int> &)
+  EncodeTextTokensFullGraph (const std::vector<int> &,
+                             std::vector<float> * = nullptr)
   {
     throw std::runtime_error ("ggml kernel runtime unavailable");
   }
@@ -3431,23 +3456,38 @@ public:
     return tokenizer_path_;
   }
 
+  /// @param hidden When non-null, receives the last hidden states
+  /// [tokens x 384] row-major (bypasses the semantic cache lookup).
   std::vector<float>
-  Encode (const std::string &text)
+  Encode (const std::string &text, std::vector<float> *hidden = nullptr)
   {
-    return EncodeSemantic (text);
+    return EncodeSemantic (text, hidden);
   }
 
+  /// @param patches When non-null, receives the 12x12x960 patch map
+  /// [144 x 960] row-major (native path only; left empty otherwise).
   std::vector<float>
-  EncodeImage (const std::uint8_t *data, int width, int height, int channels)
+  EncodeImage (const std::uint8_t *data, int width, int height, int channels,
+               std::vector<float> *patches = nullptr)
   {
     native_image_used_ = false;
+    if (patches != nullptr)
+      {
+        patches->clear ();
+      }
     if (!internal::experimental_env::Flag (
             "CORTEXT_AIST_DISABLE_NATIVE_IMAGE_KERNELS"))
       {
         std::vector<float> input = PreprocessAistImageHWC (
             data, width, height, channels);
-        std::vector<float> features = EncodeAistImageFeaturesNative (
-            tensors_, input);
+        const HwcTensor patch_map = EncodeAistImagePatchesNative (tensors_,
+                                                                  input);
+        if (patches != nullptr)
+          {
+            *patches = patch_map.data;
+          }
+        std::vector<float> features = EncodeAistImageHeadNative (tensors_,
+                                                                 patch_map);
         std::vector<float> semantic = ProjectionBlockHostVector (
             tensors_, features, "image_projection");
         NormalizeL2InPlace (semantic);
@@ -3790,13 +3830,16 @@ private:
   }
 
   std::vector<float>
-  EncodeSemantic (const std::string &text)
+  EncodeSemantic (const std::string &text, std::vector<float> *hidden)
   {
     ++stats_.semantic_requests;
-    if (const std::vector<float> *cached = semantic_cache_.Find (text))
+    if (hidden == nullptr)
       {
-        ++stats_.semantic_cache_hits;
-        return *cached;
+        if (const std::vector<float> *cached = semantic_cache_.Find (text))
+          {
+            ++stats_.semantic_cache_hits;
+            return *cached;
+          }
       }
     ++stats_.semantic_cache_misses;
 
@@ -3808,7 +3851,7 @@ private:
         try
           {
             std::vector<float> semantic = kernel_->EncodeTextTokensFullGraph (
-                ids);
+                ids, hidden);
             NormalizeL2InPlace (semantic);
             semantic_cache_.Put (text, semantic);
             return semantic;
@@ -3853,6 +3896,10 @@ private:
         LayerNormRowsInPlace (x, prefix + ".output.LayerNorm", 1e-12F);
       }
 
+    if (hidden != nullptr)
+      {
+        hidden->assign (x.data (), x.data () + x.size ());
+      }
     Eigen::VectorXf pooled = x.colwise ().mean ();
     std::vector<float> pooled_raw (static_cast<std::size_t> (pooled.size ()));
     for (Eigen::Index i = 0; i < pooled.size (); ++i)
@@ -4351,6 +4398,71 @@ AistGgufEncoder::EncodeText (const std::string &text,
     {
       throw std::runtime_error ("AIST semantic_vector output unavailable");
     }
+}
+
+void
+AistGgufEncoder::EncodeTextPositions (const std::string &text,
+                                      std::vector<float> &out_embedding,
+                                      EncoderPositions &out_positions)
+{
+  if (!loaded_)
+    {
+      throw std::runtime_error ("AIST GGUF encoder is not loaded");
+    }
+  if (!runtime_)
+    {
+      throw std::runtime_error (info_.runtime_error.empty ()
+                                    ? RuntimeUnavailableReason ()
+                                    : info_.runtime_error);
+    }
+  constexpr int kTextWidth = 384;
+  out_positions = {};
+  out_embedding = runtime_->Encode (text, &out_positions.values);
+  if (out_embedding.empty ())
+    {
+      throw std::runtime_error ("AIST semantic_vector output unavailable");
+    }
+  if (!out_positions.values.empty ())
+    {
+      out_positions.tower = "text";
+      out_positions.dim = kTextWidth;
+      out_positions.count
+          = static_cast<int> (out_positions.values.size () / kTextWidth);
+    }
+}
+
+void
+AistGgufEncoder::EncodeImagePositions (const std::uint8_t *data, int width,
+                                       int height, int channels,
+                                       std::vector<float> &out_embedding,
+                                       EncoderPositions &out_positions)
+{
+#if defined(CORTEXT_DISABLE_IMAGE)
+  (void)out_positions;
+  EncodeImage (data, width, height, channels, out_embedding);
+#else
+  if (!loaded_)
+    {
+      throw std::runtime_error ("AIST GGUF encoder is not loaded");
+    }
+  if (!runtime_ || !info_.runtime_available)
+    {
+      throw std::runtime_error (info_.runtime_error.empty ()
+                                    ? RuntimeUnavailableReason ()
+                                    : info_.runtime_error);
+    }
+  constexpr int kPatchWidth = 960;
+  out_positions = {};
+  out_embedding = runtime_->EncodeImage (data, width, height, channels,
+                                         &out_positions.values);
+  if (!out_positions.values.empty ())
+    {
+      out_positions.tower = "image";
+      out_positions.dim = kPatchWidth;
+      out_positions.count
+          = static_cast<int> (out_positions.values.size () / kPatchWidth);
+    }
+#endif
 }
 
 void

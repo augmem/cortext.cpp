@@ -242,3 +242,59 @@ TEST_CASE ("AIST native image tower output is pinned",
   CHECK (std::abs (v[1] - 0.0298241284) < 1.0e-6);
   CHECK (std::abs (sum - -0.047651531) < 1.0e-5);
 }
+
+TEST_CASE ("AIST position features match the training mirror",
+           "[aist][gguf][integration][late_interaction]")
+{
+  // Values from tools/reranker/aist_torch.py (PyTorch mirror the
+  // late-interaction reranker trains on).
+  cortext::AistGgufConfig config;
+  config.model_path = AistModelPath ().string ();
+  cortext::AistGgufEncoder encoder (config);
+  REQUIRE (encoder.IsRuntimeAvailable ());
+
+  std::vector<float> plain;
+  std::vector<float> with_positions;
+  cortext::EncoderPositions text;
+  const std::string sentence = "The playlist is called Summer Vibes.";
+  encoder.EncodeText (sentence, plain);
+  encoder.EncodeTextPositions (sentence, with_positions, text);
+  // positions come from the full ggml text graph, not the Eigen fallback
+  INFO ("full graph error: " << encoder.FullTextGraphError ());
+  CHECK (encoder.FullTextGraphError ().empty ());
+  REQUIRE (with_positions.size () == plain.size ());
+  for (std::size_t i = 0; i < plain.size (); ++i)
+    CHECK (std::abs (with_positions[i] - plain[i]) < 1.0e-5);
+  REQUIRE (text.tower == "text");
+  REQUIRE (text.count == 11);
+  REQUIRE (text.dim == 384);
+  const float token1[4] = { -0.0316F, -0.0425F, -0.0064F, -0.0158F };
+  const float last[4] = { -0.0064F, -0.0123F, -0.0212F, 0.0067F };
+  for (int c = 0; c < 4; ++c)
+    {
+      CHECK (std::abs (text.values[static_cast<std::size_t> (384 + c)] - token1[c]) < 1.0e-3);
+      CHECK (std::abs (text.values[static_cast<std::size_t> (10 * 384 + c)] - last[c]) < 1.0e-3);
+    }
+
+  std::vector<std::uint8_t> pixels (768 * 512 * 3);
+  for (std::size_t i = 0; i < pixels.size (); ++i)
+    pixels[i] = static_cast<std::uint8_t> ((i * 2654435761u) >> 24);
+  cortext::EncoderPositions image;
+  std::vector<float> v;
+  encoder.EncodeImagePositions (pixels.data (), 768, 512, 3, v, image);
+  REQUIRE (v.size () == 1280);
+  CHECK (std::abs (v[0] - 0.0423770249) < 1.0e-6);
+  REQUIRE (image.tower == "image");
+  REQUIRE (image.count == 144);
+  REQUIRE (image.dim == 960);
+  double total = 0.0;
+  double patch70 = 0.0;
+  for (std::size_t i = 0; i < image.values.size (); ++i)
+    {
+      total += image.values[i];
+      if (i / 960 == 70)
+        patch70 += image.values[i];
+    }
+  CHECK (std::abs (total - 91.2225) < 2.0e-2);
+  CHECK (std::abs (patch70 - 0.052535) < 1.0e-3);
+}
