@@ -13,6 +13,7 @@
 #include "operations/signal_record_rollback_internal.hpp"
 #include "operations/sparse_retrieval_knobs_internal.hpp"
 #include "contiguity_internal.hpp"
+#include "data_time_clock_internal.hpp"
 #include "experimental_env.hpp"
 #include "store/memory_text_index_internal.hpp"
 #include "signal_filter.hpp"
@@ -2551,7 +2552,7 @@ struct Cortext::Impl
   std::string db_path;
 
   std::unique_ptr<Encoder> encoder;
-  std::shared_ptr<cortext::Clock> clock;
+  std::shared_ptr<internal::DataTimeClock> clock;
   std::shared_ptr<cortext::Store> store;
   std::shared_ptr<cortext::ObjectStore> object_store;
   std::unique_ptr<cortext::IOperation> root_operations;
@@ -2563,17 +2564,15 @@ struct Cortext::Impl
         std::shared_ptr<cortext::ObjectStore> supplied_object_store,
         std::shared_ptr<cortext::Clock> supplied_clock)
       : cfg (c), signal_filter (MakeSignalFilterConfig (c)),
-        clock (std::move (supplied_clock)),
+        clock (std::make_shared<internal::DataTimeClock> (
+            supplied_clock ? std::move (supplied_clock)
+                           : std::make_shared<cortext::SystemClock> ())),
         store (std::move (supplied_store)),
         object_store (std::move (supplied_object_store))
   {
     if (!store)
       {
         throw std::invalid_argument ("Cortext requires a non-null Store");
-      }
-    if (!clock)
-      {
-        clock = std::make_shared<cortext::SystemClock> ();
       }
     if (!object_store)
       {
@@ -2594,6 +2593,52 @@ struct Cortext::Impl
     processor = std::make_unique<cortext::SignalProcessor> (
         MakeProcessorConfig (), store, std::move (root_operations),
         object_store);
+    ObserveStoredSignalTime ();
+  }
+
+  // Engine time starts at the newest stored signal (indexed max) so a
+  // reopened store is never in the future of its own clock.
+  void
+  ObserveStoredSignalTime ()
+  {
+    try
+      {
+        auto rows = store->Execute (
+            "SELECT MAX(timestamp) AS newest FROM signals", {});
+        if (!rows.empty ())
+          {
+            auto it = rows[0].find ("newest");
+            if (it != rows[0].end () && it->second.has_value ()
+                && it->second.type () == typeid (long long))
+              {
+                const auto newest = std::any_cast<long long> (it->second);
+                if (newest > 0)
+                  clock->Observe (static_cast<std::uint64_t> (newest));
+              }
+          }
+      }
+    catch (const std::exception &e)
+      {
+        telemetry::LogWarn ("cortext.clock.stored_time_unavailable",
+                            { telemetry::Attribute::String ("error",
+                                                            e.what ()) });
+        return;
+      }
+    if (const auto lag = clock->LagMillis (); lag > 0)
+      telemetry::LogInfo (
+          "cortext.clock.behind_stored_signals",
+          { telemetry::Attribute::Int64 ("lag_ms",
+                                         static_cast<std::int64_t> (lag)) });
+  }
+
+  // Every signal goes through here: a stored signal's timestamp becomes
+  // the floor of engine time before it is processed.
+  cortext::SignalProcessor::Output
+  Process (const cortext::Signal &signal)
+  {
+    if (signal.retention != Retention::Ephemeral)
+      clock->Observe (signal.timestamp);
+    return processor->Process (signal);
   }
 
   Impl (const Config &c, std::string db,
@@ -2667,7 +2712,7 @@ struct Cortext::Impl
     s.modality = "text";
     s.mimetype = "text/plain";
 
-    auto out = processor->Process (s);
+    auto out = Process (s);
     const auto process_end = std::chrono::steady_clock::now ();
     span.SetAttribute (
         "cortext.candidate_memory_count",
@@ -2699,7 +2744,7 @@ struct Cortext::Impl
     s.timestamp = timestamp;
     s.source_id = source_id;
     s.force_consolidation = force_consolidation;
-    return processor->Process (s);
+    return Process (s);
   }
 
   Cortext::Context
@@ -3230,7 +3275,7 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   s.modality = "text";
   s.mimetype = "text/plain";
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -3285,7 +3330,7 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   s.modality = "text";
   s.mimetype = "text/plain";
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -3355,7 +3400,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.sample_rate = 16000; // Public audio ingress contract is 16 kHz mono PCM.
   s.num_samples = num_samples;
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -3428,7 +3473,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.sample_rate = 16000;
   s.num_samples = num_samples;
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -3500,7 +3545,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.height = height;
   s.channels = channels;
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -3573,7 +3618,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.height = height;
   s.channels = channels;
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -3698,7 +3743,7 @@ internal::ReplayIngress::ProcessTextAt (Cortext &cortext,
 
   operations::retrieval_trace::ScopedCapture retrieval_trace_capture (
       hydrate_context);
-  auto out = cortext.impl_->processor->Process (s);
+  auto out = cortext.impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (
@@ -3770,7 +3815,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   s.sample_rate = 16000;
   s.num_samples = num_samples;
 
-  auto out = cortext.impl_->processor->Process (s);
+  auto out = cortext.impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -3849,7 +3894,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   s.height = height;
   s.channels = channels;
 
-  auto out = cortext.impl_->processor->Process (s);
+  auto out = cortext.impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));

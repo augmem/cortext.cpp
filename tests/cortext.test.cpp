@@ -417,6 +417,41 @@ TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
            == AnyToLongLong (before_signals[0].at ("n")));
 }
 
+TEST_CASE ("Engine time never runs behind the signals it holds",
+           "[cortext][clock]")
+{
+  // Histories imported with their own timestamps can sit ahead of the
+  // engine clock (replays, clock skew, dated imports). A query on the
+  // implicit clock must still see every stored memory, during the session
+  // and after reopening the store.
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  constexpr std::uint64_t kClockMs = 1000ULL;
+  constexpr std::uint64_t kDataMs = 86400000ULL * 400ULL;
+  const auto recalls_code = [] (const cortext::Cortext::Context &context) {
+    for (const auto &memory : context.retrieved_memory)
+      if (TextFromMemory (memory).find ("8841") != std::string::npos)
+        return true;
+    return false;
+  };
+  {
+    auto clock = std::make_shared<cortext::FixedClock> (kClockMs);
+    auto ctx = cortext::Cortext::Create (cfg, temp_db.path (), clock);
+    auto ingest = ctx->ProcessTextAt ("The garage door code is 8841.",
+                                      "notes/main", kDataMs,
+                                      cortext::Retention::Durable);
+    REQUIRE (ingest.output.stored_memory_id.has_value ());
+    auto recalled = ctx->ProcessText ("garage door code", "query/public",
+                                      cortext::Retention::Ephemeral);
+    CHECK (recalls_code (recalled));
+  }
+  auto clock = std::make_shared<cortext::FixedClock> (kClockMs);
+  auto reopened = cortext::Cortext::Create (cfg, temp_db.path (), clock);
+  auto recalled = reopened->ProcessText ("garage door code", "query/public",
+                                         cortext::Retention::Ephemeral);
+  CHECK (recalls_code (recalled));
+}
+
 TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
            "[cortext][retention][aist]")
 {
