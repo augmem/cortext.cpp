@@ -110,6 +110,13 @@ RawImageMime (int width, int height, int channels)
          + ";height=" + std::to_string (height)
          + ";channels=" + std::to_string (channels);
 }
+
+std::size_t
+RawImageBytes (int width, int height, int channels)
+{
+  return static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
+         * static_cast<std::size_t> (channels);
+}
 #endif
 
 #if !defined(CORTEXT_DISABLE_AUDIO)
@@ -160,12 +167,21 @@ ValidateMedia (const Cortext::Media &media)
     }
 }
 
+// The durable payload is the caller's Media when it carries bytes, else the
+// canonical processing input (raw pixels / f32le PCM). Every stored signal
+// thus keeps a payload, and with it a searchable shared-space vector.
 void
-ApplyStoredMedia (Signal &signal, const Cortext::Media &media)
+ApplyStoredMedia (Signal &signal, const Cortext::Media &media,
+                  const void *canonical, std::size_t canonical_bytes,
+                  std::string canonical_mimetype)
 {
   ValidateMedia (media);
   if (media.size == 0)
     {
+      const auto *bytes = static_cast<const unsigned char *> (canonical);
+      signal.payload
+          = std::vector<unsigned char> (bytes, bytes + canonical_bytes);
+      signal.mimetype = std::move (canonical_mimetype);
       return;
     }
 
@@ -3333,12 +3349,9 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
-  // Store raw PCM bytes (f32le) as payload
-  const std::size_t byte_len = num_samples * sizeof (float);
-  s.payload = std::vector<unsigned char> (byte_len);
-  std::memcpy (s.payload->data (), pcm, byte_len);
   s.modality = "audio";
-  s.mimetype = MakeAudioMimePcmF32 ();
+  ApplyStoredMedia (s, Media{}, pcm, num_samples * sizeof (float),
+                    MakeAudioMimePcmF32 ());
   s.sample_rate = 16000; // Public audio ingress contract is 16 kHz mono PCM.
   s.num_samples = num_samples;
 
@@ -3410,7 +3423,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.source_id = source_id;
   s.retention = retention;
   s.modality = "audio";
-  ApplyStoredMedia (s, media);
+  ApplyStoredMedia (s, media, pcm, num_samples * sizeof (float),
+                    MakeAudioMimePcmF32 ());
   s.sample_rate = 16000;
   s.num_samples = num_samples;
 
@@ -3479,14 +3493,9 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
-  // Store raw image bytes as payload
-  const std::size_t byte_len
-      = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
-        * static_cast<std::size_t> (channels);
-  s.payload = std::vector<unsigned char> (byte_len);
-  std::memcpy (s.payload->data (), data, byte_len);
   s.modality = "image";
-  s.mimetype = RawImageMime (width, height, channels);
+  ApplyStoredMedia (s, Media{}, data, RawImageBytes (width, height, channels),
+                    RawImageMime (width, height, channels));
   s.width = width;
   s.height = height;
   s.channels = channels;
@@ -3558,7 +3567,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.source_id = source_id;
   s.retention = retention;
   s.modality = "image";
-  ApplyStoredMedia (s, media);
+  ApplyStoredMedia (s, media, data, RawImageBytes (width, height, channels),
+                    RawImageMime (width, height, channels));
   s.width = width;
   s.height = height;
   s.channels = channels;

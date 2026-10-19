@@ -9,6 +9,7 @@
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -2525,9 +2526,59 @@ RetrievalView (std::vector<float> v)
 }
 } // namespace
 
+TEST_CASE ("Cortext keeps a payload and vector for media-less audio and images",
+           "[cortext][media][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_image_enabled = false;
+  cfg.signal_filter_audio_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto clock = std::make_shared<cortext::FixedClock> (1000);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  const auto stored = [&] (long long memory_id, const std::string &modality) {
+    auto rows = store->Execute (
+        "SELECT s.mime AS mime, COUNT(v.blob_id) AS vectors FROM signals s "
+        "LEFT JOIN memory_signal_vectors v ON v.blob_id = s.blob_id "
+        "WHERE s.memory_id = ? AND s.modality = ?",
+        { memory_id, modality });
+    REQUIRE (rows.size () == 1);
+    return std::make_pair (std::any_cast<std::string> (rows[0].at ("mime")),
+                           AnyToLongLong (rows[0].at ("vectors")));
+  };
+
+  std::vector<std::uint8_t> pixels (8 * 8 * 3, 91);
+  auto image = ctx->ProcessImage (pixels.data (), 8, 8, 3, "camera/raw",
+                                  cortext::Cortext::Media{},
+                                  cortext::Retention::Durable);
+  REQUIRE (image.output.stored_memory_id.has_value ());
+  const auto [image_mime, image_vectors]
+      = stored (*image.output.stored_memory_id, "image");
+  CHECK (image_mime == "image/raw;width=8;height=8;channels=3");
+  CHECK (image_vectors == 1);
+
+  clock->SetNowMillis (3600000);
+  std::vector<float> pcm (16000);
+  for (std::size_t i = 0; i < pcm.size (); ++i)
+    pcm[i] = 0.25f * std::sin (0.05f * static_cast<float> (i));
+  auto audio = ctx->ProcessAudio (pcm.data (), pcm.size (), "mic/raw",
+                                  cortext::Cortext::Media{},
+                                  cortext::Retention::Durable);
+  REQUIRE (audio.output.stored_memory_id.has_value ());
+  const auto [audio_mime, audio_vectors]
+      = stored (*audio.output.stored_memory_id, "audio");
+  CHECK (audio_mime == cortext::Cortext::MakeAudioMimePcmF32 ());
+  CHECK (audio_vectors == 1);
+}
+
 TEST_CASE ("Cortext recalls memories across modalities in both directions",
            "[cortext][media][aist]")
 {
+  // Photos arrive with encoded Media bytes, or as raw pixels only (empty
+  // Media): either way each stored signal must keep a searchable vector.
+  const bool with_media = GENERATE (true, false);
+  INFO ("with_media " << with_media);
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
   cfg.signal_filter_image_enabled = false;
@@ -2562,14 +2613,25 @@ TEST_CASE ("Cortext recalls memories across modalities in both directions",
       std::vector<std::uint8_t> bytes = kFakeJpeg;
       bytes.push_back (static_cast<std::uint8_t> (i));
       cortext::Cortext::Media photo;
-      photo.data = bytes.data ();
-      photo.size = bytes.size ();
-      photo.mimetype = "image/jpeg";
+      if (with_media)
+        {
+          photo.data = bytes.data ();
+          photo.size = bytes.size ();
+          photo.mimetype = "image/jpeg";
+        }
       clock->SetNowMillis (ts += 60000);
       auto ingest = ctx->ProcessImage (pixels.data (), 8, 8, 3,
                                        "camera/roll/" + std::to_string (i),
                                        photo, cortext::Retention::Durable);
       REQUIRE (ingest.output.stored_memory_id.has_value ());
+      REQUIRE (AnyToLongLong (
+                   store->Execute (
+                       "SELECT COUNT(*) AS n FROM signals s "
+                       "JOIN memory_signal_vectors v ON v.blob_id = s.blob_id "
+                       "WHERE s.memory_id = ? AND s.modality = 'image'",
+                       { *ingest.output.stored_memory_id })[0]
+                       .at ("n"))
+               == 1);
       set_vector (*ingest.output.stored_memory_id, "image",
                   RetrievalView (ctx->EmbedText (scenes[i])));
       if (i + 1 == scenes.size ())
