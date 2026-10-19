@@ -59,6 +59,70 @@ TEST_CASE ("SQLiteStore rejects bind parameter count mismatches",
       Catch::Matchers::ContainsSubstring ("parameter count mismatch"));
 }
 
+TEST_CASE ("SQLiteStore ExecuteEach visits Execute's rows in order",
+           "[store][stream]")
+{
+  auto store = cortext::SQLiteStore::Create (":memory:");
+  store->Execute (
+      "CREATE TABLE streamed(id INTEGER PRIMARY KEY, label TEXT, blob BLOB)");
+  store->Execute (
+      "WITH RECURSIVE n(id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM n "
+      "WHERE id < 40) INSERT INTO streamed SELECT id, 'row' || id, "
+      "CASE WHEN id % 7 = 0 THEN NULL ELSE randomblob(id) END FROM n");
+  const std::string query
+      = "SELECT id, label, blob FROM streamed WHERE id > ? ORDER BY id DESC";
+  const auto same_rows = [&] (cortext::Store &target) {
+    const auto expected = target.Execute (query, { 3LL });
+    std::size_t visited = 0;
+    target.ExecuteEach (query, { 3LL }, [&] (const auto &row) {
+      REQUIRE (visited < expected.size ());
+      const auto &want = expected[visited++];
+      REQUIRE (row.size () == want.size ());
+      REQUIRE (std::any_cast<long long> (row.at ("id"))
+               == std::any_cast<long long> (want.at ("id")));
+      REQUIRE (std::any_cast<std::string> (row.at ("label"))
+               == std::any_cast<std::string> (want.at ("label")));
+      REQUIRE (row.at ("blob").type () == want.at ("blob").type ());
+      if (want.at ("blob").type () == typeid (std::vector<char>))
+        REQUIRE (std::any_cast<std::vector<char> > (row.at ("blob"))
+                 == std::any_cast<std::vector<char> > (want.at ("blob")));
+    });
+    REQUIRE (visited == expected.size ());
+    return visited;
+  };
+  REQUIRE (same_rows (*store) == 37);
+
+  SECTION ("inside a transaction it sees uncommitted rows")
+  {
+    auto transaction = store->Begin ();
+    transaction->Execute ("INSERT INTO streamed VALUES(99, 'late', NULL)");
+    REQUIRE (same_rows (*store) == 38);
+    transaction->Rollback ();
+    REQUIRE (same_rows (*store) == 37);
+  }
+
+  SECTION ("a visitor exception stops the query and leaves the store usable")
+  {
+    int seen = 0;
+    REQUIRE_THROWS_AS (store->ExecuteEach (query, { 3LL },
+                                           [&] (const auto &) {
+                                             if (++seen == 5)
+                                               throw std::runtime_error (
+                                                   "stop");
+                                           }),
+                       std::runtime_error);
+    REQUIRE (seen == 5);
+    REQUIRE (same_rows (*store) == 37);
+  }
+
+  SECTION ("errors match Execute")
+  {
+    REQUIRE_THROWS_WITH (
+        store->ExecuteEach ("SELECT ? AS value", {}, [] (const auto &) {}),
+        Catch::Matchers::ContainsSubstring ("parameter count mismatch"));
+  }
+}
+
 TEST_CASE ("SQLite commit table profiling does not require epoch profiling",
            "[store][profiling][commit][regression]")
 {

@@ -184,6 +184,13 @@ public:
   Execute (const std::string &query,
            const std::vector<std::any> &params = {}) override;
 
+  /// @brief Execute a query and visit each row as SQLite steps to it.
+  /// Holds one row at a time; the visitor must not use this store.
+  void ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit) override;
+
   /// @brief Begin a new transaction.
   /// @return A unique pointer to the new transaction.
   std::unique_ptr<Transaction> Begin () override;
@@ -283,6 +290,12 @@ private:
   std::vector<std::map<std::string, std::any> >
   ExecuteDirect (const std::string &query,
                  const std::vector<std::any> &params = {});
+
+  // Execute a query directly on the connection, visiting each row as it
+  // is stepped (ExecuteDirect collects through this).
+  void ExecuteDirectEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (std::map<std::string, std::any> &&)> &visit);
 
   // Commit a root transaction (called by transaction.commit()).
   void CommitRootTransaction (SQLiteTransaction *transaction);

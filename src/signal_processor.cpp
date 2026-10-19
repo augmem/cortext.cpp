@@ -1033,6 +1033,17 @@ public:
     return store_->Execute (query, params);
   }
 
+  void
+  ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit) override
+  {
+    if (CustomQueryMayMutate (query))
+      InvalidateCustomOperationCaches (*context_);
+    store_->ExecuteEach (query, params, visit);
+  }
+
   std::unique_ptr<Transaction>
   Begin () override
   {
@@ -2139,6 +2150,7 @@ LoadRecentScores (Store &store, ProcessorContext &ctx,
     }
 }
 
+
 void
 LoadHistoricalSurfaceSearchCache (
     Store &store, ProcessorContext &ctx,
@@ -2165,7 +2177,12 @@ LoadHistoricalSurfaceSearchCache (
             }
           base_embedding_ids = &authoritative_base_ids;
         }
-      auto embedding_rows = store.Execute (
+      std::vector<
+          operations::historical_surface_search_cache_internal::Entry>
+          search_entries;
+      std::size_t embedding_row_count = 0;
+      // Streamed: one row map at a time instead of every embedding blob.
+      store.ExecuteEach (
           "SELECT e.embedding_id, e.embedding, "
           "       COALESCE(m.memory_id, 0) AS memory_id, "
           "       COALESCE(m.start_ts, 0) AS start_ts, "
@@ -2174,25 +2191,23 @@ LoadHistoricalSurfaceSearchCache (
           "FROM embeddings e "
           "LEFT JOIN memories m ON m.embedding_id = e.embedding_id "
           "  AND m.kind IN ('LONG_TERM', 'ASSOCIATION') "
-          "ORDER BY e.embedding_id, COALESCE(m.start_ts, 0), m.memory_id");
-      std::vector<
-          operations::historical_surface_search_cache_internal::Entry>
-          search_entries;
-      search_entries.reserve (embedding_rows.size ());
-      for (const auto &row : embedding_rows)
-        {
-          auto emb_it = row.find ("embedding");
-          if (emb_it == row.end () || !emb_it->second.has_value ())
-            {
-              continue;
-            }
-          search_entries.push_back (
-              { ExtractInt64 (row, "embedding_id", 0),
-                ExtractInt64 (row, "memory_id", 0),
-                ExtractInt64 (row, "start_ts", 0),
-                ExtractString (row, "kind"), ExtractString (row, "source_id"),
-                BlobToSharedEmbedding (emb_it->second) });
-        }
+          "ORDER BY e.embedding_id, COALESCE(m.start_ts, 0), m.memory_id",
+          {},
+          [&] (const std::map<std::string, std::any> &row) {
+            ++embedding_row_count;
+            auto emb_it = row.find ("embedding");
+            if (emb_it == row.end () || !emb_it->second.has_value ())
+              {
+                return;
+              }
+            search_entries.push_back (
+                { ExtractInt64 (row, "embedding_id", 0),
+                  ExtractInt64 (row, "memory_id", 0),
+                  ExtractInt64 (row, "start_ts", 0),
+                  ExtractString (row, "kind"),
+                  ExtractString (row, "source_id"),
+                  BlobToSharedEmbedding (emb_it->second) });
+          });
       std::vector<
           operations::historical_surface_search_cache_internal::Entry>
           current_entries;
@@ -2215,7 +2230,7 @@ LoadHistoricalSurfaceSearchCache (
                     : surface.embedding_id });
         }
       const bool historical_complete
-          = search_entries.size () == embedding_rows.size ();
+          = search_entries.size () == embedding_row_count;
       if (!operations::historical_surface_search_cache_internal::Reset (
               ctx,
               historical_complete ? std::move (search_entries)
@@ -2236,6 +2251,7 @@ LoadHistoricalSurfaceSearchCache (
             telemetry::Attribute::String ("error", e.what ()) });
     }
 }
+
 
 void
 LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
@@ -2261,7 +2277,22 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
 
       const long long constructive_recall_enabled
           = operations::constructive_recall::Disabled () ? 0LL : 1LL;
-      auto rows = store.Execute (
+      // Size hint for the surface maps (the stream has no row count).
+      const auto memory_count_rows
+          = store.Execute ("SELECT COUNT(*) AS n FROM memories");
+      const auto memory_count = static_cast<std::size_t> (std::max<long long> (
+          0, memory_count_rows.empty ()
+                 ? 0
+                 : ExtractInt64 (memory_count_rows.front (), "n", 0)));
+      bool current_surface_database_current = true;
+      bool processor_surface_complete = true;
+      ctx.retrieval_surface_cache.reserve (memory_count);
+      ctx.retrieval_surface_index.reserve (memory_count);
+      ctx.retrieval_surface_embedding_index.reserve (memory_count);
+      base_embedding_ids.reserve (memory_count);
+      // Streamed: a reopen holds one row map at a time instead of every
+      // memory's row (two embedding blobs each) on top of the cache.
+      store.ExecuteEach (
           "SELECT m.memory_id, m.embedding_id AS base_embedding_id, "
           "       CASE WHEN ?1 != 0 AND latest_r.reconstruction_id IS NOT NULL "
           "            THEN latest_r.embedding_id "
@@ -2309,41 +2340,33 @@ LoadRetrievalSurfaceCache (Store &store, ProcessorContext &ctx,
           "   OR (m.kind != 'WORKING' "
           "       AND m.kind != 'LABEL' "
           "       AND m.embedding_id IS NOT NULL)",
-          { constructive_recall_enabled ? 1 : 0 });
-
-      bool current_surface_database_current = true;
-      bool processor_surface_complete = true;
-      ctx.retrieval_surface_cache.reserve (rows.size ());
-      ctx.retrieval_surface_index.reserve (rows.size ());
-      ctx.retrieval_surface_embedding_index.reserve (rows.size ());
-      base_embedding_ids.reserve (rows.size ());
-      for (const auto &row : rows)
-        {
-          if (ExtractInt64 (row, "current_surface_database_current", 0) == 0)
-            {
-              current_surface_database_current = false;
-            }
-          auto emb_it = row.find ("embedding");
-          if (emb_it == row.end () || !emb_it->second.has_value ())
-            {
-              processor_surface_complete = false;
-              continue;
-            }
-          ProcessorContext::RetrievalSurfaceEntry entry;
-          entry.memory_id = ExtractInt64 (row, "memory_id", 0);
-          entry.embedding_id = ExtractInt64 (row, "embedding_id", 0);
-          base_embedding_ids[entry.memory_id]
-              = ExtractInt64 (row, "base_embedding_id", entry.embedding_id);
-          entry.created_at = ExtractInt64 (row, "created_at", 0);
-          entry.start_ts = ExtractInt64 (row, "start_ts", 0);
-          entry.kind = ExtractString (row, "kind");
-          entry.source_id = ExtractString (row, "source_id");
-          entry.modality = ExtractString (row, "modality");
-          entry.vector_seed_eligible
-              = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
-          entry.embedding = BlobToSharedEmbedding (emb_it->second);
-          ctx.UpsertRetrievalSurface (std::move (entry));
-        }
+          { constructive_recall_enabled ? 1 : 0 },
+          [&] (const std::map<std::string, std::any> &row) {
+            if (ExtractInt64 (row, "current_surface_database_current", 0) == 0)
+              {
+                current_surface_database_current = false;
+              }
+            auto emb_it = row.find ("embedding");
+            if (emb_it == row.end () || !emb_it->second.has_value ())
+              {
+                processor_surface_complete = false;
+                return;
+              }
+            ProcessorContext::RetrievalSurfaceEntry entry;
+            entry.memory_id = ExtractInt64 (row, "memory_id", 0);
+            entry.embedding_id = ExtractInt64 (row, "embedding_id", 0);
+            base_embedding_ids[entry.memory_id]
+                = ExtractInt64 (row, "base_embedding_id", entry.embedding_id);
+            entry.created_at = ExtractInt64 (row, "created_at", 0);
+            entry.start_ts = ExtractInt64 (row, "start_ts", 0);
+            entry.kind = ExtractString (row, "kind");
+            entry.source_id = ExtractString (row, "source_id");
+            entry.modality = ExtractString (row, "modality");
+            entry.vector_seed_eligible
+                = ExtractInt64 (row, "vector_seed_eligible", 1) != 0;
+            entry.embedding = BlobToSharedEmbedding (emb_it->second);
+            ctx.UpsertRetrievalSurface (std::move (entry));
+          });
       LoadHistoricalSurfaceSearchCache (store, ctx, &base_embedding_ids);
       operations::historical_surface_search_cache_internal::
           SetSparseRouteParameters (

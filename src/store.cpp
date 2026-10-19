@@ -2011,13 +2011,47 @@ std::vector<std::map<std::string, std::any> >
 SQLiteStore::ExecuteDirect (const std::string &query,
                             const std::vector<std::any> &params)
 {
+  std::vector<std::map<std::string, std::any> > results;
+  ExecuteDirectEach (query, params,
+                     [&results] (std::map<std::string, std::any> &&row) {
+                       results.push_back (std::move (row));
+                     });
+  return results;
+}
+
+void
+SQLiteStore::ExecuteEach (
+    const std::string &query, const std::vector<std::any> &params,
+    const std::function<void (const std::map<std::string, std::any> &)>
+        &visit)
+{
+  // Same transaction routing as Execute: finished transactions are dropped
+  // and an unfinished one is current, so the statement runs on the
+  // connection either way.
+  while (!transaction_stack_.empty ())
+    {
+      auto *current_tx = transaction_stack_.back ();
+      if (current_tx && !current_tx->IsFinished ())
+        break;
+      transaction_stack_.pop_back ();
+    }
+  ExecuteDirectEach (query, params,
+                     [&visit] (std::map<std::string, std::any> &&row) {
+                       visit (row);
+                     });
+}
+
+void
+SQLiteStore::ExecuteDirectEach (
+    const std::string &query, const std::vector<std::any> &params,
+    const std::function<void (std::map<std::string, std::any> &&)> &visit)
+{
   const std::string_view op = ParseDbOperation (query);
   telemetry::ScopedSpan span (
       "cortext.db.execute",
       { telemetry::Attribute::String ("db.system", "sqlite"),
         telemetry::Attribute::String ("db.operation", op) });
   sqlite3_stmt *stmt = nullptr;
-  std::vector<std::map<std::string, std::any> > results;
   try
     {
       stmt = AcquireStatement (query);
@@ -2066,7 +2100,7 @@ SQLiteStore::ExecuteDirect (const std::string &query,
         {
           std::map<std::string, std::any> row;
           FetchResultRow (stmt, row);
-          results.push_back (std::move (row));
+          visit (std::move (row));
         }
     }
   catch (...)
@@ -2102,7 +2136,6 @@ SQLiteStore::ExecuteDirect (const std::string &query,
     }
   sqlite3_reset (stmt);
   span.SetStatusOk ();
-  return results;
 }
 
 void
