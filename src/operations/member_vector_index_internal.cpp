@@ -28,6 +28,18 @@ constexpr const char *kMemberRowsSql
       "WHERE s.signal_id > ? AND m.kind = 'LONG_TERM' AND m.n_signals > 1 "
       "ORDER BY s.signal_id";
 
+// The highest LONG_TERM signal row (any memory size) above a signal id:
+// walks down from the top of the signals key, past at most the working-memory
+// tail. Refreshes read up to it and resume above it, so the long-term rows
+// that are not members (single-signal memories) are read once, not on every
+// query. Rows above it can only be working rows, which never become members
+// (a closed unit is written as new LONG_TERM rows), so nothing is skipped.
+constexpr const char *kTopLongTermRowSql
+    = "SELECT s.signal_id AS signal_id "
+      "FROM signals s CROSS JOIN memories m ON m.memory_id = s.memory_id "
+      "WHERE s.signal_id > ? AND m.kind = 'LONG_TERM' "
+      "ORDER BY s.signal_id DESC LIMIT 1";
+
 // Appends one member as int8 codes (normalised, one scale). `vec` is
 // normalised in place.
 void
@@ -63,16 +75,31 @@ ReadAll (const std::string &path)
                              SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX,
                              nullptr)
             == SQLITE_OK;
+  // One read transaction, so the mark and the rows come from one snapshot.
+  ok = ok && sqlite3_exec (db, "BEGIN", nullptr, nullptr, nullptr) == SQLITE_OK;
   sqlite3_stmt *stmt = nullptr;
+  long long mark = 0;
+  ok = ok
+       && sqlite3_prepare_v2 (db, kTopLongTermRowSql, -1, &stmt, nullptr)
+              == SQLITE_OK
+       && sqlite3_bind_int64 (stmt, 1, 0) == SQLITE_OK;
+  int rc = ok ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == SQLITE_ROW)
+    mark = sqlite3_column_int64 (stmt, 0);
+  ok = ok && (rc == SQLITE_ROW || rc == SQLITE_DONE);
+  sqlite3_finalize (stmt);
+  stmt = nullptr;
   ok = ok
        && sqlite3_prepare_v2 (db, kMemberRowsSql, -1, &stmt, nullptr)
               == SQLITE_OK
        && sqlite3_bind_int64 (stmt, 1, 0) == SQLITE_OK;
   Eigen::VectorXf vec;
-  int rc = SQLITE_DONE;
+  rc = SQLITE_DONE;
   while (ok && (rc = sqlite3_step (stmt)) == SQLITE_ROW)
     {
       const long long signal_id = sqlite3_column_int64 (stmt, 0);
+      if (signal_id > mark)
+        break;
       const void *blob = sqlite3_column_blob (stmt, 1);
       const int bytes = sqlite3_column_bytes (stmt, 1);
       if (signal_id <= 0 || !blob || bytes <= 0
@@ -90,9 +117,13 @@ ReadAll (const std::string &path)
       std::memcpy (vec.data (), blob, static_cast<std::size_t> (bytes));
       Append (out, signal_id, vec);
     }
-  ok = ok && rc == SQLITE_DONE;
+  ok = ok && (rc == SQLITE_DONE || rc == SQLITE_ROW);
   sqlite3_finalize (stmt);
+  if (db)
+    sqlite3_exec (db, "COMMIT", nullptr, nullptr, nullptr);
   sqlite3_close (db);
+  if (ok)
+    out.read_through = std::max (out.read_through, mark);
   if (!ok)
     {
       telemetry::AddCounter ("cortext.member_index.warm_failed_total", 1);
@@ -132,6 +163,10 @@ Refresh (internal::MemberVectorIndex &index, Transaction &tx, int dim,
                             .count ();
       // Rows read since open are all past the warm read's snapshot, so the
       // refresh below continues where it ended.
+      // A warm read with no members has no dimension of its own; its mark
+      // still holds.
+      if (warmed.signal_ids.empty () && warmed.read_through > 0)
+        warmed.dim = dim;
       if (warmed.dim == dim && index.read_through == 0)
         static_cast<internal::MemberVectors &> (index) = std::move (warmed);
     }
@@ -140,7 +175,16 @@ Refresh (internal::MemberVectorIndex &index, Transaction &tx, int dim,
       index = internal::MemberVectorIndex ();
       index.dim = dim;
     }
+  // Read the new mark first: rows above it can only be working rows.
+  const auto top = tx.Execute (kTopLongTermRowSql, { index.read_through });
+  if (top.empty ())
+    return 0;
+  const long long mark
+      = store::AnyToLongLong (top.front ().at ("signal_id")).value_or (0);
+  if (mark <= index.read_through)
+    return 0;
   const auto rows = tx.Execute (kMemberRowsSql, { index.read_through });
+  index.read_through = mark;
   Eigen::VectorXf vec;
   std::size_t added = 0;
   for (const auto &row : rows)
@@ -151,7 +195,7 @@ Refresh (internal::MemberVectorIndex &index, Transaction &tx, int dim,
         continue;
       const long long signal_id
           = store::AnyToLongLong (id_it->second).value_or (0);
-      if (signal_id <= 0)
+      if (signal_id <= 0 || signal_id > mark)
         continue;
       index.read_through = std::max (index.read_through, signal_id);
       if (!core::DecodeFloatBlob (emb_it->second, dim, vec))
