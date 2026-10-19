@@ -3050,6 +3050,12 @@ public:
     return false;
   }
 
+  std::size_t
+  TextGraphBufferBytes () const
+  {
+    return 0;
+  }
+
   const std::string &
   FullTextGraphError () const
   {
