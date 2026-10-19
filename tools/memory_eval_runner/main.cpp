@@ -950,6 +950,41 @@ LoadQueries (const std::filesystem::path &path, int max_queries)
   return out;
 }
 
+bool ImageSignalUsable (const Signal &signal)
+{
+  return !(signal.data_base64.empty () && signal.pixels_path.empty ())
+         && signal.width > 0 && signal.height > 0 && signal.channels > 0;
+}
+
+// Decoded pixels of a usable image signal; throws on a size mismatch.
+std::vector<unsigned char> ImagePixels (const Signal &signal)
+{
+  auto pixels = signal.pixels_path.empty () ? DecodeBase64 (signal.data_base64)
+                                            : ReadFileBytes (signal.pixels_path);
+  const std::size_t want = static_cast<std::size_t> (signal.width)
+                           * static_cast<std::size_t> (signal.height)
+                           * static_cast<std::size_t> (signal.channels);
+  if (pixels.size () != want)
+    {
+      throw std::runtime_error ("pixel buffer size mismatch for "
+                                + signal.source_id);
+    }
+  return pixels;
+}
+
+// Packet rows echo a media ref for stored image bytes, keyed by content hash.
+void RegisterImageMedia (const Signal &signal,
+                         const std::vector<unsigned char> &stored,
+                         MediaRegistry &registry)
+{
+  nlohmann::json ref = signal.media_ref.is_null ()
+                           ? nlohmann::json{{"source_id", signal.source_id},
+                                            {"mimetype", signal.mimetype}}
+                           : signal.media_ref;
+  ref["bytes"] = stored.size ();
+  registry[Fnv1a64 (stored.data (), stored.size ())] = ref;
+}
+
 std::unique_ptr<cortext::Cortext>
 CreateEngine (const Options &opts, const std::string &db_path,
               const std::shared_ptr<StreamClock> &clock)
@@ -1242,9 +1277,26 @@ int Run (const Options &opts)
           for (const auto &[source, i] : last_of)
             turn_retention[i] = cortext::Retention::Boundary;
         }
+      // Query-only replays what ingest leaves outside the store: the media
+      // registry (packet media refs) and the clamp time, which ingest takes
+      // from timestamped non-empty text signals only.
       if (query_only)
         for (const auto &signal : episode.signals)
-          last_timestamp_ms = std::max (last_timestamp_ms, signal.timestamp_ms);
+          {
+            if (clock && signal.timestamp_ms > 0)
+              clock->Set (signal.timestamp_ms);
+            if (signal.modality == "text" && !signal.text.empty ()
+                && signal.timestamp_ms > 0)
+              last_timestamp_ms
+                  = std::max (last_timestamp_ms, signal.timestamp_ms);
+            if (signal.modality == "image" && ImageSignalUsable (signal))
+              {
+                auto stored = signal.media_path.empty ()
+                                  ? ImagePixels (signal)
+                                  : ReadFileBytes (signal.media_path);
+                RegisterImageMedia (signal, stored, media_registry);
+              }
+          }
       for (std::size_t signal_index = 0;
            !query_only && signal_index < episode.signals.size ();
            ++signal_index)
@@ -1288,9 +1340,7 @@ int Run (const Options &opts)
             }
           if (signal.modality == "image")
             {
-              if ((signal.data_base64.empty () && signal.pixels_path.empty ())
-                  || signal.width <= 0 || signal.height <= 0
-                  || signal.channels <= 0)
+              if (!ImageSignalUsable (signal))
                 {
                   ++skipped_signals;
                   ++skipped_unsupported_signals;
@@ -1298,17 +1348,7 @@ int Run (const Options &opts)
                 }
               // Pixel decode happens upstream (build step); file reads are
               // excluded from the ingest timing below.
-              const auto pixels = signal.pixels_path.empty ()
-                                      ? DecodeBase64 (signal.data_base64)
-                                      : ReadFileBytes (signal.pixels_path);
-              const std::size_t want = static_cast<std::size_t> (signal.width)
-                                       * static_cast<std::size_t> (signal.height)
-                                       * static_cast<std::size_t> (signal.channels);
-              if (pixels.size () != want)
-                {
-                  throw std::runtime_error ("pixel buffer size mismatch for "
-                                            + signal.source_id);
-                }
+              const auto pixels = ImagePixels (signal);
               std::vector<unsigned char> media_bytes;
               if (!signal.media_path.empty ())
                 {
@@ -1320,12 +1360,7 @@ int Run (const Options &opts)
               media.size = media_bytes.size ();
               // The engine stores Media bytes when given, else raw pixels.
               const auto &stored = media_bytes.empty () ? pixels : media_bytes;
-              nlohmann::json ref = signal.media_ref.is_null ()
-                                       ? nlohmann::json{{"source_id", signal.source_id},
-                                                        {"mimetype", signal.mimetype}}
-                                       : signal.media_ref;
-              ref["bytes"] = stored.size ();
-              media_registry[Fnv1a64 (stored.data (), stored.size ())] = ref;
+              RegisterImageMedia (signal, stored, media_registry);
               media_bytes_by_modality["image"] += stored.size ();
               const auto image_start = std::chrono::steady_clock::now ();
               const auto ctx = engine->ProcessImage (
