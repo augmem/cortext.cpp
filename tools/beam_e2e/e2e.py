@@ -116,6 +116,8 @@ def cpa_call(prompt: str, model: str, system: str, schema: dict | None, kind: st
 def claude(prompt: str, model: str, system: str, schema: dict | None, kind: str, timeout_s: float = 300) -> dict:
     """{'text', 'json', 'usage', 'cost', 'cached'}; raises RuntimeError after retries."""
     parts = [model, system, json.dumps(schema, sort_keys=True) if schema else "", prompt]
+    if backend() == "cpa":  # a non-default CPA_REASONING_EFFORT is its own key namespace
+        parts[0] = _cpa_module().model_tag(model)
     if backend() != "cli":  # separate key namespace; cli keys unchanged
         parts.insert(0, backend() + ("/sys" if os.environ.get("E2E_CPA_SYSTEM", "none") == "keep" else "/nosys"))
     k = _key(*parts)
@@ -333,7 +335,7 @@ def cmd_run(a) -> None:
     (a.out / "config.json").write_text(json.dumps({
         "data": str(a.data), "packets": str(a.packets), "protocol": a.protocol, "arm": a.arm,
         "answer_model": a.answer_model, "judge_model": a.judge_model, "backend": backend(),
-        "thinking": "off (MAX_THINKING_TOKENS=0)" if backend() == "cli" else "off (reasoning_effort none)",
+        "thinking": "off (MAX_THINKING_TOKENS=0)" if backend() == "cli" else f"reasoning_effort {_cpa_module().REASONING_EFFORT}",
         "questions": len(qs)}, indent=1) + "\n")
     t0 = time.time()
     n = 0
