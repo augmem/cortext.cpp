@@ -9,6 +9,7 @@
 #include "retrieval_trace_state.hpp"
 #include "member_vector_index_internal.hpp"
 #include "standing_memory_internal.hpp"
+#include "temporal_seed_internal.hpp"
 #include "cortext/core/knobs.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -26,6 +27,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <optional>
@@ -1414,6 +1416,29 @@ LoadLexicalSeedConfig ()
   return cfg;
 }
 
+// Temporal seed channel for queries with a reference time
+// (temporal_seed_internal.hpp). Experiment hooks only (CORTEXT_EXPERIMENT_HOOKS
+// builds); release builds use the defaults.
+struct TemporalSeedConfig
+{
+  std::size_t limit = operations::temporal_seed_internal::kLimit;
+  double weight = operations::temporal_seed_internal::kWeight;
+};
+
+TemporalSeedConfig
+LoadTemporalSeedConfig ()
+{
+  namespace env = internal::experimental_env;
+  TemporalSeedConfig cfg;
+  cfg.limit = static_cast<std::size_t> (std::max (
+      0, env::Int ("CORTEXT_TEMPORAL_LIMIT")
+             .value_or (static_cast<int> (cfg.limit))));
+  cfg.weight = env::Int ("CORTEXT_TEMPORAL_WEIGHT_PERMILLE")
+                   .value_or (static_cast<int> (cfg.weight * 1000))
+               / 1000.0;
+  return cfg;
+}
+
 // Cross-modal seed channel: a query of one modality against the stored
 // signal vectors of every other modality in the shared space (text query ->
 // image/audio signals, image query -> text/audio signals, ...). Cosines
@@ -1945,8 +1970,24 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
       = core::RetrievalSeedSearchK (F, S, T, seed_limit);
   const int fallback_materialization_limit
       = core::RetrievalSeedSearchK (F, S, T, seed_search_limit);
-  const std::uint64_t exclusion_ts
+  // The still-open write unit is excluded from every seed path. A query
+  // with a reference time and as_of also sees only what was stored by then:
+  // start_ts <= reference_ts, so the exclusive bound is reference_ts + 1.
+  const bool reference_query = signal.retention == Retention::Ephemeral
+                               && signal.reference_ts.has_value ();
+  const std::uint64_t reference_ts
+      = reference_query
+            ? std::min<std::uint64_t> (
+                  *signal.reference_ts,
+                  static_cast<std::uint64_t> (
+                      std::numeric_limits<long long>::max () - 1))
+            : 0;
+  const std::uint64_t write_exclusion_ts
       = context.GetWriteExclusionTs ().value_or (signal.timestamp);
+  const std::uint64_t exclusion_ts
+      = reference_query && signal.reference_as_of
+            ? std::min (write_exclusion_ts, reference_ts + 1)
+            : write_exclusion_ts;
   const double duplicate_threshold
       = core::SupersessionDuplicateThreshold (F, S, T);
   const int embedding_dim = static_cast<int> (signal.embedding.size ());
@@ -2546,6 +2587,71 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
                               static_cast<double> (xmodal_hits));
   context.AddOperationTiming ("GraphRetrieve.cross_modal_added",
                               static_cast<double> (xmodal_added));
+
+  // Temporal channel for queries with a reference time: the long-term
+  // memories nearest it in time (either direction), fused by reciprocal rank
+  // like the keyword channel. It only adds candidates and rank mass; the
+  // dense and keyword lists keep theirs. Time is stored signal metadata, so
+  // every query modality uses it alike.
+  if (reference_query && embedding_dim > 0)
+    {
+      start_profile_timing ();
+      static const TemporalSeedConfig temporal_cfg = LoadTemporalSeedConfig ();
+      std::vector<temporal_seed_internal::Hit> hits;
+      if (temporal_cfg.limit > 0)
+        {
+          try
+            {
+              // Over-fetch: memories that are not seed-eligible surfaces
+              // (vectorless, superseded families) are skipped below.
+              hits = temporal_seed_internal::Nearest (
+                  tx, reference_ts, static_cast<long long> (exclusion_ts),
+                  temporal_cfg.limit * 2 + 4);
+            }
+          catch (const std::exception &e)
+            {
+              telemetry::LogWarn (
+                  "cortext.graph_retrieval.temporal_unavailable",
+                  { telemetry::Attribute::String ("error", e.what ()) });
+            }
+        }
+      std::size_t temporal_added = 0;
+      std::size_t temporal_rank = 0;
+      if (!hits.empty () && fused_scores.empty ())
+        for (std::size_t rank = 0; rank < seeded.size (); ++rank)
+          fused_scores[seeded[rank].memory_id]
+              += 1.0 / (lexical_cfg.rrf_k + static_cast<double> (rank + 1));
+      for (const auto &hit : hits)
+        {
+          if (temporal_rank >= temporal_cfg.limit)
+            break;
+          auto candidate = LexicalCandidate (
+              p_ctx, tx, hit.memory_id, static_cast<long long> (exclusion_ts),
+              embedding_dim);
+          if (!candidate)
+            continue;
+          ++temporal_rank;
+          fused_scores[hit.memory_id]
+              += temporal_cfg.weight
+                 / (lexical_cfg.rrf_k + static_cast<double> (temporal_rank));
+          if (candidates.count (hit.memory_id) != 0)
+            continue;
+          candidate->seed_score
+              = core::Map01 (Cosine (signal.embedding, candidate->embedding));
+          candidate->score = core::Clamp (candidate->seed_score, 0.0, 1.0);
+          InsertOrBoost (candidates, std::move (*candidate));
+          ++temporal_added;
+        }
+      telemetry::AddCounter ("cortext.retrieval.reference_time_queries_total",
+                             1);
+      if (signal.reference_as_of)
+        telemetry::AddCounter ("cortext.retrieval.as_of_queries_total", 1);
+      profile_timing ("GraphRetrieve.temporal_seeds", section_start);
+      context.AddOperationTiming ("GraphRetrieve.temporal_hits",
+                                  static_cast<double> (temporal_rank));
+      context.AddOperationTiming ("GraphRetrieve.temporal_added",
+                                  static_cast<double> (temporal_added));
+    }
 
   start_profile_timing ();
   // Candidates are the already family-collapsed seed set.

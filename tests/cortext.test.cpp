@@ -3809,3 +3809,130 @@ TEST_CASE ("Contiguity attaches adjacent turns of any modality",
       ++errand_anchors;
   REQUIRE (errand_anchors == 1);
 }
+
+TEST_CASE ("Query reference time reaches retrieval through the public API",
+           "[aist][cortext][retrieval][reference_time]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  constexpr std::uint64_t kDay = 86400000ULL;
+  constexpr std::uint64_t kBase = 1700000000000ULL;
+  auto clock = std::make_shared<cortext::FixedClock> (kBase + 30 * kDay);
+  auto ctx = cortext::Cortext::Create (cfg, temp_db.path (), clock);
+  REQUIRE (ctx->ProcessTextAt ("The garage door code is 8841.", "notes/a",
+                               kBase + 1 * kDay, cortext::Retention::Durable)
+               .output.stored_memory_id.has_value ());
+  REQUIRE (ctx->ProcessTextAt ("The garage door code is now 5523.",
+                               "notes/b", kBase + 20 * kDay,
+                               cortext::Retention::Durable)
+               .output.stored_memory_id.has_value ());
+  const auto recalls = [] (const cortext::Cortext::Context &context,
+                           const std::string &needle) {
+    for (const auto &memory : context.retrieved_memory)
+      if (TextFromMemory (memory).find (needle) != std::string::npos)
+        return true;
+    return false;
+  };
+  const auto ask = [&] (cortext::Cortext::RetrievalTime time) {
+    return ctx->ProcessText ("garage door code", "query/public",
+                             cortext::Retention::Ephemeral, std::nullopt,
+                             time);
+  };
+
+  const auto plain = ask ({});
+  CHECK (recalls (plain, "5523"));
+  CHECK (recalls (plain, "8841"));
+
+  // A reference time between the two notes adds no cutoff.
+  const auto between = ask ({ kBase + 10 * kDay, false });
+  CHECK (recalls (between, "5523"));
+  CHECK (recalls (between, "8841"));
+
+  // As of that time only the first note existed: the later one is neither
+  // retrieved nor attached to the first as its restatement.
+  const auto as_of = ask ({ kBase + 10 * kDay, true });
+  CHECK (recalls (as_of, "8841"));
+  CHECK_FALSE (recalls (as_of, "5523"));
+
+  // as_of without a reference time is ignored.
+  const auto ignored = ask ({ std::nullopt, true });
+  CHECK (recalls (ignored, "5523"));
+}
+
+TEST_CASE ("C API JSON options carry a query reference time",
+           "[cortext][capi][reference_time]")
+{
+  cortext_process_json_options options{};
+  options.struct_size = sizeof (options);
+  options.has_reference_ms = 1;
+  options.as_of = 1;
+  options.reference_ms = 99;
+  cortext_process_json_options_init (&options);
+  REQUIRE (options.struct_size == sizeof (options));
+  REQUIRE (options.has_reference_ms == 0);
+  REQUIRE (options.as_of == 0);
+  REQUIRE (options.reference_ms == 0);
+  REQUIRE (options.evidence_budget_bytes == 0);
+
+  // A caller built before the reference-time fields keeps its budget layout.
+  struct BudgetOptions
+  {
+    std::size_t struct_size;
+    int include_embedding;
+    int retention;
+    int reserved;
+    std::size_t evidence_budget_bytes;
+  };
+  struct BudgetOptionsWithGuard
+  {
+    BudgetOptions options;
+    std::uint64_t guard = 0x1234;
+  } prior;
+  prior.options.struct_size = sizeof (prior.options);
+  prior.options.evidence_budget_bytes = 55;
+  cortext_process_json_options_init (
+      reinterpret_cast<cortext_process_json_options *> (&prior.options));
+  REQUIRE (prior.options.struct_size
+           == offsetof (cortext_process_json_options, has_reference_ms));
+  REQUIRE (prior.options.retention == CORTEXT_RETENTION_NATURAL);
+  REQUIRE (prior.options.evidence_budget_bytes == 0);
+  REQUIRE (prior.guard == 0x1234);
+}
+
+TEST_CASE ("C API as-of reference time hides later memories",
+           "[aist][cortext][capi][reference_time]")
+{
+  ScopedTempDb temp_db;
+  auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+  REQUIRE (h != nullptr);
+  cortext_process_json_options options{};
+  options.struct_size = sizeof (options);
+  cortext_process_json_options_init (&options);
+  options.include_embedding = 0;
+  options.retention = CORTEXT_RETENTION_DURABLE;
+  char *stored = cortext_process_text_json_with_options (
+      h, "The ferry to the island leaves at 6 from pier four.", "ferry/0",
+      &options);
+  REQUIRE (stored != nullptr);
+  cortext_string_free (stored);
+
+  options.retention = CORTEXT_RETENTION_EPHEMERAL;
+  const auto retrieved = [&] () {
+    char *json_ptr = cortext_process_text_json_with_options (
+        h, "When does the ferry leave?", "query/ferry", &options);
+    REQUIRE (json_ptr != nullptr);
+    const auto packet = nlohmann::json::parse (json_ptr);
+    cortext_string_free (json_ptr);
+    return packet.at ("retrieved_memory").size ();
+  };
+  REQUIRE (retrieved () >= 1);
+  // Long before the memory was stored: nothing existed as of then.
+  options.has_reference_ms = 1;
+  options.reference_ms = 1000;
+  options.as_of = 1;
+  CHECK (retrieved () == 0);
+  // Without as_of the same reference time cuts nothing.
+  options.as_of = 0;
+  CHECK (retrieved () >= 1);
+  cortext_free (h);
+}

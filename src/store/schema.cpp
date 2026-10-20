@@ -1154,6 +1154,20 @@ GetCoreMigrations ()
               "  SELECT 1 FROM signals WHERE blob_id = old.blob_id); END",
           },
       },
+      {
+          55,
+          "Long-term memory time indexes for reference-time retrieval",
+          {
+              // A query with a reference time finds the long-term memories
+              // nearest it with bounded range scans
+              // (operations/temporal_seed_internal.hpp): by start for the
+              // memories after it or holding it, by end for those before it.
+              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_start "
+              "ON memories(start_ts) WHERE kind = 'LONG_TERM'",
+              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_end "
+              "ON memories(end_ts) WHERE kind = 'LONG_TERM'",
+          },
+      },
   };
 }
 

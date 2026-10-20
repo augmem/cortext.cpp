@@ -33,6 +33,37 @@ class ReplayIngress;
 class StreamingTextProbeSession;
 }
 
+/// @brief Optional per-call reference time for query retrieval.
+///
+/// reference_ms is a time (milliseconds since the Unix epoch) the query is
+/// about, in the past or the future relative to the engine clock. It is
+/// signal metadata compared with stored memory times (start_ts/end_ts),
+/// never text, and works the same for every query modality.
+///
+/// Unset (the default): retrieval is exactly as without this parameter.
+///
+/// Set, as_of = false: a temporal candidate channel adds the long-term
+/// memories nearest reference_ms in time, in both directions (distance 0
+/// when reference_ms falls inside a memory's [start_ts, end_ts], else the
+/// distance to its nearer edge), fused with the dense and keyword seeds by
+/// reciprocal rank. It only adds candidates; nothing is dropped for being
+/// after reference_ms or after now. The query's own still-open write unit
+/// stays excluded as always.
+///
+/// Set, as_of = true: additionally an as-of view of what was stored by
+/// reference_ms: memories with start_ts > reference_ms are excluded from
+/// every seed path, and from the successor/next-turn context attached to
+/// retrieved memories. The temporal channel stays active.
+///
+/// Only Ephemeral (query) calls read it; a storing call ignores it, so
+/// ingest-time retrieval is unchanged. as_of without reference_ms is
+/// ignored.
+struct RetrievalTime
+{
+  std::optional<std::uint64_t> reference_ms;
+  bool as_of = false;
+};
+
 /// @brief High-level entrypoint for Cortext with tri-modal process stubs.
 class CORTEXT_EXPORT Cortext
 {
@@ -161,6 +192,9 @@ public:
   /// @brief Evidence charge of one non-text payload (see EvidenceBudget).
   static constexpr std::size_t kMediaEvidenceBytes = 480;
 
+  /// @brief Optional per-call query reference time (cortext::RetrievalTime).
+  using RetrievalTime = ::cortext::RetrievalTime;
+
   /// @brief Three-knob configuration preserved across the system.
   struct Config
   {
@@ -253,10 +287,13 @@ public:
   /// or Ephemeral for no-storage query.
   /// @param evidence_budget Optional evidence budget in bytes for the
   /// returned packet (EvidenceBudget); every Process* call takes one.
+  /// @param retrieval_time Optional query reference time (RetrievalTime);
+  /// every Process* call takes one, and unset keeps retrieval unchanged.
   /// @return Context with retrieved memories and processing output.
   Context ProcessText (const std::string &text, const std::string &source_id,
                        Retention retention = Retention::Natural,
-                       EvidenceBudget evidence_budget = std::nullopt);
+                       EvidenceBudget evidence_budget = std::nullopt,
+                       RetrievalTime retrieval_time = {});
 
   /// @brief Process text while storing caller-provided source media.
   ///
@@ -267,7 +304,8 @@ public:
   Context ProcessText (const std::string &text, const std::string &source_id,
                        const Media &media,
                        Retention retention = Retention::Natural,
-                       EvidenceBudget evidence_budget = std::nullopt);
+                       EvidenceBudget evidence_budget = std::nullopt,
+                       RetrievalTime retrieval_time = {});
 
   /// @brief Process text input with an explicit timestamp (ms since epoch).
   /// @param text The text content to process.
@@ -282,7 +320,8 @@ public:
   Context ProcessTextAt (const std::string &text, const std::string &source_id,
                          std::uint64_t timestamp,
                          Retention retention = Retention::Natural,
-                         EvidenceBudget evidence_budget = std::nullopt);
+                         EvidenceBudget evidence_budget = std::nullopt,
+                         RetrievalTime retrieval_time = {});
 
 
   /// @brief Process audio PCM input.
@@ -297,7 +336,8 @@ public:
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id,
                         Retention retention = Retention::Natural,
-                        EvidenceBudget evidence_budget = std::nullopt);
+                        EvidenceBudget evidence_budget = std::nullopt,
+                        RetrievalTime retrieval_time = {});
 
   /// @brief Process audio PCM while storing caller-provided source media.
   ///
@@ -307,7 +347,8 @@ public:
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id, const Media &media,
                         Retention retention = Retention::Natural,
-                        EvidenceBudget evidence_budget = std::nullopt);
+                        EvidenceBudget evidence_budget = std::nullopt,
+                        RetrievalTime retrieval_time = {});
 
   /// @brief Process image input.
   /// @param data Raw pixel data (RGB/RGBA).
@@ -323,7 +364,8 @@ public:
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
                         Retention retention = Retention::Natural,
-                        EvidenceBudget evidence_budget = std::nullopt);
+                        EvidenceBudget evidence_budget = std::nullopt,
+                        RetrievalTime retrieval_time = {});
 
   /// @brief Process image pixels while storing caller-provided source media.
   ///
@@ -334,7 +376,8 @@ public:
                         int channels, const std::string &source_id,
                         const Media &media,
                         Retention retention = Retention::Natural,
-                        EvidenceBudget evidence_budget = std::nullopt);
+                        EvidenceBudget evidence_budget = std::nullopt,
+                        RetrievalTime retrieval_time = {});
 
   /// @brief Encode text and return the configured encoder's raw embedding.
   ///
