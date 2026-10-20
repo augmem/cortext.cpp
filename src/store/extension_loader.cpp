@@ -80,9 +80,10 @@ ObjstoreBackendFromEnv ()
   if (backend.empty ())
     {
 #if defined(__EMSCRIPTEN__)
-      // The Emscripten filesystem holding the database. AUTO would pick OPFS,
-      // which needs a worker context and an OPFS-capable filesystem this
-      // build does not link, so registration would fail on every open.
+      // The Emscripten filesystem holding the database. AUTO would pick the
+      // OPFS backend, which needs a WasmFS OPFS mount in a worker context
+      // that this build does not provide, so registration would fail on
+      // every open.
       return OBJSTORE_BACKEND_VFS;
 #else
       // The SQLite backend shares the main database transaction and avoids the

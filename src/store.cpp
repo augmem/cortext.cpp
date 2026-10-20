@@ -1813,12 +1813,19 @@ SQLiteStore::SQLiteStore (std::unique_ptr<SQLiteConnection> connection)
   // Register statically linked extensions if present, then attempt dynamic
   // fallbacks.
   RegisterBuiltInExtensions ();
+  // Native stores keep working without the objstore vtab (SqlObjectStore
+  // writes the SQLite backend's table directly), so a registration failure
+  // there stays non-fatal as before. WebAssembly stores need the vtab.
   if (const int rc = RegisterBuiltInExtensionsOnDb (connection_->GetConnection ());
       rc != SQLITE_OK)
     {
+#if defined(__EMSCRIPTEN__)
       throw StoreError (std::string ("Failed to register built-in SQLite "
                                      "extensions: ")
-                        + sqlite3_errstr (rc));
+                        + sqlite3_errstr (rc) + " ("
+                        + sqlite3_errmsg (connection_->GetConnection ())
+                        + ")");
+#endif
     }
   (void)store::memory_text_index_internal::RegisterRankingFunction (
       connection_->GetConnection ());
