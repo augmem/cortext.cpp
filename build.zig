@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const cortext_version = "1.3.3";
+const cortext_version = "2.0.0";
 
 const sqlite_header_template = @embedFile("third_party/sqlite/src/sqlite.h.in");
 
