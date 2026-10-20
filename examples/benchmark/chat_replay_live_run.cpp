@@ -862,6 +862,17 @@ PublicBehaviorJson (const cortext::Cortext::Context &ctx,
   };
 }
 
+// A blob is text when its own MIME type is text/*: a "mixed" memory holds a
+// turn's text beside its photo or audio, each with its own MIME type.
+bool
+IsTextBlob (const cortext::Cortext::Context::Memory &memory, std::size_t i)
+{
+  const std::string &mimetype = i < memory.content_mimetypes.size ()
+                                    ? memory.content_mimetypes[i]
+                                    : memory.mimetype;
+  return mimetype.rfind ("text/", 0) == 0;
+}
+
 int
 EstimateMemoryTokens (const cortext::Cortext::Context::Memory &memory)
 {
@@ -871,9 +882,10 @@ EstimateMemoryTokens (const cortext::Cortext::Context::Memory &memory)
     {
       return tokens;
     }
-  for (const auto &blob : memory.content)
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
     {
-      if (memory.modality == "text" || memory.mimetype == "text/plain")
+      const auto &blob = memory.content[i];
+      if (IsTextBlob (memory, i))
         {
           tokens += EstimateTokens (
               std::string (blob.begin (), blob.end ()));
@@ -907,16 +919,15 @@ MemoryPacketJson (
   for (const auto &memory : memories)
     {
       std::string text;
-      if (memory.modality == "text" || memory.mimetype == "text/plain")
+      bool first = true;
+      for (std::size_t i = 0; i < memory.content.size (); ++i)
         {
-          bool first = true;
-          for (const auto &blob : memory.content)
-            {
-              if (!first)
-                text += "\n";
-              text.append (blob.begin (), blob.end ());
-              first = false;
-            }
+          if (!IsTextBlob (memory, i))
+            continue;
+          if (!first)
+            text += "\n";
+          text.append (memory.content[i].begin (), memory.content[i].end ());
+          first = false;
         }
 
       out.push_back ({
