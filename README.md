@@ -533,20 +533,75 @@ per database; Cortext does not merge concurrent writer state.
 
 ## Benchmarks
 
-Long-horizon evals replay multi-session conversations through each memory
-system. At probe points, a judge LLM blind-scores each context packet for
-relevance, sufficiency, and noise.
+Cortext makes no LLM calls to store or recall. Every score below comes from
+replaying each benchmark's conversations into the engine as they happened:
+live ingest, Natural retention, and consolidation when the engine recommends
+it. Then each question is asked against the final store, and the retrieved
+context goes to an answer model and a judge, using each benchmark's own
+published QA prompts. The answer model and the judge are both `gpt-6.1-sol`
+at low reasoning effort. Packets are capped at a 34,800-byte evidence budget
+(about 8k tokens). Measured October 2026 on the v5 engine, macOS arm64.
 
-Headline hosted frontier judge run on a public Meta Multi-Session Chat slice:
-Cortext won 7 of 9 probes by majority and 21 of 27 blind judgment rows, using
-998 context tokens per turn versus 49,196 for traditional chat+RAG.
+### Same pipeline, three memory layers: LoCoMo
+
+All three systems ran on the same LoCoMo conversations (1,540 questions,
+categories 1–4). Each one's retrieval went to the same answer model and judge,
+under the same evidence budget.
+
+| System | Accuracy | Multi-hop | Temporal | Single-hop | Open-domain | Recall p50 / p95 | LLM calls to store |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Cortext** | 86.2% | 83.3% | 85.1% | 90.0% | **64.6%** | **9.7 / 13.7 ms** | **0** |
+| Mem0 OSS 2.2.1 | **89.0%** | **91.8%** | **89.1%** | **91.0%** | 62.5% | 167 / 250 ms | 544 calls, 5.7M tokens |
+| Graphiti 0.31.1 (Zep's OSS engine) | 81.0% | 89.0% | 78.8% | 81.3% | 61.5% | 143 / 157 ms | 4,151 calls, 14.4M tokens |
+
+The competitors were set up as follows:
+- **Shared setup:** the same extraction model as the answer model. The
+  embedder is EmbeddingGemma-2 Q8_0 running locally, close to Cortext's own
+  local encoder.
+- **Mem0:** run per Mem0's eval convention: each session is added from both
+  speakers' perspectives, and both speakers' memories are searched. Each
+  session's date is injected into extraction, which helps Mem0.
+- **Graphiti:** one episode per session, anchored to the session time, with
+  hybrid search.
+
+Mem0's 2.8-point lead comes almost entirely from multi-hop and temporal
+questions, where its write-time LLM writes consolidated, dated facts. Cortext
+gets within that margin with no model calls at write time and recall about 17×
+faster.
+
+### Against published results
+
+These competitor numbers are the vendors' or papers' own, each with its own
+answer model, judge and protocol. They were not re-run here, so treat the gaps
+as directional.
+
+| Benchmark | Cortext | Published |
+| --- | ---: | --- |
+| LongMemEval-S (500 q) | **93.8%** | Mem0 94.4, Hindsight 91.4, EmergenceMem 86.0, Supermemory 85.2, Zep 71.2 |
+| LoCoMo (1,540 q) | 86.2% (87.9% on corrected keys) | Mem0 92.5, Honcho 89.9, Hindsight 89.6, Zep 75.1 |
+| BEAM 100K / 1M / 10M, ExaBase protocol | 83.8 / 80.0 / 70.8 | past.dev 92.1 / 90.7 / 85.0; Exabase M-1 76.9 / 75.0 / 68.0 |
+| BEAM 100K / 1M / 10M, AMB protocol | 72.2 / 70.4 / 53.6 | Hindsight 73.4 / 73.9 / 64.1; Honcho 63.0 / 63.1 / 40.6; Mem0 – / 64.1 / 48.6 |
+| DolphinBench (600 tests, agent with memory tools) | **87.0%** | Mem0 + Hermes 70.7, Hindsight + Hermes 69.5, Honcho + Hermes 68.5 |
+| MemLens agent subset (195 q, 32k, images) | **72.3%** | Mem0 43.2 (text captions), MemOS 36.5, MemAgent-7B 32.8 |
+| LongMemEval-M (100 q) | 78.0% | — |
+
+Caveats:
+- **Unseen questions:** the late-interaction reranker was trained partly on
+  LongMemEval, MemLens and DolphinBench. On the questions it never saw,
+  Cortext scores 96.5% (LongMemEval-S, 115 q) and 78.6% (MemLens, 56 q).
+  LoCoMo is excluded from its training.
+- **Agent models:** DolphinBench ran with a `gpt-6.1-sol` agent; the published
+  rows used `gpt-5.6-luna`.
+
+### Earlier evaluations
+
+These are packet-quality judge runs from before v5.
 
 | Eval | Result | Context Cost |
 | --- | --- | ---: |
 | MSC hosted frontier judge, 9 probes, 3 reps | Cortext 7/9 probe wins, 21/27 row wins | 998 tokens vs 49,196 for chat+RAG |
 | MSC 128k RAG ablation, 6 systems | Cortext 6/9 probe wins, 19/27 row wins | 816 tokens; compaction 7,110; rolling window 15,999 |
 | One-year sparse replay, local Gemma4 judge | Cortext 47/93 raw wins | 467 tokens vs 7,447 for chat+RAG |
-| Long-horizon mechanism sweep | No removal improved the stack | Mechanisms retained under the hard-cut rule |
 
 Full protocols, caveats, and artifacts are in
 `docs/paper/sections/9_experimental.qmd` and
