@@ -85,6 +85,19 @@ function run(dbPath) {
     const emb = rt.embedImage(h, pixels, 8, 8, 3);
     assert.ok(emb.dimension > 0, "embedImage");
 
+    // Empty caller media stores the canonical text, like the call without it.
+    const empty = rt.processTextWithMedia(h, "Bailey sleeps on the blue rug", "chat",
+                                          { data: new Uint8Array(0), mimetype: "image/png" },
+                                          store);
+    assert.ok(empty.output !== undefined, "empty media accepted");
+    rt.flush(h);
+    const rug = rt.processText(h, "where does Bailey sleep", "q", query);
+    assert.ok(rug.retrieved_memory.some((m) => m.content.some(
+      (c) => c.mimetype.startsWith("text/") && atob(c.base64).includes("blue rug"))),
+              "empty media stored the text");
+    assert.throws(() => rt.processTextWithMedia(h, "x", "chat", { data: "bytes", mimetype: "image/png" }),
+                  TypeError);
+
     // Invalid options are rejected before any allocation.
     assert.throws(() => rt.processText(h, "x", "q", { evidenceBudgetBytes: -1 }), RangeError);
     assert.throws(() => rt.processText(h, "x", "q", { referenceMs: 1.5 }), RangeError);

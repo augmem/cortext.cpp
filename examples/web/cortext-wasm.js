@@ -337,9 +337,16 @@ export class CortextWasm {
     if (media === null || media === undefined) {
       return { args: [0, 0, 0], free() {} };
     }
-    const bytes = media.data instanceof Uint8Array
-      ? media.data
-      : new Uint8Array(media.data ?? []);
+    const data = media.data ?? [];
+    if (!(data instanceof ArrayBuffer || ArrayBuffer.isView(data)
+          || Array.isArray(data))) {
+      throw new TypeError("media.data must be bytes (Uint8Array, ArrayBuffer or array)");
+    }
+    const bytes = data instanceof Uint8Array
+      ? data
+      : ArrayBuffer.isView(data)
+        ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+        : new Uint8Array(data);
     if (bytes.length === 0) {
       return { args: [0, 0, 0], free() {} };
     }
