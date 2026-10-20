@@ -2,6 +2,7 @@
 #include "cortext/core/constants.hpp"
 #include "cortext/clock.hpp"
 #include "cortext/internal/cancellation.hpp"
+#include "cortext/internal/text_payload.hpp"
 #include "cortext/operations/accumulator_reset.hpp"
 #include "cortext/operations/constants.hpp"
 #include "cortext/operations/memory_storage.hpp"
@@ -2572,7 +2573,7 @@ LoadWorkingMemory (Store &store, ProcessorContext &ctx,
                 {
                   slot.blob_ids.push_back (rec.blob_id);
                   const bool text_record
-                      = rec.modality == "text" || rec.mime == "text/plain";
+                      = ::cortext::internal::IsTextPayload (rec.modality, rec.mime);
                   if (text_record)
                     {
                       try

@@ -1,4 +1,5 @@
 #include "cortext/operations/graph_retrieval.hpp"
+#include "cortext/internal/text_payload.hpp"
 
 #include "constructive_recall_internal.hpp"
 #include "cross_modal_index_internal.hpp"
@@ -1777,7 +1778,8 @@ SelectStandingSignals (const ProcessorContext &p_ctx, Transaction &tx,
   std::unordered_map<long long, double> fused;
   for (std::size_t rank = 0; rank < dense.size (); ++rank)
     fused[dense[rank].first] = 1.0 / (rrf_k + static_cast<double> (rank + 1));
-  if (signal.modality == "text" && signal.payload && !signal.payload->empty ())
+  if (::cortext::internal::IsTextPayload (signal.modality, signal.mimetype) && signal.payload
+      && !signal.payload->empty ())
     {
       const auto lexical = standing::RankByTerms (
           std::string_view (
@@ -2431,8 +2433,8 @@ GraphAugmentedRetrieveCandidates::Execute (OperationContext &context,
   std::size_t lexical_added = 0;
   if (lexical_cfg.enabled && lexical_cfg.limit > 0
       && signal.retention == Retention::Ephemeral
-      && signal.modality == "text" && signal.payload
-      && !signal.payload->empty () && embedding_dim > 0)
+      && ::cortext::internal::IsTextPayload (signal.modality, signal.mimetype)
+      && signal.payload && !signal.payload->empty () && embedding_dim > 0)
     {
       std::vector<store::memory_text_index_internal::Hit> hits;
       try

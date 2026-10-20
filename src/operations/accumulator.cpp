@@ -1,6 +1,7 @@
 #include "cortext/operations/accumulator.hpp"
 
 #include "cortext/core/knobs.hpp"
+#include "cortext/internal/text_payload.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
@@ -30,7 +31,7 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position)
   rec.serial_position = serial_position;
   rec.li_codes = internal::LateInteractionModel::Serialize (
       signal.late_interaction);
-  if ((signal.modality == "text" || signal.mimetype == "text/plain")
+  if (::cortext::internal::IsTextPayload (signal.modality, signal.mimetype)
       && signal.payload && !signal.payload->empty ())
     {
       rec.text_payload.assign (

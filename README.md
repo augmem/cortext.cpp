@@ -267,6 +267,10 @@ Core calls:
 
 - `ProcessText`, `ProcessAudio`, `ProcessImage`: process a signal (default
   retention is Natural — no forced turn edge; storage via write gate).
+- Media overloads keep the canonical input for embedding and processing.
+  Non-empty caller media replaces the stored payload and MIME type. Empty Media
+  omits the stored payload for all media overloads; legacy calls without Media
+  retain their canonical payload behavior.
 - `Retention::Durable`: force turn boundary + force write (chat convenience).
 - `Retention::Boundary`: force turn boundary only; write gate still applies.
 - `Retention::Ephemeral`: process and retrieve without storing the input.
@@ -436,10 +440,10 @@ env var — use the paths the runtime and bindings already read
 (`CORTEXT_LIBRARY_PATH`, `CORTEXT_AIST_MODEL_PATH`):
 
 ```bash
-VERSION=1.2.3   # or the release you want
+ASSETS_VERSION=1.3.3   # or the release you want
 ASSETS="$HOME/.cache/augmem/cortext/assets"
 curl -fsSL -o cortext-assets.tgz \
-  "https://github.com/augmem/cortext.cpp/releases/download/v${VERSION}/cortext-assets-${VERSION}.tar.gz"
+  "https://github.com/augmem/cortext.cpp/releases/download/v${ASSETS_VERSION}/cortext-assets-${ASSETS_VERSION}.tar.gz"
 mkdir -p "$ASSETS"
 tar -xzf cortext-assets.tgz -C "$ASSETS"
 

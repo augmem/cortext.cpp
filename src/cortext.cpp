@@ -150,7 +150,6 @@ ValidateImageInput (const std::uint8_t *data, int width, int height,
 }
 #endif
 
-#if !defined(CORTEXT_DISABLE_AUDIO) || !defined(CORTEXT_DISABLE_IMAGE)
 void
 ValidateMedia (const Cortext::Media &media)
 {
@@ -192,7 +191,6 @@ ApplyStoredMedia (Signal &signal, const Cortext::Media &media,
                                                media.data + media.size);
   signal.mimetype = media.mimetype;
 }
-#endif
 
 #if defined(CORTEXT_DISABLE_AUDIO)
 [[noreturn]] void
@@ -440,7 +438,11 @@ PayloadMatchesMemorySurface (const std::string &memory_modality,
     {
       return false;
     }
-  if (memory_modality == "text" || memory_mime == "text/plain"
+  // Text modality can carry caller-provided binary payloads (for example a
+  // token KV cache). Only canonical text/plain payloads require text-content
+  // validation; a custom MIME type declares an opaque payload surface.
+  if (memory_mime == "text/plain"
+      || (memory_mime.empty () && memory_modality == "text")
       || signal_mime == "text/plain")
     {
       return IsLikelyTextPayload (payload);
@@ -3348,10 +3350,19 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
                       Retention retention,
                       EvidenceBudget evidence_budget)
 {
+  return ProcessText (text, source_id, Media{}, retention, evidence_budget);
+}
+
+Cortext::Context
+Cortext::ProcessText (const std::string &text, const std::string &source_id,
+                      const Media &media, Retention retention,
+                      EvidenceBudget evidence_budget)
+{
   if (!impl_)
     {
       throw std::runtime_error ("Cortext not initialized");
     }
+  ValidateMedia (media);
   telemetry::ScopedSpan span ("cortext.api.process_text");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision = impl_->signal_filter.EvaluateText (text);
@@ -3367,7 +3378,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
-  // Build signal with payload for MemoryStorage
+  // Build signal with payload for MemoryStorage: the caller's Media when it
+  // carries bytes, else the text itself. Text stays the encoded input.
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
@@ -3375,9 +3387,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   s.source_id = source_id;
   s.retention = retention;
   s.late_interaction = std::move (li);
-  s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
-  s.mimetype = "text/plain";
+  ApplyStoredMedia (s, media, text.data (), text.size (), "text/plain");
 
   auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();

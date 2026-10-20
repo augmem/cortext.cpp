@@ -1,6 +1,10 @@
 #include "backend_portable.h"
 
+#if defined(_WIN32)
+#include "win_dirent.h"
+#else
 #include <dirent.h>
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <stddef.h>
@@ -10,7 +14,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#include "win_posix.h"
+#else
 #include <unistd.h>
+#endif
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>

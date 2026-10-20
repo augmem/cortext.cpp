@@ -8,6 +8,7 @@
 #include "standing_memory_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
+#include "cortext/internal/text_payload.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
@@ -1230,7 +1231,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const bool text_mode = std::all_of (
           ordered_signals.begin (), ordered_signals.end (),
           [] (const SignalRecord *rec) {
-            return rec && rec->modality == "text";
+            return rec && rec->modality == "text"
+                   && ::cortext::internal::IsTextPayload (rec->modality, rec->mime);
           });
       const bool audio_mode = std::all_of (
           ordered_signals.begin (), ordered_signals.end (),
@@ -1461,7 +1463,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                   // Standing set: a stored signal whose text states a
                   // lasting directive joins the bounded set queries rank
                   // on their own; a full set drops its oldest member.
-                  if (sig_rec.modality == "text" && !sig_rec.payload.empty ())
+                  if (::cortext::internal::IsTextPayload (sig_rec.modality, sig_rec.mime)
+                      && !sig_rec.payload.empty ())
                     {
                       namespace standing = standing_memory_internal;
                       const std::string_view text (
@@ -1532,7 +1535,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           // an extra channel and does not change the memory's modality.
           for (const auto *rec : ordered_signals)
             {
-              if (!rec || rec->modality != "text" || rec->payload.empty ())
+              if (!rec || !::cortext::internal::IsTextPayload (rec->modality, rec->mime)
+                  || rec->payload.empty ())
                 continue;
               if (!memory_text.empty ())
                 memory_text.push_back ('\n');
@@ -1555,7 +1559,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                      rec->payload.end ());
               }
           if (memory_text.empty () && signal.payload
-              && signal.modality == "text")
+              && ::cortext::internal::IsTextPayload (signal.modality, signal.mimetype))
             memory_text.assign (signal.payload->begin (),
                                  signal.payload->end ());
         }

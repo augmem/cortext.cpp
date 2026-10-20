@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const cortext_version = "1.2.4";
+const cortext_version = "1.3.3";
 
 const sqlite_header_template = @embedFile("third_party/sqlite/src/sqlite.h.in");
 
@@ -305,7 +305,7 @@ pub fn build(b: *std.Build) void {
         .name = "cortext",
         .linkage = if (shared) .dynamic else .static,
         .root_module = mod,
-        .version = .{ .major = 1, .minor = 2, .patch = 4 },
+        .version = .{ .major = 1, .minor = 3, .patch = 3 },
     });
 
     // Keep Zig consumers on the same pinned hnswlib safety contract as the

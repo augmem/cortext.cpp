@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cortext VERSION 1.2.4 LANGUAGES C CXX)
+project(cortext VERSION 1.3.3 LANGUAGES C CXX)
 
 set(CORTEXT_TARGET_IOS OFF)
 if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_OSX_SYSROOT MATCHES "iphone")
@@ -11,8 +11,13 @@ if(CMAKE_OSX_ARCHITECTURES MATCHES "(^|;)arm64($|;)")
   set(CORTEXT_TARGET_AARCH64 ON)
 elseif(CMAKE_OSX_ARCHITECTURES)
   set(CORTEXT_TARGET_AARCH64 OFF)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-  set(CORTEXT_TARGET_AARCH64 ON)
+else()
+  string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _cortext_system_processor)
+  string(TOLOWER "${CMAKE_GENERATOR_PLATFORM}" _cortext_generator_platform)
+  if(_cortext_system_processor MATCHES "aarch64|arm64" OR
+     _cortext_generator_platform MATCHES "arm64")
+    set(CORTEXT_TARGET_AARCH64 ON)
+  endif()
 endif()
 
 if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD STREQUAL "")
@@ -40,6 +45,8 @@ option(CORTEXT_FETCH_GGML
        "Fetch and build bundled ggml when CORTEXT_GGML_SOURCE_DIR is unset" ON)
 option(CORTEXT_USE_SYSTEM_GGML
        "Use preinstalled ggml headers/libraries instead of bundled ggml" OFF)
+option(CORTEXT_ALLOW_CLANGCL_ARM
+       "Allow clang-cl for ARM ggml (requires explicit opt-in)" OFF)
 # Default ON: link Git AIST shards into libcortext; assemble full GGUF at load.
 # Opt out with -DCORTEXT_EMBED_AIST_MODEL=OFF (thin native + external model path).
 # MSVC cannot .incbin shards — configure fails unless you opt out.
@@ -118,6 +125,8 @@ option(CORTEXT_ENABLE_MSAN "Enable MemorySanitizer (Clang only)" OFF)
 
 set(CORTEXT_NODE_EXECUTABLE "" CACHE FILEPATH "Path to the node executable used for Node.js addon builds")
 set(CORTEXT_NODE_INCLUDE_DIR "" CACHE PATH "Path to Node.js headers used for Node.js addon builds")
+set(CORTEXT_NODE_LIBRARY "" CACHE FILEPATH
+    "Path to the Node.js import library used for Windows addon builds")
 
 if(EMSCRIPTEN AND BUILD_TESTING)
   message(STATUS "Disabling tests for WebAssembly builds (not supported).")
@@ -137,7 +146,7 @@ endif()
 
 set(CORTEXT_EMBEDDED_AIST_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/aist_embed")
 if(CORTEXT_EMBED_AIST_MODEL)
-  if(MSVC)
+  if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     message(FATAL_ERROR
       "CORTEXT_EMBED_AIST_MODEL is not supported with MSVC (.incbin). "
       "Use Clang/GCC, or set -DCORTEXT_EMBED_AIST_MODEL=OFF and provide "
@@ -378,6 +387,65 @@ function(cortext_resolve_ggml_source_dir input_dir output_dir)
     "${input_dir}")
 endfunction()
 
+# ggml v0.9.5 rejects MSVC in its ARM guard. Some clang-cl runners report
+# MSVC to CMake, so an explicit opt-in patches only the fetched, pinned source
+# before its subdirectory is added. Keep this exact guard match so a changed
+# ggml tag fails loudly instead of being rewritten by an arbitrary replacement.
+function(cortext_patch_fetched_ggml_arm_guard ggml_source_dir)
+  if(NOT CORTEXT_ALLOW_CLANGCL_ARM)
+    return()
+  endif()
+
+  set(_cortext_ggml_arm_cmake
+      "${ggml_source_dir}/src/ggml-cpu/CMakeLists.txt")
+  if(NOT EXISTS "${_cortext_ggml_arm_cmake}")
+    message(FATAL_ERROR
+      "Expected ggml ARM CMake file is missing: ${_cortext_ggml_arm_cmake}")
+  endif()
+
+  set(_cortext_ggml_arm_guard_old
+      [=[if (MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")]=])
+  set(_cortext_ggml_arm_guard_new
+      [=[if (MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang" AND NOT CORTEXT_ALLOW_CLANGCL_ARM)]=])
+  file(READ "${_cortext_ggml_arm_cmake}" _cortext_ggml_arm_contents)
+  string(FIND "${_cortext_ggml_arm_contents}"
+         "${_cortext_ggml_arm_guard_old}" _cortext_guard_first)
+  string(FIND "${_cortext_ggml_arm_contents}"
+         "${_cortext_ggml_arm_guard_new}" _cortext_guard_new_first)
+  if(_cortext_guard_first LESS 0)
+    if(_cortext_guard_new_first LESS 0)
+      message(FATAL_ERROR
+        "Expected ggml v0.9.5 ARM compiler guard text is missing from "
+        "${_cortext_ggml_arm_cmake}; refusing an unscoped patch")
+    endif()
+    string(FIND "${_cortext_ggml_arm_contents}"
+           "${_cortext_ggml_arm_guard_new}" _cortext_guard_new_last REVERSE)
+    if(NOT _cortext_guard_new_first EQUAL _cortext_guard_new_last)
+      message(FATAL_ERROR
+        "Expected exactly one ggml ARM compiler guard in "
+        "${_cortext_ggml_arm_cmake}; refusing an ambiguous patch")
+    endif()
+    return()
+  elseif(_cortext_guard_new_first GREATER_EQUAL 0)
+    message(FATAL_ERROR
+      "Both original and patched ggml ARM compiler guards are present in "
+      "${_cortext_ggml_arm_cmake}; refusing an ambiguous patch")
+  endif()
+
+  string(FIND "${_cortext_ggml_arm_contents}"
+         "${_cortext_ggml_arm_guard_old}" _cortext_guard_last REVERSE)
+  if(NOT _cortext_guard_first EQUAL _cortext_guard_last)
+    message(FATAL_ERROR
+      "Expected exactly one ggml ARM compiler guard in "
+      "${_cortext_ggml_arm_cmake}; refusing an ambiguous patch")
+  endif()
+
+  string(REPLACE "${_cortext_ggml_arm_guard_old}"
+                 "${_cortext_ggml_arm_guard_new}"
+                 _cortext_ggml_arm_patched "${_cortext_ggml_arm_contents}")
+  file(WRITE "${_cortext_ggml_arm_cmake}" "${_cortext_ggml_arm_patched}")
+endfunction()
+
 set(CORTEXT_GGML_AVAILABLE OFF)
 if(NOT EMSCRIPTEN)
   set(_cortext_ggml_header_path "")
@@ -469,6 +537,7 @@ if(NOT EMSCRIPTEN)
       endif()
       cortext_resolve_ggml_source_dir("${cortext_ggml_source_SOURCE_DIR}"
                                       _cortext_ggml_source_dir)
+      cortext_patch_fetched_ggml_arm_guard("${_cortext_ggml_source_dir}")
     endif()
 
     add_subdirectory("${_cortext_ggml_source_dir}"
@@ -640,6 +709,12 @@ if(CORTEXT_EMBED_OBJSTORE)
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/src/backend_sqlite.c
     )
   endif()
+  if(WIN32)
+    list(APPEND CORTEXT_OBJSTORE_SRCS
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/src/win_dirent.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/src/win_posix.c
+    )
+  endif()
   if(CORTEXT_TARGET_AARCH64)
     list(APPEND CORTEXT_OBJSTORE_SRCS
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite-objstore/third_party/blake3/blake3_neon.c
@@ -792,6 +867,8 @@ if(EMSCRIPTEN AND BUILD_WASM)
     "_cortext_last_error"
     "_cortext_string_free"
     "_cortext_process_text_json"
+    "_cortext_process_text_with_media_json"
+    "_cortext_process_text_with_media_json_with_options"
     "_cortext_wasm_process_text_json"
     "_cortext_process_audio_json"
     "_cortext_process_image_json"
@@ -867,13 +944,13 @@ if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
     )
   endif()
 
+  execute_process(
+    COMMAND "${CORTEXT_NODE_EXECUTABLE}" -p "require('path').dirname(require('path').dirname(process.execPath))"
+    OUTPUT_VARIABLE CORTEXT_NODE_PREFIX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY
+  )
   if(NOT CORTEXT_NODE_INCLUDE_DIR)
-    execute_process(
-      COMMAND "${CORTEXT_NODE_EXECUTABLE}" -p "require('path').dirname(require('path').dirname(process.execPath))"
-      OUTPUT_VARIABLE CORTEXT_NODE_PREFIX
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      COMMAND_ERROR_IS_FATAL ANY
-    )
     set(CORTEXT_NODE_INCLUDE_DIR "${CORTEXT_NODE_PREFIX}/include/node")
   endif()
 
@@ -898,11 +975,34 @@ if(CORTEXT_BUILD_NODE_BINDINGS AND NOT EMSCRIPTEN)
     PREFIX ""
     OUTPUT_NAME "cortext"
     SUFFIX ".node"
+    ARCHIVE_OUTPUT_NAME "cortext_node"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ffi/node"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ffi/node"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ffi/node"
   )
 
-  if(APPLE)
+  if(WIN32)
+    if(NOT CORTEXT_NODE_LIBRARY)
+      find_file(_cortext_node_library
+        NAMES node.lib
+        PATHS "${CORTEXT_NODE_PREFIX}"
+        PATH_SUFFIXES "" x64 lib
+        NO_DEFAULT_PATH
+      )
+      set(CORTEXT_NODE_LIBRARY "${_cortext_node_library}" CACHE FILEPATH
+        "Path to the Node.js import library used for Windows addon builds"
+        FORCE
+      )
+    endif()
+    if(NOT CORTEXT_NODE_LIBRARY OR NOT EXISTS "${CORTEXT_NODE_LIBRARY}")
+      message(FATAL_ERROR
+        "Node.js import library node.lib was not found under "
+        "${CORTEXT_NODE_PREFIX} (searched the prefix, x64, and lib). "
+        "Set CORTEXT_NODE_LIBRARY to the node.lib path."
+      )
+    endif()
+    target_link_libraries(cortext_node PRIVATE "${CORTEXT_NODE_LIBRARY}")
+  elseif(APPLE)
     target_link_options(cortext_node PRIVATE "-undefined" "dynamic_lookup")
     set_property(TARGET cortext_node APPEND PROPERTY BUILD_RPATH
       "@loader_path/../.."

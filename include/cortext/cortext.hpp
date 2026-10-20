@@ -176,12 +176,15 @@ public:
     bool signal_filter_text_enabled = false;
   };
 
-  /// @brief Optional source media payload to persist with an audio/image signal.
+  /// @brief Optional source media payload to persist with a signal.
   ///
-  /// Processing still uses the canonical audio/image input passed to
-  /// ProcessAudio/ProcessImage. When Media contains data, those bytes and this
-  /// MIME type become the durable payload instead of the canonical processing
-  /// representation. Media bytes are copied during the call.
+  /// Processing still uses the canonical input passed to ProcessText,
+  /// ProcessAudio, or ProcessImage. When Media contains data, those bytes and
+  /// this MIME type become the durable payload instead of the canonical
+  /// processing representation; empty Media stores the canonical input. A
+  /// payload is used as text only when its MIME type is text/*; any other
+  /// MIME type is opaque for every modality. Media bytes are copied during
+  /// the call.
   struct Media
   {
     const std::uint8_t *data = nullptr;
@@ -255,6 +258,17 @@ public:
                        Retention retention = Retention::Natural,
                        EvidenceBudget evidence_budget = std::nullopt);
 
+  /// @brief Process text while storing caller-provided source media.
+  ///
+  /// The text remains the canonical embedding input. If media contains bytes,
+  /// those bytes are persisted as the signal/memory payload using
+  /// media.mimetype instead of the UTF-8 text bytes. If media is empty, the
+  /// text is persisted, matching the audio/image Media overloads.
+  Context ProcessText (const std::string &text, const std::string &source_id,
+                       const Media &media,
+                       Retention retention = Retention::Natural,
+                       EvidenceBudget evidence_budget = std::nullopt);
+
   /// @brief Process text input with an explicit timestamp (ms since epoch).
   /// @param text The text content to process.
   /// @param source_id Opaque source stream identifier used for provenance and
@@ -289,7 +303,7 @@ public:
   ///
   /// The PCM buffer remains the canonical processing input. If media contains
   /// bytes, those bytes are persisted as the signal/memory payload using
-  /// media.mimetype. If media is empty, no audio payload is persisted.
+  /// media.mimetype. If media is empty, the PCM is persisted.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id, const Media &media,
                         Retention retention = Retention::Natural,
@@ -315,7 +329,7 @@ public:
   ///
   /// The pixel buffer remains the canonical processing input. If media contains
   /// bytes, those bytes are persisted as the signal/memory payload using
-  /// media.mimetype. If media is empty, no image payload is persisted.
+  /// media.mimetype. If media is empty, the raw pixels are persisted.
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
                         const Media &media,

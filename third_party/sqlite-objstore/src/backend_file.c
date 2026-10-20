@@ -13,7 +13,11 @@
 
 #include "backend_fs_common.h"
 
+#if defined(_WIN32)
+#include "win_dirent.h"
+#else
 #include <dirent.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -24,8 +28,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#include "win_posix.h"
+#else
 #include <unistd.h>
-#if !defined(_WIN32)
 #include <sys/file.h>
 #endif
 #if defined(__linux__)
@@ -45,7 +51,7 @@ extern int fallocate (int fd, int mode, off_t offset, off_t len);
 #define FILE_BACKEND_ROWIDX_MARKER ".ready"
 #define FILE_BACKEND_ROWIDX_SHARD_CHARS 2u
 
-static const size_t kObjstoreIdHexChars = OBJSTORE_ID_SIZE * 2u;
+#define kObjstoreIdHexChars (OBJSTORE_ID_SIZE * 2u)
 
 typedef struct file_backend_env
 {
