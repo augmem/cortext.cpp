@@ -115,3 +115,20 @@ pre {
     width: 100%;
   }
 }
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.field.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field.check input {
+  width: auto;
+}
