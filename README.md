@@ -325,7 +325,9 @@ scores, and usage counts:
   "content": [
     {
       "base64": "VGhlIGdhcmFnZSBkb29yIGNvZGUgaXMgODg0MS4=",
-      "size_bytes": 29
+      "mimetype": "text/plain",
+      "size_bytes": 29,
+      "timestamp": 1783463360158
     }
   ],
   "relevance": 0.96,
@@ -337,7 +339,14 @@ scores, and usage counts:
 ```
 
 For C++ callers, `Memory::content` is already raw bytes. For JSON callers,
-decode `content[].base64` according to `mimetype`.
+decode `content[].base64` according to `content[].mimetype`.
+
+A retrieved memory can carry blobs from other memories (adjacent turns, the
+older version of a fact it superseded, the newer version that superseded it),
+so each blob has its own time: `Memory::content_timestamps` (JSON
+`content[].timestamp`) is the stored signal time in ms of each blob, in
+content order, 0 when unknown. The memory's `timestamp` is the memory's own
+time.
 
 ## Language packages (standalone)
 

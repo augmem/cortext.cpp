@@ -454,6 +454,7 @@ PayloadMatchesMemorySurface (const std::string &memory_modality,
 /// @param store The store instance.
 /// @param memory_id The memory_id to query signals for.
 /// @param out Vector of blobs, one per signal.
+/// @param out_timestamps Stored time of each blob's signal, in blob order.
 /// @return true if any blobs were loaded.
 bool
 LoadSignalBlobs (Store *store, long long memory_id,
@@ -464,6 +465,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
                  std::size_t *loaded_signal_blobs,
                  std::vector<std::vector<unsigned char>> &out,
                  std::vector<std::string> &out_mimetypes,
+                 std::vector<std::uint64_t> &out_timestamps,
                  SharedObjectReads *shared = nullptr)
 {
   if (!store || memory_id <= 0)
@@ -480,11 +482,12 @@ LoadSignalBlobs (Store *store, long long memory_id,
       long long cursor_signal_id = std::numeric_limits<long long>::max ();
       std::vector<std::vector<unsigned char>> matched_payloads;
       std::vector<std::string> matched_mimetypes;
+      std::vector<std::uint64_t> matched_timestamps;
       matched_payloads.reserve (static_cast<std::size_t> (limit));
       while (static_cast<long long> (matched_payloads.size ()) < limit)
         {
           auto rows = store->Execute (
-              "SELECT signal_id, modality, mime, blob_id, "
+              "SELECT signal_id, modality, mime, blob_id, timestamp, "
               "       COALESCE(serial_position, signal_id) AS sort_position "
               "FROM signals "
               "WHERE memory_id = ? AND blob_id IS NOT NULL "
@@ -532,6 +535,14 @@ LoadSignalBlobs (Store *store, long long memory_id,
                               matched_payloads.push_back (
                                   std::move (payload));
                               matched_mimetypes.push_back (signal_mime);
+                              const auto ts = row.find ("timestamp");
+                              matched_timestamps.push_back (
+                                  static_cast<std::uint64_t> (std::max (
+                                      0LL,
+                                      ts == row.end ()
+                                          ? 0LL
+                                          : store::AnyToLongLong (ts->second)
+                                                .value_or (0))));
                               if (static_cast<long long> (
                                       matched_payloads.size ())
                                   == limit)
@@ -546,6 +557,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
         }
       std::reverse (matched_payloads.begin (), matched_payloads.end ());
       std::reverse (matched_mimetypes.begin (), matched_mimetypes.end ());
+      std::reverse (matched_timestamps.begin (), matched_timestamps.end ());
       if (loaded_signal_blobs)
         *loaded_signal_blobs += matched_payloads.size ();
       out.insert (out.end (),
@@ -554,6 +566,8 @@ LoadSignalBlobs (Store *store, long long memory_id,
       out_mimetypes.insert (out_mimetypes.end (),
                             std::make_move_iterator (matched_mimetypes.begin ()),
                             std::make_move_iterator (matched_mimetypes.end ()));
+      out_timestamps.insert (out_timestamps.end (), matched_timestamps.begin (),
+                             matched_timestamps.end ());
       return !out.empty ();
     }
   catch (const std::exception &e)
@@ -579,8 +593,10 @@ LoadContentBlob (Store *store, ObjectStore *object_store,
                  const std::vector<unsigned char> &blob_id,
                  const std::string &memory_modality,
                  const std::string &memory_mime,
+                 std::uint64_t blob_timestamp,
                  std::vector<std::vector<unsigned char>> &out,
                  std::vector<std::string> &out_mimetypes,
+                 std::vector<std::uint64_t> &out_timestamps,
                  SharedObjectReads *shared = nullptr)
 {
   if (!store || blob_id.empty ())
@@ -593,6 +609,7 @@ LoadContentBlob (Store *store, ObjectStore *object_store,
     {
       out.push_back (std::move (payload));
       out_mimetypes.push_back (memory_mime);
+      out_timestamps.push_back (blob_timestamp);
       return true;
     }
   return false;
@@ -625,7 +642,14 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           "     ORDER BY s.serial_position LIMIT 1), "
           "    (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
           "     ORDER BY s.serial_position LIMIT 1)"
-          "  ) AS signal_mime "
+          "  ) AS signal_mime, "
+          "  COALESCE("
+          "    (SELECT s.timestamp FROM signals s "
+          "     WHERE s.memory_id = m.memory_id AND s.modality = m.modality "
+          "     ORDER BY s.serial_position LIMIT 1), "
+          "    (SELECT s.timestamp FROM signals s WHERE s.memory_id = m.memory_id "
+          "     ORDER BY s.serial_position LIMIT 1)"
+          "  ) AS signal_ts "
           "FROM memories m "
           "WHERE m.memory_id = ?",
           { id });
@@ -681,6 +705,11 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
               = end_ts > 0 ? end_ts
                            : (start_ts > 0 ? start_ts : created_at);
           m.timestamp = static_cast<std::uint64_t> (timestamp);
+          // A memory-level blob (a reconstruction, or the memory's content
+          // joined from its signals) carries the time of the signal it
+          // starts with, the one signal_mime comes from.
+          const auto memory_blob_ts = static_cast<std::uint64_t> (
+              std::max (0LL, get_ll ("signal_ts")));
 
           const auto reconstruction
               = operations::constructive_recall::LoadLatestReconstruction (
@@ -696,6 +725,7 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
                 {
                   m.content.push_back (std::move (payload));
                   m.content_mimetypes.push_back (m.mimetype);
+                  m.content_timestamps.push_back (memory_blob_ts);
                 }
             }
 
@@ -703,7 +733,8 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             {
               const auto blob_id = get_blob ("blob_id");
               LoadContentBlob (store, object_store, blob_id, m.modality,
-                               m.mimetype, m.content, m.content_mimetypes,
+                               m.mimetype, memory_blob_ts, m.content,
+                               m.content_mimetypes, m.content_timestamps,
                                shared);
             }
 
@@ -713,7 +744,8 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
               LoadSignalBlobs (store, memory_id, object_store, m.modality,
                                m.mimetype, max_fallback_signal_blobs,
                                loaded_fallback_signal_blobs,
-                               m.content, m.content_mimetypes, shared);
+                               m.content, m.content_mimetypes,
+                               m.content_timestamps, shared);
             }
 
           // v2: Counts are inline on memories table
@@ -775,6 +807,7 @@ StripSourceBlobsIfDisabled (Cortext::Context::Memory &memory)
     {
       memory.content.clear ();
       memory.content_mimetypes.clear ();
+      memory.content_timestamps.clear ();
     }
 }
 
@@ -828,11 +861,14 @@ HasTextContent (const Cortext::Context::Memory &memory)
   return false;
 }
 
-// Before inserting attached blobs: one MIME type per existing content blob.
+// Before inserting attached blobs: one MIME type and one signal time per
+// existing content blob. Every hydration path records a blob's time, so the
+// 0 (unknown) padding only covers content a caller built without one.
 void
 AlignContentMimetypes (Cortext::Context::Memory &memory)
 {
   memory.content_mimetypes.resize (memory.content.size (), memory.mimetype);
+  memory.content_timestamps.resize (memory.content.size (), 0);
 }
 
 std::string
@@ -1010,11 +1046,13 @@ public:
   // Content of a memory to attach to another memory, whatever its
   // modalities: its text blobs joined by spaces into one clipped text/plain
   // blob, then each non-text blob whole. cost charges text by its bytes and
-  // each non-text blob as one full clipped neighbour.
+  // each non-text blob as one full clipped neighbour. timestamps holds each
+  // blob's stored signal time (the joined text: its first text blob's).
   struct AttachedParts
   {
     std::vector<std::vector<unsigned char> > blobs;
     std::vector<std::string> mimetypes;
+    std::vector<std::uint64_t> timestamps;
     std::size_t cost = 0;
   };
 
@@ -1022,12 +1060,14 @@ public:
   AttachedContent (long long memory_id, std::size_t max_text_bytes)
   {
     AttachedParts parts;
-    auto text = AttachedText (memory_id, max_text_bytes);
+    std::uint64_t text_timestamp = 0;
+    auto text = AttachedText (memory_id, max_text_bytes, &text_timestamp);
     if (!text.empty ())
       {
         parts.cost += text.size ();
         parts.blobs.push_back (std::move (text));
         parts.mimetypes.push_back ("text/plain");
+        parts.timestamps.push_back (text_timestamp);
       }
     const Hydrated &memory = Hydrate (memory_id);
     for (std::size_t i = 0; i < memory.content.size (); ++i)
@@ -1040,16 +1080,21 @@ public:
         parts.cost += max_text_bytes;
         parts.blobs.push_back (memory.content[i]);
         parts.mimetypes.push_back (mime);
+        parts.timestamps.push_back (BlobTimestamp (memory, i));
       }
     return parts;
   }
 
   // Text of a memory to attach to another memory's content: its content
   // blobs joined by spaces and clipped to max_bytes, or empty when the
-  // memory has no text surface.
+  // memory has no text surface. *timestamp, when given, receives the stored
+  // signal time of the first text blob joined (0 when there is none).
   std::vector<unsigned char>
-  AttachedText (long long memory_id, std::size_t max_bytes)
+  AttachedText (long long memory_id, std::size_t max_bytes,
+                std::uint64_t *timestamp = nullptr)
   {
+    if (timestamp)
+      *timestamp = 0;
     const Hydrated &memory = Hydrate (memory_id);
     if (!memory.has_content)
       {
@@ -1070,6 +1115,10 @@ public:
           {
             text.push_back (' ');
           }
+        else if (timestamp)
+          {
+            *timestamp = BlobTimestamp (memory, i);
+          }
         text.insert (text.end (), blob.begin (), blob.end ());
         if (clip_terms_.empty () && text.size () > max_bytes)
           {
@@ -1088,9 +1137,18 @@ private:
     std::string mimetype;
     std::vector<std::vector<unsigned char> > content;
     std::vector<std::string> content_mimetypes;
+    std::vector<std::uint64_t> content_timestamps;
     bool has_content = false;
     std::size_t fallback_signal_blobs = 0;
   };
+
+  static std::uint64_t
+  BlobTimestamp (const Hydrated &memory, std::size_t i)
+  {
+    return i < memory.content_timestamps.size ()
+               ? memory.content_timestamps[i]
+               : 0;
+  }
 
   const Hydrated &
   Hydrate (long long memory_id)
@@ -1109,6 +1167,7 @@ private:
         hydrated.has_content = HasTextContent (memory);
         hydrated.content = std::move (memory.content);
         hydrated.content_mimetypes = std::move (memory.content_mimetypes);
+        hydrated.content_timestamps = std::move (memory.content_timestamps);
         hydrated.fallback_signal_blobs = fallback_signal_blobs;
         it = cache_.emplace (memory_id, std::move (hydrated)).first;
       }
@@ -1146,7 +1205,8 @@ LoadStandingSignal (Store *store, ObjectStore *object_store,
   try
     {
       const auto rows = store->Execute (
-          "SELECT blob_id, modality, mime FROM signals WHERE signal_id = ?",
+          "SELECT blob_id, modality, mime, timestamp FROM signals "
+          "WHERE signal_id = ?",
           { signal_id });
       if (rows.empty ())
         return 0;
@@ -1168,6 +1228,8 @@ LoadStandingSignal (Store *store, ObjectStore *object_store,
           = text ? payload.size () : Cortext::kMediaEvidenceBytes;
       memory.content.push_back (std::move (payload));
       memory.content_mimetypes.push_back (std::move (mimetype));
+      memory.content_timestamps.push_back (static_cast<std::uint64_t> (
+          std::max (0LL, RowLongLong (rows[0], "timestamp"))));
       return cost;
     }
   catch (const std::exception &e)
@@ -1273,6 +1335,7 @@ FitEvidenceToBudget (Store *store, ObjectStore *object_store,
     std::vector<unsigned char> blob_id;
     std::string modality;
     std::string mime;
+    std::uint64_t timestamp = 0;
     double score = -2.0;
     bool has_vector = false;
     bool floor = false;
@@ -1300,6 +1363,7 @@ FitEvidenceToBudget (Store *store, ObjectStore *object_store,
               : store->Execute (
                     "SELECT s.memory_id AS memory_id, s.blob_id AS blob_id, "
                     "       s.modality AS modality, s.mime AS mime, "
+                    "       s.timestamp AS timestamp, "
                     "       v.embedding AS embedding "
                     "FROM signals s "
                     "LEFT JOIN memory_signal_vectors v "
@@ -1317,6 +1381,8 @@ FitEvidenceToBudget (Store *store, ObjectStore *object_store,
                 member.blob_id = store::BlobFromAny (it->second);
               member.modality = RowString (row, "modality");
               member.mime = RowString (row, "mime");
+              member.timestamp = static_cast<std::uint64_t> (
+                  std::max (0LL, RowLongLong (row, "timestamp")));
               if (const auto it = row.find ("embedding");
                   it != row.end () && it->second.has_value ()
                   && core::DecodeFloatBlob (it->second, dim, vec))
@@ -1515,11 +1581,13 @@ FitEvidenceToBudget (Store *store, ObjectStore *object_store,
         }
       std::vector<std::vector<unsigned char> > content;
       std::vector<std::string> mimetypes;
+      std::vector<std::uint64_t> timestamps;
       const auto take = [&] (std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i)
           {
             content.push_back (std::move (m.content[i]));
             mimetypes.push_back (std::move (m.content_mimetypes[i]));
+            timestamps.push_back (m.content_timestamps[i]);
           }
       };
       if (e.with_neighbours)
@@ -1545,6 +1613,9 @@ FitEvidenceToBudget (Store *store, ObjectStore *object_store,
               content.push_back (std::move (x.payload));
               mimetypes.push_back (text ? std::string ("text/plain")
                                         : x.mime);
+              // Consecutive kept text joins this blob: it keeps the time of
+              // the member it starts with.
+              timestamps.push_back (x.timestamp);
               last_text = text;
             }
           ++fit.trimmed;
@@ -1557,6 +1628,7 @@ FitEvidenceToBudget (Store *store, ObjectStore *object_store,
         ++fit.stripped;
       m.content = std::move (content);
       m.content_mimetypes = std::move (mimetypes);
+      m.content_timestamps = std::move (timestamps);
       fitted.push_back (std::move (m));
     }
   // The charges above bound the fitted content; this keeps the bound if a
@@ -1809,6 +1881,9 @@ AttachContiguousTurns (Store *store,
         anchor.content_mimetypes.insert (
             anchor.content_mimetypes.begin () + static_cast<std::ptrdiff_t> (at),
             parts.mimetypes.begin (), parts.mimetypes.end ());
+        anchor.content_timestamps.insert (
+            anchor.content_timestamps.begin () + static_cast<std::ptrdiff_t> (at),
+            parts.timestamps.begin (), parts.timestamps.end ());
         excluded_ids.insert (turn.memory_id);
         attached_ids.insert (turn.memory_id);
         ++attached;
@@ -2061,6 +2136,7 @@ AttachSupersededPredecessors (
               continue;
             }
           std::vector<std::vector<unsigned char> > recalled;
+          std::vector<std::uint64_t> recalled_timestamps;
           for (const auto &target : anchor_targets->second)
             {
               if (static_cast<long long> (recalled.size ())
@@ -2073,14 +2149,16 @@ AttachSupersededPredecessors (
                 {
                   continue;
                 }
-              auto text = hydrations.AttachedText (target_id,
-                                                   kSupersededRecallMaxBytes);
+              std::uint64_t text_timestamp = 0;
+              auto text = hydrations.AttachedText (
+                  target_id, kSupersededRecallMaxBytes, &text_timestamp);
               if (text.empty () || text.size () > budget)
                 {
                   continue;
                 }
               budget -= text.size ();
               recalled.push_back (std::move (text));
+              recalled_timestamps.push_back (text_timestamp);
             }
           // Strongest edge first in rank, but oldest-to-newest in the packet:
           // the recalled predecessors precede the anchor's own content.
@@ -2091,6 +2169,9 @@ AttachSupersededPredecessors (
               anchor.content.begin (),
               std::make_move_iterator (recalled.rbegin ()),
               std::make_move_iterator (recalled.rend ()));
+          anchor.content_timestamps.insert (anchor.content_timestamps.begin (),
+                                            recalled_timestamps.rbegin (),
+                                            recalled_timestamps.rend ());
           attached += recalled.size ();
         }
     }
@@ -2191,13 +2272,15 @@ AttachSupersedingSuccessors (Store *store,
             {
               if (successor_id <= 0 || !excluded_ids.insert (successor_id).second)
                 continue;
-              auto text = hydrations.AttachedText (successor_id,
-                                                   kSupersedingRecallMaxBytes);
+              std::uint64_t text_timestamp = 0;
+              auto text = hydrations.AttachedText (
+                  successor_id, kSupersedingRecallMaxBytes, &text_timestamp);
               if (text.empty () || text.size () > budget)
                 continue;
               budget -= text.size ();
               AlignContentMimetypes (anchor);
               anchor.content_mimetypes.push_back ("text/plain");
+              anchor.content_timestamps.push_back (text_timestamp);
               anchor.content.push_back (std::move (text));
               ++attached;
               break;
@@ -2242,7 +2325,14 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           "          ORDER BY s.serial_position LIMIT 1), "
           "         (SELECT s.mime FROM signals s WHERE s.memory_id = m.memory_id "
           "          ORDER BY s.serial_position LIMIT 1)"
-          "       ) AS signal_mime "
+          "       ) AS signal_mime, "
+          "       COALESCE("
+          "         (SELECT s.timestamp FROM signals s WHERE s.memory_id = m.memory_id "
+          "            AND s.modality = m.modality "
+          "          ORDER BY s.serial_position LIMIT 1), "
+          "         (SELECT s.timestamp FROM signals s WHERE s.memory_id = m.memory_id "
+          "          ORDER BY s.serial_position LIMIT 1)"
+          "       ) AS signal_ts "
           "FROM memories m "
           "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
           "ORDER BY m.start_ts ASC, m.memory_id ASC");
@@ -2303,15 +2393,21 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           m.retrieved_count = get_ll ("retrieved_count");
           m.used_count = get_ll ("used_count");
 
+          // A memory-level blob carries the time of the signal it starts
+          // with, the one signal_mime comes from.
+          const auto memory_blob_ts = static_cast<std::uint64_t> (
+              std::max (0LL, get_ll ("signal_ts")));
           const auto reconstruction_blob_id
               = get_blob ("reconstruction_blob_id");
           if (!LoadContentBlob (store, object_store, reconstruction_blob_id,
-                                m.modality, m.mimetype, m.content,
-                                m.content_mimetypes))
+                                m.modality, m.mimetype, memory_blob_ts,
+                                m.content, m.content_mimetypes,
+                                m.content_timestamps))
             {
               LoadContentBlob (store, object_store, get_blob ("blob_id"),
-                               m.modality, m.mimetype, m.content,
-                               m.content_mimetypes);
+                               m.modality, m.mimetype, memory_blob_ts,
+                               m.content, m.content_mimetypes,
+                               m.content_timestamps);
             }
           if (m.content.empty ())
             {
@@ -2319,7 +2415,8 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
               LoadSignalBlobs (store, m.id, object_store, m.modality,
                                m.mimetype, max_fallback_signal_blobs,
                                loaded_fallback_signal_blobs,
-                               m.content, m.content_mimetypes);
+                               m.content, m.content_mimetypes,
+                               m.content_timestamps);
             }
           StripSourceBlobsIfDisabled (m);
 
@@ -3175,6 +3272,8 @@ struct Cortext::Impl
                 joined->content.push_back (std::move (directive.content[i]));
                 joined->content_mimetypes.push_back (
                     std::move (directive.content_mimetypes[i]));
+                joined->content_timestamps.push_back (
+                    directive.content_timestamps[i]);
               }
             continue;
           }
@@ -3187,6 +3286,7 @@ struct Cortext::Impl
           continue;
         m.content = std::move (directive.content);
         m.content_mimetypes = std::move (directive.content_mimetypes);
+        m.content_timestamps = std::move (directive.content_timestamps);
         StripSourceBlobsIfDisabled (m);
         result.standing_memory.push_back (std::move (m));
       }

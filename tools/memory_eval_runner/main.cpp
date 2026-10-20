@@ -501,23 +501,41 @@ bool LooksLikeEncodedImage (const std::vector<unsigned char> &blob)
 }
 
 /// Split a memory's blobs into text (joined exactly as MemoryText) and media
-/// references. Media blobs are never flattened into text.
+/// references. Media blobs are never flattened into text. When `parts` is
+/// given it receives one entry per blob, in content order, with the blob's
+/// stored signal time (`timestamp_ms`, 0 when unknown) and MIME type: a text
+/// blob carries its `text` as MemoryText renders it, so joining the text
+/// parts with MemoryText's rule (a space before each part once the text is
+/// non-empty) reproduces the returned text; a media blob carries its `media`
+/// reference and no text.
 std::pair<std::string, nlohmann::json>
 MemoryTextAndMedia (const cortext::Cortext::Context::Memory &memory,
-                    const MediaRegistry &registry)
+                    const MediaRegistry &registry,
+                    nlohmann::json *parts = nullptr)
 {
   cortext::Cortext::Context::Memory text_only;
   nlohmann::json media = nlohmann::json::array ();
+  if (parts)
+    {
+      *parts = nlohmann::json::array ();
+    }
   for (std::size_t i = 0; i < memory.content.size (); ++i)
     {
       const auto &blob = memory.content[i];
       const std::string &mime = i < memory.content_mimetypes.size ()
                                     ? memory.content_mimetypes[i]
                                     : memory.mimetype;
+      nlohmann::json part = {
+          {"timestamp_ms", i < memory.content_timestamps.size ()
+                               ? memory.content_timestamps[i]
+                               : std::uint64_t{0}},
+          {"mimetype", mime},
+      };
       const auto it = registry.find (Fnv1a64 (blob.data (), blob.size ()));
       if (it != registry.end ())
         {
           media.push_back (it->second);
+          part["media"] = it->second;
         }
       else if (LooksLikeEncodedImage (blob)
                || (!mime.empty () && mime.rfind ("text/", 0) != 0))
@@ -525,10 +543,18 @@ MemoryTextAndMedia (const cortext::Cortext::Context::Memory &memory,
           media.push_back ({{"mimetype", mime},
                             {"bytes", blob.size ()},
                             {"unregistered", true}});
+          part["media"] = media.back ();
         }
       else
         {
           text_only.content.push_back (blob);
+          cortext::Cortext::Context::Memory one;
+          one.content.push_back (blob);
+          part["text"] = MemoryText (one);
+        }
+      if (parts)
+        {
+          parts->push_back (std::move (part));
         }
     }
   return {MemoryText (text_only), media};
@@ -1426,8 +1452,9 @@ int Run (const Options &opts)
           for (std::size_t i = 0; i < shown; ++i)
             {
               const auto &memory = context.retrieved_memory[i];
+              nlohmann::json parts;
               const auto [text, media]
-                  = MemoryTextAndMedia (memory, media_registry);
+                  = MemoryTextAndMedia (memory, media_registry, &parts);
               retrieved_text += " ";
               retrieved_text += text;
               nlohmann::json item = {
@@ -1440,6 +1467,8 @@ int Run (const Options &opts)
                   {"salience", memory.salience},
                   {"text", text},
                   {"preview", Clip (text, 240)},
+                  {"timestamp_ms", memory.timestamp},
+                  {"parts", std::move (parts)},
               };
               // Text-only packets keep the exact prior row shape.
               if (!media.empty ())

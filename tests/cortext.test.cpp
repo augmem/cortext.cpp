@@ -105,6 +105,48 @@ AnyToLongLong (const std::any &value)
   return 0;
 }
 
+// Context::Memory::content_timestamps contract: one stored signal time per
+// content blob, in content order, whenever content is non-empty. With
+// `known`, every blob's time must be known (non-zero).
+void
+RequireContentTimestampsAligned (
+    const std::vector<cortext::Cortext::Context::Memory> &memories,
+    bool known = true)
+{
+  for (const auto &memory : memories)
+    {
+      CAPTURE (memory.id, memory.content.size (),
+               memory.content_timestamps.size ());
+      if (memory.content.empty ())
+        continue;
+      REQUIRE (memory.content_timestamps.size () == memory.content.size ());
+      if (known)
+        for (const auto ts : memory.content_timestamps)
+          REQUIRE (ts != 0);
+    }
+}
+
+void
+RequireContentTimestampsAligned (const cortext::Cortext::Context &context,
+                                 bool known = true)
+{
+  RequireContentTimestampsAligned (context.retrieved_memory, known);
+  RequireContentTimestampsAligned (context.working_memory, known);
+  RequireContentTimestampsAligned (context.standing_memory, known);
+}
+
+// Stored time of a memory's first signal (signals.timestamp).
+std::uint64_t
+FirstSignalTimestamp (cortext::Store &store, long long memory_id)
+{
+  const auto rows = store.Execute (
+      "SELECT timestamp FROM signals WHERE memory_id = ? "
+      "ORDER BY serial_position, signal_id LIMIT 1",
+      { memory_id });
+  REQUIRE (rows.size () == 1);
+  return static_cast<std::uint64_t> (AnyToLongLong (rows[0].at ("timestamp")));
+}
+
 struct DurableRetrievalState
 {
   long long memories = 0;
@@ -786,6 +828,122 @@ TEST_CASE ("A retrieved fact brings back its newest restatement after it",
   REQUIRE (packet.output.operation_ms.at (
                "Cortext.superseding_successors_attached")
            == 1.0);
+}
+
+TEST_CASE ("Recalled versions of a fact keep their own signal times",
+           "[aist][cortext][retrieval][supersession][content_timestamps]")
+{
+  // An anchor recalls the older memory it superseded (weeks earlier) and
+  // the newest memory that superseded it (a week later). Each blob carries
+  // the stored time of the signal it came from, not the anchor's.
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  const std::uint64_t day = 24ULL * 60ULL * 60ULL * 1000ULL;
+  const std::uint64_t old_ts = 1000ULL + 400ULL * day;
+  const std::uint64_t anchor_ts = old_ts + 21ULL * day;
+  const std::uint64_t newer_ts = anchor_ts + 7ULL * day;
+  auto clock = std::make_shared<cortext::FixedClock> (old_ts);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  const auto old_turn = ctx->ProcessTextAt (
+      "My gym membership costs 40 dollars a month at Iron Works.",
+      "chat/a/1", old_ts, cortext::Retention::Durable);
+  clock->SetNowMillis (anchor_ts);
+  const auto anchor_turn = ctx->ProcessTextAt (
+      "Iron Works raised my gym membership to 45 dollars a month.",
+      "chat/b/1", anchor_ts, cortext::Retention::Durable);
+  clock->SetNowMillis (newer_ts);
+  const auto newer_turn = ctx->ProcessTextAt (
+      "I switched gyms, the new membership is 30 dollars a month.",
+      "chat/c/1", newer_ts, cortext::Retention::Durable);
+  REQUIRE (old_turn.output.stored_memory_id.has_value ());
+  REQUIRE (anchor_turn.output.stored_memory_id.has_value ());
+  REQUIRE (newer_turn.output.stored_memory_id.has_value ());
+  const long long old_id = *old_turn.output.stored_memory_id;
+  const long long anchor_id = *anchor_turn.output.stored_memory_id;
+  const long long newer_id = *newer_turn.output.stored_memory_id;
+  REQUIRE (FirstSignalTimestamp (*store, old_id) == old_ts);
+  REQUIRE (FirstSignalTimestamp (*store, anchor_id) == anchor_ts);
+  REQUIRE (FirstSignalTimestamp (*store, newer_id) == newer_ts);
+  // Pin the edges so the test does not depend on similarity thresholds.
+  store->Execute ("DELETE FROM associations WHERE edge_type = 'supersedes'");
+  store->Execute ("INSERT INTO associations (source_memory_id, "
+                  "target_memory_id, edge_type, weight) "
+                  "VALUES (?, ?, 'supersedes', 1.0)",
+                  { anchor_id, old_id });
+  store->Execute ("INSERT INTO associations (source_memory_id, "
+                  "target_memory_id, edge_type, weight) "
+                  "VALUES (?, ?, 'supersedes', 1.0)",
+                  { newer_id, anchor_id });
+
+  const auto packet = ctx->DebugHydrateForTest ({ anchor_id }, {});
+  REQUIRE (packet.output.operation_ms.at (
+               "Cortext.superseded_predecessors_attached")
+           == 1.0);
+  REQUIRE (packet.output.operation_ms.at (
+               "Cortext.superseding_successors_attached")
+           == 1.0);
+  REQUIRE (packet.retrieved_memory.size () == 1);
+  const auto &memory = packet.retrieved_memory.front ();
+  REQUIRE (memory.id == anchor_id);
+  REQUIRE (memory.content.size () == 3);
+  const auto blob = [&memory] (std::size_t i) {
+    return std::string (memory.content[i].begin (), memory.content[i].end ());
+  };
+  // Oldest to newest: superseded predecessor, own content, successor.
+  REQUIRE (blob (0).find ("40 dollars") != std::string::npos);
+  REQUIRE (blob (1).find ("45 dollars") != std::string::npos);
+  REQUIRE (blob (2).find ("30 dollars") != std::string::npos);
+  REQUIRE (memory.content_timestamps
+           == std::vector<std::uint64_t>{ old_ts, anchor_ts, newer_ts });
+  RequireContentTimestampsAligned (packet);
+}
+
+TEST_CASE ("Attached adjacent turns keep their own signal times",
+           "[aist][cortext][retrieval][contiguity][content_timestamps]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  const std::uint64_t t0 = 1000ULL + 400ULL * 24ULL * 60ULL * 60ULL * 1000ULL;
+  auto clock = std::make_shared<cortext::FixedClock> (t0);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  // One exchange in one stream, a minute or two between turns.
+  const std::vector<std::pair<std::string, std::uint64_t> > turns = {
+    { "Where should we eat after the harbour concert on Friday?", t0 },
+    { "The noodle bar on Quay Street stays open until midnight.",
+      t0 + 60000ULL },
+    { "Great, I will book a table there for four people.", t0 + 180000ULL },
+  };
+  std::vector<long long> ids;
+  for (std::size_t i = 0; i < turns.size (); ++i)
+    {
+      clock->SetNowMillis (turns[i].second);
+      const auto out = ctx->ProcessTextAt (
+          turns[i].first, "chat/dinner/" + std::to_string (i + 1),
+          turns[i].second, cortext::Retention::Durable);
+      REQUIRE (out.output.stored_memory_id.has_value ());
+      ids.push_back (*out.output.stored_memory_id);
+      REQUIRE (FirstSignalTimestamp (*store, ids.back ()) == turns[i].second);
+    }
+  // Only contiguity attaches here.
+  store->Execute ("DELETE FROM associations WHERE edge_type = 'supersedes'");
+
+  const auto packet = ctx->DebugHydrateForTest ({ ids[1] }, {});
+  REQUIRE (packet.output.operation_ms.at ("Cortext.contiguous_turns_attached")
+           == 2.0);
+  REQUIRE (packet.retrieved_memory.size () == 1);
+  const auto &memory = packet.retrieved_memory.front ();
+  REQUIRE (memory.content.size () == 3);
+  for (std::size_t i = 0; i < 3; ++i)
+    REQUIRE (std::string (memory.content[i].begin (), memory.content[i].end ())
+             == turns[i].first);
+  REQUIRE (memory.content_timestamps
+           == std::vector<std::uint64_t>{ turns[0].second, turns[1].second,
+                                          turns[2].second });
+  RequireContentTimestampsAligned (packet);
 }
 
 TEST_CASE ("internal replay ingress preserves media event timestamps",
@@ -2705,6 +2863,11 @@ TEST_CASE ("Cortext multi-modality memory keeps and returns every signal",
                      || blob == std::vector<unsigned char> (kFakeJpeg.begin (),
                                                             kFakeJpeg.end ());
   REQUIRE (photo_returned);
+  // The text blob keeps its signal's stored time.
+  for (std::size_t i = 0; i < memory->content.size (); ++i)
+    if (mimes[i] == "text/plain")
+      REQUIRE (memory->content_timestamps.at (i) == 1000ULL);
+  RequireContentTimestampsAligned (recalled);
 
   const auto *slot
       = FindMemoryWithText (recalled.working_memory, "level 4 spot 27");
@@ -3021,6 +3184,11 @@ TEST_CASE ("Standing directives join query packets outside the retrieved ranking
   REQUIRE (packet.output.operation_ms.at ("Cortext.standing_joined") == 1.0);
   for (const auto &memory : packet.standing_memory)
     REQUIRE (memory.id != *long_turn.output.stored_memory_id);
+  // The directive's blob carries its own signal time.
+  REQUIRE (packet.standing_memory.front ().content_timestamps
+           == std::vector<std::uint64_t>{ 1000ULL });
+  REQUIRE_FALSE (packet.working_memory.empty ());
+  RequireContentTimestampsAligned (packet);
 
   // Ingest does not join standing memories.
   ts += 3ULL * 60ULL * 60ULL * 1000ULL;
@@ -3028,6 +3196,7 @@ TEST_CASE ("Standing directives join query packets outside the retrieved ranking
       "Which libraries does the reporting service use?", "chat/libs/x", ts,
       cortext::Retention::Durable);
   REQUIRE (ingest.standing_memory.empty ());
+  RequireContentTimestampsAligned (ingest);
   const auto joined = ingest.output.operation_ms.find ("Cortext.standing_joined");
   REQUIRE ((joined == ingest.output.operation_ms.end () || joined->second == 0.0));
 }
@@ -3117,6 +3286,10 @@ TEST_CASE ("A directive inside a grouped memory joins query packets alone",
   REQUIRE (packet.standing_memory.size () == 1);
   REQUIRE (StandingText (packet.standing_memory.front ()) == directive);
   REQUIRE (packet.output.operation_ms.at ("Cortext.standing_joined") == 1.0);
+  // The directive signal's time, not its unit's first signal.
+  REQUIRE (packet.standing_memory.front ().content_timestamps
+           == std::vector<std::uint64_t>{ 61000ULL });
+  RequireContentTimestampsAligned (packet);
 }
 
 TEST_CASE ("Stores from before the standing set fill it once on open",
@@ -3490,6 +3663,7 @@ TEST_CASE ("An evidence budget keeps more memories at their best members",
       REQUIRE (EvidenceCharge (packet) <= budget);
       REQUIRE (packet.output.operation_ms.at ("Cortext.evidence_bytes")
                == static_cast<double> (EvidenceCharge (packet)));
+      RequireContentTimestampsAligned (packet);
       // Kept memories stay in rank order.
       std::size_t at = 0;
       for (const auto &m : packet.retrieved_memory)
@@ -3521,6 +3695,16 @@ TEST_CASE ("An evidence budget keeps more memories at their best members",
                                  "marathon training plan");
   REQUIRE (unit != nullptr);
   REQUIRE (OwnBlob (*focused).size () < OwnBlob (*unit).size ());
+  // A kept member carries the time of the unit signal it came from
+  // (AddGroupedUnits: one signal a minute from 1000).
+  for (std::size_t i = 0; i < focused->content.size (); ++i)
+    {
+      const std::string s (focused->content[i].begin (),
+                           focused->content[i].end ());
+      if (s.rfind ("The marathon training plan", 0) == 0)
+        REQUIRE (focused->content_timestamps.at (i) == 1000ULL + 3ULL * 60000ULL);
+    }
+  RequireContentTimestampsAligned (whole);
   std::size_t whole_fit = 0, used = 0;
   for (const auto &m : whole.retrieved_memory)
     {

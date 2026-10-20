@@ -78,6 +78,13 @@ public:
       /// signals had different modalities (modality "mixed", for example a
       /// turn's text and its photo) returns every signal's payload.
       std::vector<std::string> content_mimetypes;
+      /// Stored signal time (ms) of each content blob, in content order; 0
+      /// when unknown. Whenever content is non-empty,
+      /// content_timestamps.size () == content.size (). A blob attached from
+      /// another memory (adjacent turns, superseded or superseding versions)
+      /// carries that memory's signal time; a blob joined from several
+      /// signals carries the first one's.
+      std::vector<std::uint64_t> content_timestamps;
       std::string modality;  ///< shared signal modality, or "mixed"
       std::string mimetype;  ///< MIME type of the memory's first signal
 
