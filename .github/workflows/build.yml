@@ -106,13 +106,37 @@ jobs:
       with:
         version: 3.1.74
 
+    - name: Cache AIST q8_0 model
+      uses: actions/cache@v4
+      with:
+        path: |
+          models/AIST-87M-GGUF/AIST-87M_q8_0.gguf
+          models/mdbr-leaf-ir/vocab.txt
+        key: aist-q8_0-bf4c49954eccc65183f1a97e44606e86c7ee5a4fea500457124b687a3ec97898-bert-vocab-07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3
+
+    - name: Ensure AIST q8_0 model and late-interaction reranker
+      run: python3 scripts/download_aist_model.py --output-dir models --quant q8_0
+
     - name: Build browser WebAssembly bundle
-      run: ./build-wasm.sh
+      run: |
+        # Preload only the runtime model files, not the Git chunks.
+        mkdir -p wasm-models/AIST-87M-GGUF wasm-models/mdbr-leaf-ir
+        cp models/AIST-87M-GGUF/AIST-87M_q8_0.gguf models/AIST-87M-GGUF/AIST-87M-LI.gguf wasm-models/AIST-87M-GGUF/
+        cp models/mdbr-leaf-ir/vocab.txt wasm-models/mdbr-leaf-ir/
+        ./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR="$PWD/wasm-models"
 
     - name: Check browser artifacts
       run: |
         test -s build-wasm/dist/wasm/cortext.js
         test -s build-wasm/dist/wasm/cortext.wasm
+        test -s build-wasm/dist/wasm/cortext.data
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Smoke-test the browser bundle in Node
+      run: node tests/wasm/smoke.mjs build-wasm/dist/wasm
 
   zig-smoke:
     runs-on: ubuntu-latest

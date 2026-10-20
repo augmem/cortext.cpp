@@ -1,6 +1,7 @@
 # Build directories
 build/
 build-wasm/
+wasm-models/
 eval_runs/
 .zig-cache/
 zig-out/
