@@ -419,7 +419,7 @@ TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
 }
 
 TEST_CASE ("Engine time never runs behind the signals it holds",
-           "[cortext][clock]")
+           "[aist][cortext][clock]")
 {
   // Histories imported with their own timestamps can sit ahead of the
   // engine clock (replays, clock skew, dated imports). A query on the
@@ -738,7 +738,7 @@ TEST_CASE ("Cortext recalls durable corrections at default knobs",
 }
 
 TEST_CASE ("A retrieved fact brings back its newest restatement after it",
-           "[cortext][retrieval][supersession]")
+           "[aist][cortext][retrieval][supersession]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -2544,7 +2544,7 @@ TEST_CASE ("C API handles NULL inputs correctly",
 
 TEST_CASE ("Sparse route growth recommends consolidation and recenters the "
            "route repeatedly on a long stream",
-           "[cortext][consolidation][sparse-route][long]")
+           "[aist][cortext][consolidation][sparse-route][long]")
 {
   // F = S = T = 0 gives the smallest route capacity C, so the SQLite
   // sparse route publishes and then outgrows its activation centroid
@@ -2974,7 +2974,7 @@ StandingText (const cortext::Cortext::Context::Memory &memory)
 } // namespace
 
 TEST_CASE ("Standing directives join query packets outside the retrieved ranking",
-           "[cortext][retrieval][standing]")
+           "[aist][cortext][retrieval][standing]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -3033,7 +3033,7 @@ TEST_CASE ("Standing directives join query packets outside the retrieved ranking
 }
 
 TEST_CASE ("The standing block stays within its byte budget",
-           "[cortext][retrieval][standing]")
+           "[aist][cortext][retrieval][standing]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -3120,7 +3120,7 @@ TEST_CASE ("A directive inside a grouped memory joins query packets alone",
 }
 
 TEST_CASE ("Stores from before the standing set fill it once on open",
-           "[cortext][standing][migration]")
+           "[aist][cortext][standing][migration]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -3201,7 +3201,7 @@ TEST_CASE ("Late interaction reranks text queries and leaves audio queries "
 }
 
 TEST_CASE ("Query retrieval defers the adjacent turn of a higher anchor",
-           "[cortext][retrieval][contiguity]")
+           "[aist][cortext][retrieval][contiguity]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -3243,7 +3243,7 @@ TEST_CASE ("Query retrieval defers the adjacent turn of a higher anchor",
 }
 
 TEST_CASE ("Attached turns keep the window that covers the query",
-           "[cortext][retrieval][contiguity]")
+           "[aist][cortext][retrieval][contiguity]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -3535,7 +3535,7 @@ TEST_CASE ("An evidence budget keeps more memories at their best members",
 }
 
 TEST_CASE ("An evidence budget counts the standing block",
-           "[cortext][retrieval][standing][evidence]")
+           "[aist][cortext][retrieval][standing][evidence]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;
@@ -3755,7 +3755,7 @@ TEST_CASE ("A reopened store reads its member vectors at open",
 }
 
 TEST_CASE ("Contiguity attaches adjacent turns of any modality",
-           "[cortext][retrieval][contiguity][media]")
+           "[aist][cortext][retrieval][contiguity][media]")
 {
   ScopedTempDb temp_db;
   cortext::Cortext::Config cfg;

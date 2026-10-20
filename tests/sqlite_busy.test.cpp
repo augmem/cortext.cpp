@@ -162,7 +162,7 @@ TEST_CASE ("A nested savepoint that writes after reading waits out another "
 }
 
 TEST_CASE ("Engine signals wait out another connection's write lock",
-           "[sqlite_busy][engine]")
+           "[aist][sqlite_busy][engine]")
 {
   BusyTempDb db;
   cortext::Cortext::Config cfg;

@@ -84,7 +84,7 @@ TEST_CASE ("Late-interaction codes serialize round trip", "[late_interaction]")
 }
 
 TEST_CASE ("Late-interaction model matches the Python reference",
-           "[late_interaction]")
+           "[aist][late_interaction]")
 {
   // tools/reranker/parity_fixture.py: same positions through codes.kmeans +
   // li.py scoring.
@@ -151,7 +151,7 @@ TEST_CASE ("Late-interaction model matches the Python reference",
 }
 
 TEST_CASE ("Late-interaction memories without members score last",
-           "[late_interaction]")
+           "[aist][late_interaction]")
 {
   const auto model = ShippedModel ();
   // A memory with no members scores below one that has any.
