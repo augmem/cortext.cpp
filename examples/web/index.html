@@ -14,19 +14,46 @@
           <span id="status">Loading module</span>
         </div>
 
-        <label class="field">
-          <span>AIST GGUF</span>
-          <input id="model-file" type="file" accept=".gguf">
-        </label>
+        <div class="row">
+          <label class="field">
+            <span>AIST GGUF</span>
+            <input id="model-file" type="file" accept=".gguf">
+          </label>
+          <label class="field">
+            <span>Late-interaction GGUF (AIST-87M-LI.gguf)</span>
+            <input id="li-model-file" type="file" accept=".gguf">
+          </label>
+        </div>
 
         <label class="field">
           <span>Signal</span>
           <textarea id="signal" rows="5">browser demo memory signal</textarea>
         </label>
 
+        <label class="field">
+          <span>Media stored with the signal (optional; the text is still what gets embedded)</span>
+          <input id="media-file" type="file">
+        </label>
+
+        <div class="row">
+          <label class="field">
+            <span>Evidence budget, bytes (0 = whole memories)</span>
+            <input id="evidence-budget" type="number" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>Recall reference time (optional)</span>
+            <input id="reference-time" type="datetime-local">
+          </label>
+          <label class="field check">
+            <input id="as-of" type="checkbox">
+            <span>As of the reference time</span>
+          </label>
+        </div>
+
         <div class="actions">
           <button id="create" type="button">Create</button>
-          <button id="process" type="button" disabled>Process</button>
+          <button id="process" type="button" disabled>Remember</button>
+          <button id="recall" type="button" disabled>Recall</button>
           <button id="embed" type="button" disabled>Embed</button>
         </div>
 

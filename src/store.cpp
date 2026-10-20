@@ -72,10 +72,18 @@ public:
   // Opens the checkpointer's connection to the store's database file, or
   // returns null when this store cannot be checkpointed from another
   // connection (memory or temporary database, non-WAL journal, exclusive
-  // locking, single-threaded SQLite build).
+  // locking, single-threaded SQLite build, or a WebAssembly build without
+  // threads, where std::thread cannot start). Without it SQLite's foreground
+  // auto-checkpoint stays in place.
   static std::unique_ptr<SQLiteWalCheckpointer>
   Open (sqlite3 *store_connection, int request_pages, int busy_timeout_ms)
   {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+    (void)store_connection;
+    (void)request_pages;
+    (void)busy_timeout_ms;
+    return nullptr;
+#else
     if (sqlite3_threadsafe () == 0)
       return nullptr;
     const char *filename = sqlite3_db_filename (store_connection, "main");
@@ -129,6 +137,7 @@ public:
     sqlite3_wal_autocheckpoint (connection, 0);
     return std::make_unique<SQLiteWalCheckpointer> (connection,
                                                     request_pages);
+#endif
   }
 
   // sqlite3_wal_hook callback on the store's connection, after each commit.
@@ -1401,7 +1410,15 @@ SQLiteConnection::SQLiteConnection (const std::string &database_path,
       exec_pragma ("PRAGMA mmap_size = 268435456");
     }
 
-  // Enable WAL mode for file databases (not :memory:)
+  // Enable WAL mode for file databases (not :memory:). WebAssembly builds
+  // keep SQLite's rollback journal unless CORTEXT_SQLITE_JOURNAL_MODE asks
+  // otherwise: the Emscripten filesystem has no shared-memory locks, so a WAL
+  // database spins on SQLITE_BUSY for the full busy timeout on every lock.
+#if defined(__EMSCRIPTEN__)
+  const bool default_wal = false;
+#else
+  const bool default_wal = config.enable_wal;
+#endif
   if (database_path != ":memory:")
     {
       const auto journal_override = ResolveJournalModeOverride ();
@@ -1409,12 +1426,12 @@ SQLiteConnection::SQLiteConnection (const std::string &database_path,
         {
           exec_pragma ("PRAGMA journal_mode = " + *journal_override);
         }
-      else if (config.enable_wal)
+      else if (default_wal)
         {
           exec_pragma ("PRAGMA journal_mode = WAL");
         }
       if ((journal_override && *journal_override == "wal")
-          || (!journal_override && config.enable_wal))
+          || (!journal_override && default_wal))
         {
           const int wal_autocheckpoint_pages
               = ResolveWalAutoCheckpointPages ();
@@ -1796,7 +1813,20 @@ SQLiteStore::SQLiteStore (std::unique_ptr<SQLiteConnection> connection)
   // Register statically linked extensions if present, then attempt dynamic
   // fallbacks.
   RegisterBuiltInExtensions ();
-  RegisterBuiltInExtensionsOnDb (connection_->GetConnection ());
+  // Native stores keep working without the objstore vtab (SqlObjectStore
+  // writes the SQLite backend's table directly), so a registration failure
+  // there stays non-fatal as before. WebAssembly stores need the vtab.
+  if (const int rc = RegisterBuiltInExtensionsOnDb (connection_->GetConnection ());
+      rc != SQLITE_OK)
+    {
+#if defined(__EMSCRIPTEN__)
+      throw StoreError (std::string ("Failed to register built-in SQLite "
+                                     "extensions: ")
+                        + sqlite3_errstr (rc) + " ("
+                        + sqlite3_errmsg (connection_->GetConnection ())
+                        + ")");
+#endif
+    }
   (void)store::memory_text_index_internal::RegisterRankingFunction (
       connection_->GetConnection ());
 #if defined(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS) && !defined(__EMSCRIPTEN__)

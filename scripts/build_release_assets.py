@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build the shared Cortext release asset tree for language bindings.
 
-Ownership: multi-arch shared libraries and the AIST model shards belong to
+Ownership: multi-arch shared libraries and the AIST model shards (with the
+late-interaction reranker the engine requires beside AIST) belong to
 **this repo**. Model sharding is implemented only in ``scripts/shard_model.py``
 (also checked in under ``models/``). Binding repositories (cortext.go, plugins,
 …) should copy the shard tree or unpack the release tarball — they must not
@@ -20,6 +21,7 @@ Layout written under --output (default dist/release-assets):
   models/
     manifest.json
     AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
+    AIST-87M-GGUF/chunks/AIST-87M-LI.gguf.part-*
     mdbr-leaf-ir/vocab.txt
 
 Also writes a versioned tarball next to the tree (unless --skip-tarball):

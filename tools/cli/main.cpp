@@ -1,7 +1,8 @@
 // cortext_cli: command-line surface over the public Cortext API.
 //
 // Subcommands:
-//   remember <text...>   store one durable memory (or one per stdin line with "-")
+//   remember <text...>   store one durable memory (or one per stdin line with "-");
+//                        --media/--mime store a file with the text
 //   recall <query...>    retrieve context without storing (Retention::Ephemeral)
 //   consolidate          run explicit shallow consolidation
 //   repl                 interactive session (default when no subcommand)
@@ -15,6 +16,8 @@
 #include <cstdlib>
 #include <ctime>
 #include <exception>
+#include <fstream>
+#include <iterator>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -52,6 +55,8 @@ struct CliOptions
   bool durable_recall = false;
   cortext::Cortext::EvidenceBudget evidence_budget;
   cortext::RetrievalTime retrieval_time;
+  std::string media_path;
+  std::string media_mimetype;
   std::string command;
   std::vector<std::string> command_args;
 };
@@ -62,6 +67,10 @@ void PrintUsage (std::ostream &out)
       << "\n"
       << "Usage:\n"
       << "  cortext_cli [options] remember <text...>   store one durable memory\n"
+      << "  cortext_cli [options] --media F --mime T remember <text...>\n"
+      << "                                           store file F (MIME type T)\n"
+      << "                                           as the memory; the text is\n"
+      << "                                           what gets embedded\n"
       << "  cortext_cli [options] remember -           store one memory per stdin line\n"
       << "  cortext_cli [options] recall <query...>    retrieve context without storing\n"
       << "  cortext_cli [options] consolidate          run explicit shallow consolidation\n"
@@ -78,9 +87,12 @@ void PrintUsage (std::ostream &out)
       << "  --evidence-budget N  fit recall evidence within N bytes\n"
       << "                     (default: whole memories)\n"
       << "  --reference-ms MS  recall around this time (ms since the Unix\n"
-      << "                     epoch, past or future)\n"
+      << "                     epoch, past or future); ephemeral recall only\n"
       << "  --as-of            with --reference-ms, recall only memories\n"
       << "                     stored by then\n"
+      << "  --media FILE       remember: store FILE's bytes with the text\n"
+      << "  --mime TYPE        MIME type of --media (required with it; only\n"
+      << "                     text/* media is used as text)\n"
       << "  --quiet            suppress per-call gauges\n"
       << "  --durable          store recall queries as durable memories under\n"
       << "                     cli/recall (default: recall is ephemeral and\n"
@@ -104,16 +116,31 @@ std::string JoinArgs (const std::vector<std::string> &args)
   return out.str ();
 }
 
+// Text blobs (MIME text/*) print as text; any other payload (a mixed
+// memory's photo, audio, caller media) prints as a [mimetype, N bytes] tag.
 std::string MemoryText (const cortext::Cortext::Context::Memory &memory)
 {
   std::string text;
-  for (const auto &blob : memory.content)
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
     {
+      const auto &blob = memory.content[i];
+      const std::string &mimetype = i < memory.content_mimetypes.size ()
+                                        ? memory.content_mimetypes[i]
+                                        : memory.mimetype;
       if (!text.empty ())
         {
           text.push_back (' ');
         }
-      text.append (blob.begin (), blob.end ());
+      if (mimetype.rfind ("text/", 0) == 0)
+        {
+          text.append (blob.begin (), blob.end ());
+        }
+      else
+        {
+          text += "[" + (mimetype.empty () ? std::string ("unknown")
+                                           : mimetype)
+                  + ", " + std::to_string (blob.size ()) + " bytes]";
+        }
     }
   for (auto &ch : text)
     {
@@ -175,7 +202,11 @@ void PrintRetrieved (const cortext::Cortext::Context &context,
       const auto &memory = context.retrieved_memory[i];
       std::cout << "  " << (i + 1) << ". [#" << memory.id << " · "
                 << memory.source_id << " · "
-                << FormatTimestamp (memory.timestamp) << " · rel "
+                << FormatTimestamp (memory.timestamp)
+                << (memory.modality.empty () || memory.modality == "text"
+                        ? std::string ()
+                        : " · " + memory.modality)
+                << " · rel "
                 << std::fixed << std::setprecision (2) << memory.relevance
                 << " · sal " << memory.salience << "] "
                 << ClipForDisplay (MemoryText (memory), 160) << "\n";
@@ -232,7 +263,8 @@ int RunRemember (cortext::Cortext &engine, const CliOptions &options)
             }
           ++lines;
           auto context = engine.ProcessText (line, options.source_id,
-                                             cortext::Retention::Durable);
+                                             cortext::Retention::Durable,
+                                             options.evidence_budget);
           if (context.output.stored_memory_id.has_value ())
             {
               ++stored;
@@ -250,8 +282,23 @@ int RunRemember (cortext::Cortext &engine, const CliOptions &options)
       std::cerr << "remember: no text given\n";
       return 1;
     }
-  auto context = engine.ProcessText (text, options.source_id,
-                                     cortext::Retention::Durable);
+  std::vector<std::uint8_t> media_bytes;
+  if (!options.media_path.empty ())
+    {
+      std::ifstream in (options.media_path, std::ios::binary);
+      if (!in)
+        {
+          std::cerr << "remember: cannot read " << options.media_path << "\n";
+          return 1;
+        }
+      media_bytes.assign (std::istreambuf_iterator<char> (in),
+                          std::istreambuf_iterator<char> ());
+    }
+  const cortext::Cortext::Media media{ media_bytes.data (), media_bytes.size (),
+                                       options.media_mimetype };
+  auto context = engine.ProcessText (text, options.source_id, media,
+                                     cortext::Retention::Durable,
+                                     options.evidence_budget);
   engine.Flush ();
   if (!context.retrieved_memory.empty ())
     {
@@ -374,7 +421,8 @@ int RunRepl (cortext::Cortext &engine, const CliOptions &options)
           continue;
         }
       last_context = engine.ProcessText (line, options.source_id,
-                                         cortext::Retention::Durable);
+                                         cortext::Retention::Durable,
+                                         options.evidence_budget);
       if (!last_context.retrieved_memory.empty ())
         {
           PrintRetrieved (last_context, options.top);
@@ -444,7 +492,8 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
         }
       if (arg == "--db" || arg == "--source" || arg == "--focus"
           || arg == "--sensitivity" || arg == "--stability" || arg == "--top"
-          || arg == "--evidence-budget" || arg == "--reference-ms")
+          || arg == "--evidence-budget" || arg == "--reference-ms"
+          || arg == "--media" || arg == "--mime")
         {
           const std::string *value = take_value (arg);
           if (value == nullptr)
@@ -480,6 +529,14 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
                 }
               options.retrieval_time.reference_ms
                   = static_cast<std::uint64_t> (ms);
+            }
+          else if (arg == "--media")
+            {
+              options.media_path = *value;
+            }
+          else if (arg == "--mime")
+            {
+              options.media_mimetype = *value;
             }
           else if (arg == "--top")
             {
@@ -529,6 +586,19 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
     {
       options.command = "repl";
     }
+  if (options.media_path.empty () != options.media_mimetype.empty ())
+    {
+      std::cerr << "--media and --mime go together\n";
+      return 1;
+    }
+  if (!options.media_path.empty ()
+      && (options.command != "remember"
+          || (options.command_args.size () == 1
+              && options.command_args[0] == "-")))
+    {
+      std::cerr << "--media applies to remember <text...> only\n";
+      return 1;
+    }
   return 0;
 }
 
@@ -565,7 +635,9 @@ int main (int argc, char **argv)
     {
       std::cerr << "failed to open cortext engine: " << error.what () << "\n"
                 << "hint: set CORTEXT_AIST_MODEL_PATH to an AIST .gguf file "
-                   "if the bundled/default model is unavailable\n";
+                   "(and CORTEXT_LI_MODEL_PATH to AIST-87M-LI.gguf when it "
+                   "is not beside it) if the bundled/default model is "
+                   "unavailable\n";
       return 1;
     }
 

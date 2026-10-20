@@ -1,6 +1,7 @@
 name: Release assets
 
-# Publishes multi-arch shared libraries + AIST model shards as GitHub Release
+# Publishes multi-arch shared libraries + AIST model and late-interaction
+# reranker shards as GitHub Release
 # assets so language packages (cortext.py, cortext.go, plugins) do not each
 # vendor the same ~160 MiB of natives/model data.
 #
@@ -10,7 +11,7 @@ name: Release assets
 #
 # Unpacked layout (also documented in scripts/build_release_assets.py):
 #   native/<platform-tag>/libcortext.* | cortext.dll
-#   models/manifest.json + chunked AIST + vocab
+#   models/manifest.json + chunked AIST + chunked AIST-87M-LI reranker + vocab
 
 on:
   push:
@@ -122,12 +123,30 @@ jobs:
               art = next(t["artifact"] for t in native["targets"] if t["package_tag"] == tag)
               path = root / "native" / tag / art
               assert path.is_file() and path.stat().st_size > 100_000, path
-          chunks = models["assets"][0]["chunks"]
-          assert len(chunks) >= 2, chunks
-          for c in chunks:
-              p = root / "models" / c["filename"]
-              assert p.is_file(), p
-          print("inventory ok:", tags, "chunks", len(chunks))
+          import hashlib
+          tracked = json.loads(Path("models/manifest.json").read_text())
+          shipped = {a["filename"]: a for a in models["assets"]}
+          # Every tracked asset ships (AIST, vocab and the late-interaction
+          # reranker the engine requires with AIST), with the tracked digest,
+          # and its chunks reassemble to that digest.
+          for want in tracked["assets"]:
+              name = want["filename"]
+              assert name in shipped, f"missing model asset {name}"
+              got = shipped[name]
+              assert got["sha256"] == want["sha256"], (name, got["sha256"])
+              if "chunks" in got:
+                  h = hashlib.sha256()
+                  for c in got["chunks"]:
+                      p = root / "models" / c["filename"]
+                      assert p.is_file(), p
+                      h.update(p.read_bytes())
+                  assert h.hexdigest() == got["sha256"], f"{name} chunks do not reassemble"
+              else:
+                  assert (root / "models" / name).is_file(), name
+          aist = shipped["AIST-87M-GGUF/AIST-87M_q8_0.gguf"]["chunks"]
+          assert len(aist) >= 2, aist
+          assert "AIST-87M-GGUF/AIST-87M-LI.gguf" in shipped
+          print("inventory ok:", tags, "assets", sorted(shipped))
           PY
 
       - name: Upload workflow artifacts

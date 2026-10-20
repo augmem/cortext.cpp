@@ -39,11 +39,19 @@ LowerEnv (const char *name)
   return out;
 }
 
+// The direct path reads and writes the SQLite objstore backend's own table,
+// so it is valid only where that backend is the registered one (see
+// ObjstoreBackendFromEnv in store/extension_loader.cpp). Emscripten builds do
+// not compile the SQLite backend and default to the VFS backend.
 bool
 UseDirectSQLiteObjstore ()
 {
+#if defined(__EMSCRIPTEN__)
+  return false;
+#else
   const std::string backend = LowerEnv ("CORTEXT_OBJSTORE_BACKEND");
   return backend.empty () || backend == "sqlite" || backend == "db";
+#endif
 }
 
 std::vector<unsigned char>

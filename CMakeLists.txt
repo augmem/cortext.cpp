@@ -137,6 +137,15 @@ if(BUILD_WASM AND NOT EMSCRIPTEN)
   message(FATAL_ERROR "BUILD_WASM requires the Emscripten toolchain. Use cmake --preset wasm.")
 endif()
 
+# Emscripten disables C++ exception catching by default, so an engine error
+# would escape the C API as a raw exception pointer instead of a NULL/status
+# return with cortext_last_error() set. Native WebAssembly exception handling
+# keeps that contract; every object (dependencies included) must use it.
+if(EMSCRIPTEN)
+  add_compile_options(-fwasm-exceptions)
+  add_link_options(-fwasm-exceptions)
+endif()
+
 include(FetchContent)
 
 if(NOT CORTEXT_AIST_MODEL_QUANT MATCHES "^(q8_0|q5_1|all)$")
@@ -856,8 +865,11 @@ if(EMSCRIPTEN AND BUILD_WASM)
     "_cortext_create_with_config_and_object_callbacks"
     "_cortext_free"
     "_cortext_process_text"
+    "_cortext_process_text_with_media"
     "_cortext_process_audio"
+    "_cortext_process_audio_with_media"
     "_cortext_process_image"
+    "_cortext_process_image_with_media"
     "_cortext_embed_text_json"
     "_cortext_embed_audio_json"
     "_cortext_embed_image_json"
@@ -867,12 +879,23 @@ if(EMSCRIPTEN AND BUILD_WASM)
     "_cortext_version"
     "_cortext_last_error"
     "_cortext_string_free"
+    "_cortext_process_json_options_init"
     "_cortext_process_text_json"
+    "_cortext_process_text_json_with_options"
     "_cortext_process_text_with_media_json"
     "_cortext_process_text_with_media_json_with_options"
-    "_cortext_wasm_process_text_json"
     "_cortext_process_audio_json"
+    "_cortext_process_audio_json_with_options"
+    "_cortext_process_audio_with_media_json"
+    "_cortext_process_audio_with_media_json_with_options"
     "_cortext_process_image_json"
+    "_cortext_process_image_json_with_options"
+    "_cortext_process_image_with_media_json"
+    "_cortext_process_image_with_media_json_with_options"
+    "_cortext_wasm_process_text_json"
+    "_cortext_wasm_process_text_with_media_json"
+    "_cortext_wasm_process_audio_json"
+    "_cortext_wasm_process_image_json"
     "_cortext_consolidate_json"
   )
   list(JOIN _cortext_wasm_exported_functions "\",\"" _cortext_wasm_exports_joined)
@@ -887,6 +910,9 @@ if(EMSCRIPTEN AND BUILD_WASM)
     "lengthBytesUTF8"
     "addFunction"
     "removeFunction"
+    "HEAPU8"
+    "HEAPF32"
+    "ENV"
   )
   list(JOIN _cortext_wasm_runtime_methods "\",\"" _cortext_wasm_runtime_joined)
   set(_cortext_wasm_runtime_json "[\"${_cortext_wasm_runtime_joined}\"]")
@@ -905,6 +931,10 @@ if(EMSCRIPTEN AND BUILD_WASM)
     -sWASM=1
     -sALLOW_MEMORY_GROWTH=1
     -sALLOW_TABLE_GROWTH=1
+    # Emscripten's 64 KiB default stack is smaller than one Eigen GEMM
+    # blocking buffer (EIGEN_STACK_ALLOCATION_LIMIT, 128 KiB) in the
+    # late-interaction reranker; overflowing it corrupts the heap.
+    -sSTACK_SIZE=2097152
     -sFORCE_FILESYSTEM=1
     -sMODULARIZE=1
     -sEXPORT_ES6=1

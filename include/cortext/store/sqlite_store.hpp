@@ -37,7 +37,8 @@ class SQLiteStoreStatementCacheInspector;
 /// @brief Configuration options for SQLite connection.
 struct SQLiteConfig
 {
-  bool enable_wal = true;           ///< Use WAL journal mode (file DBs only)
+  bool enable_wal = true;           ///< Use WAL journal mode (file DBs only;
+                                    ///< ignored by WebAssembly builds)
   int busy_timeout_ms = 5000;       ///< Wait time on SQLITE_BUSY (ms)
   bool enable_foreign_keys = true;  ///< Enforce foreign key constraints
   int synchronous = 1;              ///< NORMAL (1), FULL (2), OFF (0)
