@@ -464,39 +464,6 @@ GetCoreMigrations ()
           },
       },
       {
-          3,
-          "Long-term memory eviction audit log",
-          {
-              "CREATE TABLE IF NOT EXISTS memory_evictions ("
-              "  eviction_id INTEGER PRIMARY KEY,"
-              "  memory_id INTEGER NOT NULL,"
-              "  embedding_id INTEGER,"
-              "  source_id TEXT NOT NULL,"
-              "  kind TEXT NOT NULL,"
-              "  label TEXT,"
-              "  start_ts INTEGER NOT NULL,"
-              "  end_ts INTEGER,"
-              "  created_at INTEGER NOT NULL,"
-              "  last_access INTEGER,"
-              "  strength REAL NOT NULL DEFAULT 0.0,"
-              "  use_frequency REAL NOT NULL DEFAULT 0.0,"
-              "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
-              "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
-              "  used_count INTEGER NOT NULL DEFAULT 0,"
-              "  n_signals INTEGER NOT NULL DEFAULT 0,"
-              "  modality TEXT NOT NULL DEFAULT 'text',"
-              "  eviction_reason TEXT NOT NULL,"
-              "  evicted_at INTEGER NOT NULL"
-              ")",
-              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_time "
-              "ON memory_evictions(evicted_at DESC, eviction_id DESC)",
-              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_memory "
-              "ON memory_evictions(memory_id)",
-              "CREATE INDEX IF NOT EXISTS idx_memory_evictions_reason "
-              "ON memory_evictions(eviction_reason, kind)",
-          },
-      },
-      {
           4,
           "Constructive recall reconstruction ledger",
           {
@@ -515,23 +482,6 @@ GetCoreMigrations ()
               "ON memory_reconstructions(memory_id, reconstruction_id DESC)",
               "CREATE INDEX IF NOT EXISTS idx_memory_reconstructions_embedding "
               "ON memory_reconstructions(embedding_id)",
-          },
-      },
-      {
-          5,
-          "Meta-learning coefficient store",
-          {
-              "CREATE TABLE IF NOT EXISTS meta_learning_coeffs ("
-              "  family TEXT PRIMARY KEY,"
-              "  alpha_f REAL NOT NULL,"
-              "  alpha_s REAL NOT NULL,"
-              "  alpha_t REAL NOT NULL,"
-              "  beta REAL NOT NULL,"
-              "  a REAL NOT NULL,"
-              "  b REAL NOT NULL,"
-              "  update_count INTEGER NOT NULL DEFAULT 0,"
-              "  updated_at INTEGER NOT NULL DEFAULT 0"
-              ")",
           },
       },
       {
@@ -709,18 +659,6 @@ GetCoreMigrations ()
           },
       },
       {
-          16,
-          "Predictive pre-activation lookup index",
-          {
-              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding "
-              "ON memories(pre_activation, embedding_id) "
-              "WHERE pre_activation > 0.0",
-              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding_active "
-              "ON memories(embedding_id) "
-              "WHERE pre_activation > 0.0",
-          },
-      },
-      {
           17,
           "Association fanout order indexes",
           {
@@ -738,15 +676,6 @@ GetCoreMigrations ()
               "ON associations(source_memory_id, edge_type, weight DESC, last_reinforced DESC, target_memory_id)",
               "CREATE INDEX IF NOT EXISTS idx_associations_target_edge_weight "
               "ON associations(target_memory_id, edge_type, weight DESC, last_reinforced DESC, source_memory_id)",
-          },
-      },
-      {
-          19,
-          "Long-term retention sample index",
-          {
-              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_created_strength "
-              "ON memories(created_at DESC, start_ts DESC, strength) "
-              "WHERE kind = 'LONG_TERM'",
           },
       },
       {
@@ -785,15 +714,6 @@ GetCoreMigrations ()
               "CREATE INDEX IF NOT EXISTS idx_memories_last_access "
               "ON memories(last_access DESC) "
               "WHERE last_access IS NOT NULL AND kind != 'WORKING'",
-          },
-      },
-      {
-          23,
-          "Predictive pre-activation active embedding lookup",
-          {
-              "CREATE INDEX IF NOT EXISTS idx_memories_pre_activation_embedding_active "
-              "ON memories(embedding_id) "
-              "WHERE pre_activation > 0.0",
           },
       },
       {
@@ -953,16 +873,6 @@ GetCoreMigrations ()
           },
       },
       {
-          33,
-          "Index bounded emotional source reranking",
-          {
-              "CREATE INDEX IF NOT EXISTS idx_memories_flashbulb_intensity "
-              "ON memories(emotional_intensity DESC, memory_id ASC) "
-              "WHERE flashbulb = 1 AND embedding_id IS NOT NULL "
-              "AND kind != 'WORKING'",
-          },
-      },
-      {
           34,
           "Index bounded unclustered consolidation candidates",
           {
@@ -970,6 +880,278 @@ GetCoreMigrations ()
               "idx_memories_ltm_unclustered_strength_created "
               "ON memories(strength, created_at, embedding_id) "
               "WHERE kind = 'LONG_TERM' AND cluster_id IS NULL",
+          },
+      },
+      {
+          35,
+          "Drop the removed meta-learning coefficient store from older stores",
+          {
+              "DROP TABLE IF EXISTS meta_learning_coeffs",
+          },
+      },
+      {
+          36,
+          "Drop the removed predictive pre-activation column and indexes",
+          {
+              "DROP INDEX IF EXISTS idx_memories_pre_activation_embedding",
+              "DROP INDEX IF EXISTS idx_memories_pre_activation_embedding_active",
+              "ALTER TABLE memories DROP COLUMN pre_activation",
+          },
+      },
+      {
+          37,
+          "Drop the removed influence-feedback columns",
+          {
+              "ALTER TABLE memories DROP COLUMN influence",
+              "ALTER TABLE memories DROP COLUMN sustained_influence",
+              "ALTER TABLE memories DROP COLUMN mean_influence",
+              "ALTER TABLE state DROP COLUMN sustained_influence",
+          },
+      },
+      {
+          38,
+          "Drop the removed memory-strength traces and eviction audit log",
+          {
+              "DROP TABLE IF EXISTS memory_evictions",
+              "ALTER TABLE memories DROP COLUMN trace_fast",
+              "ALTER TABLE memories DROP COLUMN trace_med",
+              "ALTER TABLE memories DROP COLUMN trace_slow",
+              "ALTER TABLE memories DROP COLUMN trace_ultra",
+              "ALTER TABLE memories DROP COLUMN use_frequency",
+              "ALTER TABLE memories DROP COLUMN contextual_gain",
+              "ALTER TABLE memories DROP COLUMN influence_factor",
+          },
+      },
+      {
+          39,
+          "Drop the removed synaptic-tag columns",
+          {
+              "ALTER TABLE memories DROP COLUMN tag_strength",
+              "ALTER TABLE memories DROP COLUMN tag_expires_at",
+          },
+      },
+      {
+          40,
+          "Drop the removed redundancy and connectivity columns",
+          {
+              "ALTER TABLE memories DROP COLUMN redundancy",
+              "ALTER TABLE memories DROP COLUMN connectivity",
+          },
+      },
+      {
+          41,
+          "Drop the removed per-memory stability and half-life adaptation state",
+          {
+              "DROP INDEX IF EXISTS idx_memories_ltm_created_strength",
+              "ALTER TABLE memories DROP COLUMN stability",
+              "ALTER TABLE state DROP COLUMN half_life",
+              "ALTER TABLE state DROP COLUMN rate_decay",
+              "ALTER TABLE state DROP COLUMN periphery_half_life",
+              "ALTER TABLE state DROP COLUMN salience_half_life",
+              "ALTER TABLE state DROP COLUMN drift_weight",
+              "ALTER TABLE state DROP COLUMN retention_ema",
+              "ALTER TABLE state DROP COLUMN delta_half_life_adj",
+          },
+      },
+      {
+          42,
+          "Drop the removed emotional-consolidation and cascade columns",
+          {
+              "DROP INDEX IF EXISTS idx_memories_flashbulb_intensity",
+              "ALTER TABLE memories DROP COLUMN flashbulb",
+              "ALTER TABLE memories DROP COLUMN emotional_intensity",
+              "ALTER TABLE memories DROP COLUMN half_life_bonus",
+              "ALTER TABLE memories DROP COLUMN detail_suppression",
+              "ALTER TABLE memories DROP COLUMN gist_components",
+              "ALTER TABLE memories DROP COLUMN cascade_radius",
+              "ALTER TABLE memories DROP COLUMN cascade_decay",
+          },
+      },
+      {
+          43,
+          "Drop the removed reward-prediction and dopamine state",
+          {
+              "ALTER TABLE state DROP COLUMN outcome_pred",
+              "ALTER TABLE state DROP COLUMN neuromod_da",
+          },
+      },
+      {
+          44,
+          "Drop the removed encode/retrieve oscillator phase",
+          {
+              "ALTER TABLE state DROP COLUMN osc_phase",
+          },
+      },
+      {
+          45,
+          "Drop the removed retrieval-induced forgetting state",
+          {
+              "DROP TABLE IF EXISTS rif_active_state",
+              "DROP TABLE IF EXISTS rif_generation_resets",
+              "DROP TABLE IF EXISTS rif_recovery_clock",
+              "ALTER TABLE memories DROP COLUMN suppression",
+              "ALTER TABLE memories DROP COLUMN suppression_ts",
+              "ALTER TABLE memories DROP COLUMN suppression_count",
+              "ALTER TABLE memories DROP COLUMN recovery_time_start",
+          },
+      },
+      {
+          46,
+          "Drop the removed reconsolidation lability state",
+          {
+              "ALTER TABLE memories DROP COLUMN lability_state",
+              "ALTER TABLE memories DROP COLUMN lability_ts",
+              "ALTER TABLE memories DROP COLUMN original_centroid",
+          },
+      },
+      {
+          47,
+          "Drop the removed norepinephrine-like modulator state",
+          {
+              "ALTER TABLE state DROP COLUMN neuromod_ne",
+          },
+      },
+      {
+          48,
+          "Drop the removed Soft Anchor state and links",
+          {
+              "DROP TABLE IF EXISTS soft_anchor_links",
+              "DROP TABLE IF EXISTS soft_anchors",
+          },
+      },
+      {
+          49,
+          "Keyword index over LONG_TERM memory text (FTS5, contentless)",
+          {
+              // rowid = memory_id. Text stays in the object store; the
+              // index keeps only inverted lists (porter-stemmed unicode61).
+              "CREATE VIRTUAL TABLE IF NOT EXISTS memory_text_fts USING fts5("
+              "  text, content='', contentless_delete=1,"
+              "  tokenize='porter unicode61 remove_diacritics 2')",
+              "CREATE TRIGGER IF NOT EXISTS memories_text_fts_delete "
+              "AFTER DELETE ON memories WHEN old.kind = 'LONG_TERM' "
+              "BEGIN DELETE FROM memory_text_fts WHERE rowid = old.memory_id; "
+              "END",
+              // Object payloads may live outside this database, so stores
+              // that already hold memories are indexed from C++ once
+              // (memory_text_index_internal::RunPendingBackfill).
+              "CREATE TABLE IF NOT EXISTS cortext_pending_backfills ("
+              "  name TEXT PRIMARY KEY)",
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'memory_text_fts' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
+      {
+          50,
+          "Shared-space vectors of stored signals, keyed by content",
+          {
+              // One retrieval-view vector per stored signal payload of any
+              // modality (content id = objstore BLAKE3 id). Memories reach a
+              // vector through their signal rows, so merges stay correct and
+              // identical payloads share one vector.
+              "CREATE TABLE IF NOT EXISTS memory_signal_vectors ("
+              "  blob_id BLOB PRIMARY KEY,"
+              "  modality TEXT NOT NULL,"
+              "  embedding BLOB NOT NULL)",
+              "CREATE INDEX IF NOT EXISTS idx_memory_signal_vectors_modality "
+              "ON memory_signal_vectors(modality)",
+              "CREATE INDEX IF NOT EXISTS idx_signals_blob "
+              "ON signals(blob_id) WHERE blob_id IS NOT NULL",
+              "CREATE TRIGGER IF NOT EXISTS signals_vector_delete "
+              "AFTER DELETE ON signals WHEN old.blob_id IS NOT NULL "
+              "BEGIN DELETE FROM memory_signal_vectors "
+              "WHERE blob_id = old.blob_id AND NOT EXISTS ("
+              "  SELECT 1 FROM signals WHERE blob_id = old.blob_id); END",
+          },
+      },
+      {
+          51,
+          "Standing memories: bounded set of lasting directives",
+          {
+              // Memories that state a lasting directive or preference
+              // (operations/standing_memory_internal.hpp). Queries rank
+              // this set on its own, so its members reach packets whatever
+              // their rank among all memories.
+              // terms: the member's word stems (TermsOf), so queries rank
+              // the set without reading member text or the store-wide index.
+              "CREATE TABLE IF NOT EXISTS standing_memories ("
+              "  memory_id INTEGER PRIMARY KEY,"
+              "  start_ts INTEGER NOT NULL,"
+              "  terms TEXT NOT NULL DEFAULT '')",
+              "CREATE TRIGGER IF NOT EXISTS memories_standing_delete "
+              "AFTER DELETE ON memories "
+              "BEGIN DELETE FROM standing_memories "
+              "WHERE memory_id = old.memory_id; END",
+              // Memories stored before this migration join the set once,
+              // from C++ (memory_text_index_internal::RunPendingBackfill).
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'standing_memories' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
+      {
+          52,
+          "Rebuild the sparse retrieval route with per-link distances",
+          {
+              // Route link rows now carry each link's distance so a full
+              // neighbor list keeps its nearest members. Older rows lack it;
+              // drop every generation and let the bounded backfill rebuild
+              // the route from the authoritative current surface.
+              "DELETE FROM cortext_sparse_route_dirty",
+              "DELETE FROM cortext_sparse_route_build",
+              "DELETE FROM cortext_sparse_route_meta",
+              "DELETE FROM cortext_sparse_route_nodes",
+          },
+      },
+      {
+          53,
+          "Standing set per stored signal",
+          {
+              // Membership moves from the memory to the stored signal that
+              // states the directive: a memory grouped from several signals
+              // (a Natural unit) is far longer than any directive, so a
+              // memory-level check never admits it, and a query packet
+              // joins the directive itself, not the whole unit.
+              // terms: the signal's word stems (TermsOf).
+              "DROP TRIGGER IF EXISTS memories_standing_delete",
+              "DROP TABLE IF EXISTS standing_memories",
+              "DELETE FROM cortext_pending_backfills "
+              "WHERE name = 'standing_memories'",
+              "CREATE TABLE IF NOT EXISTS standing_signals ("
+              "  signal_id INTEGER PRIMARY KEY,"
+              "  start_ts INTEGER NOT NULL,"
+              "  terms TEXT NOT NULL DEFAULT '')",
+              "CREATE TRIGGER IF NOT EXISTS signals_standing_delete "
+              "AFTER DELETE ON signals "
+              "BEGIN DELETE FROM standing_signals "
+              "WHERE signal_id = old.signal_id; END",
+              // Signals stored before this migration join the set once,
+              // from C++ (memory_text_index_internal::RunPendingBackfill).
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'standing_signals' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
+      {
+          54,
+          "Late-interaction reranker codes per stored signal payload",
+          {
+              // codes: k-means codes of the payload's AIST position features
+              // in the reranker's late-interaction space
+              // (models/aist_late_interaction.hpp Serialize format). Keyed
+              // like memory_signal_vectors (content id), in their own rowid
+              // table: a ~1 KB code blob beside the 1 KB vector would hold
+              // one vector row per page and make every vector read pull it.
+              // Queries rerank the head of the candidate pool with them.
+              "CREATE TABLE IF NOT EXISTS memory_signal_li_codes ("
+              "  blob_id BLOB NOT NULL UNIQUE,"
+              "  codes BLOB NOT NULL)",
+              "CREATE TRIGGER IF NOT EXISTS signals_li_codes_delete "
+              "AFTER DELETE ON signals WHEN old.blob_id IS NOT NULL "
+              "BEGIN DELETE FROM memory_signal_li_codes "
+              "WHERE blob_id = old.blob_id AND NOT EXISTS ("
+              "  SELECT 1 FROM signals WHERE blob_id = old.blob_id); END",
           },
       },
   };
@@ -1010,37 +1192,25 @@ ApplyMigrationsThrough (Store &store, int64_t maximum_id)
           ApplySingleMigrationInTransaction (store, m);
         }
 
-      const auto rif_tables = store.Execute (
+      const auto memory_text_fts = store.Execute (
           "SELECT 1 FROM sqlite_master "
-          "WHERE type = 'table' AND name = 'rif_active_state' LIMIT 1");
-      if (!rif_tables.empty ())
+          "WHERE type = 'table' AND name = 'memory_text_fts' LIMIT 1");
+      if (!memory_text_fts.empty ())
         {
-          // The approved migration contains only the three persistent tables
-          // and one index. Keep the derived-value seam connection-local.
-          store.Execute ("DROP VIEW IF EXISTS temp.rif_effective_memories");
+          // Connection-local helpers for keyword queries: a scratch FTS5
+          // table with the index's tokenizer maps query words to index terms,
+          // and vocabularies give those terms' document frequencies
+          // (memory_text_index_internal::Search).
           store.Execute (
-              "CREATE TEMP VIEW rif_effective_memories AS "
-              "SELECT m.memory_id, "
-              "CASE WHEN a.memory_id IS NULL THEN m.strength "
-              "     WHEN a.generation = c.generation THEN "
-              "       MAX(0.0, a.recovery_total - "
-              "           a.anchor_suppression * "
-              "           exp(c.log_factor - a.anchor_log_factor)) "
-              "     ELSE a.recovery_total END AS strength, "
-              "CASE WHEN a.memory_id IS NULL THEN m.suppression "
-              "     WHEN a.generation = c.generation THEN "
-              "       a.anchor_suppression * "
-              "       exp(c.log_factor - a.anchor_log_factor) "
-              "     ELSE 0.0 END AS suppression, "
-              "CASE WHEN a.memory_id IS NULL THEN m.suppression_ts "
-              "     WHEN a.generation = c.generation THEN c.last_ts "
-              "     ELSE COALESCE(r.reset_ts, c.last_ts) "
-              "END AS suppression_ts "
-              "FROM memories m "
-              "CROSS JOIN rif_recovery_clock c "
-              "LEFT JOIN rif_active_state a ON a.memory_id = m.memory_id "
-              "LEFT JOIN rif_generation_resets r "
-              "  ON r.generation = a.generation");
+              "CREATE VIRTUAL TABLE IF NOT EXISTS temp.memory_query_terms "
+              "USING fts5(text, content='',"
+              "  tokenize='porter unicode61 remove_diacritics 2')");
+          store.Execute (
+              "CREATE VIRTUAL TABLE IF NOT EXISTS temp.memory_query_term_stems "
+              "USING fts5vocab(temp, memory_query_terms, 'instance')");
+          store.Execute (
+              "CREATE VIRTUAL TABLE IF NOT EXISTS temp.memory_text_vocab "
+              "USING fts5vocab(main, memory_text_fts, 'row')");
         }
 
       store.Execute ("COMMIT");

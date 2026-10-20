@@ -290,7 +290,17 @@ PruneReconstructionHistory (Executor &executor, long long memory_id,
             + Placeholders (reconstruction_ids.size ()) + ")",
         reconstruction_ids);
 
-  if (!policy.delete_orphan_embeddings || embedding_ids.empty ())
+  if (!policy.delete_orphan_embeddings)
+    {
+      // The forced working-memory flush deletes the embeddings this left
+      // unreferenced.
+      if (p_ctx != nullptr)
+        p_ctx->orphan_embedding_candidates.insert (
+            p_ctx->orphan_embedding_candidates.end (),
+            seen_embeddings.begin (), seen_embeddings.end ());
+      return;
+    }
+  if (embedding_ids.empty ())
     {
       return;
     }
@@ -494,34 +504,6 @@ LoadLatestReconstructionImpl (Executor &executor, long long memory_id)
 }
 
 template <typename Executor>
-std::vector<unsigned char>
-LoadCurrentBlobIdImpl (Executor &executor, long long memory_id)
-{
-  if (memory_id <= 0)
-    {
-      return {};
-    }
-  if (const auto latest = LoadLatestReconstructionImpl (executor, memory_id);
-      latest.has_value () && !latest->blob_id.empty ())
-    {
-      return latest->blob_id;
-    }
-
-  auto rows = Exec (executor, "SELECT blob_id FROM memories WHERE memory_id = ?",
-                    { memory_id });
-  if (rows.empty ())
-    {
-      return {};
-    }
-  auto it = rows[0].find ("blob_id");
-  if (it == rows[0].end () || !it->second.has_value ())
-    {
-      return {};
-    }
-  return store::BlobFromAny (it->second);
-}
-
-template <typename Executor>
 std::optional<Eigen::VectorXf>
 LoadCurrentEmbeddingImpl (Executor &executor, long long memory_id,
                           long long base_embedding_id, int expected_dim)
@@ -605,32 +587,6 @@ LoadLatestReconstruction (Transaction &tx, long long memory_id)
   return LoadLatestReconstructionImpl (tx, memory_id);
 }
 
-bool
-ShouldSkipReconstructionUpdate (Transaction &tx, long long memory_id,
-                                long long created_at,
-                                std::string_view trigger,
-                                ReconstructionUpdatePolicy policy)
-{
-  return ShouldSkipReconstructionUpdateImpl (tx, memory_id, created_at,
-                                             trigger, policy);
-}
-
-std::vector<unsigned char>
-LoadCurrentBlobId (Store *store, long long memory_id)
-{
-  if (!store)
-    {
-      return {};
-    }
-  return LoadCurrentBlobIdImpl (*store, memory_id);
-}
-
-std::vector<unsigned char>
-LoadCurrentBlobId (Transaction &tx, long long memory_id)
-{
-  return LoadCurrentBlobIdImpl (tx, memory_id);
-}
-
 std::optional<Eigen::VectorXf>
 LoadCurrentEmbedding (Store *store, long long memory_id, long long base_embedding_id,
                       int expected_dim)
@@ -659,7 +615,8 @@ AppendReconstructionWithEmbeddingId (Transaction &tx, long long memory_id,
                                      std::string_view trigger,
                                      double source_confidence,
                                      double context_similarity,
-                                     ReconstructionUpdatePolicy policy)
+                                     ReconstructionUpdatePolicy policy,
+                                     ProcessorContext *p_ctx)
 {
   if (memory_id <= 0 || embedding_id <= 0)
     {
@@ -687,7 +644,7 @@ AppendReconstructionWithEmbeddingId (Transaction &tx, long long memory_id,
     {
       UpdateCurrentEmbeddingSurface (tx, memory_id, embedding_id, created_at);
     }
-  PruneReconstructionHistory (tx, memory_id, policy);
+  PruneReconstructionHistory (tx, memory_id, policy, p_ctx);
 
   return reconstruction_id;
 }
@@ -761,9 +718,10 @@ AppendReconstructionWithEmbeddingUnchecked (
     }
   if (p_ctx != nullptr)
     {
+      const internal::SharedEmbedding shared_embedding (embedding);
       historical_surface_search_cache_internal::Append (
-          *p_ctx,
-          { embedding_id, 0, 0, std::string (), std::string (), embedding });
+          *p_ctx, { embedding_id, 0, 0, std::string (), std::string (),
+                    shared_embedding });
       const auto surface_it = p_ctx->retrieval_surface_index.find (memory_id);
       if (surface_it != p_ctx->retrieval_surface_index.end ()
           && surface_it->second < p_ctx->retrieval_surface_cache.size ())
@@ -771,7 +729,7 @@ AppendReconstructionWithEmbeddingUnchecked (
           historical_surface_search_cache_internal::UpsertCurrent (
               *p_ctx,
               { embedding_id, memory_id, 0, std::string (), std::string (),
-                embedding });
+                shared_embedding });
         }
     }
 

@@ -23,27 +23,6 @@ namespace cortext
 class Store;
 class ObjectTransaction;
 
-/// @brief Information about a cluster of memories from consolidation.
-///
-/// Created by ConsolidationCluster and consumed by shallow consolidation and
-/// graph construction.
-struct ClusterInfo
-{
-  int cluster_id = 0;
-  std::vector<long long> memory_ids;
-  std::vector<long long> embedding_ids;
-  std::vector<float> centroid;
-  double avg_score = 0.0;
-};
-
-/// @brief Represents a candidate memory for consolidation.
-struct ConsolidationCandidate
-{
-  long long memory_id = 0;
-  long long embedding_id = 0;
-  double score = 0.0;
-  Eigen::VectorXf embedding;
-};
 
 
 
@@ -477,26 +456,6 @@ public:
   {
     return retrieval_queue_depth_;
   }
-  void
-  SetConsolidationShouldStart (bool v)
-  {
-    consolidation_should_start_ = v;
-  }
-  bool
-  GetConsolidationShouldStart () const
-  {
-    return consolidation_should_start_;
-  }
-  void
-  SetConsolidationPersisted (bool v)
-  {
-    consolidation_persisted_ = v;
-  }
-  bool
-  GetConsolidationPersisted () const
-  {
-    return consolidation_persisted_;
-  }
   // Diagnostics for Algorithm 27 (for testing/telemetry)
   void
   SetMniJaccard (double v)
@@ -646,102 +605,8 @@ public:
   // Stability Feedback API (Algorithm 17 → Algorithm 6 bridge)
   // ======================================================================
   
-  void
-  SetDeltaHalfLifeAdjustment (std::optional<double> v)
-  {
-    delta_half_life_adj_ = v;
-  }
-  std::optional<double>
-  GetDeltaHalfLifeAdjustment () const
-  {
-    return delta_half_life_adj_;
-  }
 
   // Observed retention (seconds) for Alg 6 input
-  void
-  SetObservedRetentionSeconds (std::optional<double> v)
-  {
-    observed_retention_sec_ = v;
-  }
-  std::optional<double>
-  GetObservedRetentionSeconds () const
-  {
-    return observed_retention_sec_;
-  }
-
-  // Serial Position Effects API (Algorithm 26)
-  // ======================================================================
-  
-  void
-  SetSerialPrimacyWindow (int v)
-  {
-    serial_primacy_window_ = v;
-  }
-  int
-  GetSerialPrimacyWindow () const
-  {
-    return serial_primacy_window_;
-  }
-  void
-  SetSerialRecencyWindow (int v)
-  {
-    serial_recency_window_ = v;
-  }
-  int
-  GetSerialRecencyWindow () const
-  {
-    return serial_recency_window_;
-  }
-  void
-  SetSerialPrimacyBonus (double v)
-  {
-    serial_primacy_bonus_ = v;
-  }
-  double
-  GetSerialPrimacyBonus () const
-  {
-    return serial_primacy_bonus_;
-  }
-  void
-  SetSerialRehearsalCurveDepth (double v)
-  {
-    serial_rehearsal_curve_depth_ = v;
-  }
-  double
-  GetSerialRehearsalCurveDepth () const
-  {
-    return serial_rehearsal_curve_depth_;
-  }
-  void
-  SetSerialDistinctivenessThreshold (double v)
-  {
-    serial_distinctiveness_threshold_ = v;
-  }
-  double
-  GetSerialDistinctivenessThreshold () const
-  {
-    return serial_distinctiveness_threshold_;
-  }
-  void
-  SetSerialVonRestorffMultiplier (double v)
-  {
-    serial_von_restorff_multiplier_ = v;
-  }
-  double
-  GetSerialVonRestorffMultiplier () const
-  {
-    return serial_von_restorff_multiplier_;
-  }
-  void
-  SetSerialMiddleSuppression (double v)
-  {
-    serial_middle_suppression_ = v;
-  }
-  double
-  GetSerialMiddleSuppression () const
-  {
-    return serial_middle_suppression_;
-  }
 
   // ======================================================================
   // Effective Focus API (Algorithm 10 stabilizer)
@@ -794,18 +659,6 @@ public:
   GetAllMetrics () const
   {
     return metrics_;
-  }
-
-  // Serial position multiplier (Algorithm 26 application)
-  void
-  SetSerialPositionMultiplier (std::optional<double> v)
-  {
-    serial_position_multiplier_ = v;
-  }
-  std::optional<double>
-  GetSerialPositionMultiplier () const
-  {
-    return serial_position_multiplier_;
   }
 
   // Diagnostics for Algorithm 7 weight handling
@@ -1070,36 +923,6 @@ public:
   }
 
 
-  // ======================================================================
-  // Consolidation Cluster API (Cluster -> Summarize data passing)
-  // ======================================================================
-
-  void
-  SetConsolidationClusters (std::vector<ClusterInfo> clusters)
-  {
-    consolidation_clusters_ = std::move (clusters);
-  }
-  const std::vector<ClusterInfo> &
-  GetConsolidationClusters () const
-  {
-    return consolidation_clusters_;
-  }
-
-  // ======================================================================
-  // In-Memory Consolidation Candidates (Phase 2 Refactor)
-  // ======================================================================
-
-  void
-  SetConsolidationCandidates (std::vector<ConsolidationCandidate> candidates)
-  {
-    consolidation_candidates_ = std::move (candidates);
-  }
-  const std::vector<ConsolidationCandidate> &
-  GetConsolidationCandidates () const
-  {
-    return consolidation_candidates_;
-  }
-
   // --- Fork/Join state (see processor/operation_fork.hpp) ---
 
   /// @brief Registers an outstanding Fork. Joins pair FIFO.
@@ -1173,8 +996,6 @@ private:
   std::optional<Eigen::VectorXf> boundary_centroid_;
 
   // Stability feedback bridge and optional observed retention
-  std::optional<double> delta_half_life_adj_;
-  std::optional<double> observed_retention_sec_;
 
   // Memory usage events attached to this signal
   std::vector<MemoryUsageEvent> memory_usage_events_;
@@ -1183,16 +1004,6 @@ private:
   std::vector<RetrievedMemoryCandidate> retrieved_memory_candidates_;
   // Selected candidate ID from interrupt gate (if any)
   std::optional<long long> selected_candidate_id_;
-
-  // Serial Position Effects (Algorithm 26) fields
-  int serial_primacy_window_ = 0;
-  int serial_recency_window_ = 0;
-  double serial_primacy_bonus_ = 0.0;
-  double serial_rehearsal_curve_depth_ = 0.0;
-  double serial_distinctiveness_threshold_ = 0.0;
-  double serial_von_restorff_multiplier_ = 0.0;
-  double serial_middle_suppression_ = 0.0;
-  std::optional<double> serial_position_multiplier_;
 
   // Write gate decision (Algorithm 7+8)
   bool write_decision_ = false;
@@ -1228,17 +1039,10 @@ private:
   // Algorithm 28/28b fields
   int tokens_in_flight_ = 0;
   int retrieval_queue_depth_ = 0;
-  bool consolidation_should_start_ = false;
-  bool consolidation_persisted_ = false;
 
   // Streaming Pacing fields (Section 10.4)
   bool should_check_retrieval_ = true;
   double drift_accum_snapshot_ = 0.0;
-
-  // Consolidation Cluster fields (Section 7.3)
-  std::vector<ClusterInfo> consolidation_clusters_;
-  // In-Memory Consolidation Candidates
-  std::vector<ConsolidationCandidate> consolidation_candidates_;
 
   // Memory Accumulation fields (Section 4.4)
   std::optional<double> boundary_score_;

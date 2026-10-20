@@ -9,8 +9,6 @@ namespace cortext::operations::retrieval_trace
 struct ActivationLedger
 {
   double base_level = 0.0;
-  double spreading_activation = 0.0;
-  double partial_match_penalty = 0.0;
   double recent_inhibition = 0.0;
   double utility = 0.0;
   double exploration_noise = 0.0;
@@ -24,12 +22,9 @@ struct RankedCandidate
   double score = 0.0;
   double relevance = 0.0;
   double proc_score = 0.0;
-  double predictive_bonus = 0.0;
-  double pre_activation = 0.0;
   int label_match_count = 0;
   double durable_source_boost = 0.0;
   int durable_source_count = 0;
-  double temporal_score = 0.0;
   double evidence_confidence = 0.0;
   double evidence_weight = 0.0;
   int evidence_source_diversity = 0;
@@ -106,6 +101,16 @@ struct SurfaceMutation
 void ClearLastSelectedEmbeddingOrder ();
 void SetLastSelectedEmbeddingOrder (const std::vector<long long> &embedding_ids);
 const std::vector<long long> &GetLastSelectedEmbeddingOrder ();
+// Standing signals (standing_memory_internal.hpp) the last query packet
+// joins, best first: each stored signal with the memory that holds it.
+struct StandingPick
+{
+  long long memory_id = 0;
+  long long signal_id = 0;
+};
+void ClearLastStandingPicks ();
+void SetLastStandingPicks (const std::vector<StandingPick> &picks);
+const std::vector<StandingPick> &GetLastStandingPicks ();
 void ClearLastRankedCandidates ();
 void SetLastRankedCandidates (const std::vector<RankedCandidate> &candidates);
 const std::vector<RankedCandidate> &GetLastRankedCandidates ();

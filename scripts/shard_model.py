@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Split the AIST GGUF model into Git-friendly chunks for language bindings.
+"""Split the AIST GGUF models into Git-friendly chunks for language bindings.
 
 Ownership: this repo is the source of truth for model shards. Binding packages
 (cortext.go, cortext.py, hermes plugins, …) should copy the produced tree under
@@ -15,7 +15,12 @@ Layout (matches cortext.go MaterializeModel):
   models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-000
   models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-001
   models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-002
+  models/AIST-87M-GGUF/chunks/AIST-87M-LI.gguf.part-000
   models/mdbr-leaf-ir/vocab.txt
+
+The late-interaction reranker (AIST-87M-LI.gguf, required with the AIST model)
+is sharded the same way: from the exported whole file when present
+(tools/reranker/export_gguf.py), otherwise the tracked parts are adopted.
 
 Examples:
   python3 scripts/shard_model.py
@@ -39,6 +44,12 @@ DEFAULT_SOURCE = REPO_ROOT / "models" / "AIST-87M-GGUF" / "AIST-87M_q8_0.gguf"
 DEFAULT_VOCAB = REPO_ROOT / "models" / "mdbr-leaf-ir" / "vocab.txt"
 MODEL_REL = "AIST-87M-GGUF/AIST-87M_q8_0.gguf"
 VOCAB_REL = "mdbr-leaf-ir/vocab.txt"
+# Late-interaction reranker (tools/reranker/export_gguf.py); sharded like the model.
+LI_NAME = "AIST-87M-LI.gguf"
+LI_REL = f"AIST-87M-GGUF/{LI_NAME}"
+DEFAULT_LI = REPO_ROOT / "models" / LI_REL
+REPO_CHUNK_DIR = REPO_ROOT / "models" / "AIST-87M-GGUF" / "chunks"
+MODEL_NAME = "AIST-87M_q8_0.gguf"
 DEFAULT_CHUNK = 48 * 1024 * 1024  # Git-friendly; matches cortext.go / hermes
 SCHEMA = "augmem.cortext.models.v1"
 # Expected whole-file digest for the shipping q8_0 quant (download_aist_model.py).
@@ -145,11 +156,13 @@ def shard_from_file(
     source: Path,
     models_root: Path,
     chunk_size: int,
+    name: str = MODEL_NAME,
 ) -> tuple[list[dict[str, object]], str, int]:
+    """Write ``chunks/<name>.part-NNN`` from ``source`` (replacing that name's parts only)."""
     chunk_dir = models_root / "AIST-87M-GGUF" / "chunks"
-    if chunk_dir.exists():
-        shutil.rmtree(chunk_dir)
     chunk_dir.mkdir(parents=True, exist_ok=True)
+    for stale in chunk_dir.glob(f"{name}.part-*"):
+        stale.unlink()
 
     whole = hashlib.sha256()
     chunks: list[dict[str, object]] = []
@@ -160,8 +173,8 @@ def shard_from_file(
             data = handle.read(chunk_size)
             if not data:
                 break
-            name = f"AIST-87M_q8_0.gguf.part-{index:03d}"
-            rel = f"AIST-87M-GGUF/chunks/{name}"
+            part_name = f"{name}.part-{index:03d}"
+            rel = f"AIST-87M-GGUF/chunks/{part_name}"
             path = models_root / rel
             path.write_bytes(data)
             part_hash = hashlib.sha256(data).hexdigest()
@@ -181,8 +194,9 @@ def shard_from_file(
 def adopt_existing_chunks(
     chunk_dir: Path,
     models_root: Path,
+    name: str = MODEL_NAME,
 ) -> tuple[list[dict[str, object]], str, int]:
-    parts = sorted(chunk_dir.glob("AIST-87M_q8_0.gguf.part-*"))
+    parts = sorted(chunk_dir.glob(f"{name}.part-*"))
     if not parts:
         raise SystemExit(f"no part files in {chunk_dir}")
     dest_dir = models_root / "AIST-87M-GGUF" / "chunks"
@@ -213,12 +227,15 @@ def write_manifest(
     model_sha: str,
     size: int,
     vocab_sha: str,
+    li_chunks: list[dict[str, object]],
+    li_sha: str,
+    li_size: int,
 ) -> Path:
     manifest = {
         "schema": SCHEMA,
         "cortext_version": version,
         "note": (
-            "AIST model is Git-chunked under 100 MiB so it can live in ordinary "
+            "AIST models are Git-chunked under 100 MiB so they can live in ordinary "
             "Git without LFS. Language bindings reassemble and checksum on first use; "
             "do not re-shard in binding repos — copy this tree from cortext."
         ),
@@ -230,11 +247,32 @@ def write_manifest(
                 "chunks": chunks,
             },
             {"filename": VOCAB_REL, "sha256": vocab_sha},
+            {
+                "filename": LI_REL,
+                "sha256": li_sha,
+                "size": li_size,
+                "chunks": li_chunks,
+            },
         ],
     }
     out = models_root / "manifest.json"
     out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return out
+
+
+def shard_late_interaction(
+    models_root: Path, chunk_size: int
+) -> tuple[list[dict[str, object]], str, int]:
+    """Shard the reranker from its exported whole file, else adopt the tracked parts."""
+    if DEFAULT_LI.is_file():
+        print(f"sharding late-interaction model from {DEFAULT_LI}", flush=True)
+        return shard_from_file(DEFAULT_LI, models_root, chunk_size, LI_NAME)
+    if any(REPO_CHUNK_DIR.glob(f"{LI_NAME}.part-*")):
+        return adopt_existing_chunks(REPO_CHUNK_DIR, models_root, LI_NAME)
+    raise SystemExit(
+        f"late-interaction model missing: neither {DEFAULT_LI} nor "
+        f"{REPO_CHUNK_DIR}/{LI_NAME}.part-* exists"
+    )
 
 
 def shard_models(
@@ -271,6 +309,7 @@ def shard_models(
     if vocab_src.resolve() != vocab_dest.resolve():
         shutil.copy2(vocab_src, vocab_dest)
     vocab_sha = digest_file(vocab_dest)
+    li_chunks, li_sha, li_size = shard_late_interaction(models_root, chunk_size)
 
     if verify_expected:
         if model_sha != EXPECTED_MODEL_SHA256 or size != EXPECTED_MODEL_SIZE:
@@ -283,7 +322,8 @@ def shard_models(
                 f"vocab digest mismatch: {vocab_sha} (expected {EXPECTED_VOCAB_SHA256})"
             )
 
-    write_manifest(models_root, version, chunks, model_sha, size, vocab_sha)
+    write_manifest(models_root, version, chunks, model_sha, size, vocab_sha,
+                   li_chunks, li_sha, li_size)
     print(f"wrote {models_root / 'manifest.json'}", flush=True)
     print(f"model sha256={model_sha} size={size}", flush=True)
     return json.loads((models_root / "manifest.json").read_text(encoding="utf-8"))

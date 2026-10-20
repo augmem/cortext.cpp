@@ -1,10 +1,12 @@
 #include "cortext/store/sqlite_store.hpp"
 #include "store/commit_profile_internal.hpp"
+#include "store/memory_text_index_internal.hpp"
 #include "store/mutation_audit_internal.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <condition_variable>
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
@@ -15,6 +17,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -37,6 +40,201 @@ SQLiteStoreQueryInterrupter::Interrupt (SQLiteStore &store)
   sqlite3_interrupt (store.connection_->GetConnection ());
   return true;
 }
+
+// Background WAL checkpointer: its own connection on its own thread, so the
+// copy of committed WAL frames into the database and the fsyncs around it
+// never run on the thread that ingests. PASSIVE mode never waits on, or
+// blocks, the writer or readers; frames a reader still needs are copied by a
+// later request.
+class SQLiteWalCheckpointer
+{
+public:
+  SQLiteWalCheckpointer (sqlite3 *connection, int request_pages)
+      : connection_ (connection), request_pages_ (request_pages),
+        thread_ ([this] { Run (); })
+  {
+  }
+
+  ~SQLiteWalCheckpointer ()
+  {
+    {
+      std::lock_guard<std::mutex> lock (mutex_);
+      stop_ = true;
+    }
+    wake_.notify_all ();
+    thread_.join ();
+    sqlite3_close (connection_);
+  }
+
+  SQLiteWalCheckpointer (const SQLiteWalCheckpointer &) = delete;
+  SQLiteWalCheckpointer &operator= (const SQLiteWalCheckpointer &) = delete;
+
+  // Opens the checkpointer's connection to the store's database file, or
+  // returns null when this store cannot be checkpointed from another
+  // connection (memory or temporary database, non-WAL journal, exclusive
+  // locking, single-threaded SQLite build).
+  static std::unique_ptr<SQLiteWalCheckpointer>
+  Open (sqlite3 *store_connection, int request_pages, int busy_timeout_ms)
+  {
+    if (sqlite3_threadsafe () == 0)
+      return nullptr;
+    const char *filename = sqlite3_db_filename (store_connection, "main");
+    if (!filename || filename[0] == '\0')
+      return nullptr;
+    const auto pragma_text = [store_connection] (const char *sql) {
+      std::string value;
+      sqlite3_stmt *stmt = nullptr;
+      if (sqlite3_prepare_v2 (store_connection, sql, -1, &stmt, nullptr)
+              == SQLITE_OK
+          && sqlite3_step (stmt) == SQLITE_ROW)
+        {
+          const auto *text = sqlite3_column_text (stmt, 0);
+          value = text ? reinterpret_cast<const char *> (text) : "";
+        }
+      sqlite3_finalize (stmt);
+      std::transform (value.begin (), value.end (), value.begin (),
+                      [] (unsigned char c) {
+                        return static_cast<char> (std::tolower (c));
+                      });
+      return value;
+    };
+    if (pragma_text ("PRAGMA journal_mode") != "wal"
+        || pragma_text ("PRAGMA locking_mode") == "exclusive")
+      return nullptr;
+    const std::string synchronous = pragma_text ("PRAGMA synchronous");
+
+    sqlite3 *connection = nullptr;
+    if (sqlite3_open_v2 (filename, &connection,
+                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                         nullptr)
+        != SQLITE_OK)
+      {
+        sqlite3_close (connection);
+        return nullptr;
+      }
+    // The checkpointer syncs exactly as the store's connection would have.
+    const std::string sync_pragma
+        = "PRAGMA synchronous = " + (synchronous.empty () ? "1" : synchronous);
+    if (sqlite3_exec (connection, sync_pragma.c_str (), nullptr, nullptr,
+                      nullptr)
+        != SQLITE_OK)
+      {
+        sqlite3_close (connection);
+        return nullptr;
+      }
+    // PASSIVE checkpoints never wait on a lock, but this connection still
+    // reads the database (it opens the WAL with a read transaction) and
+    // must wait on a busy lock exactly as the store's connection does.
+    sqlite3_busy_timeout (connection, busy_timeout_ms);
+    sqlite3_wal_autocheckpoint (connection, 0);
+    return std::make_unique<SQLiteWalCheckpointer> (connection,
+                                                    request_pages);
+  }
+
+  // sqlite3_wal_hook callback on the store's connection, after each commit.
+  static int
+  OnCommit (void *self, sqlite3 * /*db*/, const char * /*name*/, int pages)
+  {
+    auto *checkpointer = static_cast<SQLiteWalCheckpointer *> (self);
+    if (checkpointer->request_pages_ > 0
+        && pages >= checkpointer->request_pages_)
+      checkpointer->Request ();
+    return SQLITE_OK;
+  }
+
+  void
+  Request ()
+  {
+    {
+      std::lock_guard<std::mutex> lock (mutex_);
+      if (pending_)
+        return;
+      pending_ = true;
+    }
+    wake_.notify_one ();
+  }
+
+  void
+  Wait ()
+  {
+    std::unique_lock<std::mutex> lock (mutex_);
+    idle_.wait (lock, [this] { return !pending_ && !running_; });
+  }
+
+  int
+  RequestPages () const
+  {
+    return request_pages_;
+  }
+
+private:
+  void
+  Run ()
+  {
+    std::unique_lock<std::mutex> lock (mutex_);
+    for (;;)
+      {
+        wake_.wait (lock, [this] { return pending_ || stop_; });
+        if (stop_)
+          break;
+        pending_ = false;
+        running_ = true;
+        lock.unlock ();
+        CheckpointOnce ();
+        lock.lock ();
+        running_ = false;
+        idle_.notify_all ();
+      }
+    pending_ = false;
+    idle_.notify_all ();
+  }
+
+  void
+  CheckpointOnce ()
+  {
+    const auto start = std::chrono::steady_clock::now ();
+    int wal_pages = 0;
+    int backfilled = 0;
+    const int rc
+        = sqlite3_wal_checkpoint_v2 (connection_, nullptr,
+                                     SQLITE_CHECKPOINT_PASSIVE, &wal_pages,
+                                     &backfilled);
+    const double ms = std::chrono::duration<double, std::milli> (
+                          std::chrono::steady_clock::now () - start)
+                          .count ();
+    telemetry::AddCounter ("cortext.sqlite.background_checkpoint_total", 1);
+    telemetry::RecordHistogram (
+        "cortext.sqlite.background_checkpoint_duration_ms", ms);
+    if (rc == SQLITE_BUSY)
+      {
+        // Another connection was checkpointing; its work covers this one.
+        telemetry::AddCounter ("cortext.sqlite.background_checkpoint_busy_total",
+                               1);
+      }
+    else if (rc != SQLITE_OK)
+      {
+        telemetry::AddCounter (
+            "cortext.sqlite.background_checkpoint_failed_total", 1);
+        telemetry::LogWarn (
+            "cortext.sqlite_checkpoint_failed",
+            { telemetry::Attribute::String ("component", "store"),
+              telemetry::Attribute::String ("mode", "background_passive"),
+              telemetry::Attribute::String ("error",
+                                            sqlite3_errmsg (connection_)) });
+      }
+  }
+
+  sqlite3 *connection_;
+  const int request_pages_;
+  std::mutex mutex_;
+  std::condition_variable wake_;
+  std::condition_variable idle_;
+  bool pending_ = false;
+  bool running_ = false;
+  bool stop_ = false;
+  // Started last: Run () reads the members above.
+  std::thread thread_;
+};
 
 } // namespace internal
 
@@ -699,15 +897,20 @@ ResolveBeginTransactionSql ()
     return out;
   } ();
 
-  if (mode == "immediate")
+  if (mode == "deferred")
     {
-      return "BEGIN IMMEDIATE";
+      return "BEGIN";
     }
   if (mode == "exclusive")
     {
       return "BEGIN EXCLUSIVE";
     }
-  return "BEGIN";
+  // IMMEDIATE by default: the write lock is taken at BEGIN, where SQLite runs
+  // the busy handler. A deferred transaction reads first and takes the lock
+  // on its first write; SQLite never runs the busy handler for that
+  // read-to-write upgrade, so any other connection holding the write lock for
+  // a moment failed the statement at once with "database is locked".
+  return "BEGIN IMMEDIATE";
 }
 
 sqlite3_stmt *
@@ -1144,7 +1347,7 @@ ConsumeSQLiteCommitProfile (Store *store)
 // SQLiteConnection implementation
 SQLiteConnection::SQLiteConnection (const std::string &database_path,
                                     const SQLiteConfig &config)
-    : connection_ (nullptr)
+    : connection_ (nullptr), busy_timeout_ms_ (config.busy_timeout_ms)
 {
   if (sqlite3_open (database_path.c_str (), &connection_) != SQLITE_OK)
     {
@@ -1261,7 +1464,7 @@ SQLiteConnection::~SQLiteConnection ()
 }
 
 SQLiteConnection::SQLiteConnection (SQLiteConnection &&other) noexcept
-    : connection_ (other.connection_)
+    : connection_ (other.connection_), busy_timeout_ms_ (other.busy_timeout_ms_)
 {
   other.connection_ = nullptr;
 }
@@ -1276,6 +1479,7 @@ SQLiteConnection::operator= (SQLiteConnection &&other) noexcept
           sqlite3_close (connection_);
         }
       connection_ = other.connection_;
+      busy_timeout_ms_ = other.busy_timeout_ms_;
       other.connection_ = nullptr;
     }
   return *this;
@@ -1410,6 +1614,28 @@ SQLiteTransaction::Execute (const std::string &query,
 }
 
 void
+SQLiteTransaction::ExecuteEach (
+    const std::string &query, const std::vector<std::any> &params,
+    const std::function<void (const std::map<std::string, std::any> &)>
+        &visit)
+{
+  if (is_committed_ || is_rolled_back_)
+    {
+      throw TransactionAlreadyFinishedError (
+          "Transaction is already committed or rolled back");
+    }
+  if (!store_ || store_->transaction_stack_.empty ()
+      || store_->transaction_stack_.back () != this)
+    {
+      throw TransactionNotCurrentError (
+          "Transaction is not the current transaction");
+    }
+  store_->ExecuteDirectEach (
+      query, params,
+      [&visit] (std::map<std::string, std::any> &&row) { visit (row); });
+}
+
+void
 SQLiteTransaction::Commit ()
 {
   if (is_committed_ || is_rolled_back_)
@@ -1484,6 +1710,11 @@ SQLiteStore::Create (const std::string &database_path,
 
 SQLiteStore::~SQLiteStore ()
 {
+  if (checkpointer_)
+    {
+      sqlite3_wal_hook (connection_->GetConnection (), nullptr, nullptr);
+      checkpointer_.reset ();
+    }
   if (connection_ && connection_->IsValid ())
     {
       sqlite3_preupdate_hook (connection_->GetConnection (), nullptr,
@@ -1566,9 +1797,20 @@ SQLiteStore::SQLiteStore (std::unique_ptr<SQLiteConnection> connection)
   // fallbacks.
   RegisterBuiltInExtensions ();
   RegisterBuiltInExtensionsOnDb (connection_->GetConnection ());
+  (void)store::memory_text_index_internal::RegisterRankingFunction (
+      connection_->GetConnection ());
 #if defined(CORTEXT_ENABLE_DYNAMIC_EXTENSIONS) && !defined(__EMSCRIPTEN__)
   TryLoadDynamicExtensions (connection_->GetConnection ());
 #endif
+  // WAL checkpoints leave the writing thread: commits only request one
+  // (sqlite3_wal_hook replaces SQLite's foreground auto-checkpoint).
+  checkpointer_ = internal::SQLiteWalCheckpointer::Open (
+      connection_->GetConnection (), ResolveWalAutoCheckpointPages (),
+      connection_->BusyTimeoutMs ());
+  if (checkpointer_)
+    sqlite3_wal_hook (connection_->GetConnection (),
+                      &internal::SQLiteWalCheckpointer::OnCommit,
+                      checkpointer_.get ());
   const bool mutation_audit_enabled = MutationAuditEnabled ();
   if (mutation_audit_enabled || CommitProfileEnabled ())
     {
@@ -1802,13 +2044,47 @@ std::vector<std::map<std::string, std::any> >
 SQLiteStore::ExecuteDirect (const std::string &query,
                             const std::vector<std::any> &params)
 {
+  std::vector<std::map<std::string, std::any> > results;
+  ExecuteDirectEach (query, params,
+                     [&results] (std::map<std::string, std::any> &&row) {
+                       results.push_back (std::move (row));
+                     });
+  return results;
+}
+
+void
+SQLiteStore::ExecuteEach (
+    const std::string &query, const std::vector<std::any> &params,
+    const std::function<void (const std::map<std::string, std::any> &)>
+        &visit)
+{
+  // Same transaction routing as Execute: finished transactions are dropped
+  // and an unfinished one is current, so the statement runs on the
+  // connection either way.
+  while (!transaction_stack_.empty ())
+    {
+      auto *current_tx = transaction_stack_.back ();
+      if (current_tx && !current_tx->IsFinished ())
+        break;
+      transaction_stack_.pop_back ();
+    }
+  ExecuteDirectEach (query, params,
+                     [&visit] (std::map<std::string, std::any> &&row) {
+                       visit (row);
+                     });
+}
+
+void
+SQLiteStore::ExecuteDirectEach (
+    const std::string &query, const std::vector<std::any> &params,
+    const std::function<void (std::map<std::string, std::any> &&)> &visit)
+{
   const std::string_view op = ParseDbOperation (query);
   telemetry::ScopedSpan span (
       "cortext.db.execute",
       { telemetry::Attribute::String ("db.system", "sqlite"),
         telemetry::Attribute::String ("db.operation", op) });
   sqlite3_stmt *stmt = nullptr;
-  std::vector<std::map<std::string, std::any> > results;
   try
     {
       stmt = AcquireStatement (query);
@@ -1857,7 +2133,7 @@ SQLiteStore::ExecuteDirect (const std::string &query,
         {
           std::map<std::string, std::any> row;
           FetchResultRow (stmt, row);
-          results.push_back (std::move (row));
+          visit (std::move (row));
         }
     }
   catch (...)
@@ -1893,7 +2169,6 @@ SQLiteStore::ExecuteDirect (const std::string &query,
     }
   sqlite3_reset (stmt);
   span.SetStatusOk ();
-  return results;
 }
 
 void
@@ -1923,6 +2198,40 @@ SQLiteStore::Checkpoint (bool full)
     }
 }
 
+void
+SQLiteStore::RequestCheckpoint ()
+{
+  if (checkpointer_)
+    {
+      checkpointer_->Request ();
+      return;
+    }
+  Checkpoint (false);
+}
+
+void
+SQLiteStore::WaitForRequestedCheckpoints ()
+{
+  if (checkpointer_)
+    checkpointer_->Wait ();
+}
+
+void
+SQLiteStore::SyncWal ()
+{
+  // The pager's journal file is the WAL in WAL mode; a closed handle (no
+  // WAL yet, memory database, committed rollback journal) has nothing to sync.
+  sqlite3_file *wal = nullptr;
+  if (sqlite3_file_control (connection_->GetConnection (), "main",
+                            SQLITE_FCNTL_JOURNAL_POINTER, &wal)
+          != SQLITE_OK
+      || !wal || !wal->pMethods)
+    return;
+  const int rc = wal->pMethods->xSync (wal, SQLITE_SYNC_NORMAL);
+  if (rc != SQLITE_OK)
+    throw StoreError ("WAL sync failed: " + std::string (sqlite3_errstr (rc)));
+}
+
 SQLiteStore::WalStatus
 SQLiteStore::GetWalStatus () const
 {
@@ -1937,6 +2246,10 @@ SQLiteStore::GetWalStatus () const
 int
 SQLiteStore::WalAutoCheckpointPages () const
 {
+  if (checkpointer_)
+    {
+      return checkpointer_->RequestPages ();
+    }
   if (!connection_ || !connection_->IsValid ())
     {
       return 0;
@@ -1975,6 +2288,33 @@ SQLiteStore::WalFileBytes () const
   const auto wal_path = std::filesystem::path (db_filename).concat ("-wal");
   const auto bytes = std::filesystem::file_size (wal_path, ec);
   return ec ? 0 : bytes;
+}
+
+std::string
+SQLiteStore::ConcurrentReadPath () const
+{
+  if (!connection_ || !connection_->IsValid () || sqlite3_threadsafe () == 0)
+    return {};
+  sqlite3 *db = connection_->GetConnection ();
+  const char *filename = sqlite3_db_filename (db, "main");
+  if (!filename || filename[0] == '\0'
+      || std::string_view (filename) == ":memory:")
+    return {};
+  std::string mode;
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2 (db, "PRAGMA journal_mode", -1, &stmt, nullptr)
+          == SQLITE_OK
+      && sqlite3_step (stmt) == SQLITE_ROW)
+    {
+      const auto *text = sqlite3_column_text (stmt, 0);
+      mode = text ? reinterpret_cast<const char *> (text) : "";
+    }
+  sqlite3_finalize (stmt);
+  std::transform (mode.begin (), mode.end (), mode.begin (),
+                  [] (unsigned char c) {
+                    return static_cast<char> (std::tolower (c));
+                  });
+  return mode == "wal" ? std::string (filename) : std::string ();
 }
 
 void

@@ -1,8 +1,8 @@
 # Advanced Cognitive Processes {#sec-advanced}
 
 This section presents algorithms modeling higher-order cognitive phenomena:
-working memory maintenance, soft anchor formation, retrieval uncertainty,
-reconsolidation dynamics, and serial position effects.
+working memory maintenance, retrieval uncertainty, and the removed
+reconsolidation and Soft Anchor dynamics.
 
 **Knob note:** Unless explicitly stated otherwise, F and S in this section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
 
@@ -96,7 +96,7 @@ if Δt_decay > 0:
   strength ← max(strength_floor(F,S,T),
                  strength − maintenance_cost_per_memory × Δt_decay)
   strength_ts ← now_s()
-# last_ts changes only on chunking, rehearsal, or insertion
+# last_ts changes only on chunking or insertion
 ```
 
 The active floor is applied only while charging positive elapsed time. A
@@ -109,14 +109,13 @@ dirty so the next normal process persists both values.
 
 The manifold_complexity is defined as a normalized local variability proxy (see Appendix B): manifold_complexity ← clamp((1 − mean_cos_window) / 2, 0, 1).
 
-### Memory-Level Gating
+### Memory-Level Gating {#sec-wm-gating}
 
 Gating thresholds determine entry and chunking:
 
 ```
 chunking_threshold = lerp(0.7, 0.9, F)
 gate_threshold = lerp(0.1, 0.4, F)
-rehearsal_rate = lerp(0.5, 2.0, S)
 memory_dedication_strength = lerp(0.3, 0.9, T)
 ```
 
@@ -157,11 +156,32 @@ Chunking operates on memory embeddings to merge related content from the same so
 ```
 similar_memories ← {m ∈ active_memories | cos(m.embedding, memory.e_rep) > chunking_threshold AND
                               m.source_id == memory.source_id}
-if |similar_memories| > 0:
-    merge_into_chunk(similar_memories, memory)
+chunk_max(T) = round(lerp(8, 24, T))  # signals per slot (16 at T = 0.5)
+best ← argmax cos over similar_memories
+if best exists AND best.n_signals + memory.n_signals ≤ chunk_max(T):
+    merge_into_chunk(best, memory)
+else:
+    insert_new_slot(memory)  # capacity eviction as for any insert
 ```
 
-**Implementation note:** durable ingress inputs preserve an ordered working-memory trace independent of the literal `source_id` string. `source_id` is still used for opaque provenance and exact same-source grouping, but Cortext does not parse roles such as user, assistant, speaker, or device from it. Internal maintenance work follows the same rule: explicit consolidation is driven by a force flag on the signal, not by a magic `source_id` value. Prompt hydration orders active slots by insertion/start time rather than `last_access`; otherwise rehearsal or retrieval touches can scramble the visible recent context even when the underlying memories are correct.
+The chunk budget bounds what one slot carries into every packet. Without it,
+per-conversation Natural ingest let a slot absorb a whole stream: on BEAM
+(22,652 turns) three slots held 21,793 signals, each query packet carried
+~0.9 MB of working-memory text, and consolidation p95 reached 10 s. With
+`chunk_max` = 16 the same stream keeps gold recall (.110 retrieved), halves the
+working-memory text, cuts ingest instructions 62%, and brings consolidation
+p95 to 0.31 s. Durable ingest never chunks (each turn keeps its own trace).
+
+Earlier builds also rehearsed slots: an incoming unit within
+`lerp(0.5, 0.7, F)` cosine of a slot, or a retrieved memory within the chunking
+threshold, raised that slot's strength by `lerp(0.5, 2.0, S) × base_delta`.
+The round-3 ablation (2026-10) found rehearsal changed 12/48 LongMemEval-S and
+33/250 Eval 1 packets (working-memory order only) and none on BEAM-10M
+conversation 7, with gold-turn recall unchanged and Haiku-judged sufficiency
++0.000 (S) and +0.002 ± 0.003 (Eval 1); removing it saved 3–4% of instructions,
+so it was removed.
+
+**Implementation note:** durable ingress inputs preserve an ordered working-memory trace independent of the literal `source_id` string. `source_id` is still used for opaque provenance and exact same-source grouping, but Cortext does not parse roles such as user, assistant, speaker, or device from it. Internal maintenance work follows the same rule: explicit consolidation is driven by a force flag on the signal, not by a magic `source_id` value. Prompt hydration orders active slots by insertion/start time rather than `last_access`; otherwise slot updates can scramble the visible recent context even when the underlying memories are correct.
 
 ## Two-Layer Graph Memory Surface {#sec-three-tier-graph-memory}
 
@@ -187,286 +207,20 @@ shallow, embedding-only commitment step: it clusters mature long-term memories,
 creates association centroids, connects member memories with `derived_from`, and
 optionally attaches already-existing label nodes by embedding similarity.
 
-## Soft Anchor Formation {#sec-soft-anchor}
+## Soft Anchor Formation (Removed) {#sec-soft-anchor}
 
-Soft Anchor is an ingress-time uncertainty layer for subject, entity, object, and
-event continuity. It is not a hard referent resolver and it is not a
-retrieval-time reranker. At memory ingestion time, Cortext compares the current
-memory signal against already-established working-memory (WM), short-term memory
-(STM), and long-term memory (LTM) anchor state. The output is a ranked,
-uncertainty-preserving set of possible continuities. Retrieval may later consume
-these links as context, but retrieval candidates do not create anchors.
-
-The input signal model emits view vectors:
-
-```
-x_sem  ← semantic_key(m)
-x_ent  ← entity_key(m)
-x_full ← full_key(m)
-```
-
-For an ES-AIST-style signal model these are the corrected slices:
-
-```
-semantic_key = z[0:768]
-entity_key   = z[768:1536]
-full_key     = z[0:1536]
-```
-
-Production note: the shipped runtime first uses a dedicated
-`soft_anchor_embedding` when the encoder exposes at least 1536 dimensions.
-When only the 256-dimensional retrieval embedding is available, it uses a
-single-view fallback: semantic, entity, and full centroids all reference the
-normalized available embedding, and entity quality is lowered by an F/S/T-derived
-prior. ES-AIST slices are therefore supported, but they are not required for the
-production path.
-
-Each active soft anchor state stores separate centroids and support statistics:
-
-```
-SoftAnchorState {
-  anchor_id
-  status ∈ {provisional, active, durable, decayed, rejected}
-  semantic_centroid, entity_centroid, full_centroid
-  semantic_radius, entity_radius, full_radius
-  memory_tier_mask
-  source_histogram
-  first_step, last_step, last_boundary_id
-  anchor_strength
-  support_count, contradiction_count
-  recent_memory_ids
-}
-```
-
-Each memory may retain multiple possible links:
-
-```
-SoftAnchorLink {
-  memory_id
-  anchor_id
-  anchor_strength ∈ [0, 1]
-  anchor_label ∈ {none, tentative, ambiguous, durable, decayed, rejected}
-  evidence_kind
-  memory_tier ∈ {WM, STM, LTM}
-  score
-  margin
-  entropy
-  support_count
-  contradiction_count
-  created_step
-  updated_step
-}
-```
-
-### Candidate Set
-
-The candidate set is built only from prior soft anchor state. The current
-runtime iterates the bounded set of non-rejected `SoftAnchorState` objects
-loaded into processor state; the WM/STM/LTM split below describes the intended
-tiered candidate policy and the metadata labels assigned to retained links, not
-a separate production retrieval over three anchor indexes yet.
-
-```
-C_WM  = active WM anchors
-C_STM = top STM anchors by state similarity, capped
-C_LTM = durable/provisional LTM anchors only when entity/full evidence is non-weak
-C     = bounded_union(C_WM, C_STM, C_LTM)
-```
-
-The caps are knob-derived:
-
-```
-K_STM_pre = round(lerp(24, 8, F) × (0.75 + 0.50S))
-K_LTM_pre = round(lerp(16, 4, F) × (0.70 + 0.30S) × (0.80 + 0.20T))
-K_pre     = min(64, |C_WM| + K_STM_pre + K_LTM_pre)
-```
-
-No future labels, retrieved memories, target flags, candidate classes, or
-gold actions enter the runtime candidate set.
-
-### View Evidence
-
-For each candidate anchor `a`, compute:
-
-```
-s_sem(a)  = map01(cos(x_sem,  a.semantic_centroid))
-s_ent(a)  = map01(cos(x_ent,  a.entity_centroid))
-s_full(a) = map01(cos(x_full, a.full_centroid))
-```
-
-The view weights use the three knobs. Focus increases entity specificity,
-Sensitivity preserves weak semantic continuity, and Stability increases
-context/full-vector influence:
-
-```
-w_sem_raw  = (0.45 - 0.15F + 0.10S) × q_sem
-w_ent_raw  = (0.25 + 0.35F) × q_ent
-w_full_raw = (0.20 + 0.25T + 0.05F) × q_full
-[w_sem, w_ent, w_full] = normalize([w_sem_raw, w_ent_raw, w_full_raw])
-
-view(a) = w_sem s_sem(a) + w_ent s_ent(a) + w_full s_full(a)
-```
-
-When quality estimates are unavailable, use `q_sem = q_full = 1` and an
-F/S/T-derived weak entity-quality prior. At the neutral midpoint this equals
-`q_ent = 0.5`. If the entity vector is missing or known-diffuse, set
-`q_ent = 0`.
-
-### Engine Evidence
-
-Soft Anchor is an engine policy over signal evidence plus ingress state. The
-real-anchor score combines view evidence with source continuity, tier-adjusted
-recency, support history, boundary pressure, and contradiction pressure.
-Generic or low-information suppression is applied in the null/new hypothesis
-competition and hard-retention gates rather than subtracted from every real
-anchor score:
-
-```
-R(a) =
-  w_view    view(a)
-+ w_source  source_continuity(m, a)
-+ w_recency recency_tier(m, a, T)
-+ w_support support_prior(a, T)
-- w_boundary boundary_shift(m, a, F, T)
-- w_contra   contradiction_penalty(a, S)
-```
-
-The blend weights are normalized:
-
-```
-[w_view, w_source, w_recency, w_support, w_boundary, w_contra] =
-normalize([
-  0.55 + 0.20F,
-  0.20 + 0.20F + 0.10T,
-  0.20 + 0.20S + 0.10T,
-  0.15 + 0.45T,
-  0.25 + 0.35F + 0.15T,
-  0.20 + 0.30S + 0.20F
-])
-```
-
-Generic or low-information memories must not create durable continuity. The
-generic suppressor is modality-general: it uses null centroids, low entity mass,
-low information content, and diffuse candidate entropy. Text shortcuts such as
-"ok", "yeah", "bye", and filler are optional extra evidence, not the anchor
-mechanism.
-
-### Null and New Hypotheses
-
-Soft Anchor competes every real anchor against two special hypotheses:
-
-```
-H_none = no continuity; emit no retained link
-H_new  = start a new provisional anchor
-```
-
-Compute:
-
-```
-best_real = max_a R(a), or 0 when C is empty
-H_real    = normalized_entropy({R(a)})
-info(m)   = clamp((q_sem + q_ent + q_full) / 3, 0, 1) × (1 - generic(m))
-
-score_none = SoftAnchorNoneScore(F,S,T,generic,H_real,
-                                 1 - best_real, top_contra)
-
-score_new  = SoftAnchorNewScore(F,S,T,info,boundary_score,
-                                best_real,generic)
-```
-
-Then:
-
-```
-β_anchor(F) = lerp(4.0, 14.0, F)
-P = softmaxβ([R(a_1), ..., R(a_n), score_none, score_new])
-```
-
-If `H_none` wins, the memory receives no active continuity link. If `H_new`
-wins and the signal is informative, Cortext creates a provisional soft anchor.
-
-### Labels and Retention
-
-Soft Anchor does not collapse uncertainty to top-1. It retains up to:
-
-```
-K_keep(F,S,T) = clamp(round(lerp(8, 3, F) × lerp(1.10, 0.85, T) + 2S), 2, 10)
-```
-
-for real anchors satisfying posterior and score thresholds. The label is a
-policy state, not a truth claim:
-
-```
-none       H_none wins or no candidate passes retention
-tentative  one anchor has usable evidence but insufficient support
-ambiguous  multiple anchors survive with low margin or high entropy
-durable    repeated non-generic support or exceptional evidence passes
-decayed    prior link has weakened below active threshold
-rejected   contradiction, generic suppression, or correction invalidates link
-```
-
-Ambiguous links may be surfaced as possible continuity, not as a fact. Durable
-assertions must not be formed from ambiguous links.
-
-### Durable Promotion and Decay
-
-Durable promotion is deliberately conservative:
-
-```
-support_required(F,T) = clamp(ceil(2 + 1.5F + 2.0T), 2, 6)
-```
-
-A support event counts only if it is non-generic, boundary-compatible,
-low-entropy, has sufficient margin, and is not a near duplicate of the previous
-support event. Current durable promotion requires repeated support plus
-low-entropy, high-margin evidence; one-shot exceptional durable promotion remains
-a possible future policy rather than the active runtime behavior.
-
-Link strength decays independently from the anchor:
-
-```
-strength_t = strength_0 × exp(-ln(2) × Δt / τ_link_tier(T))
-```
-
-with WM shortest, STM intermediate, and LTM longest. Higher Stability increases
-half-life and support window length; it must not by itself override boundary
-pressure or force cross-boundary durable binds. Non-durable anchor states decay
-after a bounded active-TTL grace period whose multiplier is also F/S/T-derived
-and remains `2x` at the neutral midpoint.
-
-### Knob Semantics
-
-The expected monotonic behavior is:
-
-```
-Focus ↑:
-  fewer weak retained links
-  higher margin requirement
-  stronger entity/split pressure
-  lower tentative recall acceptable
-
-Sensitivity ↑:
-  more tentative links
-  higher target-in-top-k recall
-  more ambiguous context acceptable
-  durable precision should not materially drop
-
-Stability ↑:
-  slower decay
-  longer support accumulation windows
-  fewer label flips
-  no cross-boundary durable overreach
-```
-
-Current checked-in evidence is limited to deterministic formation, ambiguity,
-promotion, persistence, and hydration tests; @sec-experimental does not report a
-human-subject anchoring benchmark. `UpdateSoftAnchor` runs at ingress after
-memory storage and writes soft-anchor state and links by default. Production
-retrieval does not rank from these links yet, and application surfacing is
-limited to hydrated memory metadata and experiment/benchmark utilities. The
-next open question is consumption: formed anchors may become useful uncertain
-context only after replay and manual-review experiments show that
-possible-continuity hints help more often than they harm, without converting
-tentative or ambiguous evidence into durable assertions.
+Earlier builds ran an ingress-time Soft Anchor operation after memory
+storage. It kept provisional subject/entity continuity states (semantic,
+entity and full centroids with support and contradiction counts) and linked
+each stored memory to up to three of them in `soft_anchors` and
+`soft_anchor_links`; hydration exposed the links as
+`Context::Memory::soft_anchors`. Retrieval never ranked on them. The engine
+ablation study (2026-10) found packets byte-identical without the operation on
+LongMemEval-S 0/48, Eval 1 0/250 and BEAM-10M conv 7 0/20, at a 0.5-1% ingest
+instruction cost, and removed the operation, its knobs, the public
+`Context::Memory::soft_anchors` / output diagnostics, the C API JSON fields
+and the 1536-dimensional `soft_anchor_embedding` signal slot. Migration 48
+drops both tables.
 
 ## Retrieval Uncertainty
 
@@ -484,28 +238,24 @@ candidate packet and evidence surfaces to decide whether to answer, ask for
 clarification, or expose multiple possible memories without the engine carrying
 a separate persistent confidence machine.
 
-## Memory Reconsolidation
+## Memory Reconsolidation and Retrieval Reconstruction (Removed)
 
-Following @nader2000fear, retrieved memories enter a labile state permitting modification:
+Earlier builds moved stored embeddings after use. Following @nader2000fear, a
+retrieved memory became labile (`τ_labile = lerp(30, 300, T)`, susceptibility
+`(1 − T) × (0.5 + 0.5 × S)`) and drifted toward the current context by
+`(1 − T) × S × lability × contextual_relevance × lerp(0.2, 0.02, T)`, scaled
+by `1 + 0.4 × ACh_t`. Retrieval itself also re-encoded its top candidates as a
+bounded blend of the stored embedding and the query
+(`blend ∈ [lerp(0.04, 0.07, S), …]`, at most `RetrievalReconstructionUpdateCount`
+updates per signal). Both appended versions to `memory_reconstructions` and
+moved the current retrieval surface. An earlier ripple over association edges
+was removed first because nothing wrote those edges.
 
-```
-τ_labile = lerp(30, 300, T)  # seconds
-reconsolidation_gain = lerp(0.2, 0.02, T)
-lability_susceptibility = (1 − T) × (0.5 + 0.5 × S)
-```
-
-During the lability window, memories can drift toward current context:
-
-```
-drift_magnitude = (1 − T) × S × lability ×
-                   contextual_relevance
-```
-
-Reconsolidation effects propagate to semantically related memories with decay:
-
-```
-ripple_decay = lerp(0.5, 0.1, T)  # per semantic hop
-```
+The round-3 leave-one-out (2026-10) switched both off together on the full-length evaluations. LongMemEval-S packet gold-turn recall was unchanged (0.642) and Haiku-judged sufficiency moved 0.000; Eval 1 recall rose 0.597 → 0.611 (6 cases better, 1 worse), judged +0.010 ± 0.016; BEAM-10M conversation 7 rose 0.103 → 0.110, judged +0.014 ± 0.027; an eight-episode LongMemEval-M subset (39k turns) kept recall at 0.462, judged 0.000. Instructions fell 5–11% and stores shrank 12–23%. Each source alone was also neutral. The earlier phase-1 "embedding movement" arm that measured harm also switched off the constructive reconstruction representation, so its delta came from that representation change rather than from movement. The engine ablation study (2026-10) therefore removed both movement
+sources, their knobs, the ACh reconsolidation scale and the per-memory lability
+columns (migration 46). Stored memories keep the reconstruction ledger written
+at storage time, so existing stores that already hold moved versions are still
+read through their latest reconstruction.
 
 ## Stored Source Metadata and Supersession
 
@@ -556,10 +306,23 @@ if θ_topic ≤ cos(e_new, e_old) < θ_dup:
 ```
 
 Retrieval treats `supersedes` as a directional family relation rather than a
-traversable activation edge. Superseded targets are removed before the vector
-seed cap, leaving the replacement eligible as the family representative and
-preventing obsolete members from consuming prompt slots. The number of written
+traversable activation edge. Packet hydration uses it to attach a retrieved
+replacement's superseded predecessors. Earlier builds also removed superseded
+targets before the vector seed cap. The engine ablation study (2026-10) measured
+that exclusion as harmful and removed it. Keeping superseded targets eligible
+raised the share of gold turns among the seed anchors by +0.16 on Eval 1, +0.14
+on LongMemEval-S, +0.16 on LongMemEval-M and +0.05 on BEAM-10M. Packet recall
+rose by +0.017, +0.025, +0.000 and +0.039. In these conversations an "obsolete"
+turn is often the evidence a question asks about. The number of written
 supersession edges is capped by `SupersessionMaxEdges(F,S,T)`.
+
+Predecessor hydration used to skip a target from the anchor's own source stream
+within 30 minutes, treating it as an in-conversation correction. The round-3
+leave-one-out (2026-10) found the skip changed no packet on LongMemEval-S (0/48)
+or Eval 1 (0/250), because contiguity hydration already attaches such nearby
+turns, while on BEAM-10M conversation 7 dropping it raised packet gold-turn
+recall from 0.103 to 0.118 (2 cases better, none worse) for 0.5 KB more packet.
+The skip was removed.
 
 ## Constructive Recall and Controlled Distortion
 
@@ -578,212 +341,46 @@ on_memory_write:
             trigger = 'initial'})
 ```
 
-During retrieval:
-```
-current_embedding ← latest(reconstruction.embedding, fallback = memory.embedding)
-score_retrieval(current_embedding, current_context)
-recon ← bounded_blend(current_embedding, query, temporal_context)
-append(memory_reconstructions,
-       {embedding_id = recon.embedding,
-        blob_id = current_blob,
-        ts = now,
-        uncertainty = inferred_retrieval_uncertainty,
-        trigger = 'retrieval'})
-```
+During retrieval the current embedding is the latest reconstruction (or the
+base embedding when none exists). Since the 2026-10 ablation nothing appends
+further versions, so for new stores it equals the stored embedding.
 
-Hydration resolves `memory.current_view` from the latest reconstruction blob when one exists; otherwise it falls back to the immutable evidence packets. Reconsolidation follows the same audit-trail rule: it appends a new `trigger='reconsolidation'` reconstruction instead of overwriting the evidence embedding stored on the base memory row. This gives the current branch the controlled-distortion property the earlier draft claimed, while preserving the original evidence vector for inspection and replay.
+Hydration resolves `memory.current_view` from the latest reconstruction blob when one exists; otherwise it falls back to the immutable evidence packets.
 
-## Retrieval Competition
+## Retrieval Competition (Removed)
 
-Retrieved memories compete through lateral inhibition, modeling retrieval-induced forgetting [@anderson1994remembering]:
+Earlier builds made retrieved memories compete through lateral inhibition, modeling retrieval-induced forgetting [@anderson1994remembering]: winners within `inhibition_radius = lerp(0.5, 0.85, F)` of the context suppressed losers by `lerp(0.1, 0.01, T) × (1 − winning_activation)`, scaled by `1 + 0.5 × NE_t`, and suppression recovered over `lerp(300, 1800, T)` seconds through a lazily anchored log clock. The suppressed value lowered `memories.strength`, but no retrieval, hydration or gating step reads strength for long-term memories, so suppression never reached a packet. Skipping the competition operation left every packet byte-identical on LongMemEval-S (0/48) and Eval 1 (0/250). Its only other effect was operational: the active-epoch bound was the sole source of `Required` consolidation hints, so without it BEAM-10M conversation 7 consolidated once instead of 44 times and the sparse route stopped recentering. Measured together with the in-conversation predecessor change described above, all 20 BEAM packets changed, gold-turn recall moved 0.103 → 0.110 (0.118 with the predecessor change alone) and Haiku-judged sufficiency by −0.014 ± 0.048 (n = 18). On a 111,527-turn chain of five BEAM-10M conversations the same build recalled 0.082 vs 0.062 of gold turns (13 cases better, 4 worse), judged +0.008 ± 0.040 (n = 89), with 13.5% fewer instructions retired. The engine ablation study (2026-10) removed the operation, the lazy recovery clock, its tables and its active-epoch projection.
 
-```
-inhibition_radius = lerp(0.5, 0.85, F)
-winners_k = round(lerp(7, 3, F))
-suppression_per_retrieval = lerp(0.1, 0.01, T) ×
-                             (1 − winning_activation)
-recovery_time_RIF = lerp(300, 1800, T)  # seconds
-```
+## Predictive Pre-activation (Removed)
 
-High Focus produces narrow winner-take-all dynamics; low Focus permits broader activation.
+Earlier builds kept a per-memory `pre_activation` value. An expectation state (`x_pred_ema`) and recent context raised it, it decayed at `lerp(0.7, 0.3, T)` per turn, and high surprise refreshed it faster. After the hard cutover, graph retrieval no longer read the field. The research ranking prior `predictive_bonus = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T) × pre_activation` was never part of the production ranker. The engine ablation study (2026-10) removed the operation, the column and its indexes. Skipping the operation left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. Instructions retired changed by -1%, +3% and -1%, which is noise.
 
-## Predictive Pre-activation
+## Serial Position Effects (Removed)
 
-The system pre-activates memories predicted to be relevant based on the EMA expectation state (`x_pred_ema`) and recent context:
+Earlier builds modelled primacy, recency and von Restorff distinctiveness [@murdock1962serial; @hunt1995subtlety]. They derived a per-signal multiplier from knob-dependent windows (`primacy_window = round(lerp(5, 2, F))`, `recency_window = round(lerp(7, 3, F))`, `von_restorff_multiplier = lerp(1.5, 3.0, S)` and others) and applied it to memory-strength reinforcement. Memory strength was removed (@sec-reinforcement), so nothing consumed the multiplier, and the engine ablation study (2026-10) removed the two operations. Phase-1 ablation, as part of the minor-feedback group, left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
 
-```
-prediction_horizon = round(lerp(2, 8, F))
-pre_activation_decay = lerp(0.7, 0.3, T)
-prediction_conf_threshold = lerp(0.3, 0.7, F)
-surprise_sensitivity = S × lerp(2.0, 0.5, T)
-```
+## Emotional Consolidation and Cascade (Removed) {#sec-emotional-consolidation}
 
-When predictions fail (high surprise), the system increases the refresh rate of pre-activation:
+Earlier builds marked high-intensity, high-arousal memories as flashbulb memories, following @mcgaugh2004amygdala. A flashbulb memory got a half-life bonus, detail suppression and gist-component settings. An emotional cascade then propagated decayed intensity and half-life bonus to graph neighbours within a knob-derived radius. The persisted outputs (`flashbulb`, `emotional_intensity`, `half_life_bonus`, `detail_suppression`, `gist_components`, `cascade_radius` and `cascade_decay`) fed memory-strength decay and the cascade itself. Retrieval never read them. The engine ablation study (2026-10) removed both operations, their private metadata cache and the columns. Phase-1 ablation of the affect group left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. Sensitivity's per-signal emotion and mood projections, and their threshold deltas, are a separate mechanism and remain.
 
-```
-update_rate_on_surprise = lerp(0.2, 0.02, T) × S
-```
+## Synaptic Tagging and Capture (Removed)
 
-Current implementation note: the shipped pipeline updates and decays the
-persisted `pre_activation` field, but production graph retrieval does not read
-that field. The following bounded retrieval prior describes the experimental
-ranking variant, not current runtime behavior:
+Earlier builds tagged the temporal neighbours of a high-surprise or high-arousal signal (`tag_strength`, `tag_expires_at`). A tagged memory got a consolidation-score bonus of `lerp(0.10, 0.25, S) × tag_strength`. That score was the tag's only consumer. Clustering consolidation was removed (@sec-consolidation), and the engine ablation study (2026-10) removed tagging and its columns with it. Phase-1 ablation left every packet byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. The June research-branch result that tagging removal hurt (@sec-experimental) was measured on a branch where consolidation was live, so it does not apply to the current engine.
 
-```
-predictive_weight(F,T) = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T)
-predictive_bonus = predictive_weight × pre_activation
-```
+## Pattern Separation Sparse Index and Procedural Lane (Removed) {#sec-pattern-separation}
 
-In the current runtime, high-surprise updates refresh latent predictive state
-without changing the next retrieval score. The historical ablation in
-@sec-experimental evaluates the earlier research variant and must not be read as
-a measurement of this hard-cutover implementation.
-
-## Serial Position Effects
-
-The architecture models primacy, recency, and distinctiveness effects observed in human memory [@murdock1962serial]:
-
-```
-primacy_window = round(lerp(5, 2, F))
-primacy_bonus = lerp(1.2, 2.0, S)
-recency_window = round(lerp(7, 3, F))
-rehearsal_curve_depth = lerp(0.2, 0.6, S)
-```
-
-The von Restorff (isolation) effect enhances memory for distinctive items [@hunt1995subtlety]:
-
-```
-distinctiveness_threshold = lerp(0.6, 0.8, F)
-von_restorff_multiplier = lerp(1.5, 3.0, S)
-```
-
-Items in the middle region suffer interference:
-
-```
-interference_zone = positions[primacy_window+1 : −recency_window]
-middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
-```
-
-## Emotional Consolidation {#sec-emotional-consolidation}
-
-High-emotion events trigger enhanced consolidation, following @mcgaugh2004amygdala findings. As detailed in @sec-consolidation, consolidation operates on stored memory metadata:
-
-```
-θ_intensity = lerp(0.6, 0.8, 1 − S)
-θ_arousal = lerp(0.4, 0.2, S)
-# Consolidation uses stored memory emotional metadata
-trigger = (m.metadata.s_emotion_max ≥ θ_intensity) AND
-           (m.metadata.s_arousal_avg ≥ θ_arousal)
-```
-
-Flashbulb memories receive extended half-life bonuses based on the memory's peak emotional intensity:
-
-```
-flashbulb_threshold = lerp(0.97, 0.65, S)
-flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × s_emotion_max)
-                           × (1 − 0.3 × s_arousal_avg)
-# Rate stabilizer only suppresses over-frequent flashbulbs; it does not lower
-# thresholds when the recent flashbulb rate is already below target.
-flashbulb_target = lerp(0.02, 0.06, S)
-flashbulb_rate_ewma ← EWMA(flashbulb, α = lerp(0.02, 0.12, S))
-rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × max(0, flashbulb_rate_ewma − flashbulb_target),
-                    1.0, 1.2)
-# Contextual percentile gate (embedding‑only, knob‑derived)
-emo_window = round(lerp(24, 96, S) × lerp(0.8, 1.2, T))
-percentile = lerp(0.95, 0.80, S)
-flashbulb_gain = lerp(1.0, 1.1, S)
-flashbulb_threshold_adj = max(flashbulb_threshold_eff × rate_adjust,
-                              Pctl_{percentile}(recent_emotion_intensity, emo_window))
-flashbulb_arousal = lerp(0.7, 0.5, S)
-flashbulb = ((s_arousal_avg ≥ flashbulb_arousal) AND
-             ((flashbulb_gain × s_emotion_max) ≥ flashbulb_threshold_adj))
-# Half-life bonus uses stored memory emotional peak
-emotional_half_life_bonus = exp(lerp(0, ln(3), S)) ×
-                             (1 + m.metadata.s_emotion_max)
-```
-
-The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation and stored with the memory (@sec-accumulator).
-
-```
-cascade_radius = round(lerp(1, 5, S))
-cascade_decay = lerp(0.7, 0.3, S)
-cascade_source_window_ms = 1000 × consolidation_interval_seconds(T)
-```
-
-Only flashbulb sources created within `cascade_source_window_ms` of the current
-signal participate. The explicit conversion preserves the intended five- to
-sixty-minute window while stored timestamps remain milliseconds since epoch.
-
-## Synaptic Tagging and Capture
-
-Flashbulb events are extended with **synaptic tagging**: high surprise or arousal tags nearby memories for preferential consolidation later, even if they scored low at the time.
-
-```
-tag_trigger ← (surprisal_t > lerp(0.6, 0.4, S)) OR (arousal_t > lerp(0.7, 0.5, S))
-tag_window = round(lerp(2, 8, S))  # memories before/after current time
-tag_decay_s = lerp(300, 3600, T)   # tag lifetime (seconds)
-
-if tag_trigger:
-    for m in temporal_neighbors(now_s(), tag_window):
-        m.tagged ← true
-        m.tag_strength ← 1.0
-        m.tag_expires_at ← now_s() + tag_decay_s
-```
-
-Tagged memories receive a consolidation bonus:
-```
-if m.tagged and now_s() < m.tag_expires_at:
-    score_consolidate(m) += lerp(0.10, 0.25, S) × m.tag_strength
-```
-
-## Pattern Separation Sparse Index {#sec-pattern-separation}
-
-Pattern separation is a lightweight sparse-key side channel maintained for
-experimental indexing and procedural-value updates without adding a decoder,
-taxonomy, or fact layer. For an accumulator or stored memory embedding `x`, Cortext selects
-the `k` largest-magnitude dimensions, preserves each selected dimension's sign,
-sorts the selected indices, and serializes the result as a stable sparse key:
-
-```
-k_sparse(F,S,T) = RetrievalSparseKeySize(F,S,T)
-top_k(x) = indices of the k_sparse largest |x_i|
-sparse_key(x) = join(sort({ i || sign(x_i) : i in top_k(x) }))
-```
-
-The write path stores each committed memory id under
-`index_store[sparse_key(e_rep)]`. The procedural update lane reuses the same
-keying function but stores values rather than membership lists:
-
-```
-index_store[sparse_key(e_rep)] += memory_id
-procedural_store[sparse_key(μ_acc)][memory_id] = Q(proc_key, memory_id)
-```
-
-Thus `index_store` is a processor-local sparse content-addressed bucket, while
-`procedural_store` is a processor-local sparse context-to-memory value table.
-Empty embeddings or non-positive key sizes produce no key and therefore do not
-update either store. Neither map is currently persisted, and production graph
-retrieval does not consume `index_store`; dense SQLite/vector discovery remains
-the active seed path.
-
-## Procedural Memory Lane (Habit/Skill Memory)
-
-In addition to declarative memory, Cortext maintains experimental procedural
-values for which previously successful routine memory could be surfaced in a
-context, learned from repeated successful use.
-
-```
-proc_key ← sparse_key(μ_acc)  # same sparsification as @sec-pattern-separation
-Q(proc_key, memory_id) ← routine value
-```
-
-Updates occur when a retrieved memory is used successfully and downstream outcome signals are positive:
-```
-Q ← Q + value_update_gain × δ_reward_t × (1 − Q)
-```
-
-The current implementation updates this processor-local table but does not read
-it in production graph retrieval, so it does not yet add proactive seeds or
-surface action tokens. The historical `procedural_proactive` ablation in
+Earlier builds kept two processor-local side tables keyed by a sparse
+signature of an embedding (the signs of its `RetrievalSparseKeySize(F,S,T)`
+largest-magnitude dimensions): `index_store[sparse_key(e_rep)]` listed every
+stored memory id, and `procedural_store[sparse_key(μ_acc)][memory_id]` held a
+routine value `Q ← Q + value_update_gain × δ_reward × (1 − Q)` updated when a
+retrieved memory was used. Neither table was persisted and no operation read
+either one: retrieval seeds come from the dense vector surface only. The tables
+were still journaled for rollback on every signal and grew by one entry per
+stored memory. The engine ablation study (2026-10) removed both tables, the
+sparse key and its knob with no packet change. The public `procedural_enabled`
+configuration flag (C++ `Config`, C ABI `cortext_config`, and the bindings)
+then controlled nothing and was removed with the unused procedural seed and
+candidate-blend knobs. The historical `procedural_proactive` ablation in
 @sec-experimental evaluated an earlier research-branch path and was an exact
-null; it is not evidence that proactive procedural retrieval ships today.
+null.

@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cortext
@@ -20,6 +21,10 @@ struct Signal;
 class OperationContext;
 class Encoder;
 class Clock;
+namespace internal
+{
+class LateInteractionModel;
+}
 
 /// @brief Orchestrates the signal processing.
 ///
@@ -37,11 +42,13 @@ public:
     bool affect_interrupt = true;
     bool affect_retrieval = true;
     bool reinforcement_enabled = true;
-    bool procedural_enabled = true;
     bool sequential_edges_enabled = true;
 
     Encoder *encoder = nullptr; // Required for embedding-based operations
     std::shared_ptr<Clock> clock;
+    /// Learned late-interaction reranker (queries rerank the head of the
+    /// candidate pool); null when the encoder has no position features.
+    const internal::LateInteractionModel *late_interaction = nullptr;
   };
 
   /// @brief Constructs a SignalProcessor with a defined set of operations.
@@ -113,27 +120,14 @@ public:
     std::optional<std::string> boundary_type;
     ConsolidationState consolidation_state = ConsolidationState::None;
 
-    // Composite score and serial-position application (if provided)
+    // Composite score (if provided)
     std::optional<double> composite_score;
-    std::optional<double> serial_position_multiplier;
 
     // Metrics (Algorithm 7 inputs) in normalized domains
     std::unordered_map<operations::Metric, double> metrics;
 
     // Per-operation timings (ms) for this signal
     std::unordered_map<std::string, double> operation_ms;
-
-    // Soft Anchor diagnostics. Formation runs at ingress; retrieval/chat
-    // consumption is not changed by these fields.
-    bool soft_anchor_enabled = false;
-    int soft_anchor_state_count = 0;
-    int soft_anchor_link_count = 0;
-    int soft_anchor_create_count = 0;
-    int soft_anchor_update_count = 0;
-    int soft_anchor_none_count = 0;
-    double soft_anchor_last_update_us = 0.0;
-    double soft_anchor_mean_update_us = 0.0;
-
   };
 
   /// @brief Processes a single signal by executing the instruction set.
@@ -146,6 +140,15 @@ public:
 private:
   void StartNewEpisode (Transaction *tx, uint64_t start_ts);
   void FinalizeEpisode (Transaction *tx, const OperationContext *op_context);
+  // Sources whose open unit Flush closes, oldest activity first. Empty for
+  // a custom root, which keeps its own meaning for open state.
+  std::vector<std::pair<uint64_t, std::string> > OpenUnits () const;
+  // Flush: close each listed source's open unit as at a boundary (write
+  // gate, storage, working memory, reset), so no accumulated signal outlives
+  // a commit request. Returns the number of units closed.
+  int CloseOpenUnits (
+      const std::vector<std::pair<uint64_t, std::string> > &open,
+      Transaction &tx, ObjectTransaction *object_tx);
 
   // State persistence helpers (called within Process transaction)
   // v2 schema: Unified state persistence

@@ -1,11 +1,13 @@
 #include "cortext/operations/accumulator.hpp"
 
 #include "cortext/core/knobs.hpp"
+#include "cortext/internal/text_payload.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 #include "../experimental_env.hpp"
+#include "../models/aist_late_interaction.hpp"
 #include "signal_record_rollback_internal.hpp"
 
 #include <algorithm>
@@ -27,7 +29,9 @@ CreateSignalRecord (const Signal &signal, double score, int serial_position)
   rec.mime = signal.mimetype;
   rec.score = score;
   rec.serial_position = serial_position;
-  if ((signal.modality == "text" || signal.mimetype == "text/plain")
+  rec.li_codes = internal::LateInteractionModel::Serialize (
+      signal.late_interaction);
+  if (::cortext::internal::IsTextPayload (signal.modality, signal.mimetype)
       && signal.payload && !signal.payload->empty ())
     {
       rec.text_payload.assign (
@@ -109,10 +113,10 @@ UpdateAccumulator::Execute (OperationContext &context,
               CreateSignalRecord (signal, 0.0, 0));
         }
 
-      // Track primary modality (v2: first modality wins)
+      // A fresh unit takes the first signal's modality.
       if (track_storable_signal)
         {
-          state.primary_modality = signal.modality;
+          state.memory_modality = signal.modality;
         }
       if (state.mu_acc.size () > 0)
         {
@@ -212,10 +216,10 @@ UpdateAccumulator::Execute (OperationContext &context,
               CreateSignalRecord (signal, 0.0, 0));
         }
 
-      // Track primary modality (v2: first modality wins)
+      // A fresh unit takes the first signal's modality.
       if (track_storable_signal)
         {
-          acc.primary_modality = signal.modality;
+          acc.memory_modality = signal.modality;
         }
       if (acc.mu_acc.size () > 0)
         {
@@ -272,10 +276,13 @@ UpdateAccumulator::Execute (OperationContext &context,
           CreateSignalRecord (signal, 0.0, serial_pos));
     }
 
-  // Track primary modality (v2: first modality wins)
-  if (track_storable_signal && acc.primary_modality.empty ())
+  // Signals of different modalities in one unit are peers: "mixed".
+  if (track_storable_signal)
     {
-      acc.primary_modality = signal.modality;
+      if (acc.memory_modality.empty ())
+        acc.memory_modality = signal.modality;
+      else if (acc.memory_modality != signal.modality)
+        acc.memory_modality = "mixed";
     }
 
   telemetry::RecordHistogram ("cortext.accumulator.n_signals",

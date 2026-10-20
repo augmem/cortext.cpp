@@ -100,20 +100,6 @@ FocusStatePriorsForKnobs (double F)
   return { Sigmoid (2.0 * f - 1.0), 0.3 + 0.7 * f, 1.0 - f };
 }
 
-struct StabilityStatePriors
-{
-  double rate_decay;
-  double secondary_half_life_scale;
-  double drift_weight;
-};
-
-inline StabilityStatePriors
-StabilityStatePriorsForKnobs (double T)
-{
-  const double t = Clamp (T, 0.0, 1.0);
-  return { Lerp (0.60, 0.98, t), 0.50, 0.50 * (1.0 - t) };
-}
-
 inline double
 MetricRarityStabilityScale (double T)
 {
@@ -395,18 +381,6 @@ RetrievalPressureRampLowScale (double T)
 }
 
 inline int
-HydratedSoftAnchorLimit (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (4.0, 2.0, f) * Lerp (1.05, 0.95, s)
-                             * Lerp (1.00, 1.10, t),
-                         1.0, 6.0)));
-}
-
-inline int
 RetrievalTextQueryWMSlots (double F, double T)
 {
   // Lower focus permits broader conversational addressing; higher stability
@@ -447,32 +421,6 @@ RetrievalSeedSearchK (double F, double S, double T, int seed_k)
 }
 
 inline int
-RetrievalGraphExpansionRowLimit (double F, double S, double T, int result_k)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double multiplier = Lerp (18.0, 8.0, f) * Lerp (1.08, 0.92, s)
-                            * Lerp (1.05, 0.90, t);
-  const int cap = static_cast<int> (
-      std::round (Lerp (768.0, 256.0, f) * Lerp (1.05, 0.90, t)));
-  return std::max (result_k, std::min (
-                                 cap, static_cast<int> (std::round (
-                                          std::max (1, result_k) * multiplier))));
-}
-
-inline int
-RetrievalGraphExpansionFanout (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (48.0, 16.0, f) * Lerp (0.90, 1.20, s)
-                     * Lerp (1.05, 0.85, t);
-  return static_cast<int> (std::round (Clamp (raw, 8.0, 64.0)));
-}
-
-inline int
 RetrievalDurableSourceLinkFanout (double F, double S, double T,
                                   int candidate_count)
 {
@@ -485,53 +433,6 @@ RetrievalDurableSourceLinkFanout (double F, double S, double T,
                          2.0, 16.0)));
   return std::max (std::max (1, candidate_count),
                    std::max (1, candidate_count) * per_candidate);
-}
-
-struct RetrievalGraphExpansionEvidencePolicy
-{
-  int min_association_count;
-  int min_label_count;
-};
-
-inline RetrievalGraphExpansionEvidencePolicy
-RetrievalGraphExpansionEvidenceCounts (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return { std::max (0, static_cast<int> (
-                             std::round (Lerp (3.0, 1.0, f)
-                                         * Lerp (1.0, 0.85, t)))),
-           std::max (0, static_cast<int> (
-                             std::round (Lerp (0.0, 3.0, s)
-                                         * Lerp (1.0, 0.85, f)))) };
-}
-
-inline int
-RetrievalLinkedHydrationCandidateLimit (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (20.0, 8.0, f) * Lerp (1.05, 0.95, s)
-                             * Lerp (1.05, 0.92, t),
-                         6.0, 24.0)));
-}
-
-inline std::pair<double, double>
-RetrievalLinkedHydrationOrderingWeights (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  const double query_raw = 0.82 + 0.14 * (f - f0) - 0.04 * (s - s0)
-                           + 0.04 * (t - t0);
-  const double query_weight = Clamp (query_raw, 0.60, 0.92);
-  return { query_weight, 1.0 - query_weight };
 }
 
 inline double
@@ -574,65 +475,6 @@ RetrievalVectorDistanceScore (double distance, double F, double S, double T)
                    + 0.08 * (t - t0),
                0.70, 1.35);
   return Clamp (1.0 / (1.0 + sharpness * distance), 0.0, 1.0);
-}
-
-inline int
-RetrievalSparseKeySize (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = 0.5;
-  const double s0 = SensitivityBias (0.5);
-  const double raw = (16.0 + (64.0 - 16.0) * f)
-                     * Clamp (1.0 + 0.10 * (s - s0)
-                                  - 0.06 * (t - 0.5)
-                                  - 0.04 * (f - f0),
-                              0.85, 1.15);
-  return std::max (8, static_cast<int> (std::round (Clamp (raw, 8.0, 72.0))));
-}
-
-inline double
-RetrievalPredictiveBonusWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Lerp (0.05, 0.20, f) * Lerp (1.0, 0.85, t)
-         * Clamp (1.0 + 0.12 * (s - s0), 0.90, 1.12);
-}
-
-inline double
-RetrievalCompetitionSuppressionBase (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double base = Lerp (0.10, 0.01, t);
-  return Clamp (base * (1.0 - 0.10 * (f - f0) + 0.10 * (s - s0)),
-                0.005, 0.12);
-}
-
-inline int
-RetrievalCompetitionWinnerCount (double F)
-{
-  return std::max (1, static_cast<int> (
-                          std::round (Lerp (7.0, 3.0, FocusBias (F)))));
-}
-
-inline double
-RetrievalCompetitionInhibitionRadius (double F)
-{
-  return Lerp (0.50, 0.85, FocusBias (F));
-}
-
-inline double
-RetrievalCompetitionRecoverySeconds (double T)
-{
-  return Lerp (300.0, 1800.0, Clamp (T, 0.0, 1.0));
 }
 
 inline double
@@ -766,56 +608,6 @@ RetrievalEvidenceBlendMaxMembers (double F, double S, double T)
       2, static_cast<int> (std::round (Lerp (2.0, 4.0, s)
                                       * Lerp (1.10, 0.90, f)
                                       * Lerp (0.95, 1.10, t))));
-}
-
-struct InfluenceFeedbackPolicy
-{
-  double sustain_window;
-  double sustain_alpha;
-  double contextual_gain_weight;
-  double predictive_similarity_weight;
-  double drift_weight;
-};
-
-inline InfluenceFeedbackPolicy
-InfluenceFeedbackPolicyForKnobs (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double sustain_window = std::round (Lerp (3.0, 5.0, t));
-  const double sustain_alpha
-      = (sustain_window > 0.0) ? (2.0 / (sustain_window + 1.0)) : 1.0;
-  return { sustain_window,
-           sustain_alpha,
-           Clamp (0.50 * (1.0 + 0.08 * (f - f0) + 0.04 * (t - 0.5)),
-                  0.35, 0.65),
-           Clamp (0.40 * (1.0 - 0.05 * (s - s0)), 0.25, 0.55),
-           Clamp (0.30 * (1.0 + 0.08 * (s - s0) - 0.10 * (t - 0.5)),
-                  0.15, 0.45) };
-}
-
-struct RetrievalCandidateBlendWeights
-{
-  double context;
-  double procedural;
-  double label_boost;
-};
-
-inline RetrievalCandidateBlendWeights
-RetrievalCandidateBlendScoringWeights (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return { Lerp (0.15, 0.35, f) * Lerp (1.0, 0.85, s)
-               * Lerp (0.98, 1.02, t),
-           Lerp (0.10, 0.25, s) * Lerp (1.02, 0.98, f)
-               * Lerp (0.98, 1.02, t),
-           Lerp (0.05, 0.18, s) * Lerp (1.04, 0.96, f)
-	               * Lerp (0.98, 1.02, t) };
 }
 
 struct RetrievalMemoryAffectWeights
@@ -1064,15 +856,6 @@ RetrievalGraphExpandedRagTemporalWindow (double F, double T)
       std::round (Lerp (4.0, 1.0, f) * Lerp (1.05, 0.90, t)));
 }
 
-inline int
-RetrievalGraphExpandedRagCompactItemLimit (double F, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double t = RetrievalStabilityBias (T);
-  return static_cast<int> (
-      std::round (Lerp (4.0, 1.0, f) * Lerp (1.05, 0.90, t)));
-}
-
 inline double
 RetrievalGraphExpandedRagSeedWeight (double F, double S, double T)
 {
@@ -1082,17 +865,6 @@ RetrievalGraphExpandedRagSeedWeight (double F, double S, double T)
   return Clamp (Lerp (0.72, 0.90, f) * Lerp (1.02, 0.96, s)
                     * Lerp (1.00, 0.96, t),
                 0.60, 0.95);
-}
-
-inline double
-RetrievalGraphExpandedRagGraphWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  return Clamp (Lerp (0.16, 0.34, s) * Lerp (1.14, 0.78, f)
-                    * Lerp (1.04, 0.92, t),
-                0.08, 0.40);
 }
 
 inline double
@@ -1148,475 +920,6 @@ RetrievalContextReinstatementAlpha (double F, double S, double T)
   return Clamp (base * (1.0 - 0.06 * (f - f0) + 0.08 * (s - s0)
                         - 0.04 * (t - RetrievalStabilityBias (0.5))),
                 0.02, 0.24);
-}
-
-inline int
-RetrievalProceduralSeedReserveCount (double F, double S, double T,
-                                     int remaining_slots)
-{
-  if (remaining_slots <= 0)
-    {
-      return 0;
-    }
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (1.4, 0.6, f) * Lerp (0.85, 1.20, s)
-                     * Lerp (1.05, 0.90, t);
-  const int reserve = static_cast<int> (std::round (Clamp (raw, 0.0, 2.0)));
-  return std::min (reserve, remaining_slots);
-}
-
-inline int
-RetrievalProceduralSeedFanout (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double focus_scale = Clamp (1.0 - 0.20 * (f - f0), 0.85, 1.15);
-  return std::max (
-      1, static_cast<int> (std::round (Lerp (1.0, 4.0, s)
-                                       * Lerp (1.0, 0.75, t)
-                                       * focus_scale)));
-}
-
-struct RetrievalReconstructionPolicy
-{
-  double source_confidence_weight;
-  double candidate_score_weight;
-  double context_score_weight;
-  double min_blend;
-  double max_blend;
-  double query_weight;
-};
-
-inline RetrievalReconstructionPolicy
-RetrievalConstructiveReconstructionPolicy (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double source_raw = Lerp (0.38, 0.52, f);
-  const double candidate_raw = Lerp (0.38, 0.30, f) * Lerp (1.00, 0.95, s);
-  const double context_raw = Lerp (0.18, 0.26, s) * Lerp (1.04, 0.94, f);
-  const double sum = std::max (1e-12,
-                               source_raw + candidate_raw + context_raw);
-  return {
-    source_raw / sum,
-    candidate_raw / sum,
-    context_raw / sum,
-    Clamp (Lerp (0.04, 0.07, s) * Lerp (1.04, 0.94, t), 0.02, 0.10),
-    Clamp (Lerp (0.18, 0.30, s) * Lerp (1.04, 0.90, t), 0.12, 0.35),
-    Clamp (Lerp (0.80, 0.72, t) * Lerp (1.02, 0.98, f), 0.60, 0.90)
-  };
-}
-
-inline int
-ReconstructionHistoryLimit (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (6.0, 14.0, t) * Lerp (1.08, 0.92, f)
-                     * Lerp (0.94, 1.08, s);
-  return static_cast<int> (std::round (Clamp (raw, 4.0, 24.0)));
-}
-
-inline int
-ReconstructionPruneBatchLimit (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (64.0, 192.0, t) * Lerp (0.90, 1.05, f)
-                     * Lerp (0.95, 1.10, s);
-  return static_cast<int> (std::round (Clamp (raw, 32.0, 256.0)));
-}
-
-inline long long
-ReconstructionMinUpdateIntervalMs (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double seconds = Lerp (300.0, 1800.0, t) * Lerp (0.90, 1.18, f)
-                         * Lerp (1.10, 0.80, s);
-  return static_cast<long long> (
-      std::llround (Clamp (seconds, 120.0, 3600.0) * 1000.0));
-}
-
-inline int
-RetrievalReconstructionUpdateCount (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double raw = Lerp (3.0, 1.0, f) * Lerp (0.85, 1.25, s)
-                     * Lerp (1.20, 0.75, t);
-  return static_cast<int> (std::round (Clamp (raw, 1.0, 4.0)));
-}
-
-inline double
-BoundaryThreshold (double F, double S);
-
-inline int
-SoftAnchorHardBoundaryRetainSteps (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return static_cast<int> (std::round (
-      Clamp (Lerp (5.0, 2.0, f) * Lerp (1.10, 0.85, s)
-                 * Lerp (0.85, 1.25, t),
-             1.0, 8.0)));
-}
-
-// --- Soft Anchor continuity policy ---
-
-inline int
-SoftAnchorActiveTTLSteps (double T)
-{
-  return static_cast<int> (
-      std::round (Lerp (16.0, 56.0, Clamp (T, 0.0, 1.0))));
-}
-
-inline int
-SoftAnchorRecentMemoryLimit (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (20.0, 44.0, t) * Lerp (1.10, 0.90, f)
-                     * Lerp (0.95, 1.05, s);
-  return static_cast<int> (std::round (Clamp (raw, 8.0, 64.0)));
-}
-
-inline double
-SoftAnchorSupportRawThreshold (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.70 + 0.10 * f - 0.05 * s + 0.04 * (t - 0.5),
-                0.58, 0.84);
-}
-
-inline double
-SoftAnchorSupportMarginThreshold (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.10 + 0.08 * f - 0.03 * s + 0.02 * (t - 0.5),
-                0.03, 0.20);
-}
-
-inline double
-SoftAnchorSupportEntropyMax (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.51 - 0.18 * f + 0.08 * s - 0.04 * t, 0.25,
-                0.75);
-}
-
-inline double
-SoftAnchorContradictionSemanticThreshold (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.78 + 0.08 * f - 0.04 * s + 0.02 * t, 0.68,
-                0.90);
-}
-
-inline double
-SoftAnchorContradictionEntityMax (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.505 - 0.08 * f + 0.04 * s - 0.02 * t, 0.35,
-                0.65);
-}
-
-inline double
-SoftAnchorDurableMarginThreshold (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.184 + 0.12 * f - 0.03 * s + 0.04 * t, 0.08,
-                0.35);
-}
-
-inline double
-SoftAnchorDurableEntropyMax (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.352 - 0.14 * f + 0.06 * s - 0.04 * t, 0.15,
-                0.55);
-}
-
-struct SoftAnchorViewWeights
-{
-  double semantic;
-  double entity;
-  double full;
-};
-
-inline SoftAnchorViewWeights
-SoftAnchorViewScoringWeights (double F, double S, double T,
-                              double semantic_quality,
-                              double entity_quality,
-                              double full_quality)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = Clamp (S, 0.0, 1.0);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double semantic_raw = (0.45 - 0.15 * f + 0.10 * s)
-                              * Clamp (semantic_quality, 0.0, 1.0);
-  const double entity_raw = (0.25 + 0.35 * f)
-                            * Clamp (entity_quality, 0.0, 1.0);
-  const double full_raw = (0.20 + 0.25 * t + 0.05 * f)
-                          * Clamp (full_quality, 0.0, 1.0);
-  const double sum = std::max (1e-9, semantic_raw + entity_raw + full_raw);
-  return { semantic_raw / sum, entity_raw / sum, full_raw / sum };
-}
-
-struct SoftAnchorCandidateWeights
-{
-  double view;
-  double source;
-  double recency;
-  double support;
-  double boundary;
-  double contradiction;
-};
-
-inline SoftAnchorCandidateWeights
-SoftAnchorCandidateScoringWeights (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = Clamp (S, 0.0, 1.0);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double sum = 1.55 + 1.05 * f + 0.50 * s + 0.40 * t;
-  return { (0.55 + 0.20 * f) / sum,
-           (0.20 + 0.20 * f + 0.10 * t) / sum,
-           (0.20 + 0.20 * s + 0.10 * t) / sum,
-           (0.15 + 0.45 * t) / sum,
-           (0.25 + 0.35 * f + 0.15 * t) / sum,
-           (0.20 + 0.30 * s + 0.20 * f) / sum };
-}
-
-inline double
-SoftAnchorSourceAffinity (double F, double S, double T, bool same_source)
-{
-  if (same_source)
-    {
-      return 1.0;
-    }
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = Clamp (S, 0.0, 1.0);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double scale = 1.0 - 0.20 * (f - 0.5) + 0.20 * (s - 0.5)
-                       - 0.10 * (t - 0.5);
-  return Clamp (0.25 * scale, 0.12, 0.42);
-}
-
-inline double
-SoftAnchorRecencyTauSteps (double T)
-{
-  return std::max (1.0, Lerp (4.0, 32.0, Clamp (T, 0.0, 1.0)));
-}
-
-inline double
-SoftAnchorSupportSaturation (double T)
-{
-  return Lerp (1.5, 4.0, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-SoftAnchorContradictionSaturation (double S)
-{
-  return Lerp (2.5, 1.0, Clamp (S, 0.0, 1.0));
-}
-
-inline double
-SoftAnchorBoundaryShiftScale (double F, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.40 + 0.40 * f + 0.20 * t, 0.35, 1.10);
-}
-
-inline double
-SoftAnchorSoftmaxTemperature (double F)
-{
-  return Lerp (4.0, 14.0, Clamp (F, 0.0, 1.0));
-}
-
-inline double
-SoftAnchorSingleViewEntityQuality (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double scale = 1.0 - 0.10 * (f - f0) + 0.12 * (s - s0)
-                       - 0.06 * (Clamp (T, 0.0, 1.0) - 0.5);
-  return Clamp (0.50 * scale, 0.35, 0.65);
-}
-
-inline double
-SoftAnchorActiveDecayMultiplier (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double scale = 1.0 + 0.08 * (f - f0) - 0.12 * (s - s0)
-                       + 0.18 * (Clamp (T, 0.0, 1.0) - 0.5);
-  return Clamp (2.0 * scale, 1.25, 3.0);
-}
-
-inline double
-SoftAnchorGenericScore (double F, double S, double T, double entity_quality,
-                        double real_entropy, double specificity)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double entity_weight = 0.40 * Clamp (1.0 + 0.08 * (f - f0)
-                                                 - 0.06 * (s - s0),
-                                             0.80, 1.20);
-  const double entropy_weight = 0.35 * Clamp (1.0 - 0.05 * (f - f0)
-                                                  + 0.08 * (s - s0)
-                                                  - 0.04 * (t - 0.5),
-                                              0.80, 1.20);
-  const double specificity_weight = 0.25 * Clamp (1.0 + 0.10 * (f - f0)
-                                                      - 0.04 * (s - s0)
-                                                      + 0.04 * (t - 0.5),
-                                                  0.80, 1.20);
-  const double sum = std::max (1e-12,
-                               entity_weight + entropy_weight
-                                   + specificity_weight);
-  return Clamp ((entity_weight * (1.0 - Clamp (entity_quality, 0.0, 1.0))
-                 + entropy_weight * Clamp (real_entropy, 0.0, 1.0)
-                 + specificity_weight
-                       * (1.0 - Clamp (specificity, 0.0, 1.0)))
-                    / sum,
-                0.0, 1.0);
-}
-
-inline double
-SoftAnchorNoneScore (double F, double S, double T, double generic,
-                     double real_entropy, double no_real_penalty,
-                     double top_contradiction)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double base = 0.20 * Clamp (1.0 + 0.08 * (f - f0)
-                                        - 0.08 * (s - s0)
-                                        + 0.06 * (t - 0.5),
-                                    0.75, 1.25);
-  const double generic_weight = 0.55 * Clamp (1.0 + 0.10 * (f - f0)
-                                                  - 0.06 * (s - s0),
-                                              0.80, 1.20);
-  const double entropy_weight = 0.20 * Clamp (1.0 - 0.04 * (f - f0)
-                                                  + 0.08 * (s - s0),
-                                              0.80, 1.20);
-  const double no_real_weight = 0.20 * Clamp (1.0 + 0.06 * (f - f0)
-                                                 - 0.04 * (s - s0)
-                                                 + 0.06 * (t - 0.5),
-                                             0.80, 1.20);
-  const double contradiction_weight = 0.15 * Clamp (1.0 + 0.08 * (s - s0),
-                                                    0.80, 1.20);
-  return Clamp (base + generic_weight * Clamp (generic, 0.0, 1.0)
-                    + entropy_weight * Clamp (real_entropy, 0.0, 1.0)
-                    + no_real_weight * Clamp (no_real_penalty, 0.0, 1.0)
-                    + contradiction_weight
-                          * Clamp (top_contradiction, 0.0, 1.0),
-                0.0, 1.0);
-}
-
-inline double
-SoftAnchorNewScore (double F, double S, double T, double info,
-                    double boundary_score, double best_real, double generic)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double base = 0.15 * Clamp (1.0 - 0.04 * (f - f0)
-                                        + 0.08 * (s - s0)
-                                        - 0.08 * (t - 0.5),
-                                    0.75, 1.25);
-  const double info_weight = 0.45 * Clamp (1.0 + 0.04 * (f - f0)
-                                               + 0.06 * (s - s0)
-                                               - 0.06 * (t - 0.5),
-                                           0.80, 1.20);
-  const double boundary_weight = 0.25 * Clamp (1.0 + 0.10 * (s - s0)
-                                                   - 0.04 * (t - 0.5),
-                                               0.80, 1.20);
-  const double novelty_weight = 0.20 * Clamp (1.0 + 0.06 * (s - s0)
-                                                  - 0.08 * (t - 0.5),
-                                              0.80, 1.20);
-  const double generic_penalty = 0.35 * Clamp (1.0 + 0.08 * (f - f0)
-                                                   - 0.04 * (s - s0),
-                                               0.80, 1.20);
-  return Clamp (base + info_weight * Clamp (info, 0.0, 1.0)
-                    + boundary_weight * Clamp (boundary_score, 0.0, 1.0)
-                    + novelty_weight * (1.0 - Clamp (best_real, 0.0, 1.0))
-                    - generic_penalty * Clamp (generic, 0.0, 1.0),
-                0.0, 1.0);
-}
-
-struct SoftAnchorDecisionPolicy
-{
-  double new_threshold;
-  double keep_threshold;
-  double tentative_threshold;
-  double margin_min;
-  double ambiguous_entropy;
-  double generic_hard_threshold;
-  int keep_count;
-  double centroid_alpha;
-  int durable_support_required;
-};
-
-inline SoftAnchorDecisionPolicy
-SoftAnchorDecisionPolicyForKnobs (double F, double S, double T)
-{
-  const double f = Clamp (F, 0.0, 1.0);
-  const double s = Clamp (S, 0.0, 1.0);
-  const double t = Clamp (T, 0.0, 1.0);
-  return {
-    Clamp (Lerp (0.44, 0.62, f) * Lerp (1.05, 0.90, s), 0.0, 1.0),
-    Clamp (Lerp (0.035, 0.080, f) * Lerp (1.15, 0.75, s), 0.0, 1.0),
-    Clamp (Lerp (0.38, 0.58, f) * Lerp (1.10, 0.85, s), 0.0, 1.0),
-    Clamp (Lerp (0.03, 0.15, f) * Lerp (1.05, 0.75, s), 0.0, 1.0),
-    Clamp (Lerp (0.85, 0.55, f) * Lerp (1.05, 1.15, s), 0.0, 1.0),
-    Clamp (Lerp (0.82, 0.65, f) * Lerp (1.05, 0.95, s), 0.0, 1.0),
-    std::max (2, std::min (10, static_cast<int> (
-                                  std::round (Lerp (8.0, 3.0, f)
-                                              * Lerp (1.10, 0.85, t)
-                                              + 2.0 * s)))),
-    Clamp (0.35 - 0.15 * t + 0.10 * s - 0.04 * (f - 0.5), 0.05, 0.60),
-    std::max (2, std::min (6, static_cast<int> (
-                                  std::ceil (2.0 + 1.5 * f + 2.0 * t
-                                             - 0.5 * (s - 0.5)))))
-  };
 }
 
 inline int
@@ -1708,17 +1011,6 @@ RetrievalDiversificationWeights (double F, double S, double T)
       return { 1.0, 0.0 };
     }
   return { w_rel_raw / sum, w_div_raw / sum };
-}
-
-inline double
-RetrievalProceduralSeedMinScore (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (0.44, 0.72, f) * Lerp (1.08, 0.92, s)
-                    * Lerp (0.96, 1.04, t),
-                0.30, 0.80);
 }
 
 // Small boost for consolidated association memories during retrieval ranking.
@@ -1930,14 +1222,6 @@ AlphaF (double F, double u_t)
   return kAlphaMinF + FocusBias (F) * kAlphaSpanF * u_t;
 }
 
-inline double
-AlphaS (double S, double u_t)
-{
-  const double kAlphaMinS = 0.05;
-  const double kAlphaSpanS = 0.35;
-  return kAlphaMinS + SensitivityBias (S) * kAlphaSpanS * u_t;
-}
-
 // Uncertainty variance normalization ceiling
 inline double
 VarScoreMax (double S)
@@ -2025,84 +1309,11 @@ BlenderOutcomeScoringWeights (double F, double S, double T)
                   0.06, 0.14) };
 }
 
-inline double
-BlenderOutcomeAlpha (double T)
-{
-  return Lerp (0.12, 0.03, Clamp (T, 0.0, 1.0));
-}
-
-inline int
-PredictionHorizon (double F)
-{
-  return std::max (
-      1, static_cast<int> (
-             std::round (Lerp (2.0, 8.0, FocusBias (F)))));
-}
-
-inline double
-PredictionConfidenceThreshold (double F)
-{
-  return Lerp (0.3, 0.7, FocusBias (F));
-}
-
-inline double
-PredictivePreActivationDecay (double T)
-{
-  return Lerp (0.7, 0.3, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-PredictiveSurpriseSensitivity (double S, double T)
-{
-  return SensitivityBias (S) * Lerp (2.0, 0.5, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-PredictiveBaseDelta (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double pad = PredictivePreActivationDecay (T);
-  return Clamp (0.02 * (1.0 - (pad - 0.3))
-                    * (1.0 - 0.06 * (f - f0) + 0.08 * (s - s0)),
-                0.006, 0.030);
-}
-
-inline double
-PredictiveSurpriseUpdateRate (double S, double T)
-{
-  return Lerp (0.2, 0.02, Clamp (T, 0.0, 1.0)) * SensitivityBias (S);
-}
-
-inline double
-PredictiveDeltaCap (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.20
-                    * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)
-                       - 0.08 * (t - 0.5)),
-                0.10, 0.28);
-}
-
 // Rate observation window (seconds)
 inline int
 WRateSeconds (double T)
 {
   return static_cast<int> (std::round (Lerp (60.0, 300.0, T)));
-}
-
-// Emotional-cascade lookback window (seconds)
-inline int
-EmotionCascadeWindowSeconds (double T)
-{
-  // Stable memories retain a longer affective-neighbor window.
-  return static_cast<int> (std::round (Lerp (300.0, 3600.0, T)));
 }
 
 // Escalation multiplier for consolidation urgency — Algorithm 28b
@@ -2113,61 +1324,7 @@ ConsolidationEscalationMultiplier (double T)
   return Lerp (1.5, 2.5, Clamp (T, 0.0, 1.0));
 }
 
-inline int
-ShallowConsolidationMaxLabels (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (2.0, 6.0, s) * Lerp (1.0, 0.70, f)
-                     * Lerp (1.04, 0.96, t);
-  return std::max (1, static_cast<int> (std::round (raw)));
-}
-
-inline double
-ShallowConsolidationLabelMinSimilarity (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double s0 = SensitivityBias (0.5);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (Lerp (0.30, 0.60, f) * Lerp (1.0, 1.1, t)
-                    * Clamp (1.0 - 0.06 * (s - s0), 0.94, 1.04),
-                0.15, 0.95);
-}
-
 // --- Consolidation Clustering (Section 7.3-7.4) ---
-
-// Merge threshold for clustering — Section 7.5.1
-inline double
-MergeThreshold (double F)
-{
-  // merge_threshold(F) = lerp(0.85, 0.95, F)
-  // Higher focus = stricter merging (higher similarity required)
-  // Also used for co-occurrence edges in Section 7.5.1
-  return Lerp (0.85, 0.95, FocusBias (F));
-}
-
-// Minimum cluster size — Section 7.4
-inline int
-MinClusterSize (double F)
-{
-  // min_cluster_size(F) = round(lerp(3, 10, F))
-  // Higher focus = larger minimum clusters required
-  return static_cast<int> (std::round (Lerp (3.0, 10.0, FocusBias (F))));
-}
-
-inline int
-ConsolidationMaxClusters (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = Lerp (140.0, 40.0, f)
-                     * (1.0 + 0.12 * (s - SensitivityBias (0.5))
-                        + 0.10 * (t - 0.5));
-  return static_cast<int> (std::round (Clamp (raw, 32.0, 256.0)));
-}
 
 // Label frequency threshold — Section 7.4
 inline int
@@ -2176,26 +1333,6 @@ LabelFrequencyThreshold (double T)
   // label_frequency_threshold(T) = round(lerp(5, 15, T))
   // Higher stability = higher frequency required for label to be notable
   return static_cast<int> (std::round (Lerp (5.0, 15.0, Clamp (T, 0.0, 1.0))));
-}
-
-// Retention window size (w_ret) — Algorithm 0.2
-// Spec (§2.3.2, line 339): w_ret(T) = round(lerp(10, 50, T))
-inline int
-WRet (double T)
-{
-  return static_cast<int> (std::round (Lerp (10.0, 50.0, T)));
-}
-
-inline int
-ObservedRetentionHistoryLimit (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return static_cast<int> (
-      std::round (Clamp (Lerp (192.0, 384.0, t) * Lerp (1.08, 0.94, f)
-                             * Lerp (0.95, 1.05, s),
-                         96.0, 512.0)));
 }
 
 inline int
@@ -2208,107 +1345,6 @@ RecentRetrievedIdWindow (double F, double S, double T)
       std::round (Clamp (Lerp (768.0, 1536.0, t) * Lerp (1.10, 0.90, f)
                              * Lerp (0.95, 1.05, s),
 	                         256.0, 2048.0)));
-}
-
-struct MemoryTraceTauMultipliers
-{
-  double fast;
-  double medium;
-  double slow;
-  double ultra;
-};
-
-inline MemoryTraceTauMultipliers
-MemoryTraceTauPolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double reactive_scale = 1.0 + 0.14 * (s - s0) - 0.08 * (f - f0)
-                                + 0.06 * (t - 0.5);
-  const double stable_scale = 1.0 + 0.24 * (t - 0.5) - 0.06 * (s - s0);
-  return {
-    Clamp (0.10 * reactive_scale, 0.05, 0.20),
-    Clamp (0.50 * (1.0 + 0.12 * (t - 0.5) - 0.06 * (f - f0)), 0.30, 0.80),
-    Clamp (2.00 * stable_scale, 1.20, 3.20),
-    Clamp (8.00 * stable_scale * (1.0 + 0.10 * (f - f0)), 4.00,
-           12.00)
-  };
-}
-
-inline double
-MemoryTraceCoupling (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp ((0.05 + 0.10 * t)
-                    * (1.0 - 0.10 * (f - f0) + 0.12 * (s - s0)),
-                0.02, 0.20);
-}
-
-struct MemoryTraceWeights
-{
-  double fast;
-  double medium;
-  double slow;
-  double ultra;
-};
-
-inline MemoryTraceWeights
-MemoryTraceWeightPolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return {
-    Clamp ((0.40 - 0.25 * t)
-               * (1.0 - 0.08 * (f - f0) - 0.10 * (s - s0)),
-           0.05, 0.50),
-    Clamp (0.25 * (1.0 - 0.04 * (f - f0) - 0.04 * (t - 0.5)),
-           0.12, 0.35),
-    Clamp ((0.20 + 0.15 * t)
-               * (1.0 + 0.08 * (f - f0) + 0.06 * (s - s0)),
-           0.12, 0.45),
-    Clamp ((0.15 + 0.10 * t)
-               * (1.0 + 0.10 * (f - f0) + 0.06 * (s - s0)),
-           0.08, 0.35)
-  };
-}
-
-inline MemoryTraceWeights
-MemoryInitialTracePolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double stable_seed = Clamp ((t - 0.5) * 2.0, 0.0, 1.0);
-  const double slow_seed = Clamp (0.04 * stable_seed
-                                      * (1.0 - 0.10 * (f - f0)
-                                         + 0.10 * (s - s0)),
-                                  0.0, 0.08);
-  const double ultra_seed = Clamp (0.02 * stable_seed
-                                       * (1.0 - 0.06 * (f - f0)
-                                          + 0.08 * (s - s0)),
-                                   0.0, 0.04);
-  const double medium_seed = Clamp (0.08 * stable_seed
-                                        * (1.0 - 0.12 * (f - f0)
-                                           + 0.08 * (s - s0)),
-                                    0.0, 0.14);
-  return {
-    Clamp (1.0 - 0.5 * medium_seed - slow_seed - ultra_seed, 0.80, 1.0),
-    medium_seed,
-    slow_seed,
-    ultra_seed
-  };
 }
 
 inline double
@@ -2329,77 +1365,6 @@ MemoryInitialStrengthPolicy (double F, double S, double T)
                 0.90, 1.0);
 }
 
-inline double
-MemoryInitialStabilityPolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double instability = std::max (0.0, 0.5 - t);
-  const double sensitivity_pressure = std::max (0.0, s - s0);
-  const double diffuse_pressure = std::max (0.0, f0 - f);
-  return Clamp (1.0
-                    - 0.12 * instability
-                          * (1.0 + 0.25 * sensitivity_pressure
-                             + 0.15 * diffuse_pressure),
-                0.82, 1.0);
-}
-
-inline MemoryTraceWeights
-MemoryStoredTraceFallbackPolicy (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return {
-    1.0,
-    Clamp (0.50 * (1.0 - 0.08 * (f - f0) + 0.08 * (s - s0)
-                   + 0.10 * (t - 0.5)),
-           0.30, 0.70),
-    Clamp (0.20 * (1.0 + 0.08 * (f - f0) + 0.06 * (s - s0)
-                   + 0.18 * (t - 0.5)),
-           0.10, 0.35),
-    Clamp (0.05 * (1.0 + 0.10 * (f - f0) + 0.06 * (s - s0)
-                   + 0.25 * (t - 0.5)),
-           0.02, 0.12)
-  };
-}
-
-inline double
-MemoryContextualGainWindow (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (Lerp (8.0, 32.0, Clamp (T, 0.0, 1.0))
-                    * (1.0 - 0.06 * (f - f0) + 0.08 * (s - s0)),
-                4.0, 48.0);
-}
-
-inline int
-MemoryTraceCount (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double raw = (2.0 + 2.0 * Clamp (T, 0.0, 1.0))
-                     * (1.0 + 0.08 * (f - f0) + 0.06 * (s - s0));
-  return std::max (1, std::min (4, static_cast<int> (std::round (raw))));
-}
-
-// Periphery cutoff — Algorithm 0.2
-inline double
-PeripheryCutoff (double T)
-{
-  return Lerp (0.03, 0.20, T);
-}
-
 // --- Stability prior helpers (Algorithm 5) ---
 inline double
 BaseBandPrior (double T)
@@ -2408,250 +1373,12 @@ BaseBandPrior (double T)
   return Lerp (0.02, 0.25, T);
 }
 
-inline double
-BaseHalfLifePrior (double T)
-{
-  // hl_min = 120.0; hl_max = 43200.0 (2 min → 12 h)
-  const double hl_min = 120.0;
-  const double hl_max = 43200.0;
-  return std::exp (std::log (hl_min) + T * std::log (hl_max / hl_min));
-}
-
-inline double
-ClampHalfLife (double value)
-{
-  const double hl_min = 120.0;
-  const double hl_max = 43200.0;
-  return Clamp (value, hl_min, hl_max);
-}
-
 // --- Algorithm 20 (Reconsolidation) Helpers ---
-inline double
-TauLabile (double T)
-{
-  // τ_labile = lerp(30, 300, T) seconds
-  return Lerp (30.0, 300.0, T);
-}
-
-inline double
-ReconsolidationGain (double T)
-{
-  // reconsolidation_gain = lerp(0.2, 0.02, T)
-  return Lerp (0.2, 0.02, T);
-}
-
-inline double
-ReconsolidationDriftClamp (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.30
-                    * (1.0 - 0.06 * (f - f0) + 0.08 * (s - s0)
-                       - 0.18 * (t - 0.5)),
-                0.12, 0.40);
-}
-
-inline double
-ReconsolidationDriftSkipEpsilon (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.001
-                    * (1.0 + 0.08 * (f - f0) - 0.10 * (s - s0)
-                       + 0.12 * (t - 0.5)),
-                0.0004, 0.0020);
-}
-
-inline double
-ReconsolidationPrimaryDriftMagnitude (double F, double S, double T,
-                                      double current_lability,
-                                      double contextual_relevance,
-                                      double recon_mod_scale)
-{
-  const double s = SensitivityBias (S);
-  const double s0 = SensitivityBias (0.5);
-  const double sensitivity_term = Clamp (
-      Clamp (S, 0.0, 1.0) * (1.0 + 0.20 * (s - s0)), 0.0, 1.0);
-  const double raw = (1.0 - Clamp (T, 0.0, 1.0)) * sensitivity_term
-                     * std::max (0.0, current_lability)
-                     * Clamp (contextual_relevance, 0.0, 1.0)
-                     * ReconsolidationGain (T)
-                     * std::max (0.0, recon_mod_scale);
-  return Clamp (raw, 0.0, ReconsolidationDriftClamp (F, S, T));
-}
-
-inline double
-RippleStrengthMin (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.01
-                    * (1.0 + 0.08 * (f - f0) - 0.20 * (s - s0)
-                       + 0.30 * (t - 0.5)),
-                0.003, 0.020);
-}
-
-inline double
-RippleDriftCapFactor (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.50
-                    * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)
-                       - 0.12 * (t - 0.5)),
-                0.30, 0.70);
-}
-
-inline double
-ReconsolidationUncertaintyRelevanceWeight (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.50
-                    * (1.0 + 0.06 * (f - f0) - 0.06 * (s - s0)
-                       + 0.08 * (t - 0.5)),
-                0.30, 0.70);
-}
-
-inline double
-RippleDecay (double T)
-{
-  // ripple_decay = lerp(0.5, 0.1, T)
-  return Lerp (0.5, 0.1, T);
-}
-
-inline int
-RippleDepth (double T)
-{
-  // ripple_depth = round(lerp(2, 1, T)) — higher stability = shallower ripple
-  return static_cast<int> (std::round (Lerp (2.0, 1.0, T)));
-}
-
-inline int
-ReconsolidationRippleReconstructionLimit (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = (1.0 - t) * s * Lerp (1.0, 0.4, f) * 5.0 - 1.0;
-  return static_cast<int> (std::round (Clamp (raw, 0.0, 6.0)));
-}
-
-inline int
-ReconsolidationPrimaryReconstructionLimit (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double raw = (1.0 - t) * s * Lerp (1.1, 0.75, f) * 3.0;
-  return static_cast<int> (std::round (Clamp (raw, 0.0, 3.0)));
-}
-
-inline double
-LabilitySusceptibility (double S, double T)
-{
-  // lability_susceptibility = (1 − T) × (0.5 + 0.5 × S)
-  return (1.0 - T) * (0.5 + 0.5 * SensitivityBias (S));
-}
-
-// --- Algorithm 23 (Emotional Consolidation Tags) Helpers ---
-inline double
-ThetaIntensity (double S)
-{
-  // θ_intensity = lerp(0.6, 0.8, 1 − S)
-  return Lerp (0.6, 0.8, 1.0 - SensitivityBias (S));
-}
-
-inline double
-ThetaArousal (double S)
-{
-  // θ_arousal = lerp(0.4, 0.2, S)
-  return Lerp (0.4, 0.2, SensitivityBias (S));
-}
-
 inline double
 FlashbulbThreshold (double S)
 {
   // flashbulb_threshold = lerp(0.97, 0.65, S)
   return Lerp (0.97, 0.65, SensitivityBias (S));
-}
-
-inline int
-CascadeRadius (double S)
-{
-  // cascade_radius = round(lerp(1, 5, S))
-  return static_cast<int> (std::round (Lerp (1.0, 5.0, SensitivityBias (S))));
-}
-
-inline double
-CascadeDecay (double S)
-{
-  // cascade_decay = lerp(0.7, 0.3, S)
-  return Lerp (0.7, 0.3, SensitivityBias (S));
-}
-
-inline double
-CascadeIntensityFloor (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.10
-                    * (1.0 + 0.08 * (f - f0) - 0.18 * (s - s0)
-                       + 0.14 * (t - 0.5)),
-                0.04, 0.18);
-}
-
-inline double
-EmotionalHalfLifeBonus (double S, double emotion_intensity)
-{
-  // emotional_half_life_bonus = exp(lerp(0, ln(3), S)) × (1 +
-  // emotion_intensity)
-  const double ln3 = std::log (3.0);
-  return std::exp (Lerp (0.0, ln3, SensitivityBias (S)))
-         * (1.0 + emotion_intensity);
-}
-
-inline double
-DetailSuppression (double S, double F)
-{
-  // detail_suppression = S × (1 − F) × 0.5
-  return SensitivityBias (S) * (1.0 - FocusBias (F)) * 0.5;
-}
-
-inline int
-GistComponents (double F)
-{
-  // gist_components = round(lerp(5, 2, F))
-  return static_cast<int> (std::round (Lerp (5.0, 2.0, FocusBias (F))));
-}
-
-inline double
-FlashbulbThresholdEff (double S, double emotion_intensity, double arousal)
-{
-  // flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × intensity)
-  //                           × (1 − 0.3 × arousal)^{p(S)}
-  const double base = FlashbulbThreshold (S);
-  const double p = Lerp (1.25, 0.85, SensitivityBias (S));
-  return base * (1.0 - 0.5 * emotion_intensity)
-         * std::pow (1.0 - 0.3 * arousal, p);
 }
 
 inline int
@@ -2661,32 +1388,6 @@ EmotionHistoryWindow (double S, double T)
   const double t = Clamp (T, 0.0, 1.0);
   const double base = Lerp (24.0, 96.0, s) * Lerp (0.8, 1.2, t);
   return static_cast<int> (std::round (Clamp (base, 16.0, 160.0)));
-}
-
-inline double
-FlashbulbPercentile (double S)
-{
-  const double s = SensitivityBias (S);
-  return Lerp (0.95, 0.80, s);
-}
-
-inline double
-FlashbulbGain (double S)
-{
-  const double s = SensitivityBias (S);
-  return Lerp (1.0, 1.1, s);
-}
-
-inline double
-ConsolidationCandidateTagWeight (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double raw = Lerp (0.10, 0.25, s) * (1.0 - 0.05 * (f - f0))
-                     * (1.0 + 0.04 * (t - 0.5));
-  return Clamp (raw, 0.05, 0.35);
 }
 
 // --- Algorithm 4b (Mood Integrator) Helpers ---
@@ -2814,6 +1515,17 @@ WMChunkingThreshold (double F)
   return Lerp (0.7, 0.9, FocusBias (F));
 }
 
+// Working-memory chunk budget (signals per slot). A same-source unit merges
+// into its best-matching slot only while the slot stays within this budget;
+// otherwise it takes a new slot. Unbounded chunking let one slot hold tens of
+// thousands of signals on long streams (packet and consolidation blow-up).
+// Higher stability holds longer chunks.
+inline int
+WMChunkMaxSignals (double T)
+{
+  return static_cast<int> (std::round (Lerp (8.0, 24.0, Clamp (T, 0.0, 1.0))));
+}
+
 inline double
 WMGateThreshold (double F)
 {
@@ -2864,37 +1576,6 @@ WMComplexityScale (double S)
 }
 
 inline double
-WMRehearsalRate (double S)
-{
-  // rehearsal_rate = lerp(0.5, 2.0, S)
-  // Higher Sensitivity = faster rehearsal boost
-  return Lerp (0.5, 2.0, SensitivityBias (S));
-}
-
-inline double
-WMRehearsalBaseDelta (double F, double S, double T)
-{
-  // Base rehearsal increment before WMRehearsalRate(S). Focus suppresses
-  // broad rehearsal, Sensitivity raises weak-match responsiveness, and
-  // Stability preserves practiced slots more strongly.
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.10 * Lerp (1.15, 0.85, f) * Lerp (0.92, 1.08, s)
-                    * Lerp (0.90, 1.10, t),
-                0.04, 0.18);
-}
-
-inline double
-WMRehearsalThreshold (double F)
-{
-  // rehearsal_threshold = lerp(0.5, 0.7, F)
-  // Below chunking_threshold(F) = lerp(0.7, 0.9, F)
-  // Slots in [rehearsal_threshold, chunking_threshold) get rehearsal boost
-  return Lerp (0.5, 0.7, FocusBias (F));
-}
-
-inline double
 WMSlotDedicationStrength (double T)
 {
   // slot_dedication_strength = lerp(0.3, 0.9, T)
@@ -2928,26 +1609,6 @@ WMCapacityPressureExponent (double F, double S, double T)
 	                1.5, 5.0);
 }
 
-inline double
-DerivedSourceEdgeWeight (double F, double S, double T)
-{
-  const double f = RetrievalFocusBias (F);
-  const double s = RetrievalSensitivityBias (S);
-  const double t = RetrievalStabilityBias (T);
-  const double f0 = RetrievalFocusBias (0.5);
-  const double s0 = RetrievalSensitivityBias (0.5);
-  const double t0 = RetrievalStabilityBias (0.5);
-  return Clamp (1.0 + 0.03 * (f - f0) - 0.04 * (s - s0)
-                    + 0.08 * (t - t0),
-                0.80, 1.0);
-}
-
-inline double
-DerivedSourceFallbackEdgeWeight (double F, double S, double T)
-{
-  return DerivedSourceEdgeWeight (F, S, T);
-}
-
 // --- Section 5.5 (Adaptive Threshold Precision Modulation) ---
 inline double
 TargetPrecision (double F, double T)
@@ -2966,18 +1627,11 @@ TargetPrecision (double F, double T)
 struct NeuromodulatorPolicy
 {
   double ach_base;
-  double ne_base;
-  double da_base;
   double retrieval_pressure_depth;
   double ach_novelty_gain;
   double ach_retrieval_pressure_gain;
-  double ne_surprisal_gain;
-  double ne_arousal_gain;
   double encode_sensitivity_floor;
   double encode_sensitivity_gain;
-  double oscillation_rate;
-  double encode_oscillation_floor;
-  double encode_oscillation_gain;
 };
 
 inline NeuromodulatorPolicy
@@ -2990,148 +1644,17 @@ NeuromodulatorPolicyForKnobs (double F, double S, double T)
   const double s0 = SensitivityBias (0.5);
   return {
     Clamp (0.15 + 0.55 * s + 0.25 * (1.0 - t) - 0.15 * f, 0.0, 1.0),
-    Clamp (0.10 + 0.60 * s + 0.20 * (1.0 - t), 0.0, 1.0),
-    Clamp (0.10 + 0.40 * f + 0.30 * t, 0.0, 1.0),
     Clamp (10.0 * (1.0 - 0.10 * (s - s0) + 0.15 * (t - 0.5)),
            6.0, 14.0),
     Clamp (0.35 * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)),
            0.25, 0.45),
     Clamp (0.20 * (1.0 + 0.12 * (f - f0) - 0.08 * (t - 0.5)),
            0.12, 0.28),
-    Clamp (0.50 * (1.0 + 0.12 * (s - s0) - 0.08 * (t - 0.5)),
-           0.35, 0.65),
-    Clamp (0.30 * (1.0 - 0.06 * (f - f0) + 0.10 * (s - s0)),
-           0.20, 0.40),
     Clamp (0.70 - 0.06 * (s - s0) + 0.04 * (t - 0.5), 0.58,
            0.80),
     Clamp (0.30 + 0.06 * (s - s0) - 0.04 * (t - 0.5), 0.20,
-           0.42),
-    Lerp (0.03, 0.12, s) * Lerp (1.2, 0.8, t),
-    Clamp (0.60 - 0.03 * (s - s0) + 0.04 * (t - 0.5), 0.50,
-           0.70),
-    Clamp (0.40 + 0.03 * (s - s0) - 0.04 * (t - 0.5), 0.30,
-           0.50)
+           0.42)
   };
-}
-
-struct SynapticTaggingPolicy
-{
-  double surprisal_threshold;
-  double arousal_threshold;
-  int tag_window;
-  int tag_decay_seconds;
-};
-
-inline SynapticTaggingPolicy
-SynapticTaggingPolicyForKnobs (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  return {
-    Clamp (Lerp (0.6, 0.4, s) * (1.0 + 0.04 * (f - f0)), 0.34, 0.66),
-    Clamp (Lerp (0.7, 0.5, s) * (1.0 + 0.03 * (f - f0)), 0.44, 0.76),
-    std::max (
-        1, static_cast<int> (std::round (
-               Lerp (2.0, 8.0, s) * Lerp (0.92, 1.08, 1.0 - f)))),
-    static_cast<int> (
-        std::round (Clamp (Lerp (300.0, 3600.0, t)
-                               * Lerp (1.05, 0.95, s),
-                           180.0, 5400.0)))
-  };
-}
-
-// --- Algorithm 26 (Serial Position Effects) Helpers ---
-inline int
-SerialPrimacyWindow (double F)
-{
-  // primacy_window = round(lerp(5, 2, F))
-  return static_cast<int> (std::round (Lerp (5.0, 2.0, FocusBias (F))));
-}
-
-inline int
-SerialRecencyWindow (double F)
-{
-  // recency_window = round(lerp(7, 3, F))
-  return static_cast<int> (std::round (Lerp (7.0, 3.0, FocusBias (F))));
-}
-
-inline double
-SerialPrimacyBonus (double S)
-{
-  // primacy_bonus = lerp(1.2, 2.0, S)
-  return Lerp (1.2, 2.0, SensitivityBias (S));
-}
-
-inline double
-SerialRehearsalCurveDepth (double S)
-{
-  // rehearsal_curve_depth = lerp(0.2, 0.6, S)
-  return Lerp (0.2, 0.6, SensitivityBias (S));
-}
-
-inline double
-SerialDistinctivenessThreshold (double F)
-{
-  // distinctiveness_threshold = lerp(0.6, 0.8, F)
-  return Lerp (0.6, 0.8, FocusBias (F));
-}
-
-inline double
-SerialVonRestorffMultiplier (double S)
-{
-  // von_restorff_multiplier = lerp(1.5, 3.0, S)
-  return Lerp (1.5, 3.0, SensitivityBias (S));
-}
-
-inline double
-SerialMiddleSuppression (double S, double F)
-{
-  // middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
-  return Lerp (0.8, 0.5, SensitivityBias (S)) * (1.0 - FocusBias (F));
-}
-
-inline double
-SerialMiddleMultiplierFloor (double F, double S)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.10
-                    * (1.0 + 0.08 * (f - f0) - 0.12 * (s - s0)),
-                0.05, 0.16);
-}
-
-// Zone determination helper for observability (Algorithm 26)
-enum class SerialZone
-{
-  Primacy,
-  Recency,
-  Distinctive,
-  Middle
-};
-
-inline SerialZone
-SerialDetermineZone (double F, int position, int N, double rarity)
-{
-  const int primacy = SerialPrimacyWindow (F);
-  const int recency = SerialRecencyWindow (F);
-  const double thr = SerialDistinctivenessThreshold (F);
-  if (position <= primacy)
-    {
-      return SerialZone::Primacy;
-    }
-  if (position >= N - recency + 1)
-    {
-      return SerialZone::Recency;
-    }
-  if (rarity > thr)
-    {
-      return SerialZone::Distinctive;
-    }
-  return SerialZone::Middle;
 }
 
 // --- Implicit Feedback (Memory Usage Detection) Helpers ---
@@ -3170,67 +1693,7 @@ ReinforcementFallbackContextualSupport (double F, double S, double T)
                 0.35, 0.65);
 }
 
-inline double
-FocusFeedbackWeightGain (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.10 * Lerp (0.85, 1.20, f) * Lerp (0.90, 1.12, s)
-                    * Lerp (1.08, 0.92, t),
-                0.04, 0.18);
-}
-
-inline double
-FocusFeedbackWidthGain (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.05 * Lerp (0.90, 1.15, f) * Lerp (0.92, 1.08, s)
-                    * Lerp (1.06, 0.94, t),
-                0.02, 0.10);
-}
-
-inline double
-SensitivityFeedbackNoveltyGain (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.10 * Lerp (1.12, 0.90, f) * Lerp (0.85, 1.25, s)
-                    * Lerp (1.08, 0.90, t),
-                0.04, 0.20);
-}
-
-inline double
-StabilityFeedbackUsageGain (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (0.05 * Lerp (0.95, 1.05, f) * Lerp (1.12, 0.88, s)
-                    * Lerp (0.75, 1.25, t),
-                0.02, 0.10);
-}
-
 // --- Knowledge Graph Enhancement (Section 9.5) ---
-
-inline double
-CausalDriftThreshold (double T)
-{
-  // causal_drift_threshold(T) = lerp(0.15, 0.35, T)
-  // Higher stability = higher drift required for causal edge
-  return Lerp (0.15, 0.35, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-ReinforcementDecay (double T)
-{
-  // reinforcement_decay(T) = lerp(0.9, 0.99, T)
-  // Higher stability = slower decay of reinforcement edges
-  return Lerp (0.9, 0.99, Clamp (T, 0.0, 1.0));
-}
 
 inline double
 ReinforcementCoRetrievalStep (double F, double S, double T)
@@ -3280,34 +1743,6 @@ ReinforcementFanoutDamping (double F, double S, double T, int candidate_count)
 }
 
 inline double
-ReinforcementPruneThreshold (double F, double S, double T)
-{
-  // Prune only reinforcement edges below a knob-derived evidence floor. The
-  // floor reuses the historical step calibration without creating new pair
-  // edges: higher Focus requires cleaner evidence, higher Sensitivity permits
-  // more aggressive weak-edge pruning, and higher Stability preserves weaker
-  // long-term associations.
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double anchored_step = ReinforcementCoRetrievalStep (F, S, T);
-  const double required_retrievals = Lerp (2.0, 6.0, f)
-                                     * Lerp (1.25, 0.85, s)
-                                     * Lerp (1.15, 0.65, t);
-  return Clamp (anchored_step * required_retrievals, 0.03, 0.18);
-}
-
-inline double
-GraphBuildSameEventBoundaryThreshold (double F, double S, double T)
-{
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (BoundaryThreshold (F, S) * Lerp (0.62, 0.44, s)
-                    * Lerp (0.95, 1.10, t),
-                0.18, 0.45);
-}
-
-inline double
 GraphBuildSequentialTauSeconds (double F, double S, double T)
 {
   const double f = FocusBias (F);
@@ -3318,32 +1753,6 @@ GraphBuildSequentialTauSeconds (double F, double S, double T)
   return Clamp (Lerp (10.0, 60.0, t)
                     * (1.0 - 0.08 * (f - f0) + 0.06 * (s - s0)),
                 5.0, 90.0);
-}
-
-inline double
-GraphBuildSequentialWeight (double F, double S, double T, double gap_s,
-                            double boundary_score)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  const double tau = GraphBuildSequentialTauSeconds (F, S, T);
-  const double temporal = std::exp (-std::max (0.0, gap_s) / std::max (tau, 1e-6));
-  const double boundary_power = Clamp (1.0 + 0.08 * (f - f0)
-                                           - 0.08 * (s - s0)
-                                           + 0.10 * (t - 0.5),
-                                      0.75, 1.30);
-  const double boundary = std::pow (
-      1.0 - Clamp (boundary_score, 0.0, 1.0), boundary_power);
-  return Clamp (temporal * boundary, 0.0, 1.0);
-}
-
-inline double
-CausalDriftWeightScale (double T)
-{
-  return Lerp (1.6, 2.4, Clamp (T, 0.0, 1.0));
 }
 
 inline double
@@ -3363,21 +1772,6 @@ MinEpisodesForConcept (double T)
   // min_episodes_for_concept(T) = round(lerp(2, 5, T))
   // Higher stability = more episodes required for concept detection
   return static_cast<int> (std::round (Lerp (2.0, 5.0, Clamp (T, 0.0, 1.0))));
-}
-
-inline double
-CoOccurrenceThreshold (double F)
-{
-  // Same as MergeThreshold - co-occurrence uses same similarity threshold
-  // co_occurrence_threshold(F) = lerp(0.85, 0.95, F)
-  return MergeThreshold (F);
-}
-
-inline double
-SimilarToThreshold (double F)
-{
-  // similar_to threshold: high cosine similarity (soft equivalence)
-  return Lerp (0.90, 0.98, FocusBias (F));
 }
 
 inline double
@@ -3455,34 +1849,6 @@ MinEdgeWeight (double F)
 {
   // min_edge_weight(F) for graph traversal
   return Lerp (0.08, 0.40, FocusBias (F));
-}
-
-inline double
-ImpliesDriftThreshold (double T)
-{
-  // implies threshold (directional drift correlation)
-  return Lerp (0.10, 0.25, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-ContradictionThreshold (double F, double S, double T)
-{
-  // Contradiction detection remains centered at the historical -0.5 default.
-  // Higher Sensitivity admits weaker contradiction cues; higher Focus and
-  // Stability require clearer opposition before writing contradiction edges.
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  return Clamp (-0.50 + 0.08 * (s - SensitivityBias (0.5))
-                    - 0.05 * (f - FocusBias (0.5))
-                    - 0.04 * (t - 0.5),
-                -0.70, -0.30);
-}
-
-inline double
-ContradictionThreshold ()
-{
-  return ContradictionThreshold (0.5, 0.5, 0.5);
 }
 
 // --- Section 8: Interrupt Gate Parameters ---
@@ -4018,24 +2384,6 @@ WindowScoreCoverageBeta (double S)
   // β(S) = lerp(0.05, 0.15, S)
   // Higher sensitivity = more bonus for complete memorys
   return Lerp (0.05, 0.15, SensitivityBias (S));
-}
-
-// Section 4.4.5 - Write refractory time constant (seconds)
-inline double
-WriteRefractoryTau (double T)
-{
-  // τ_write_refrac(T) = lerp(5, 30, T) seconds
-  // Higher stability = longer refractory period
-  return Lerp (5.0, 30.0, Clamp (T, 0.0, 1.0));
-}
-
-// Section 4.4.5 - Write refractory gain
-inline double
-WriteRefractoryK (double T)
-{
-  // k_write_refrac = lerp(0.3, 0.1, T)
-  // Higher stability = weaker refractory suppression
-  return Lerp (0.3, 0.1, Clamp (T, 0.0, 1.0));
 }
 
 // Section 4.4.5 - Representative embedding blend factor

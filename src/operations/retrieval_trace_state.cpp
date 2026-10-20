@@ -8,6 +8,7 @@ namespace
 
 thread_local std::vector<long long> g_last_selected_embedding_order;
 thread_local std::vector<RankedCandidate> g_last_ranked_candidates;
+thread_local std::vector<StandingPick> g_last_standing_picks;
 thread_local std::vector<RankedCandidate> g_last_seed_candidates;
 thread_local std::vector<RankedCandidate> g_last_exact_seed_candidates;
 thread_local std::vector<RejectedCandidate> g_last_rejected_candidates;
@@ -69,6 +70,24 @@ const std::vector<SurfaceMutation> &
 GetSurfaceMutations ()
 {
   return g_surface_mutations;
+}
+
+void
+ClearLastStandingPicks ()
+{
+  g_last_standing_picks.clear ();
+}
+
+void
+SetLastStandingPicks (const std::vector<StandingPick> &picks)
+{
+  g_last_standing_picks = picks;
+}
+
+const std::vector<StandingPick> &
+GetLastStandingPicks ()
+{
+  return g_last_standing_picks;
 }
 
 void

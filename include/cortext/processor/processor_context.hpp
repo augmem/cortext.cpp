@@ -2,6 +2,7 @@
 
 #include "cortext/data/centroids.hpp"
 #include "cortext/operations/metrics.hpp"
+#include "cortext/internal/embedding_arena.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/signal.hpp"
 #include <Eigen/Dense>
@@ -10,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -18,6 +20,11 @@
 
 namespace cortext
 {
+
+namespace internal
+{
+struct MemberVectorIndex; // src/operations/member_vector_index_internal.hpp
+}
 
 struct BoundaryDiagnostics
 {
@@ -54,7 +61,6 @@ struct BoundaryDiagnostics
 /// - Threshold: T_dynamic, recent_scores, rate control (Alg 8)
 /// - Blender: metric weights, RLS state (Alg 7)
 /// - Consolidation: last_consolidation_ts, last_retrieval_ts (Alg 28)
-/// - Influence: sustained_influence (Alg 19)
 /// - Working Memory: wm_slots, acceptance state (Alg 24)
 ///
 /// Note: This struct could be refactored into smaller sub-structs (e.g.,
@@ -230,14 +236,9 @@ struct ProcessorContext
   // ======================================================================
   int signals_processed = 0;
   double u_t = 0.0;
-  double outcome_pred = 0.0;
-  double delta_reward = 0.0;
   double neuromod_ach = 0.0;
-  double neuromod_ne = 0.0;
-  double neuromod_da = 0.0;
   double encode_bias = 0.5;
   double retrieval_bias = 0.5;
-  double osc_phase = 0.0;
   double last_used_rate = 0.0;
   double last_used_flag = 0.0;
   bool focus_priors_initialized = false;
@@ -271,19 +272,6 @@ struct ProcessorContext
   double coverage_gain_floor = 0.65;
   double mismatch_weight = 0.5;
   std::deque<Eigen::VectorXf> recent_context_embeddings;
-
-  /// @brief Embedding ids whose persisted memories currently have non-zero
-  /// predictive pre-activation and therefore need per-turn decay.
-  std::unordered_set<long long> predictive_pre_activation_embedding_ids;
-  /// @brief Memory ids whose persisted memories currently have non-zero
-  /// predictive pre-activation and therefore need per-turn decay.
-  std::unordered_set<long long> predictive_pre_activation_memory_ids;
-  /// @brief Embedding ids whose persisted memories currently carry retrieval
-  /// induced forgetting suppression and therefore need recovery updates.
-  std::unordered_set<long long> retrieval_suppression_embedding_ids;
-  /// @brief Memory ids whose persisted memories currently carry retrieval
-  /// induced forgetting suppression and therefore need recovery updates.
-  std::unordered_set<long long> retrieval_suppression_memory_ids;
 
   // ======================================================================
   // Sensitivity-Related State (Algorithms 3, 4, 16)
@@ -323,19 +311,6 @@ struct ProcessorContext
   // Stability-Related State (Algorithms 5, 6, 17)
   // ======================================================================
   double hysteresis_band_prior = 0.02;
-  double half_life_prior = 120.0;
-  double rate_decay_prior = 0.60;
-  double periphery_half_life_prior = 120.0;
-  double salience_half_life_prior = 120.0;
-  double drift_weight_prior = 0.5;
-  std::deque<double> observed_retention_history;
-  double half_life = 120.0;
-  double rate_decay = 0.60;
-  double periphery_half_life = 120.0;
-  double salience_half_life = 120.0;
-  double drift_weight = 0.5;
-  double retention_ema = 0.0;
-  double delta_half_life_adj = 0.0;
 
   // ======================================================================
   // Threshold & Score Tracking State (Algorithm 8)
@@ -369,34 +344,10 @@ struct ProcessorContext
   int memories_since_consolidation = 0;
   bool is_processing_signal = false;
 
-  // Eviction frontier scans are corpus-size-sensitive maintenance work. They
-  // are still run after consolidation and under pressure, but not every turn.
-  int last_eviction_scan_signal = -1;
-  uint64_t last_eviction_scan_consolidation_ts = 0;
-
-  // Retention aggregates scan the memory table. Keep them periodic so
-  // stability adaptation does not add a corpus-size term to every signal.
-  int last_retention_scan_signal = -1;
-  uint64_t last_retention_scan_consolidation_ts = 0;
-
-  // Storage pressure reads touch filesystem/SQLite metadata and are used by
-  // multiple operations in one turn. Cache briefly to avoid per-signal jitter.
-  bool storage_pressure_cache_valid = false;
-  int storage_pressure_cache_signal = -1;
-  std::string storage_pressure_cache_key;
-  bool storage_pressure_cache_active = false;
-  long long storage_pressure_cache_used_bytes = 0;
-  long long storage_pressure_cache_threshold_bytes = 0;
-
   // ======================================================================
   // Episode Tracking State (Algorithm 12)
   // ======================================================================
   uint64_t episode_start_ts = 0;
-
-  // ======================================================================
-  // Influence Feedback State (Algorithm 19)
-  // ======================================================================
-  double sustained_influence = 0.0;
 
   // ======================================================================
   // Working Memory State (Algorithm 24, Section 6.1)
@@ -439,6 +390,16 @@ struct ProcessorContext
   bool wm_last_accepted = false;
   bool wm_last_chunked = false;
 
+  /// @brief Embedding ids whose last reference may have been dropped since
+  /// the last forced working-memory flush (replaced slot embeddings, pruned
+  /// working rows, cleared slot signals, pruned reconstructions).
+  ///
+  /// The forced flush deletes exactly those that are unreferenced instead of
+  /// scanning every embedding. The first forced flush of a context still
+  /// sweeps the whole table, which covers orphans left by an earlier process.
+  std::vector<long long> orphan_embedding_candidates;
+  bool orphan_embedding_sweep_complete = false;
+
   // ======================================================================
   // Memory Accumulation State (Section 4.4)
   // ======================================================================
@@ -449,6 +410,8 @@ struct ProcessorContext
   /// Event Segmentation Theory (Zacks & Swallow, 2007) for grouping
   /// signals into natural "thought units".
   std::unordered_map<std::string, AccumulatorState> accumulator_states;
+  /// @brief Root signals processed; stamps AccumulatorState::last_active_seq.
+  uint64_t accumulator_activity_seq = 0;
 
   /// @brief Stream of written memory representatives (e_rep).
   std::deque<Eigen::VectorXf> memory_stream;
@@ -461,97 +424,21 @@ struct ProcessorContext
   std::deque<Eigen::VectorXf> recent_memory_centroids;
 
   // ======================================================================
-  // Soft Anchor State (ingress-time formation)
-  // ======================================================================
-  struct SoftAnchorState
-  {
-    std::string anchor_id;
-    std::string status = "provisional";
-    std::string last_source_id;
-    Eigen::VectorXf semantic_centroid;
-    Eigen::VectorXf entity_centroid;
-    Eigen::VectorXf full_centroid;
-    double semantic_radius = 0.0;
-    double entity_radius = 0.0;
-    double full_radius = 0.0;
-    double anchor_strength = 0.0;
-    int support_count = 0;
-    int contradiction_count = 0;
-    int first_step = 0;
-    int last_step = 0;
-    uint64_t first_ts = 0;
-    uint64_t last_ts = 0;
-    int64_t last_boundary_id = 0;
-    std::deque<long long> recent_memory_ids;
-  };
-
-  struct SoftAnchorLink
-  {
-    long long memory_id = 0;
-    std::string anchor_id;
-    double anchor_strength = 0.0;
-    std::string anchor_label = "none";
-    std::string evidence_kind = "unknown";
-    std::string memory_tier = "WM";
-    double score = 0.0;
-    double margin = 0.0;
-    double entropy = 0.0;
-    int support_count = 0;
-    int contradiction_count = 0;
-    int created_step = 0;
-    int updated_step = 0;
-  };
-
-  std::vector<SoftAnchorState> soft_anchor_states;
-  std::vector<SoftAnchorLink> soft_anchor_last_links;
-  bool soft_anchor_enabled = false;
-  int soft_anchor_next_id = 1;
-  int soft_anchor_update_count = 0;
-  int soft_anchor_last_link_count = 0;
-  int soft_anchor_last_state_count = 0;
-  int soft_anchor_last_create_count = 0;
-  int soft_anchor_last_update_count = 0;
-  int soft_anchor_last_none_count = 0;
-  double soft_anchor_last_update_us = 0.0;
-  double soft_anchor_total_update_us = 0.0;
-  std::deque<double> soft_anchor_recent_update_us;
-
-  // ======================================================================
   // Index and Procedural Stores (CLS extensions)
   // ======================================================================
-  struct AssociationCacheEntry
-  {
-    long long memory_id = 0;
-    long long embedding_id = 0;
-    Eigen::VectorXf embedding;
-    float embedding_norm = 0.0f;
-    bool is_association = false;
-  };
-
   struct RetrievalSurfaceEntry
   {
     long long memory_id = 0;
     long long embedding_id = 0;
     long long created_at = 0;
     long long start_ts = 0;
-    long long last_access = 0;
-    long long event_ts = 0;
-    long long retrieved_count = 0;
-    long long used_count = 0;
     std::string kind;
     std::string source_id;
     std::string modality;
-    double source_reliability = -1.0;
-    int source_contradiction_count = 0;
-    double emotional_intensity = 0.0;
-    double arousal_avg = 0.0;
-    double pre_activation = 0.0;
     bool is_association = false;
     bool vector_seed_eligible = true;
-    Eigen::VectorXf embedding;
-    Eigen::VectorXf context_embedding;
+    internal::SharedEmbedding embedding;  ///< Arena row (shared, immutable)
     float embedding_norm = 0.0f;
-    std::uint32_t seed_visit_epoch = 0;
   };
 
   struct RetrievalSurfaceSourceIndexEntry
@@ -566,67 +453,6 @@ struct ProcessorContext
     }
   };
 
-  struct AssociationFanoutEdge
-  {
-    long long memory_id = 0;
-    long long embedding_id = 0;
-    std::string edge_type;
-    double weight = 1.0;
-    long long last_reinforced = 0;
-  };
-
-  struct AssociationFanoutCache
-  {
-    bool valid = false;
-    long long edge_count = 0;
-    long long source_sum = 0;
-    long long target_sum = 0;
-    long long source_max = 0;
-    long long target_max = 0;
-    long long weight_sum_micros = 0;
-    long long last_reinforced_sum = 0;
-    int last_fingerprint_check_signal = -1;
-    int consolidation_count = -1;
-    std::unordered_map<long long, std::vector<AssociationFanoutEdge>>
-        out_by_source;
-    std::unordered_map<long long, std::vector<AssociationFanoutEdge>>
-        in_by_target;
-  };
-
-  void
-  UpsertAssociationCache (long long memory_id, long long embedding_id,
-                          const Eigen::VectorXf &embedding,
-                          bool is_association)
-  {
-    if (memory_id <= 0 || embedding_id <= 0 || embedding.size () == 0)
-      {
-        return;
-      }
-    const float norm = embedding.norm ();
-    if (norm <= 1e-9f)
-      {
-        return;
-      }
-    auto it = association_cache_index.find (memory_id);
-    if (it != association_cache_index.end ())
-      {
-        auto &entry = association_cache[it->second];
-        entry.embedding_id = embedding_id;
-        entry.embedding = embedding;
-        entry.embedding_norm = norm;
-        entry.is_association = is_association;
-        return;
-      }
-    AssociationCacheEntry entry;
-    entry.memory_id = memory_id;
-    entry.embedding_id = embedding_id;
-    entry.embedding = embedding;
-    entry.embedding_norm = norm;
-    entry.is_association = is_association;
-    association_cache_index[memory_id] = association_cache.size ();
-    association_cache.push_back (std::move (entry));
-  }
-
   void
   UpsertRetrievalSurface (RetrievalSurfaceEntry entry)
   {
@@ -635,7 +461,7 @@ struct ProcessorContext
       {
         return;
       }
-    entry.embedding_norm = entry.embedding.norm ();
+    entry.embedding_norm = entry.embedding.Norm ();
     if (entry.embedding_norm <= 1e-9f)
       {
         return;
@@ -821,141 +647,17 @@ struct ProcessorContext
     SortRetrievalSurfaceSourceIndex (source_id);
   }
 
-  void
-  UpdateRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
-                                                  double pre_activation)
-  {
-    auto it = retrieval_surface_embedding_index.find (embedding_id);
-    if (it == retrieval_surface_embedding_index.end ())
-      {
-        return;
-      }
-    retrieval_surface_cache[it->second].pre_activation = pre_activation;
-  }
-
-  void
-  UpdateRetrievalSurfacePreActivationByMemory (long long memory_id,
-                                               double pre_activation)
-  {
-    auto it = retrieval_surface_index.find (memory_id);
-    if (it == retrieval_surface_index.end ())
-      {
-        return;
-      }
-    retrieval_surface_cache[it->second].pre_activation = pre_activation;
-  }
-
-  void
-  DecayRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
-                                                 double pad)
-  {
-    auto it = retrieval_surface_embedding_index.find (embedding_id);
-    if (it == retrieval_surface_embedding_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.pre_activation = std::max (0.0, entry.pre_activation * pad);
-    if (entry.pre_activation <= 1e-6)
-      {
-        entry.pre_activation = 0.0;
-      }
-  }
-
-  void
-  DecayRetrievalSurfacePreActivationByMemory (long long memory_id, double pad)
-  {
-    auto it = retrieval_surface_index.find (memory_id);
-    if (it == retrieval_surface_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.pre_activation = std::max (0.0, entry.pre_activation * pad);
-    if (entry.pre_activation <= 1e-6)
-      {
-        entry.pre_activation = 0.0;
-      }
-  }
-
-  void
-  BoostRetrievalSurfacePreActivationByEmbedding (long long embedding_id,
-                                                 double pad, double delta)
-  {
-    auto it = retrieval_surface_embedding_index.find (embedding_id);
-    if (it == retrieval_surface_embedding_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.pre_activation = std::min (
-        1.0, std::max (0.0, entry.pre_activation) * pad + delta);
-  }
-
-  void
-  BoostRetrievalSurfacePreActivationByMemory (long long memory_id, double pad,
-                                              double delta)
-  {
-    auto it = retrieval_surface_index.find (memory_id);
-    if (it == retrieval_surface_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.pre_activation = std::min (
-        1.0, std::max (0.0, entry.pre_activation) * pad + delta);
-  }
-
-  void
-  UpdateRetrievalSurfaceUsageByEmbedding (long long embedding_id,
-                                          long long retrieved_count,
-                                          long long used_count,
-                                          long long last_access)
-  {
-    auto it = retrieval_surface_embedding_index.find (embedding_id);
-    if (it == retrieval_surface_embedding_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.retrieved_count = retrieved_count;
-    entry.used_count = used_count;
-    entry.last_access = last_access;
-  }
-
-  void
-  UpdateRetrievalSurfaceUsageByMemory (long long memory_id,
-                                       long long retrieved_count,
-                                       long long used_count,
-                                       long long last_access)
-  {
-    auto it = retrieval_surface_index.find (memory_id);
-    if (it == retrieval_surface_index.end ())
-      {
-        return;
-      }
-    auto &entry = retrieval_surface_cache[it->second];
-    entry.retrieved_count = retrieved_count;
-    entry.used_count = used_count;
-    entry.last_access = last_access;
-  }
-
-  std::unordered_map<std::string, std::vector<long long>> index_store;
-  std::unordered_map<long long, std::string> index_reverse;
-
-  std::unordered_map<std::string, std::unordered_map<long long, double>> procedural_store;
-  std::vector<AssociationCacheEntry> association_cache;
-  std::unordered_map<long long, size_t> association_cache_index;
   std::vector<RetrievalSurfaceEntry> retrieval_surface_cache;
-  std::uint32_t retrieval_surface_seed_visit_epoch = 0;
   std::unordered_map<long long, size_t> retrieval_surface_index;
   std::unordered_map<long long, size_t> retrieval_surface_embedding_index;
   std::unordered_map<std::string,
                      std::vector<RetrievalSurfaceSourceIndexEntry>>
       retrieval_surface_source_index;
   std::unordered_set<std::string> retrieval_surface_source_index_dirty;
-  AssociationFanoutCache association_fanout_cache;
-
+  // Query-time member channel (graph_retrieval.cpp); read from the store on
+  // demand and validated per hit, so it survives cache detach/restore and
+  // rollback snapshots share it.
+  std::shared_ptr<internal::MemberVectorIndex> member_vector_index;
 };
 
 } // namespace cortext

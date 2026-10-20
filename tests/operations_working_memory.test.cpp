@@ -122,6 +122,46 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
            >= Catch::Approx (before_strength).epsilon (1e-6));
 }
 
+TEST_CASE ("Alg24 a full slot takes no further chunk",
+           "[operations][working_memory][chunk]")
+{
+  Signal s;
+  s.embedding = Eigen::VectorXf::Zero (3);
+  s.embedding[0] = 1.0f;
+  s.timestamp = 200000;
+  s.source_id = "test";
+  ProcessorContext pctx;
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  cfg.focus = 1.0;
+  cfg.sensitivity = 0.3;
+  cfg.stability = 0.6;
+
+  // Same source, same direction, but already holding the chunk budget: the
+  // incoming 3-signal unit would push it past WMChunkMaxSignals.
+  const int cap = core::WMChunkMaxSignals (cfg.stability);
+  REQUIRE (cap >= 3);
+  ProcessorContext::WMSlot slot;
+  slot.embedding = s.embedding;
+  slot.strength = 1.0;
+  slot.last_ts = static_cast<double> (s.timestamp) / 1000.0;
+  slot.source_id = s.source_id;
+  slot.n_signals = cap - 2;
+  pctx.wm_slots.push_back (slot);
+
+  pctx.T_dynamic = 0.2;
+  WorkingMemory op;
+  OperationContext ctx (s, pctx, cfg);
+  SetupMemoryGatingContext (ctx, pctx, s, 0.95);
+  op.Execute (ctx, cortext::testing::GetNullTransaction ());
+
+  REQUIRE (pctx.wm_last_accepted == true);
+  REQUIRE (pctx.wm_last_chunked == false);
+  REQUIRE (pctx.wm_slots.size () == 2);
+  REQUIRE (pctx.wm_slots.front ().n_signals == cap - 2);
+  REQUIRE (pctx.wm_slots.back ().n_signals == 3);
+}
+
 TEST_CASE ("Alg24 maintenance decays slots but preserves them with floor",
            "[operations][working_memory][maintenance]")
 {
@@ -403,324 +443,6 @@ TEST_CASE ("Alg24 uses Focus-derived gate_threshold for gating decision",
     REQUIRE (pctx.wm_last_accepted == true);
     REQUIRE (pctx.wm_slots.size () == 1);
   }
-}
-
-// --- Phase 4: Rehearsal Mechanism Tests ---
-
-TEST_CASE ("Alg24 input-based rehearsal boosts slot strength for similarity in "
-           "[rehearsal, chunk) range",
-           "[operations][working_memory][rehearsal][phase4]")
-{
-  Signal s;
-  s.embedding = Eigen::VectorXf::Zero (3);
-  s.embedding[0] = 0.6f;
-  s.embedding[1] = 0.8f;
-  s.embedding.normalize ();
-  s.timestamp = 100000; // 100 seconds in ms
-  s.source_id = "test";
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
-  cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
-  cfg.stability = 0.5;
-
-  ProcessorContext::WMSlot slot;
-  slot.embedding = Eigen::VectorXf::Zero (3);
-  slot.embedding[0] = 1.0f;
-  slot.embedding.normalize ();
-  slot.strength = 0.5;
-  slot.last_ts = 100.0;
-  slot.pos_index = 0;
-  pctx.wm_slots.push_back (slot);
-
-  const double before_strength = pctx.wm_slots[0].strength;
-
-  WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg);
-
-  // Memory-level gating: set up context for memory boundary
-  SetupMemoryGatingContext (ctx, pctx, s, 0.9);  // High S_window
-
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-  // Similarity to the existing slot is exactly 0.6, inside the rehearsal band
-  // [0.5, 0.7), so the original slot is boosted but not chunked.
-  REQUIRE_FALSE (pctx.wm_last_chunked);
-  REQUIRE (pctx.wm_slots[0].strength > before_strength);
-}
-
-TEST_CASE ("Alg24 rehearsal strength capped at knob-derived max",
-           "[operations][working_memory][rehearsal][phase4][cap]")
-{
-  Signal s;
-  s.embedding = Eigen::VectorXf::Zero (3);
-  s.embedding[0] = 0.6f;
-  s.embedding[1] = 0.8f;
-  s.embedding.normalize ();
-  s.timestamp = 100000; // 100 seconds in ms
-  s.source_id = "test";
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
-  cfg.sensitivity = 1.0; // rehearsal_rate = 2.0 (max)
-  cfg.stability = 0.5;
-  const double strength_max
-      = core::WMStrengthMax (cfg.focus, cfg.sensitivity, cfg.stability);
-
-  // Seed slot at max strength
-  ProcessorContext::WMSlot slot;
-  slot.embedding = Eigen::VectorXf::Zero (3);
-  slot.embedding[0] = 1.0f;
-  slot.embedding.normalize ();
-  slot.strength = strength_max;
-  slot.last_ts = 100.0;
-  slot.pos_index = 0;
-  pctx.wm_slots.push_back (slot);
-
-  WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg);
-
-  // Memory-level gating: set up context for memory boundary
-  SetupMemoryGatingContext (ctx, pctx, s, 0.9);  // High S_window
-
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-  // Strength should still be capped at max
-  REQUIRE (pctx.wm_slots[0].strength <= strength_max);
-}
-
-TEST_CASE ("Alg24 rehearsal rate scales with Sensitivity knob",
-           "[operations][working_memory][rehearsal][phase4][rate]")
-{
-  Signal s;
-  s.embedding = Eigen::VectorXf::Zero (3);
-  s.embedding[0] = 0.6f;
-  s.embedding[1] = 0.8f;
-  s.embedding.normalize ();
-  s.timestamp = 100000; // 100 seconds in ms
-  s.source_id = "test";
-
-
-  // Test with low S (0.0) -> rehearsal_rate = 0.5
-  // Test with high S (1.0) -> rehearsal_rate = 2.0
-  double low_s_boost = 0.0;
-  double high_s_boost = 0.0;
-
-  {
-    ProcessorContext pctx;
-    SignalProcessor::Config cfg;
-    cortext::testing::RequireEncoder (cfg);
-    cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
-    cfg.sensitivity = 0.0; // rehearsal_rate = 0.5
-    cfg.stability = 0.5;
-
-    ProcessorContext::WMSlot slot;
-    slot.embedding = Eigen::VectorXf::Zero (3);
-    slot.embedding[0] = 1.0f;
-    slot.embedding.normalize ();
-    slot.strength = 0.5;
-    slot.last_ts = 100.0;
-    slot.pos_index = 0;
-    pctx.wm_slots.push_back (slot);
-
-    const double before = pctx.wm_slots[0].strength;
-
-    WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg);
-
-    // Memory-level gating: set up context for memory boundary
-    SetupMemoryGatingContext (ctx, pctx, s, 0.9);
-
-    op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-    low_s_boost = pctx.wm_slots[0].strength - before;
-  }
-
-  {
-    ProcessorContext pctx;
-    SignalProcessor::Config cfg;
-    cortext::testing::RequireEncoder (cfg);
-    cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
-    cfg.sensitivity = 1.0; // rehearsal_rate = 2.0
-    cfg.stability = 0.5;
-
-    ProcessorContext::WMSlot slot;
-    slot.embedding = Eigen::VectorXf::Zero (3);
-    slot.embedding[0] = 1.0f;
-    slot.embedding.normalize ();
-    slot.strength = 0.5;
-    slot.last_ts = 100.0;
-    slot.pos_index = 0;
-    pctx.wm_slots.push_back (slot);
-
-    const double before = pctx.wm_slots[0].strength;
-
-    WorkingMemory op;
-    OperationContext ctx (s, pctx, cfg);
-
-    // Memory-level gating: set up context for memory boundary
-    SetupMemoryGatingContext (ctx, pctx, s, 0.9);
-
-    op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-    high_s_boost = pctx.wm_slots[0].strength - before;
-  }
-
-  // High S should give at least as much boost as low S
-  // (may be equal if both chunked or both below threshold)
-  REQUIRE (high_s_boost >= low_s_boost);
-}
-
-TEST_CASE ("Alg24 no input-based rehearsal when similarity below "
-           "rehearsal_threshold",
-           "[operations][working_memory][rehearsal][phase4][threshold]")
-{
-  Signal s;
-  s.embedding = Eigen::VectorXf::Zero (3);
-  s.embedding[0] = 0.0f;
-  s.embedding[1] = 1.0f; // Orthogonal to slot
-  s.embedding.normalize ();
-  s.timestamp = 100000; // 100 seconds in ms
-  s.source_id = "test";
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.0;       // chunk_threshold = 0.7, rehearsal_threshold = 0.5
-  cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
-  cfg.stability = 0.5;
-
-
-  ProcessorContext::WMSlot slot;
-  slot.embedding = Eigen::VectorXf::Zero (3);
-  slot.embedding[0] = 1.0f; // Orthogonal to signal
-  slot.embedding.normalize ();
-  slot.strength = 0.5;
-  slot.last_ts = 100.0;
-  slot.pos_index = 0;
-  pctx.wm_slots.push_back (slot);
-
-  const double before_strength = pctx.wm_slots[0].strength;
-
-  WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg);
-
-  // Memory-level gating: set up context for memory boundary
-  SetupMemoryGatingContext (ctx, pctx, s, 0.9);
-
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-  // Similarity = 0 (orthogonal), below rehearsal_threshold of 0.5
-  // Original slot should NOT get rehearsal boost (strength unchanged from
-  // decay)
-  // A new slot will be added for the new signal
-  // Original slot strength should be same (no time elapsed, no decay, no boost)
-  REQUIRE (pctx.wm_slots[0].strength == Catch::Approx (before_strength));
-  REQUIRE (pctx.wm_slots.size () == 2); // New slot added
-}
-
-TEST_CASE ("Alg24 retrieval-based rehearsal boosts WM slot matching retrieved "
-           "memory",
-           "[operations][working_memory][rehearsal][phase4][retrieval]")
-{
-  Signal s;
-  s.embedding = Eigen::VectorXf::Constant (3, 0.5f);
-  s.embedding.normalize ();
-  s.timestamp = 100000; // 100 seconds in ms
-  s.source_id = "test";
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.0;       // chunk_threshold = 0.7
-  cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
-  cfg.stability = 0.5;
-
-
-  // Seed WM slot
-  ProcessorContext::WMSlot slot;
-  slot.embedding = Eigen::VectorXf::Zero (3);
-  slot.embedding[0] = 1.0f;
-  slot.embedding.normalize ();
-  slot.strength = 0.5;
-  slot.last_ts = 100.0;
-  slot.pos_index = 0;
-  pctx.wm_slots.push_back (slot);
-
-  const double before_strength = pctx.wm_slots[0].strength;
-
-  // Set up retrieved memory that matches the WM slot exactly
-  std::unordered_map<long long, Eigen::VectorXf> retrieved;
-  Eigen::VectorXf match_vec = Eigen::VectorXf::Zero (3);
-  match_vec[0] = 1.0f;
-  match_vec.normalize ();
-  retrieved.emplace (1LL, match_vec);
-
-  WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg);
-
-  // Memory-level gating: set up context for memory boundary
-  SetupMemoryGatingContext (ctx, pctx, s, 0.9);
-
-  ctx.SetRetrievedMemoryEmbeddings (std::move (retrieved));
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-  // Retrieved memory matches WM slot with similarity = 1.0 >= chunk_threshold
-  // Retrieval-based rehearsal should boost the slot
-  REQUIRE (pctx.wm_slots[0].strength > before_strength);
-}
-
-TEST_CASE ("Alg24 retrieval-based rehearsal skips non-matching WM slots",
-           "[operations][working_memory][rehearsal][phase4][retrieval][skip]")
-{
-  // Use signal orthogonal to slot to avoid input-based rehearsal
-  Signal s;
-  s.embedding = Eigen::VectorXf::Zero (3);
-  s.embedding[1] = 1.0f; // Orthogonal to slot [1, 0, 0]
-  s.embedding.normalize ();
-  s.timestamp = 100000; // 100 seconds in ms
-  s.source_id = "test";
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.0;       // chunk_threshold = 0.7
-  cfg.sensitivity = 0.5; // rehearsal_rate = 1.25
-  cfg.stability = 0.5;
-
-
-  // Seed WM slot at [1, 0, 0]
-  ProcessorContext::WMSlot slot;
-  slot.embedding = Eigen::VectorXf::Zero (3);
-  slot.embedding[0] = 1.0f;
-  slot.embedding.normalize ();
-  slot.strength = 0.5;
-  slot.last_ts = 100.0;
-  slot.pos_index = 0;
-  pctx.wm_slots.push_back (slot);
-
-  const double before_strength = pctx.wm_slots[0].strength;
-
-  // Set up retrieved memory orthogonal to WM slot (low similarity)
-  std::unordered_map<long long, Eigen::VectorXf> retrieved;
-  Eigen::VectorXf ortho_vec = Eigen::VectorXf::Zero (3);
-  ortho_vec[2] = 1.0f; // Different orthogonal direction from slot AND signal
-  ortho_vec.normalize ();
-  retrieved.emplace (1LL, ortho_vec);
-
-  WorkingMemory op;
-  OperationContext ctx (s, pctx, cfg);
-
-  // Memory-level gating: set up context for memory boundary
-  SetupMemoryGatingContext (ctx, pctx, s, 0.9);
-
-  ctx.SetRetrievedMemoryEmbeddings (std::move (retrieved));
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-  // Signal is orthogonal to slot → similarity = 0 < rehearsal_threshold = 0.5
-  // Retrieved memory is orthogonal to slot → similarity = 0 < chunk_threshold = 0.7
-  // Neither input-based nor retrieval-based rehearsal should apply
-  // Strength should be unchanged
-  REQUIRE (pctx.wm_slots[0].strength == Catch::Approx (before_strength));
 }
 
 TEST_CASE ("Alg24 eviction prioritizes weak old slots over strong recent ones",

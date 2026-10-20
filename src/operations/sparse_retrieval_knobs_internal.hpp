@@ -74,11 +74,14 @@ FamilyExactComparisonLimit (double focus, double sensitivity,
   return 2 * RouteCapacity (focus, sensitivity, stability);
 }
 
+// Upper-level HNSW degree M. Level zero holds 2M. A fixed traversal row
+// envelope reaches about envelope/degree hops, so a low degree spends the
+// same rows walking deeper toward the target instead of fanning out.
 inline int
 GraphNeighborCount (double focus, double sensitivity, double stability)
 {
   return std::max (
-      8, BackfillBatchSize (focus, sensitivity, stability) / 2);
+      16, BackfillBatchSize (focus, sensitivity, stability) / 8);
 }
 
 inline int
@@ -133,7 +136,16 @@ OrdinarySealBatch (double focus, double sensitivity, double stability)
 inline int
 GraphLevelZeroLinks (double focus, double sensitivity, double stability)
 {
-  return std::max (16, RouteCapacity (focus, sensitivity, stability) / 4);
+  return 2 * GraphNeighborCount (focus, sensitivity, stability);
+}
+
+// Rows one insertion search may fetch to propose a node's links. Link quality
+// bounds every later query's recall at the fixed 8C-to-9C query envelope, so
+// insertion gets a comparable 4C envelope rather than a single batch's worth.
+inline int
+ConstructionNodeBudget (double focus, double sensitivity, double stability)
+{
+  return 4 * RouteCapacity (focus, sensitivity, stability);
 }
 
 inline int

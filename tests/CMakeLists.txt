@@ -25,11 +25,14 @@ add_executable(cortext_tests
   data.test.cpp
   operations_centroids.test.cpp
   store.test.cpp
+  cross_modal_index.test.cpp
+  member_vector_index.test.cpp
   store_extensions.test.cpp
   object_store.test.cpp
   core_algorithms.test.cpp
   core_knobs.test.cpp
   env_scrub.test.cpp
+  sqlite_busy.test.cpp
   thread_config.test.cpp
   operation_context.test.cpp
   operation_set.test.cpp
@@ -41,37 +44,25 @@ add_executable(cortext_tests
   operations_threshold.test.cpp
   operations_blend.test.cpp
   operations_metrics.test.cpp
-  operations_memory_strength.test.cpp
-  operations_focus_feedback.test.cpp
-  operations_sensitivity_feedback.test.cpp
-  operations_stability_feedback.test.cpp
-  operations_influence_feedback.test.cpp
-  operations_reconsolidation.test.cpp
-  operations_competition.test.cpp
-  operations_predictive.test.cpp
-  operations_meta_learning.test.cpp
+  operations_memory_usage_record.test.cpp
+  embedding_arena.test.cpp
   operations_constructive_recall.test.cpp
-  operations_emotion.test.cpp
   operations_mood.test.cpp
   operations_sensitivity.test.cpp
   operations_sensitivity_update.test.cpp
   centroids.test.cpp
   operations_interrupt_gate.test.cpp
   operations_working_memory.test.cpp
-  operations_serial_position.test.cpp
-  operations_serial_position_apply.test.cpp
   operations_embedding_prediction_error.test.cpp
   operations_precision_modulation.test.cpp
 
-  operations_graph_build.test.cpp
   operations_graph_retrieval.test.cpp
-  operations_emotion_cascade.test.cpp
+  memory_text_index.test.cpp
+  standing_memory.test.cpp
 
   operations_consolidation.test.cpp
-  operations_consolidation_cluster.test.cpp
 	  operations_write_gate.test.cpp
   operations_memory_storage.test.cpp
-  operations_soft_anchor.test.cpp
   operations_detect_memory_usage.test.cpp
   operations_streaming_pacing.test.cpp
   operations_accumulator.test.cpp
@@ -100,8 +91,10 @@ if((CORTEXT_FETCH_AIST_MODEL OR EXISTS ${CMAKE_SOURCE_DIR}/models/AIST-87M-GGUF)
    AND CORTEXT_ENABLE_IMAGE)
   target_sources(cortext_tests PRIVATE
     aist_gguf_encoder_integration.test.cpp
+    aist_late_interaction.test.cpp
   )
-  target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_AIST_MODEL=1)
+  target_compile_definitions(cortext_tests PRIVATE CORTEXT_TESTS_HAVE_AIST_MODEL=1
+                             CORTEXT_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 endif()
 
 target_link_libraries(cortext_tests PRIVATE cortext Catch2::Catch2 nlohmann_json::nlohmann_json)

@@ -87,9 +87,7 @@ struct CaptureLoadedPolicyStateOp : IOperation
   mutable double weight_relevance = 0.0;
   mutable double coverage_gain_floor = 0.0;
   mutable double theta_dynamic = 0.0;
-  mutable double half_life = 0.0;
   mutable double weight_surprise = 0.0;
-  mutable double rate_decay = 0.0;
   mutable double reliability = -1.0;
 
   void
@@ -99,9 +97,7 @@ struct CaptureLoadedPolicyStateOp : IOperation
     weight_relevance = pctx.weight_relevance;
     coverage_gain_floor = pctx.coverage_gain_floor;
     theta_dynamic = pctx.T_dynamic;
-    half_life = pctx.half_life;
     weight_surprise = pctx.weight_surprise;
-    rate_decay = pctx.rate_decay;
     reliability = pctx.reliability;
   }
 };
@@ -525,14 +521,8 @@ TEST_CASE ("Legacy state defaults reload from active knobs",
                 WithinAbs (core::TPrior (cfg.focus, cfg.sensitivity,
                                          cfg.stability),
                            1e-9));
-  REQUIRE_THAT (capture_raw->half_life,
-                WithinAbs (core::BaseHalfLifePrior (cfg.stability), 1e-9));
   REQUIRE_THAT (capture_raw->weight_surprise,
                 WithinAbs (1.0, 1e-9));
-  REQUIRE_THAT (capture_raw->rate_decay,
-                WithinAbs (
-                    core::StabilityStatePriorsForKnobs (cfg.stability).rate_decay,
-                    1e-9));
   REQUIRE_THAT (capture_raw->reliability, WithinAbs (0.0, 1e-9));
 }
 
@@ -575,10 +565,6 @@ TEST_CASE ("Partial legacy state defaults reload from active knobs",
                            1e-9));
   REQUIRE_THAT (capture_raw->weight_surprise,
                 WithinAbs (1.0, 1e-9));
-  REQUIRE_THAT (capture_raw->rate_decay,
-                WithinAbs (
-                    core::StabilityStatePriorsForKnobs (cfg.stability).rate_decay,
-                    1e-9));
 }
 
 TEST_CASE ("Recent context view derives from signals",
@@ -967,23 +953,17 @@ TEST_CASE ("Working memory slots are persisted",
   // Check memories table has WM entries (v2 schema: kind='WORKING', active slots)
   // Active slots have end_ts IS NULL
   auto rows = store->Execute (
-      "SELECT memory_id, strength, source_reliability, stability FROM memories "
+      "SELECT memory_id, strength, source_reliability FROM memories "
       "WHERE kind = 'WORKING' AND end_ts IS NULL ORDER BY memory_id");
   REQUIRE (rows.size () == 2);
   REQUIRE_THAT (GetDouble (rows[0], "strength"), WithinAbs (0.8, 0.01));
   REQUIRE_THAT (GetDouble (rows[1], "strength"), WithinAbs (0.8, 0.01));
   const double expected_source_reliability
       = core::SourceReliabilityPrior (0.0, 1.0, 0.0);
-  const double expected_stability
-      = core::MemoryInitialStabilityPolicy (0.0, 1.0, 0.0);
   REQUIRE_THAT (GetDouble (rows[0], "source_reliability"),
                 WithinAbs (expected_source_reliability, 1e-9));
   REQUIRE_THAT (GetDouble (rows[1], "source_reliability"),
                 WithinAbs (expected_source_reliability, 1e-9));
-  REQUIRE_THAT (GetDouble (rows[0], "stability"),
-                WithinAbs (expected_stability, 1e-9));
-  REQUIRE_THAT (GetDouble (rows[1], "stability"),
-                WithinAbs (expected_stability, 1e-9));
 }
 
 TEST_CASE ("Closed working memory rows are pruned incrementally",

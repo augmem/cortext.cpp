@@ -14,12 +14,4 @@ public:
   void Execute (OperationContext &context, Transaction &tx) const override;
 };
 
-/// @brief Implements Algorithm 6: Stability dynamic update.
-class UpdateStability
-    : public Operation<Requires<tags::DeltaHalfLifeAdjustment>, Satisfies<> >
-{
-public:
-  void Execute (OperationContext &context, Transaction &tx) const override;
-};
-
 } // namespace cortext::operations

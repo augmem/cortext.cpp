@@ -1,6 +1,7 @@
 #pragma once
 
 #include <any>
+#include <functional>
 #include <map>
 #include <memory>
 #include <stdexcept>
@@ -83,6 +84,22 @@ public:
   Execute (const std::string &query, const std::vector<std::any> &params = {})
       = 0;
 
+  /// @brief Execute a query within transaction context and visit its rows in
+  /// order (same contract as Store::ExecuteEach). The default visits
+  /// Execute's result.
+  /// @param query The SQL query to execute.
+  /// @param params The parameters for the query.
+  /// @param visit Called once per result row.
+  virtual void
+  ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit)
+  {
+    for (const auto &row : Execute (query, params))
+      visit (row);
+  }
+
   /// @brief Commit the current transaction.
   virtual void Commit () = 0;
 
@@ -111,6 +128,26 @@ public:
   virtual std::vector<std::map<std::string, std::any> >
   Execute (const std::string &query, const std::vector<std::any> &params = {})
       = 0;
+
+  /// @brief Execute a query and visit its result rows in order.
+  ///
+  /// Same rows, order and errors as Execute, but an implementation may hand
+  /// each row to @p visit as it is produced instead of materializing the
+  /// whole result set first, so a full-table read holds one row at a time.
+  /// The visitor must not call back into this store; a visitor exception
+  /// stops the query and propagates. The default visits Execute's result.
+  /// @param query The SQL query to execute.
+  /// @param params The parameters for the query.
+  /// @param visit Called once per result row.
+  virtual void
+  ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit)
+  {
+    for (const auto &row : Execute (query, params))
+      visit (row);
+  }
 
   /// @brief Begin a new transaction.
   /// @return A unique pointer to the new transaction.

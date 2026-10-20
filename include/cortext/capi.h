@@ -183,7 +183,6 @@ extern "C"
     int affect_interrupt;
     int affect_retrieval;
     int reinforcement_enabled;
-    int procedural_enabled;
     int sequential_edges_enabled;
     int signal_filter_audio_enabled;
     int signal_filter_image_enabled;
@@ -193,11 +192,14 @@ extern "C"
   /// @brief Optional source media payload persisted for a processed signal.
   ///
   /// The canonical process input is still passed through text/pcm/data
-  /// arguments. When this struct carries bytes, those bytes are stored as the
-  /// durable signal/memory payload using mimetype. NULL or size == 0 omits
-  /// the canonical payload for every overload that accepts media. Legacy
-  /// process functions retain their canonical payload behavior. Media bytes
-  /// are copied during the call.
+  /// arguments and is what the signal is encoded from. When this struct
+  /// carries bytes, those bytes are stored as the durable signal/memory
+  /// payload using mimetype. NULL or size == 0 stores the canonical input
+  /// (UTF-8 text, f32le PCM, or raw pixels), exactly like the process
+  /// functions without media. A payload is used as text (keyword index,
+  /// standing memories, working-memory text, packet text) only when its
+  /// mimetype is text/*; any other mimetype is an opaque payload for every
+  /// modality. Media bytes are copied during the call.
   typedef struct cortext_media
   {
     const uint8_t *data;
@@ -228,13 +230,26 @@ extern "C"
   ///
   /// retention defaults to CORTEXT_RETENTION_NATURAL. Older clients that only
   /// set struct_size + include_embedding keep Natural (false/false forces).
+  ///
+  /// evidence_budget_bytes is the per-call evidence budget
+  /// (cortext::Cortext::EvidenceBudget): 0 (the default) returns every
+  /// recalled memory whole; a positive value fits standing_memory plus
+  /// retrieved_memory (with attached neighbours) within that many bytes,
+  /// text charged by its UTF-8 bytes and every other payload as
+  /// CORTEXT_MEDIA_EVIDENCE_BYTES. A reader budgeted in tokens converts with
+  /// its tokenizer's rate (8,000 tokens at 4.35 characters per token is
+  /// 34,800 bytes of ASCII text).
   typedef struct cortext_process_json_options
   {
     size_t struct_size;
     int include_embedding;
     int retention; ///< cortext_retention; Natural when field absent/unknown
     int reserved;  ///< Must be zero; distinguishes this layout from v1.1.10.
+    size_t evidence_budget_bytes; ///< 0 = unset; read when struct_size covers it
   } cortext_process_json_options;
+
+/// @brief Evidence charge of one non-text payload under evidence_budget_bytes.
+#define CORTEXT_MEDIA_EVIDENCE_BYTES 480
 
   /// @brief Initializes process JSON options to current defaults.
   ///
@@ -315,7 +330,7 @@ extern "C"
   ///
   /// Text remains the canonical processing input. If media is non-NULL and
   /// media->size > 0, media->data is stored using media->mimetype instead of
-  /// the canonical UTF-8 text bytes. An empty media omits the stored payload.
+  /// the canonical UTF-8 text bytes. An empty media stores the text.
   CORTEXT_EXPORT int cortext_process_text_with_media (
       cortext_handle h, const char *text, const char *source_id,
       const cortext_media *media);

@@ -5,48 +5,11 @@ add_executable(cortext_text_encoder_bench
 )
 
 
-add_executable(cortext_eviction_ablation_bench
-  eviction_ablation_bench.cpp
-)
 
-add_executable(cortext_predictive_ablation_bench
-  predictive_ablation_bench.cpp
-)
 
-add_executable(cortext_constructive_recall_ablation_bench
-  constructive_recall_ablation_bench.cpp
-)
-
-add_executable(cortext_neuromodulator_ablation_bench
-  neuromodulator_ablation_bench.cpp
-)
-
-add_executable(cortext_procedural_ablation_bench
-  procedural_ablation_bench.cpp
-)
-
-add_executable(cortext_meta_learning_ablation_bench
-  meta_learning_ablation_bench.cpp
-)
-
-add_executable(cortext_storage_eviction_budget_bench
-  storage_eviction_budget_bench.cpp
-)
-
-add_executable(cortext_storage_eviction_sweep_bench
-  storage_eviction_sweep_bench.cpp
-)
 
 add_executable(cortext_live_loop_steady_state_bench
   live_loop_steady_state_bench.cpp
-)
-
-add_executable(cortext_storage_human_sleep_token_bench
-  storage_human_sleep_token_bench.cpp
-)
-
-add_executable(cortext_decay_surface_ablation_bench
-  decay_surface_ablation_bench.cpp
 )
 
 add_executable(cortext_signal_filter_bench
@@ -73,37 +36,7 @@ add_executable(cortext_chat_replay_live_run
 target_include_directories(cortext_text_encoder_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
-target_include_directories(cortext_eviction_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_predictive_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_constructive_recall_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_neuromodulator_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_procedural_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_meta_learning_ablation_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_storage_eviction_budget_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_storage_eviction_sweep_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
 target_include_directories(cortext_live_loop_steady_state_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_storage_human_sleep_token_bench PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_include_directories(cortext_decay_surface_ablation_bench PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_include_directories(cortext_signal_filter_bench PRIVATE
@@ -120,42 +53,13 @@ target_include_directories(cortext_audio_video_accumulator_bench PRIVATE
 )
 target_include_directories(cortext_chat_replay_live_run PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PROJECT_SOURCE_DIR}/src
 )
 # Link dependencies
 target_link_libraries(cortext_text_encoder_bench PRIVATE
   cortext
 )
-target_link_libraries(cortext_eviction_ablation_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_predictive_ablation_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_constructive_recall_ablation_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_neuromodulator_ablation_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_procedural_ablation_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_meta_learning_ablation_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_storage_eviction_budget_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_storage_eviction_sweep_bench PRIVATE
-  cortext
-)
 target_link_libraries(cortext_live_loop_steady_state_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_storage_human_sleep_token_bench PRIVATE
-  cortext
-)
-target_link_libraries(cortext_decay_surface_ablation_bench PRIVATE
   cortext
 )
 target_link_libraries(cortext_signal_filter_bench PRIVATE

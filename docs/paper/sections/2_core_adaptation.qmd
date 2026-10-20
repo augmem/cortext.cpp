@@ -144,167 +144,57 @@ m_norm ← ‖M_t‖ / √6  # max norm when all components at 1
 
 ## Stability-Driven Persistence
 
-Stability governs temporal dynamics through half-life, decay rates, and hysteresis.
-
-### Stability Priors
-
-Given Stability knob T ∈ [0, 1], initialize Stability control variables:
+Stability sets the hysteresis band of the write threshold:
 
 ```
 hysteresis = lerp(0.02, 0.25, T)
-half_life = base_half_life(T)
-rate_decay = lerp(0.60, 0.98, T)
-periphery_half_life = clamp(0.5 × half_life,
-                                   τ_min, τ_max)
-drift_weight = 0.5 × (1 − T)
 ```
 
-### Dynamic Stability Update {#sec-stability-update}
+### Half-Life Adaptation (Removed) {#sec-stability-update}
 
-The stability update uses uncertainty-modulated learning rate and a stability-derived retention window:
-
-```
-α_min_T = 0.02; α_span_T = 0.18
-α_T(t) = α_min_T + (1 − T) × α_span_T × u(t)
-win_ret(T) = round(lerp(10, 50, T))  # retention history window size
-```
-
-At each signal event, compute retention statistics and adjust half-life:
-
-```
-active_memories ← {m | strength(m) ≥ periphery_cutoff(T)}
-observed_retention ← mean_age(active_memories)
-retention_ema_t ← EWMA(retention_ema_{t−1},
-                       observed_retention, α = α_T(t))
-```
-
-```
-retention_ema ← retention_ema_t
-```
-
-Definitions:
-```
-age_s(m) ← now_s() − to_s(m.created_at)  # fallback: use start_ts if created_at unset
-mean_age(active_memories) ← mean_{m ∈ active_memories} age_s(m); if empty, return 0
-retention_history ← append(observed_retention); keep last win_ret(T) values
-```
-
-Compute z-score relative to recent retention history:
-
-```
-last_win_ret ← tail(retention_history, win_ret(T))
-μ_ret ← mean(last_win_ret)
-σ_ret ← max(std(last_win_ret), 1.0)
-zscore_ret ← clamp((observed_retention − μ_ret) / σ_ret, −3, +3)
-```
-
-The target half-life incorporates feedback adjustment from the stability feedback mechanism (@sec-feedback):
-
-```
-stability_adj ← ΔHalfLife_adj_t if provided else 0
-target_half_life_t ← clamp(base_half_life(T) ×
-                          (1 + 0.25 × zscore_ret + stability_adj),
-                          τ_min, τ_max)
-half_life_t ← EWMA(half_life_{t−1}, target_half_life_t,
-                   α = α_T(t))
-```
-
-```
-half_life ← half_life_t
-```
+Earlier builds also kept an adaptive memory half-life. It started at `base_half_life(T)` and moved each signal by an EWMA toward `base_half_life(T) × (1 + 0.25 × zscore_ret + ΔHalfLife_adj)`. Here `zscore_ret` was the z-scored mean age of memories whose strength stayed above `PeripheryCutoff(T)`, and `ΔHalfLife_adj` came from stability feedback (@sec-feedback). Derived state included `rate_decay`, `periphery_half_life`, `salience_half_life`, `drift_weight` and `retention_ema`. Memory-strength decay was the only consumer of the half-life. The engine ablation study (2026-10) removed memory strength (@sec-reinforcement), and then this adaptation and its persisted state, which no operation read any more.
 
 ## Neuromodulator Layer (Internal Mapping)
 
 To keep the three-knob UI while enabling more biologically faithful control, Cortext maps the knobs and internal signals to continuous neuromodulator-like variables. These are **not** additional user knobs; they are latent control signals derived from F/S/T and real-time stream statistics.
 
-We define three modulators:
+One modulator remains:
 
 * **ACh-like (acetylcholine):** encode vs retrieve bias.
-* **NE-like (norepinephrine):** arousal + interrupt urgency.
-* **DA-like (dopamine):** reward prediction error + value learning.
 
-Baseline levels come from knobs; phasic bursts come from current signals:
+Its baseline comes from the knobs and its phasic part from the current signal:
 
 ```
 ACh_base(F,S,T) = clamp(0.15 + 0.55S + 0.25(1 − T) − 0.15F, 0, 1)
-NE_base(F,S,T)  = clamp(0.10 + 0.60S + 0.20(1 − T), 0, 1)
-DA_base(F,S,T)  = clamp(0.10 + 0.40F + 0.30T, 0, 1)
-
 ACh_t ← clamp(ACh_base + 0.35 × novelty_t − 0.20 × retrieval_pressure, 0, 1)
-NE_t  ← clamp(NE_base  + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)
-DA_t  ← clamp(DA_base  + max(0, δ_reward_t), 0, 1)
-```
-
-Where `retrieval_pressure` is the normalized retrieval queue-depth input, and
-`δ_reward_t` is a reward prediction error derived from downstream outcome
-signals (see @sec-structural-metrics). The production operation context does not
-currently populate queue depth, so this term is zero in the shipped full
-pipeline; tests and experiment hooks can supply it. The other phasic terms are
-live. These modulators drive internal gates without introducing new user-facing
-parameters:
-
-```
 encode_bias ← ACh_t × (0.7 + 0.3S)
 retrieve_bias ← 1 − encode_bias
-write_threshold_scale ← 1 − 0.3 × NE_t
-reconsolidation_scale ← 1 + 0.4 × ACh_t
-retrieval_competition_scale ← 1 + 0.5 × NE_t
-value_update_gain ← 0.5 + 0.5 × DA_t
 ```
 
-In the current implementation, these latent scales are applied at four concrete downstream sites rather than introduced as separate runtime controls:
+Where `retrieval_pressure` is the normalized retrieval queue-depth input. The
+production operation context does not currently populate queue depth, so this
+term is zero in the shipped full pipeline. `retrieve_bias` gates streaming
+retrieval checks between boundaries (@sec-interrupt).
 
-* `write_threshold_scale` multiplies the accumulator write-gate threshold, so high `NE_t` lowers the barrier for committing a boundary candidate.
-* `reconsolidation_scale` multiplies reconsolidation drift magnitude, so high `ACh_t` strengthens context-driven reconstruction updates.
-* `retrieval_competition_scale` multiplies lateral inhibition during retrieval competition, so high `NE_t` sharpens suppression among near-duplicate candidates.
-* `value_update_gain` scales procedural-store reward updates, so high `DA_t` increases reinforcement of recently used routines.
+Earlier builds also kept an NE-like modulator,
+`NE_t = clamp(NE_base + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)`, and
+"effect scales" that multiplied the write-gate threshold by `1 − 0.3 × NE_t`,
+reconsolidation drift by `1 + 0.4 × ACh_t` and retrieval competition by
+`1 + 0.5 × NE_t`. Competition and reconsolidation were removed by the engine
+ablation study (2026-10). Switching all effect scales off changed 5/48
+LongMemEval-S, 32/250 Eval 1 and 7/20 BEAM-10M conversation 7 packets, left
+gold-turn recall within one case, and moved Haiku-judged sufficiency by 0.000,
+−0.001 ± 0.006 and +0.028 ± 0.054; the MSC replay changed 7/39 probe packets,
+five only in order. The write scale and NE were then removed (migration 47).
 
-## Oscillatory Gating (No Discrete Modes)
+Earlier builds also kept a DA-like modulator, `DA_t = clamp(DA_base + max(0, δ_reward_t), 0, 1)`, driven by a reward prediction error `δ_reward_t = outcome_t − EWMA(outcome_t)` from the metric blender. Its only consumer was `value_update_gain` for the procedural value table (@sec-pattern-separation). The engine ablation study (2026-10) removed that table, then the DA modulator, the reward prediction error and their persisted state, with no packet change.
 
-To reduce interference without introducing hard modes, Cortext adds a continuous oscillatory gate that gently alternates encode- vs retrieve-bias over time.
+## Oscillatory Gating (Removed)
 
-```
-ω(F,S,T) = lerp(0.03, 0.12, S) × lerp(1.2, 0.8, T)  # rad/s
-φ_t ← (φ_{t−1} + ω × Δt) mod 2π
-osc_t ← 0.5 + 0.5 × sin(φ_t)
+Earlier builds multiplied `encode_bias` by a slow oscillator, `0.6 + 0.4 × (0.5 + 0.5 × sin φ_t)` with `φ_t` advancing at `ω(S,T) = lerp(0.03, 0.12, S) × lerp(1.2, 0.8, T)` rad/s. Its only effect was on `retrieve_bias`, which the streaming pacer consults only between boundaries; accepted boundaries, forced checks and queries bypass it. The 2026-10 MSC rerun on the current engine (25 validation dialogs, 1,190 turns, 39 probes, capacity 21) left every probe packet byte-identical with the oscillator off, under both Durable and Natural retention, so the engine ablation study removed it and its persisted phase (@sec-experimental).
 
-encode_bias_t ← encode_bias × (0.6 + 0.4 × osc_t)
-retrieve_bias_t ← 1 − encode_bias_t
-```
+## Knob-to-Parameter Priors (Meta-Learning Removed)
 
-The oscillator is continuous and **never** switches modes; it merely biases thresholds and competition in a time-varying, biologically plausible manner.
+All knob-derived ranges and coefficient tables (e.g., bootstrap coefficients for RLS, lerp endpoints, base rates) are fixed **species priors**: closed-form functions of F/S/T. `attention_width_prior` is `lerp(W_min, W_max, 1 − F)`, `base_rate_prior` is `BaseRatePrior(S)`, and `hysteresis_band_prior` is `BaseBandPrior(T)`.
 
-## Meta-Learning Knob-to-Parameter Maps
-
-All knob-derived ranges and coefficient tables (e.g., bootstrap coefficients for RLS, lerp endpoints, base rates) are treated as **species priors**. They remain the **only** user-visible controls, but are made learnable at deployment or per-user:
-
-```
-p(F,S,T) = lerp(a, b, κ(F,S,T))
-κ(F,S,T) = sigmoid(α_F F + α_S S + α_T T + β)
-```
-
-The coefficients `{α_F, α_S, α_T, β, a, b}` are updated from observed outcomes (acceptance, uncertainty reduction, task reward), while the UI still exposes only F/S/T. This preserves simplicity while allowing the system to adapt its parameterization over time.
-
-In the current branch, this generic learner is instantiated for three live priors that already shape runtime behavior:
-
-* `attention_width_prior` (Focus family)
-* `rate_target_prior` / `base_rate_prior` (Sensitivity family)
-* `hysteresis_band_prior` (Stability family)
-
-The implementation keeps the historical closed-form priors as the exact cold-start species priors. When no learned row exists, Cortext uses the legacy formulas directly. Once informative outcomes arrive, it seeds a narrow learnable band around that legacy value in an internal `meta_learning_coeffs` table and then updates:
-
-```
-success_t = 0.30 × write_accept_t
-          + 0.30 × retrieval_use_t
-          + 0.25 × (1 − u_t)
-          + 0.15 × clamp(0.5 + 0.5δ_reward_t, 0, 1)
-direction_t = 2 × success_t − 1
-```
-
-Only informative turns (`write_accept_t`, `retrieval_use_t`, or non-zero reward error) trigger updates. The learner then nudges `{α_F, α_S, α_T, β, a, b}` toward or away from the currently successful dynamic state:
-
-* Focus observes the current `attention_width_t`
-* Sensitivity observes the realized write-rate estimate `ρ̂_t`
-* Stability observes the current hysteresis band
-
-This makes the meta-learning claim operational without adding any new public controls or changing the public API surface.
+Earlier builds made three of these priors learnable (`p = lerp(a, b, sigmoid(α_F F + α_S S + α_T T + β))`, updated from write acceptance, retrieval use, uncertainty and reward, and stored in a `meta_learning_coeffs` table). The engine ablation study (2026-10) removed it. Skipping the learner and using the closed-form priors left every retrieval packet byte-identical on Eval 1 (0/250), LongMemEval-S (0/48) and two full-length BEAM-10M conversations (0/40, 42.6k turns), with no measurable cost change. Migration 35 drops the table.

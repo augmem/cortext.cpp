@@ -302,6 +302,21 @@ GetProcessJSONOptions (napi_env env, napi_value value,
         }
       out.retention = retention;
     }
+
+  // evidenceBudgetBytes: a whole number of bytes; absent or 0 = unset
+  // (whole memories).
+  double evidence_budget = 0.0;
+  if (!GetOptionalDoubleProperty (env, value, "evidenceBudgetBytes",
+                                  evidence_budget))
+    {
+      return false;
+    }
+  if (!(evidence_budget >= 0.0 && evidence_budget <= 9007199254740991.0)
+      || std::floor (evidence_budget) != evidence_budget)
+    {
+      return false;
+    }
+  out.evidence_budget_bytes = static_cast<size_t> (evidence_budget);
   return true;
 }
 
@@ -318,8 +333,6 @@ ParseConfigObject (napi_env env, napi_value value, cortext_config &cfg)
                                    cfg.affect_retrieval)
       || !GetOptionalBoolProperty (env, value, "reinforcementEnabled",
                                    cfg.reinforcement_enabled)
-      || !GetOptionalBoolProperty (env, value, "proceduralEnabled",
-                                   cfg.procedural_enabled)
       || !GetOptionalBoolProperty (env, value, "sequentialEdgesEnabled",
                                    cfg.sequential_edges_enabled)
       || !GetOptionalBoolProperty (env, value, "signalFilterAudioEnabled",

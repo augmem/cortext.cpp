@@ -48,18 +48,6 @@ LoadLatestReconstruction (Store *store, long long memory_id);
 std::optional<ReconstructionRecord>
 LoadLatestReconstruction (Transaction &tx, long long memory_id);
 
-bool
-ShouldSkipReconstructionUpdate (Transaction &tx, long long memory_id,
-                                long long created_at,
-                                std::string_view trigger,
-                                ReconstructionUpdatePolicy policy = {});
-
-std::vector<unsigned char>
-LoadCurrentBlobId (Store *store, long long memory_id);
-
-std::vector<unsigned char>
-LoadCurrentBlobId (Transaction &tx, long long memory_id);
-
 std::optional<Eigen::VectorXf>
 LoadCurrentEmbedding (Store *store, long long memory_id,
                       long long base_embedding_id, int expected_dim);
@@ -76,7 +64,8 @@ AppendReconstructionWithEmbeddingId (Transaction &tx, long long memory_id,
                                      std::string_view trigger,
                                      double source_confidence = 1.0,
                                      double context_similarity = 0.0,
-                                     ReconstructionUpdatePolicy policy = {});
+                                     ReconstructionUpdatePolicy policy = {},
+                                     ProcessorContext *p_ctx = nullptr);
 
 long long
 AppendReconstructionWithEmbedding (Transaction &tx, long long memory_id,

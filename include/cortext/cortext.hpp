@@ -60,14 +60,6 @@ public:
     double signal_filter_score = 0.0;
     double signal_filter_threshold = 0.0;
     double signal_filter_quiet_seconds = 0.0;
-    bool soft_anchor_enabled = false;
-    int soft_anchor_state_count = 0;
-    int soft_anchor_link_count = 0;
-    int soft_anchor_create_count = 0;
-    int soft_anchor_update_count = 0;
-    int soft_anchor_none_count = 0;
-    double soft_anchor_last_update_us = 0.0;
-    double soft_anchor_mean_update_us = 0.0;
   };
   
   /// @brief Context returned from processing calls, containing hydrated
@@ -76,26 +68,18 @@ public:
   {
     struct Memory
     {
-      struct SoftAnchor
-      {
-        std::string id;
-        double strength = 0.0;
-        double likelihood = 0.0;
-        std::string label;
-        std::string tier;
-        double score = 0.0;
-        double margin = 0.0;
-        double entropy = 0.0;
-      };
-
       std::string source_id;
       long long id = 0;
       std::uint64_t timestamp = 0;
       long long retrieved_count = 0;
       long long used_count = 0;
       std::vector<std::vector<unsigned char>> content;  ///< Blobs from signals (one per signal in slot)
-      std::string modality;
-      std::string mimetype;
+      /// MIME type of each content blob, in content order. A memory whose
+      /// signals had different modalities (modality "mixed", for example a
+      /// turn's text and its photo) returns every signal's payload.
+      std::vector<std::string> content_mimetypes;
+      std::string modality;  ///< shared signal modality, or "mixed"
+      std::string mimetype;  ///< MIME type of the memory's first signal
 
       // Flattened metrics (formerly HistoricalMetrics)
       double relevance = 0.0;
@@ -112,11 +96,17 @@ public:
       double arousal = 0.0;
       double composite_score = 0.0;
       double threshold_t = 0.0;
-      std::vector<SoftAnchor> soft_anchors;
     };
 
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
     std::vector<Memory> retrieved_memory;  ///< Long-term retrieval results (injected context)
+    /// Standing directives for this query, outside the retrieved ranking:
+    /// each entry holds only the stored signals that state a directive
+    /// (one entry per memory), best first, within its own byte budget.
+    /// Empty for writes. Consumers place it ahead of retrieved_memory and
+    /// do not count it against a retrieved-item cut; an evidence budget
+    /// (EvidenceBudget) counts it.
+    std::vector<Memory> standing_memory;
     std::vector<float> embedding;          ///< Canonical embedding used for this process call.
     bool should_interrupt = false;
     bool interrupt_aborted = false;
@@ -145,6 +135,32 @@ public:
     double total_ms = 0.0;
   };
 
+  /// @brief Optional per-call evidence budget, in bytes.
+  ///
+  /// Evidence is what a returned Context offers as recalled content:
+  /// standing_memory plus retrieved_memory (with the neighbours attached to
+  /// each retrieved memory); working_memory is not evidence. Text content is
+  /// charged by its UTF-8 bytes and every other payload (image, audio) as
+  /// kMediaEvidenceBytes. A reader budgeted in tokens converts with its own
+  /// tokenizer's rate: for example 8,000 tokens at 4.35 characters per token
+  /// is 34,800 bytes of ASCII text.
+  ///
+  /// Unset (std::nullopt, the default): every recalled memory comes back
+  /// whole, with no trimming. Set: the engine fits the evidence within the
+  /// budget. Directives are placed first (within their own block budget and
+  /// this one), then retrieved memories in rank order; a memory grouped from
+  /// several signals keeps its members most similar to the query (the best
+  /// member of each modality always, then the rest best first) under one
+  /// member cap shared by all memories, the largest cap with which the
+  /// evidence fits, so more distinct memories are kept trimmed rather than
+  /// fewer whole. A memory that does not fit even at its best members drops
+  /// its attached neighbours, then the memory itself; lower-ranked memories
+  /// that fit still join. The evidence never exceeds the budget.
+  using EvidenceBudget = std::optional<std::size_t>;
+
+  /// @brief Evidence charge of one non-text payload (see EvidenceBudget).
+  static constexpr std::size_t kMediaEvidenceBytes = 480;
+
   /// @brief Three-knob configuration preserved across the system.
   struct Config
   {
@@ -154,7 +170,6 @@ public:
     bool affect_interrupt = true;
     bool affect_retrieval = true;
     bool reinforcement_enabled = true;
-    bool procedural_enabled = true;
     bool sequential_edges_enabled = true;
     bool signal_filter_audio_enabled = true;
     bool signal_filter_image_enabled = true;
@@ -166,7 +181,10 @@ public:
   /// Processing still uses the canonical input passed to ProcessText,
   /// ProcessAudio, or ProcessImage. When Media contains data, those bytes and
   /// this MIME type become the durable payload instead of the canonical
-  /// processing representation. Media bytes are copied during the call.
+  /// processing representation; empty Media stores the canonical input. A
+  /// payload is used as text only when its MIME type is text/*; any other
+  /// MIME type is opaque for every modality. Media bytes are copied during
+  /// the call.
   struct Media
   {
     const std::uint8_t *data = nullptr;
@@ -233,19 +251,23 @@ public:
   /// @param retention Natural by default; episode algorithms decide. Pass
   /// Durable for explicit turn commit, Boundary for explicit turn edge only,
   /// or Ephemeral for no-storage query.
+  /// @param evidence_budget Optional evidence budget in bytes for the
+  /// returned packet (EvidenceBudget); every Process* call takes one.
   /// @return Context with retrieved memories and processing output.
   Context ProcessText (const std::string &text, const std::string &source_id,
-                       Retention retention = Retention::Natural);
+                       Retention retention = Retention::Natural,
+                       EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process text while storing caller-provided source media.
   ///
   /// The text remains the canonical embedding input. If media contains bytes,
   /// those bytes are persisted as the signal/memory payload using
-  /// media.mimetype instead of the UTF-8 text bytes. If media is empty, no
-  /// text payload is persisted, matching the audio/image Media overloads.
+  /// media.mimetype instead of the UTF-8 text bytes. If media is empty, the
+  /// text is persisted, matching the audio/image Media overloads.
   Context ProcessText (const std::string &text, const std::string &source_id,
                        const Media &media,
-                       Retention retention = Retention::Natural);
+                       Retention retention = Retention::Natural,
+                       EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process text input with an explicit timestamp (ms since epoch).
   /// @param text The text content to process.
@@ -259,7 +281,8 @@ public:
   /// @return Context with retrieved memories and processing output.
   Context ProcessTextAt (const std::string &text, const std::string &source_id,
                          std::uint64_t timestamp,
-                         Retention retention = Retention::Natural);
+                         Retention retention = Retention::Natural,
+                         EvidenceBudget evidence_budget = std::nullopt);
 
 
   /// @brief Process audio PCM input.
@@ -273,16 +296,18 @@ public:
   /// @return Context with retrieved memories and processing output.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id,
-                        Retention retention = Retention::Natural);
+                        Retention retention = Retention::Natural,
+                        EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process audio PCM while storing caller-provided source media.
   ///
   /// The PCM buffer remains the canonical processing input. If media contains
   /// bytes, those bytes are persisted as the signal/memory payload using
-  /// media.mimetype. If media is empty, no audio payload is persisted.
+  /// media.mimetype. If media is empty, the PCM is persisted.
   Context ProcessAudio (const float *pcm, std::size_t num_samples,
                         const std::string &source_id, const Media &media,
-                        Retention retention = Retention::Natural);
+                        Retention retention = Retention::Natural,
+                        EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process image input.
   /// @param data Raw pixel data (RGB/RGBA).
@@ -297,17 +322,19 @@ public:
   /// @return Context with retrieved memories and processing output.
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
-                        Retention retention = Retention::Natural);
+                        Retention retention = Retention::Natural,
+                        EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Process image pixels while storing caller-provided source media.
   ///
   /// The pixel buffer remains the canonical processing input. If media contains
   /// bytes, those bytes are persisted as the signal/memory payload using
-  /// media.mimetype. If media is empty, no image payload is persisted.
+  /// media.mimetype. If media is empty, the raw pixels are persisted.
   Context ProcessImage (const std::uint8_t *data, int width, int height,
                         int channels, const std::string &source_id,
                         const Media &media,
-                        Retention retention = Retention::Natural);
+                        Retention retention = Retention::Natural,
+                        EvidenceBudget evidence_budget = std::nullopt);
 
   /// @brief Encode text and return the configured encoder's raw embedding.
   ///
@@ -336,6 +363,17 @@ public:
   Context Consolidate (StopToken stop_token);
 
   /// @brief Flush/commit any pending episode writes.
+  ///
+  /// Every source's open unit closes here as at a boundary: the write gate
+  /// decides whether it is stored, and the next signal starts a new unit.
+  ///
+  /// Durability: Flush returns once its transaction is committed to the
+  /// SQLite WAL, so a process crash afterwards keeps it. It only requests the
+  /// WAL checkpoint, which runs on a background connection; that checkpoint
+  /// syncs the flushed rows against power loss without stalling ingest.
+  /// A Durable signal fsyncs the WAL after its commit, so it is power-loss
+  /// durable when Process returns; it too leaves the checkpoint to the
+  /// background connection.
   void Flush ();
 
   /// @brief Reset volatile in-memory processor state.

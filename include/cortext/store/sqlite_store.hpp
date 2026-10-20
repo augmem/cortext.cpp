@@ -21,6 +21,8 @@ class SQLiteStore;
 
 namespace internal
 {
+class SQLiteWalCheckpointer;
+
 class SQLiteStoreQueryInterrupter
 {
 public:
@@ -69,6 +71,13 @@ public:
   std::vector<std::map<std::string, std::any> >
   Execute (const std::string &query,
            const std::vector<std::any> &params = {}) override;
+
+  /// @brief Execute a query within this transaction, visiting each row as
+  /// SQLite steps to it. The visitor must not use this transaction or store.
+  void ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit) override;
 
   /// @brief Commit this transaction.
   void Commit () override;
@@ -138,8 +147,17 @@ public:
     return connection_ != nullptr;
   }
 
+  /// @brief How long this connection waits on a busy lock (ms); every other
+  /// connection the store opens to the same file waits as long.
+  int
+  BusyTimeoutMs () const
+  {
+    return busy_timeout_ms_;
+  }
+
 private:
   sqlite3 *connection_;
+  int busy_timeout_ms_ = 0;
 };
 
 /// @brief SQLite database store with transaction support.
@@ -182,6 +200,13 @@ public:
   Execute (const std::string &query,
            const std::vector<std::any> &params = {}) override;
 
+  /// @brief Execute a query and visit each row as SQLite steps to it.
+  /// Holds one row at a time; the visitor must not use this store.
+  void ExecuteEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (const std::map<std::string, std::any> &)>
+          &visit) override;
+
   /// @brief Begin a new transaction.
   /// @return A unique pointer to the new transaction.
   std::unique_ptr<Transaction> Begin () override;
@@ -195,20 +220,54 @@ public:
   /// @brief Close the database connection.
   void Close () override;
 
-  /// @brief Trigger WAL checkpoint.
-  /// @param full If true, use TRUNCATE mode (waits for readers and shrinks WAL);
-  /// otherwise PASSIVE (non-blocking).
+  /// @brief Run a WAL checkpoint on the calling thread.
+  /// @param full If true, use TRUNCATE mode (waits for readers, syncs the
+  /// database and shrinks the WAL): a power-loss durability barrier for every
+  /// committed transaction. Otherwise PASSIVE (never waits on other
+  /// connections).
   void Checkpoint (bool full = false);
+
+  /// @brief Ask for a PASSIVE checkpoint without blocking the caller.
+  ///
+  /// File databases in WAL mode own a background checkpointer: a separate
+  /// connection on its own thread copies committed WAL frames into the
+  /// database and syncs it, so neither the copy nor its fsyncs run on the
+  /// thread that writes. The WAL also requests one once it holds
+  /// WalAutoCheckpointPages() pages (0: only explicit requests). Other stores
+  /// (memory, non-WAL, exclusive locking) run the PASSIVE checkpoint inline.
+  ///
+  /// Durability: a committed transaction survives a process crash as soon as
+  /// it commits (it is in the WAL); with synchronous=NORMAL it survives power
+  /// loss once a checkpoint (background or Checkpoint) has synced it. The
+  /// database is consistent after either crash: recovery replays only whole
+  /// committed transactions.
+  void RequestCheckpoint ();
+
+  /// @brief Block until every requested background checkpoint has finished.
+  void WaitForRequestedCheckpoints ();
+
+  /// @brief Sync the WAL on the calling thread (outside a transaction).
+  ///
+  /// A power-loss durability barrier for every transaction committed so far:
+  /// one fsync of the WAL file, without copying it into the database. No-op
+  /// for stores without a WAL. Throws StoreError if the sync fails.
+  void SyncWal ();
 
   /// @brief Get WAL status information.
   /// @return WAL status with page counts.
   WalStatus GetWalStatus () const;
 
-  /// @brief Return the connection-local SQLite auto-checkpoint threshold.
+  /// @brief Return the WAL size in pages at which a checkpoint is requested
+  /// automatically (background when available), or zero when disabled.
   int WalAutoCheckpointPages () const;
 
   /// @brief Return the current WAL file size in bytes, or zero when absent.
   std::uintmax_t WalFileBytes () const;
+
+  /// @brief Path of the database file when other connections can read it
+  /// concurrently (a file database in WAL mode on a thread-safe SQLite
+  /// build), else empty.
+  std::string ConcurrentReadPath () const;
 
   /// @brief Unregister a transaction from the transaction stack.
   /// Called by SQLiteTransaction destructor to prevent dangling pointers.
@@ -217,6 +276,9 @@ public:
 
 private:
   std::unique_ptr<SQLiteConnection> connection_;
+  // Declared after connection_ so it stops (and closes its own connection)
+  // before the store's connection closes.
+  std::unique_ptr<internal::SQLiteWalCheckpointer> checkpointer_;
   bool in_transaction_;
   std::vector<SQLiteTransaction *> transaction_stack_;
 
@@ -244,6 +306,12 @@ private:
   std::vector<std::map<std::string, std::any> >
   ExecuteDirect (const std::string &query,
                  const std::vector<std::any> &params = {});
+
+  // Execute a query directly on the connection, visiting each row as it
+  // is stepped (ExecuteDirect collects through this).
+  void ExecuteDirectEach (
+      const std::string &query, const std::vector<std::any> &params,
+      const std::function<void (std::map<std::string, std::any> &&)> &visit);
 
   // Commit a root transaction (called by transaction.commit()).
   void CommitRootTransaction (SQLiteTransaction *transaction);

@@ -287,6 +287,15 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
     }
 
   const double chunk_threshold = core::WMChunkingThreshold (cfg.focus);
+  // A slot at its chunk budget takes no further chunk; the unit opens a new
+  // slot instead (and capacity eviction applies as for any insert).
+  if (best_idx >= 0
+      && p_ctx.wm_slots[static_cast<size_t> (best_idx)].n_signals
+                 + acc_signal_count
+             > core::WMChunkMaxSignals (cfg.stability))
+    {
+      best_idx = -1;
+    }
   if (best_idx >= 0 && best_sim >= chunk_threshold)
     {
       auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
@@ -389,58 +398,6 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
         telemetry::Attribute::Double ("now_s", now_s)
       });
       return;
-    }
-
-  // Input-based rehearsal: boost strength for "close" slots without merging.
-  // Slots with similarity in [rehearsal_threshold, chunk_threshold)
-  // get a strength boost but embedding is NOT merged.
-  const double rehearsal_threshold = core::WMRehearsalThreshold (cfg.focus);
-  if (!preserve_input_trace && best_idx >= 0 && best_sim >= rehearsal_threshold)
-    {
-      auto &slot = p_ctx.wm_slots[static_cast<size_t> (best_idx)];
-      const double rehearsal_rate = core::WMRehearsalRate (cfg.sensitivity);
-      const double boost = rehearsal_rate
-                           * core::WMRehearsalBaseDelta (
-                               cfg.focus, cfg.sensitivity, cfg.stability);
-      slot.strength = std::min (wm_strength_max, slot.strength + boost);
-      slot.last_ts = now_s;
-      slot.strength_ts = now_s;
-      slot.metadata_dirty = true;
-      p_ctx.wm_slots_dirty = true;
-      // Continue to insert logic - rehearsal doesn't prevent new slot creation
-    }
-
-  // Retrieval-based rehearsal: boost WM slots that match retrieved memories.
-  // Uses chunking_threshold as the similarity requirement per spec.
-  const auto &retrieved = context.GetRetrievedMemoryEmbeddings ();
-  if (!retrieved.empty ())
-    {
-      const double retrieval_threshold = core::WMChunkingThreshold (cfg.focus);
-      const double rehearsal_rate = core::WMRehearsalRate (cfg.sensitivity);
-      const double boost = rehearsal_rate
-                           * core::WMRehearsalBaseDelta (
-                               cfg.focus, cfg.sensitivity, cfg.stability);
-
-      for (auto &slot : p_ctx.wm_slots)
-        {
-          for (const auto &[retrieved_id, retrieved_vec] : retrieved)
-            {
-              if (slot.embedding.size () != retrieved_vec.size ())
-                continue;
-              const double sim
-                  = core::CosineSimilarity (slot.embedding, retrieved_vec);
-              if (sim >= retrieval_threshold)
-                {
-                  slot.strength
-                      = std::min (wm_strength_max, slot.strength + boost);
-                  slot.last_ts = now_s;
-                  slot.strength_ts = now_s;
-                  slot.metadata_dirty = true;
-                  p_ctx.wm_slots_dirty = true;
-                  break; // Only boost once per slot per memory
-                }
-            }
-        }
     }
 
   // Insert new slot (evict highest eviction_score if capacity reached).
@@ -574,9 +531,9 @@ WorkingMemory::Execute (OperationContext &context, Transaction &tx) const
 
   // v2 persistence fields (working-memory.plan.md Section 4)
   slot.source_id = signal.source_id;
-  if (!acc.primary_modality.empty ())
+  if (!acc.memory_modality.empty ())
     {
-      slot.modality = acc.primary_modality;
+      slot.modality = acc.memory_modality;
     }
   else
     {

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -30,6 +31,10 @@ namespace cortext::operations::sparse_retrieval_route_sqlite_internal
 namespace
 {
 
+// Link rows store each link's distance next to its identity so a full
+// neighbor list can admit a closer reciprocal link by replacing its farthest
+// member without fetching the neighbor's neighbors. Schema migration 52
+// dropped every route generation written without those distances.
 constexpr int kSchemaVersion = 1;
 
 struct NodeRow
@@ -38,11 +43,28 @@ struct NodeRow
   std::vector<float> embedding;
   int level = 0;
   std::vector<std::vector<long long>> links;
+  /// Parallel to links: Distance (node embedding, linked embedding) at the
+  /// time the link was written.
+  std::vector<std::vector<float>> link_distances;
   bool active = false;
 };
 
+/// A graph row held in memory for traversal: adjacency plus a shared arena
+/// row. The stored normalized vector is row[i] * scale (scale is the inverse
+/// norm of a shared raw row, or 1 when the row is the stored normalized
+/// vector itself), which reproduces Normalize bit for bit.
+struct ResidentNode
+{
+  int level = 0;
+  bool active = false;
+  std::vector<std::vector<long long>> links;
+  internal::SharedEmbedding row;
+  float scale = 1.0f;
+};
+
 std::optional<std::vector<float>>
-Normalize (const Eigen::VectorXf &embedding, int embedding_dim)
+Normalize (const Eigen::Ref<const Eigen::VectorXf> &embedding,
+           int embedding_dim)
 {
   if (embedding_dim <= 0 || embedding.size () != embedding_dim)
     return std::nullopt;
@@ -72,6 +94,37 @@ Distance (const std::vector<float> &left, const std::vector<float> &right)
   for (std::size_t index = 0; index < left.size (); ++index)
     dot += static_cast<double> (left[index]) * right[index];
   return static_cast<float> (1.0 - dot);
+}
+
+/// Distance (left, stored normalized vector) for a resident row; each
+/// normalized component is formed exactly as Normalize formed it.
+float
+Distance (const std::vector<float> &left, const ResidentNode &node)
+{
+  const float *row = node.row.data ();
+  const float scale = node.scale;
+  double dot = 0.0;
+  for (std::size_t index = 0; index < left.size (); ++index)
+    dot += static_cast<double> (left[index]) * (row[index] * scale);
+  return static_cast<float> (1.0 - dot);
+}
+
+/// Inverse norm Normalize applies to @p embedding (nullopt when Normalize
+/// rejects it).
+std::optional<float>
+NormalizeScale (const float *embedding, int embedding_dim)
+{
+  double norm_squared = 0.0;
+  for (int index = 0; index < embedding_dim; ++index)
+    {
+      const float value = embedding[index];
+      if (!std::isfinite (value))
+        return std::nullopt;
+      norm_squared += static_cast<double> (value) * value;
+    }
+  if (!(norm_squared > 0.0) || !std::isfinite (norm_squared))
+    return std::nullopt;
+  return static_cast<float> (1.0 / std::sqrt (norm_squared));
 }
 
 int
@@ -168,16 +221,44 @@ ReadInt64 (const std::vector<unsigned char> &bytes, std::size_t &offset)
   return static_cast<long long> (value);
 }
 
-std::vector<unsigned char>
-EncodeLinks (const std::vector<std::vector<long long>> &links)
+void
+AppendFloat (std::vector<unsigned char> &bytes, float value)
 {
+  std::uint32_t encoded = 0;
+  std::memcpy (&encoded, &value, sizeof (encoded));
+  AppendUint32 (bytes, encoded);
+}
+
+std::optional<float>
+ReadFloat (const std::vector<unsigned char> &bytes, std::size_t &offset)
+{
+  const auto encoded = ReadUint32 (bytes, offset);
+  if (!encoded)
+    return std::nullopt;
+  float value = 0.0f;
+  std::memcpy (&value, &*encoded, sizeof (value));
+  if (!std::isfinite (value))
+    return std::nullopt;
+  return value;
+}
+
+std::vector<unsigned char>
+EncodeLinks (const std::vector<std::vector<long long>> &links,
+             const std::vector<std::vector<float>> &distances)
+{
+  if (distances.size () != links.size ())
+    throw std::invalid_argument ("sparse route link distances mismatch");
   std::vector<unsigned char> bytes;
   AppendUint32 (bytes, static_cast<std::uint32_t> (links.size ()));
-  for (const auto &level : links)
+  for (std::size_t level = 0; level < links.size (); ++level)
     {
-      AppendUint32 (bytes, static_cast<std::uint32_t> (level.size ()));
-      for (const long long memory_id : level)
+      if (distances[level].size () != links[level].size ())
+        throw std::invalid_argument ("sparse route link distances mismatch");
+      AppendUint32 (bytes, static_cast<std::uint32_t> (links[level].size ()));
+      for (const long long memory_id : links[level])
         AppendInt64 (bytes, memory_id);
+      for (const float distance : distances[level])
+        AppendFloat (bytes, distance);
     }
   return bytes;
 }
@@ -220,7 +301,13 @@ DecodeIdentityIds (const std::any &value, std::size_t capacity)
   return memory_ids;
 }
 
-std::optional<std::vector<std::vector<long long>>>
+struct DecodedLinks
+{
+  std::vector<std::vector<long long>> links;
+  std::vector<std::vector<float>> distances;
+};
+
+std::optional<DecodedLinks>
 DecodeLinks (const std::any &value, int expected_level,
              const Parameters &parameters)
 {
@@ -233,11 +320,13 @@ DecodeLinks (const std::any &value, int expected_level,
   if (!level_count
       || *level_count != static_cast<std::uint32_t> (expected_level + 1))
     return std::nullopt;
-  std::vector<std::vector<long long>> links (*level_count);
-  for (std::size_t level_index = 0; level_index < links.size ();
+  DecodedLinks decoded;
+  decoded.links.resize (*level_count);
+  decoded.distances.resize (*level_count);
+  for (std::size_t level_index = 0; level_index < decoded.links.size ();
        ++level_index)
     {
-      auto &level = links[level_index];
+      auto &level = decoded.links[level_index];
       const auto count = ReadUint32 (bytes, offset);
       const std::size_t link_limit
           = level_index == 0 ? parameters.row_addressed_level_zero_links
@@ -252,10 +341,145 @@ DecodeLinks (const std::any &value, int expected_level,
             return std::nullopt;
           level.push_back (*memory_id);
         }
+      auto &distances = decoded.distances[level_index];
+      distances.reserve (*count);
+      for (std::uint32_t index = 0; index < *count; ++index)
+        {
+          const auto distance = ReadFloat (bytes, offset);
+          if (!distance)
+            return std::nullopt;
+          distances.push_back (*distance);
+        }
     }
   if (offset != bytes.size ())
     return std::nullopt;
-  return links;
+  return decoded;
+}
+
+std::uint64_t
+QueryKey (const std::vector<float> &query)
+{
+  std::uint64_t hash = 0xcbf29ce484222325ULL;
+  const auto *bytes = reinterpret_cast<const unsigned char *> (query.data ());
+  for (std::size_t index = 0; index < query.size () * sizeof (float); ++index)
+    {
+      hash ^= bytes[index];
+      hash *= 0x100000001b3ULL;
+    }
+  return hash;
+}
+
+/// Open-addressing set of positive memory ids for one traversal. A query
+/// probes every level-zero link of each expanded row, so most probes hit an
+/// already-visited id; a flat table keeps that membership test allocation
+/// free. Capacity is sized from the traversal envelope and grows at half
+/// load, so the bound is the envelope, never the store.
+class VisitedIds
+{
+public:
+  explicit VisitedIds (std::size_t expected)
+  {
+    std::size_t capacity = 64;
+    while (capacity < expected * 2)
+      capacity <<= 1;
+    slots_.assign (capacity, 0);
+  }
+
+  bool Insert (long long memory_id)
+  {
+    if ((size_ + 1) * 2 > slots_.size ())
+      Grow ();
+    return Place (slots_, memory_id);
+  }
+
+private:
+  static std::size_t Hash (long long memory_id)
+  {
+    auto value = static_cast<std::uint64_t> (memory_id);
+    value ^= value >> 33U;
+    value *= 0xff51afd7ed558ccdULL;
+    value ^= value >> 33U;
+    return static_cast<std::size_t> (value);
+  }
+
+  bool Place (std::vector<long long> &slots, long long memory_id)
+  {
+    const std::size_t mask = slots.size () - 1;
+    for (std::size_t index = Hash (memory_id) & mask;;
+         index = (index + 1) & mask)
+      {
+        if (slots[index] == memory_id)
+          return false;
+        if (slots[index] == 0)
+          {
+            slots[index] = memory_id;
+            if (&slots == &slots_)
+              ++size_;
+            return true;
+          }
+      }
+  }
+
+  void Grow ()
+  {
+    std::vector<long long> grown (slots_.size () * 2, 0);
+    for (const long long memory_id : slots_)
+      if (memory_id != 0)
+        Place (grown, memory_id);
+    slots_.swap (grown);
+  }
+
+  std::vector<long long> slots_;
+  std::size_t size_ = 0;
+};
+
+struct Admission
+{
+  bool changed = false;
+  long long evicted = 0; ///< replaced member, 0 when the list had room
+};
+
+/// Admit memory_id into row's level list. A full list replaces a member
+/// farther than memory_id (the farthest such member, or with `force` the
+/// farthest member at any distance) that `evictable` allows; at level 0 the
+/// caller only allows members that keep another inbound link, so admitting
+/// a closer neighbor never strands a node.
+template <typename Evictable>
+Admission
+AdmitLink (NodeRow &row, int level, long long memory_id, float distance,
+           std::size_t link_limit, Evictable evictable, bool force = false)
+{
+  if (level < 0 || static_cast<std::size_t> (level) >= row.links.size ()
+      || row.link_distances.size () != row.links.size ())
+    return {};
+  auto &links = row.links[static_cast<std::size_t> (level)];
+  auto &distances = row.link_distances[static_cast<std::size_t> (level)];
+  if (distances.size () != links.size ()
+      || std::find (links.begin (), links.end (), memory_id) != links.end ())
+    return {};
+  if (links.size () < link_limit)
+    {
+      links.push_back (memory_id);
+      distances.push_back (distance);
+      return { true, 0 };
+    }
+  std::size_t victim = links.size ();
+  for (std::size_t index = 0; index < links.size (); ++index)
+    {
+      if ((!force && !(distance < distances[index]))
+          || !evictable (level, links[index]))
+        continue;
+      if (victim == links.size () || distances[index] > distances[victim]
+          || (distances[index] == distances[victim]
+              && links[index] > links[victim]))
+        victim = index;
+    }
+  if (victim == links.size ())
+    return {};
+  const long long evicted = links[victim];
+  links[victim] = memory_id;
+  distances[victim] = distance;
+  return { true, evicted };
 }
 
 std::string
@@ -299,7 +523,8 @@ DecodeNode (const std::map<std::string, std::any> &row, int embedding_dim,
   if (!decoded_embedding || !decoded_links)
     return std::nullopt;
   node.embedding = std::move (*decoded_embedding);
-  node.links = std::move (*decoded_links);
+  node.links = std::move (decoded_links->links);
+  node.link_distances = std::move (decoded_links->distances);
   return node;
 }
 
@@ -311,15 +536,26 @@ FetchNodes (Store &store, int embedding_dim,
 {
   if (memory_ids.empty ())
     return std::vector<NodeRow>{};
+  // Round the IN list up to a power of two, padded with the never-stored
+  // id 0, so a traversal reuses a handful of prepared statements instead of
+  // preparing (and evicting from the shared statement cache) one statement
+  // per distinct batch size.
+  std::size_t placeholders = 16;
+  while (placeholders < memory_ids.size ())
+    placeholders <<= 1;
   std::vector<std::any> params;
-  params.reserve (memory_ids.size () + 1);
+  params.reserve (placeholders + 1);
   params.emplace_back (generation);
   for (const long long memory_id : memory_ids)
     params.emplace_back (memory_id);
+  while (params.size () < placeholders + 1)
+    params.emplace_back (0LL);
   const auto rows = store.Execute (
       "SELECT memory_id, embedding, level, links, active "
-      "FROM cortext_sparse_route_nodes WHERE generation = ? AND memory_id IN ("
-          + Placeholders (memory_ids.size ()) + ")",
+      // Unary + keeps the planner on the rowid: one table seek per row
+      // instead of a generation-index seek plus a table seek.
+      "FROM cortext_sparse_route_nodes WHERE +generation = ? AND memory_id IN ("
+          + Placeholders (placeholders) + ")",
       params);
   std::vector<NodeRow> decoded;
   decoded.reserve (rows.size ());
@@ -367,18 +603,171 @@ struct Route::Impl
   mutable std::size_t activation_search_node_budget = 0;
   std::unordered_map<long long, std::vector<float>> delta_embeddings;
   std::unordered_set<long long> removed;
-  std::unordered_map<long long, std::shared_ptr<const NodeRow>> node_cache;
-  std::deque<long long> node_cache_order;
+  /// Every row of this generation, resident in memory: loaded once when the
+  /// route opens and replaced with exactly the rows each committed seal
+  /// writes. Traversal never reads a node row from SQLite; SQLite stays the
+  /// durable authority the graph is reloaded from.
+  std::unordered_map<long long, ResidentNode> resident;
+  /// Level-0 links pointing at each identity, over every resident row.
+  std::unordered_map<long long, std::uint32_t> level_zero_indegree;
+  std::function<internal::SharedEmbedding (long long)> embedding_provider;
+
+  void CountLevelZeroLinks (const ResidentNode &node, bool add)
+  {
+    if (node.links.empty ())
+      return;
+    for (const long long target : node.links.front ())
+      {
+        if (add)
+          {
+            ++level_zero_indegree[target];
+            continue;
+          }
+        const auto count = level_zero_indegree.find (target);
+        if (count != level_zero_indegree.end () && --count->second == 0)
+          level_zero_indegree.erase (count);
+      }
+  }
+
+  std::uint32_t LevelZeroIndegree (long long memory_id) const
+  {
+    const auto count = level_zero_indegree.find (memory_id);
+    return count == level_zero_indegree.end () ? 0 : count->second;
+  }
+  std::size_t restart_rows_loaded = 0;
   std::vector<float> activation_centroid;
   std::vector<long long> activation_identity_ids;
   mutable std::size_t last_search_node_rows = 0;
   mutable std::size_t last_activation_snapshot_rows = 0;
-  mutable std::size_t last_activation_snapshot_cache_miss_rows = 0;
   mutable std::size_t last_activation_frontier_seed_count = 0;
   mutable std::size_t last_search_distance_evaluations = 0;
   mutable int last_search_failure_code = 0;
   mutable int last_seal_failure_code = 0;
+  std::size_t last_seal_walk_reuse_count = 0;
   mutable std::mutex mutex;
+  /// Nearest identities of recently walked activated queries, keyed by the
+  /// normalized query. A new memory's embedding is walked at ingest; its
+  /// seal reuses that neighborhood as link proposals instead of walking the
+  /// construction envelope again. Cleared by every seal, bounded by 2B.
+  mutable std::unordered_map<std::uint64_t,
+                             std::pair<std::vector<float>,
+                                       std::vector<long long>>>
+      walked_neighborhoods;
+  mutable std::deque<std::uint64_t> walked_order;
+
+  /// Load every row of the generation in memory_id order, a bounded chunk
+  /// at a time so no whole-table result set is materialized.
+  bool LoadGeneration ()
+  {
+    resident.clear ();
+    level_zero_indegree.clear ();
+    constexpr long long kChunkRows = 4096;
+    long long cursor = 0;
+    std::size_t loaded = 0;
+    while (true)
+      {
+        const auto rows = store->Execute (
+            "SELECT memory_id, embedding, level, links, active "
+            "FROM cortext_sparse_route_nodes "
+            "WHERE +generation = ? AND memory_id > ? "
+            "ORDER BY memory_id LIMIT ?",
+            { generation, cursor, kChunkRows });
+        for (const auto &row : rows)
+          {
+            auto node = DecodeNode (row, embedding_dim, parameters);
+            if (!node)
+              return false;
+            cursor = node->memory_id;
+            Admit (std::move (*node));
+            ++loaded;
+          }
+        if (rows.size () < static_cast<std::size_t> (kChunkRows))
+          break;
+      }
+    restart_rows_loaded = 1 + loaded;
+    return true;
+  }
+
+  /// Re-read rows another write path committed (bounded by that write).
+  bool ReloadRows (const std::vector<long long> &memory_ids)
+  {
+    constexpr std::size_t kChunkIds = 4096;
+    for (std::size_t begin = 0; begin < memory_ids.size ();
+         begin += kChunkIds)
+      {
+        const std::vector<long long> chunk (
+            memory_ids.begin () + static_cast<std::ptrdiff_t> (begin),
+            memory_ids.begin ()
+                + static_cast<std::ptrdiff_t> (
+                    std::min (memory_ids.size (), begin + kChunkIds)));
+        for (const long long memory_id : chunk)
+          {
+            const auto prior = resident.find (memory_id);
+            if (prior == resident.end ())
+              continue;
+            CountLevelZeroLinks (prior->second, false);
+            resident.erase (prior);
+          }
+        const auto rows = FetchNodes (*store, embedding_dim, parameters,
+                                      generation, chunk);
+        if (!rows)
+          return false;
+        for (auto node : *rows)
+          Admit (std::move (node));
+      }
+    return true;
+  }
+
+  /// Make a decoded generation row resident. Its embedding shares the
+  /// memory's current arena row when that row normalizes to the stored
+  /// vector bit for bit; otherwise the stored vector becomes the row.
+  const ResidentNode &Admit (NodeRow &&node)
+  {
+    ResidentNode resident_node;
+    resident_node.level = node.level;
+    resident_node.active = node.active;
+    resident_node.links = std::move (node.links);
+    if (embedding_provider)
+      {
+        internal::SharedEmbedding raw = embedding_provider (node.memory_id);
+        if (raw.size () == embedding_dim
+            && node.embedding.size ()
+                   == static_cast<std::size_t> (embedding_dim))
+          if (const auto scale = NormalizeScale (raw.data (), embedding_dim))
+            {
+              bool same = true;
+              const float *values = raw.data ();
+              for (int index = 0; index < embedding_dim && same; ++index)
+                {
+                  const float normalized = values[index] * *scale;
+                  same = std::memcmp (&normalized,
+                                      &node.embedding[static_cast<std::size_t> (
+                                          index)],
+                                      sizeof (float))
+                         == 0;
+                }
+              if (same)
+                {
+                  resident_node.row = std::move (raw);
+                  resident_node.scale = *scale;
+                }
+            }
+      }
+    if (resident_node.row.empty ())
+      {
+        resident_node.row = internal::SharedEmbedding (
+            node.embedding.data (),
+            static_cast<Eigen::Index> (node.embedding.size ()));
+        resident_node.scale = 1.0f;
+      }
+    const auto prior = resident.find (node.memory_id);
+    if (prior != resident.end ())
+      CountLevelZeroLinks (prior->second, false);
+    CountLevelZeroLinks (resident_node, true);
+    return resident.insert_or_assign (node.memory_id,
+                                      std::move (resident_node))
+        .first->second;
+  }
 };
 
 Route::Route (std::unique_ptr<Impl> impl) : impl_ (std::move (impl)) {}
@@ -390,7 +779,7 @@ Route::Create (
     Store &store, int embedding_dim,
     const std::vector<std::pair<long long, Eigen::VectorXf>> &entries,
     const sparse_retrieval_route_internal::Route &hnsw_route,
-    Parameters parameters)
+    Parameters parameters, EmbeddingProvider provider)
 {
   if (embedding_dim <= 0)
     return nullptr;
@@ -424,7 +813,8 @@ Route::Create (
               "memory_id, embedding, level, links, active, generation) "
               "VALUES(?, ?, ?, ?, 1, 1)",
               { node.memory_id, EncodeEmbedding (node.embedding),
-                static_cast<long long> (node.level), EncodeLinks (node.links) });
+                static_cast<long long> (node.level),
+                EncodeLinks (node.links, node.link_distances) });
         }
       if (!expected.empty ())
         return nullptr;
@@ -438,11 +828,15 @@ Route::Create (
             static_cast<long long> (snapshot->max_level),
             static_cast<long long> (snapshot->nodes.size ()) });
       tx->Commit ();
-      return std::shared_ptr<Route> (new Route (std::make_unique<Impl> (
+      auto impl = std::make_unique<Impl> (
           store, embedding_dim, snapshot->entry_memory_id,
           snapshot->max_level,
           static_cast<long long> (snapshot->nodes.size ()), 1,
-          std::move (parameters))));
+          std::move (parameters));
+      impl->embedding_provider = std::move (provider);
+      if (!impl->LoadGeneration ())
+        return nullptr;
+      return std::shared_ptr<Route> (new Route (std::move (impl)));
     }
   catch (...)
     {
@@ -451,7 +845,8 @@ Route::Create (
 }
 
 std::shared_ptr<Route>
-Route::Open (Store &store, int embedding_dim, Parameters parameters)
+Route::Open (Store &store, int embedding_dim, Parameters parameters,
+             EmbeddingProvider provider)
 {
   if (embedding_dim <= 0)
     return nullptr;
@@ -549,6 +944,9 @@ Route::Open (Store &store, int embedding_dim, Parameters parameters)
           impl->activation_centroid = *activation_centroid;
           impl->activation_identity_ids = *activation_identity_ids;
         }
+      impl->embedding_provider = std::move (provider);
+      if (!impl->LoadGeneration ())
+        return nullptr;
       return std::shared_ptr<Route> (new Route (std::move (impl)));
     }
   catch (...)
@@ -559,7 +957,7 @@ Route::Open (Store &store, int embedding_dim, Parameters parameters)
 
 std::shared_ptr<Route>
 Route::OpenOrBeginBuild (Store &store, int embedding_dim,
-                         Parameters parameters)
+                         Parameters parameters, EmbeddingProvider provider)
 {
   if (embedding_dim <= 0)
     return nullptr;
@@ -587,11 +985,15 @@ Route::OpenOrBeginBuild (Store &store, int embedding_dim,
               && max_level
                      <= static_cast<long long> (parameters.maximum_level)
               && active_count >= 0 && generation > 0)
-            return std::shared_ptr<Route> (new Route (
-                std::make_unique<Impl> (
-                    store, embedding_dim, entry,
-                    static_cast<int> (max_level), active_count, generation,
-                    parameters, true, cursor)));
+            {
+              auto impl = std::make_unique<Impl> (
+                  store, embedding_dim, entry, static_cast<int> (max_level),
+                  active_count, generation, parameters, true, cursor);
+              impl->embedding_provider = std::move (provider);
+              if (!impl->LoadGeneration ())
+                return nullptr;
+              return std::shared_ptr<Route> (new Route (std::move (impl)));
+            }
         }
 
       // A missing build record means the prior partial generation was not
@@ -617,9 +1019,13 @@ Route::OpenOrBeginBuild (Store &store, int embedding_dim,
           { static_cast<long long> (kSchemaVersion),
             static_cast<long long> (embedding_dim), generation });
       tx->Commit ();
-      return std::shared_ptr<Route> (new Route (std::make_unique<Impl> (
-          store, embedding_dim, 0, 0, 0, generation,
-          std::move (parameters), true, 0)));
+      auto impl = std::make_unique<Impl> (store, embedding_dim, 0, 0, 0,
+                                          generation, std::move (parameters),
+                                          true, 0);
+      impl->embedding_provider = std::move (provider);
+      if (!impl->LoadGeneration ())
+        return nullptr;
+      return std::shared_ptr<Route> (new Route (std::move (impl)));
     }
   catch (...)
     {
@@ -628,7 +1034,8 @@ Route::OpenOrBeginBuild (Store &store, int embedding_dim,
 }
 
 bool
-Route::Upsert (long long memory_id, const Eigen::VectorXf &embedding)
+Route::Upsert (long long memory_id,
+               const Eigen::Ref<const Eigen::VectorXf> &embedding)
 {
   if (!impl_ || !impl_->store || memory_id <= 0)
     return false;
@@ -677,8 +1084,8 @@ Route::Remove (long long memory_id)
 }
 
 bool
-Route::StagePendingUpsert (long long memory_id,
-                           const Eigen::VectorXf &embedding)
+Route::StagePendingUpsert (
+    long long memory_id, const Eigen::Ref<const Eigen::VectorXf> &embedding)
 {
   if (!impl_ || memory_id <= 0)
     return false;
@@ -754,24 +1161,26 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       impl_->last_search_failure_code = 0;
       impl_->last_search_node_rows = 0;
       impl_->last_activation_snapshot_rows = 0;
-      impl_->last_activation_snapshot_cache_miss_rows = 0;
       impl_->last_activation_frontier_seed_count = 0;
       impl_->last_search_distance_evaluations = 0;
       const bool use_construction_envelope
           = impl_->building || construction_search;
       const std::size_t search_node_budget
           = use_construction_envelope
-                ? impl_->parameters.backfill_search_node_budget
+                ? impl_->parameters.construction_search_node_budget
                 : impl_->activation_search_node_budget;
       const std::size_t search_effort
           = use_construction_envelope
-                ? impl_->parameters.backfill_search_ef
+                ? impl_->parameters.construction_search_ef
                 : impl_->activation_search_ef;
       if (impl_->delta_embeddings.size () > search_node_budget)
         {
           impl_->last_search_failure_code = 2;
           return std::nullopt;
         }
+      const bool records_walk = return_all_activated
+                                && !use_construction_envelope
+                                && !rebuild_activation;
       const std::size_t persisted_node_budget
           = use_construction_envelope
                 ? search_node_budget
@@ -783,49 +1192,23 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       const std::size_t node_fetch_budget = persisted_node_budget;
       struct QueryNode
       {
-        std::shared_ptr<const NodeRow> row;
+        const ResidentNode *row = nullptr;
         std::optional<float> distance;
       };
       std::unordered_map<long long, QueryNode> cache;
       cache.reserve (node_fetch_budget + activation_identity_target);
-      std::vector<std::shared_ptr<const NodeRow>> activation_nodes;
+      std::vector<const ResidentNode *> activation_nodes;
       if (return_all_activated && !use_construction_envelope
           && !rebuild_activation && !impl_->activation_identity_ids.empty ())
         {
-          std::vector<long long> missing;
-          missing.reserve (impl_->activation_identity_ids.size ());
           activation_nodes.reserve (impl_->activation_identity_ids.size ());
           for (const long long memory_id : impl_->activation_identity_ids)
             {
-              const auto cached = impl_->node_cache.find (memory_id);
-              if (cached == impl_->node_cache.end ())
-                missing.push_back (memory_id);
-              else
-                {
-                  activation_nodes.push_back (cached->second);
-                  cache.emplace (memory_id,
-                                 QueryNode{ cached->second, {} });
-                }
-            }
-          const auto fetched = FetchNodes (
-              *impl_->store, impl_->embedding_dim, impl_->parameters,
-              impl_->generation, missing);
-          if (!fetched)
-            {
-              impl_->last_search_failure_code = 10;
-              return std::nullopt;
-            }
-          impl_->last_activation_snapshot_cache_miss_rows
-              = fetched->size ();
-          for (auto node : *fetched)
-            {
-              const long long memory_id = node.memory_id;
-              auto shared
-                  = std::make_shared<const NodeRow> (std::move (node));
-              impl_->node_cache[memory_id] = shared;
-              impl_->node_cache_order.push_back (memory_id);
-              activation_nodes.push_back (shared);
-              cache.emplace (memory_id, QueryNode{ std::move (shared), {} });
+              const auto resident = impl_->resident.find (memory_id);
+              if (resident == impl_->resident.end ())
+                continue;
+              activation_nodes.push_back (&resident->second);
+              cache.emplace (memory_id, QueryNode{ &resident->second, {} });
             }
           impl_->last_activation_snapshot_rows = activation_nodes.size ();
           if (impl_->last_activation_snapshot_rows
@@ -836,14 +1219,6 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
               impl_->last_search_failure_code = 11;
               return std::nullopt;
             }
-          while (impl_->node_cache.size ()
-                     > impl_->parameters.shadow_node_capacity
-                 && !impl_->node_cache_order.empty ())
-            {
-              const long long oldest = impl_->node_cache_order.front ();
-              impl_->node_cache_order.pop_front ();
-              impl_->node_cache.erase (oldest);
-            }
         }
       std::unordered_set<long long> canonical_ids;
       canonical_ids.reserve (node_fetch_budget);
@@ -852,7 +1227,7 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
         auto &node = cache.at (memory_id);
         if (node.distance)
           return *node.distance;
-        node.distance = Distance (*normalized, node.row->embedding);
+        node.distance = Distance (*normalized, *node.row);
         ++impl_->last_search_distance_evaluations;
         return *node.distance;
       };
@@ -871,56 +1246,25 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
                               return cache.count (memory_id) != 0;
                             }),
             memory_ids.end ());
-        std::vector<long long> missing;
-        missing.reserve (memory_ids.size ());
+        // Links can point into an older unpublished generation while a
+        // bounded rebuild is in progress. Those identities are not part of
+        // this generation's traversal surface, but each still consumes one
+        // slot of the per-query row envelope, exactly as a requested row the
+        // generation-qualified fetch would not return.
+        std::size_t absent = 0;
         for (const long long memory_id : memory_ids)
           {
-            if (canonical_node_rows + missing.size () >= node_fetch_budget)
+            if (canonical_node_rows + absent >= node_fetch_budget)
               break;
-            const auto cached = impl_->node_cache.find (memory_id);
-            if (cached == impl_->node_cache.end ())
-              missing.push_back (memory_id);
-            else
+            const auto resident = impl_->resident.find (memory_id);
+            if (resident == impl_->resident.end ())
               {
-                cache.emplace (memory_id,
-                               QueryNode{ cached->second, {} });
-                canonical_ids.insert (memory_id);
-                ++canonical_node_rows;
+                ++absent;
+                continue;
               }
-          }
-        const std::size_t remaining
-            = node_fetch_budget - canonical_node_rows;
-        if (missing.size () > remaining)
-          missing.resize (remaining);
-        const auto nodes
-            = FetchNodes (*impl_->store, impl_->embedding_dim,
-                          impl_->parameters, impl_->generation, missing);
-        // Links can point into an older unpublished generation while a
-        // bounded rebuild is in progress. Those nodes are simply not part of
-        // this generation's traversal surface.
-        if (!nodes)
-          {
-            impl_->last_search_failure_code = 3;
-            return false;
-          }
-        for (auto node : *nodes)
-          {
-            const long long memory_id = node.memory_id;
-            auto shared
-                = std::make_shared<const NodeRow> (std::move (node));
-            impl_->node_cache[memory_id] = shared;
-            impl_->node_cache_order.push_back (memory_id);
-            cache.emplace (memory_id, QueryNode{ std::move (shared), {} });
+            cache.emplace (memory_id, QueryNode{ &resident->second, {} });
             canonical_ids.insert (memory_id);
             ++canonical_node_rows;
-          }
-        while (impl_->node_cache.size ()
-                   > impl_->parameters.shadow_node_capacity
-               && !impl_->node_cache_order.empty ())
-          {
-            const long long oldest = impl_->node_cache_order.front ();
-            impl_->node_cache_order.pop_front ();
-            impl_->node_cache.erase (oldest);
           }
         impl_->last_search_node_rows = canonical_node_rows;
         return true;
@@ -996,10 +1340,12 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
       std::priority_queue<Ranked, std::vector<Ranked>, std::greater<Ranked>>
           frontier;
       std::priority_queue<Ranked> best;
-      std::unordered_set<long long> visited;
-      visited.reserve (search_node_budget + activation_nodes.size ());
+      // Seen-but-unfetched link targets outnumber fetched rows; start at a
+      // small multiple of the row envelope and let the table grow.
+      VisitedIds visited (4
+                          * (search_node_budget + activation_nodes.size ()));
       auto seed_frontier = [&] (const long long memory_id) {
-        if (memory_id <= 0 || !visited.insert (memory_id).second)
+        if (memory_id <= 0 || !visited.Insert (memory_id))
           return false;
         const auto node = cache.find (memory_id);
         if (node == cache.end ())
@@ -1054,7 +1400,7 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
                 continue;
               for (const long long neighbor_id
                    : node->second.row->links.front ())
-                if (visited.insert (neighbor_id).second)
+                if (visited.Insert (neighbor_id))
                   neighbor_ids.push_back (neighbor_id);
             }
           if (!fetch (neighbor_ids))
@@ -1236,6 +1582,31 @@ Route::SearchWithEnvelope (const Eigen::VectorXf &query,
           (void)distance;
           result.push_back (memory_id);
         }
+      if (records_walk)
+        {
+          const std::size_t kept = std::min (
+              result.size (),
+              impl_->parameters.row_addressed_level_zero_links
+                  + impl_->parameters.backfill_batch_size);
+          const std::uint64_t key = QueryKey (*normalized);
+          if (impl_->walked_neighborhoods
+                  .insert_or_assign (
+                      key, std::make_pair (
+                               *normalized,
+                               std::vector<long long> (
+                                   result.begin (),
+                                   result.begin ()
+                                       + static_cast<std::ptrdiff_t> (kept))))
+                  .second)
+            impl_->walked_order.push_back (key);
+          while (impl_->walked_order.size ()
+                 > 2 * impl_->parameters.backfill_batch_size)
+            {
+              impl_->walked_neighborhoods.erase (
+                  impl_->walked_order.front ());
+              impl_->walked_order.pop_front ();
+            }
+        }
       if (!impl_->building && !construction_search && !rebuild_activation)
         {
           impl_->activation_search_ef = std::min (
@@ -1310,6 +1681,10 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
 {
   if (!impl_ || !impl_->store)
     return false;
+  {
+    std::lock_guard<std::mutex> lock (impl_->mutex);
+    impl_->last_seal_walk_reuse_count = 0;
+  }
   std::unordered_map<long long, std::vector<long long>> neighbor_proposals;
   if (!hnsw_route)
     {
@@ -1328,8 +1703,57 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
             queries.emplace_back (memory_id, std::move (query));
           }
       }
+      std::unordered_map<long long, std::vector<long long>> walked;
+      {
+        std::lock_guard<std::mutex> lock (impl_->mutex);
+        if (!impl_->building)
+          for (const auto &[memory_id, embedding] : impl_->delta_embeddings)
+            {
+              const auto found
+                  = impl_->walked_neighborhoods.find (QueryKey (embedding));
+              if (found != impl_->walked_neighborhoods.end ()
+                  && found->second.first == embedding)
+                walked.emplace (memory_id, found->second.second);
+            }
+      }
+      {
+        std::lock_guard<std::mutex> lock (impl_->mutex);
+        impl_->last_seal_walk_reuse_count = walked.size ();
+      }
       for (const auto &[memory_id, query] : queries)
         {
+          const auto reuse = walked.find (memory_id);
+          if (reuse != walked.end ())
+            {
+              // The ingest walk already ranked this exact embedding over a
+              // larger envelope; other staged rows join as candidates and
+              // the link selection below ranks every candidate exactly.
+              // Same candidate count as the construction walk: M + |delta|
+              // nearest from the ingest walk, then the staged rows.
+              const std::size_t walked_limit
+                  = impl_->parameters.row_addressed_neighbor_count
+                    + queries.size ();
+              std::vector<long long> candidates;
+              candidates.reserve (walked_limit + queries.size ());
+              for (const long long candidate : reuse->second)
+                {
+                  if (candidates.size () >= walked_limit)
+                    break;
+                  if (candidate != memory_id)
+                    candidates.push_back (candidate);
+                }
+              for (const auto &[staged_id, staged_query] : queries)
+                {
+                  (void)staged_query;
+                  if (staged_id != memory_id
+                      && std::find (candidates.begin (), candidates.end (),
+                                    staged_id)
+                             == candidates.end ())
+                    candidates.push_back (staged_id);
+                }
+              neighbor_proposals.emplace (memory_id, std::move (candidates));
+              continue;
+            }
           auto candidates = SearchWithEnvelope (
               query, impl_->parameters.row_addressed_neighbor_count
                          + queries.size (),
@@ -1384,9 +1808,20 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
 
           // Existing adjacency is derived from the stored embedding. Keeping
           // those links after an embedding moves can make the row-addressed
-          // route silently miss its exact target. Invalidate the generation
-          // and let the bounded backfill rebuild it instead of publishing a
-          // mixed old-topology/new-vector snapshot.
+          // route silently miss its exact target, so a moved active node is
+          // relinked locally instead: its old outbound adjacency is replaced
+          // by neighbors selected for the moved vector, and the same
+          // reciprocal path used for a new node links it from its new
+          // neighborhood. Inbound links held by old neighbors are kept: a
+          // traversal always scores a reached row by its stored vector, so a
+          // stale inbound edge is an extra path rather than a wrong answer,
+          // while stripping those edges measurably lowered reachability of
+          // unrelated rows. The relink slice is bounded by B, the same
+          // knob-derived row count one backfill seal inserts; a larger moved
+          // slice still invalidates the generation and lets the bounded
+          // backfill rebuild it instead of publishing a mixed
+          // old-topology/new-vector snapshot.
+          std::unordered_set<long long> moved;
           bool topology_requires_rebuild = false;
           for (const auto &[memory_id, embedding] : impl_->delta_embeddings)
             {
@@ -1394,13 +1829,17 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               if (prior == prior_by_id.end () || !prior->second.active)
                 continue;
               constexpr float kEmbeddingMovementEpsilon = 1e-6f;
-              topology_requires_rebuild
-                  = prior->second.embedding.size () != embedding.size ()
-                    || Distance (embedding, prior->second.embedding)
-                           > kEmbeddingMovementEpsilon;
-              if (topology_requires_rebuild)
-                break;
+              if (prior->second.embedding.size () != embedding.size ())
+                {
+                  topology_requires_rebuild = true;
+                  break;
+                }
+              if (Distance (embedding, prior->second.embedding)
+                  > kEmbeddingMovementEpsilon)
+                moved.insert (memory_id);
             }
+          if (moved.size () > impl_->parameters.backfill_batch_size)
+            topology_requires_rebuild = true;
           if (topology_requires_rebuild)
             {
               impl_->last_seal_failure_code = 62;
@@ -1413,8 +1852,6 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                         "WHERE singleton = 1");
               tx->Execute ("DELETE FROM cortext_sparse_route_dirty");
               tx->Commit ();
-              impl_->node_cache.clear ();
-              impl_->node_cache_order.clear ();
               impl_->delta_embeddings.clear ();
               impl_->removed.clear ();
               impl_->entry_memory_id = 0;
@@ -1442,11 +1879,37 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
           int next_max_level = impl_->max_level;
           const long long next_generation = impl_->generation;
 
+          const auto link_limit_at = [&] (int level) {
+            return level == 0
+                       ? impl_->parameters.row_addressed_level_zero_links
+                       : impl_->parameters.row_addressed_neighbor_count;
+          };
+          // Level-0 in-degree as this seal leaves it: the resident count plus
+          // the links this seal has added or dropped so far.
+          std::unordered_map<long long, long long> indegree_delta;
+          const auto indegree = [&] (long long memory_id) {
+            const auto delta = indegree_delta.find (memory_id);
+            return static_cast<long long> (
+                       impl_->LevelZeroIndegree (memory_id))
+                   + (delta == indegree_delta.end () ? 0 : delta->second);
+          };
+          const auto evictable = [&] (int level, long long memory_id) {
+            return level > 0 || indegree (memory_id) > 1;
+          };
+          const auto record_admission
+              = [&] (int level, long long memory_id, const Admission &result) {
+                  if (level != 0 || !result.changed)
+                    return;
+                  ++indegree_delta[memory_id];
+                  if (result.evicted > 0)
+                    --indegree_delta[result.evicted];
+                };
           for (const long long memory_id : roots)
             {
               const auto removed = impl_->removed.count (memory_id) != 0;
               const auto delta = impl_->delta_embeddings.find (memory_id);
               const auto prior = prior_by_id.find (memory_id);
+              const bool relink = moved.count (memory_id) != 0;
               if (removed)
                 {
                   if (prior == prior_by_id.end ())
@@ -1461,7 +1924,7 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               if (delta == impl_->delta_embeddings.end ())
                 continue;
 
-              if (prior != prior_by_id.end ())
+              if (prior != prior_by_id.end () && !relink)
                 {
                   NodeRow node = prior->second;
                   if (!node.active)
@@ -1529,76 +1992,167 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                                   || (left.distance == right.distance
                                       && left.memory_id < right.memory_id);
                          });
+              std::unordered_map<long long, const Neighbor *> neighbor_index;
+              neighbor_index.reserve (neighbors.size ());
+              for (const auto &neighbor : neighbors)
+                neighbor_index.emplace (neighbor.memory_id, &neighbor);
               NodeRow node;
               node.memory_id = memory_id;
               node.embedding = delta->second;
-              node.level = DeterministicLevel (
-                  memory_id, impl_->parameters.maximum_level);
+              // A relinked node keeps its persisted level so the canonical
+              // hierarchy entry and max-level metadata stay valid.
+              node.level = relink ? prior->second.level
+                                  : DeterministicLevel (
+                                      memory_id,
+                                      impl_->parameters.maximum_level);
               node.links.resize (static_cast<std::size_t> (node.level + 1));
+              node.link_distances.resize (node.links.size ());
               node.active = true;
               for (int level = 0; level <= node.level; ++level)
                 {
                   auto &links
                       = node.links[static_cast<std::size_t> (level)];
-                  const std::size_t link_limit
-                      = level == 0
-                            ? impl_->parameters
-                                  .row_addressed_level_zero_links
-                            : impl_->parameters
-                                  .row_addressed_neighbor_count;
+                  auto &distances
+                      = node.link_distances[static_cast<std::size_t> (level)];
+                  const std::size_t link_limit = link_limit_at (level);
                   links.reserve (std::min (link_limit, neighbors.size ()));
+                  distances.reserve (links.capacity ());
+                  // HNSW neighbor selection: a candidate nearer to an
+                  // already-selected neighbor than to this node is reachable
+                  // through that neighbor, so the slot goes to a candidate
+                  // in another direction first. Skipped candidates fill any
+                  // remaining slots in distance order.
+                  std::vector<const Neighbor *> skipped;
                   for (const auto &neighbor : neighbors)
                     {
                       if (neighbor.node.level < level)
                         continue;
-                      links.push_back (neighbor.memory_id);
                       if (links.size () >= link_limit)
                         break;
+                      bool covered = false;
+                      for (const long long selected_id : links)
+                        {
+                          const auto selected = neighbor_index.find (
+                              selected_id);
+                          if (selected != neighbor_index.end ()
+                              && Distance (neighbor.node.embedding,
+                                           selected->second->node.embedding)
+                                     < neighbor.distance)
+                            {
+                              covered = true;
+                              break;
+                            }
+                        }
+                      if (covered)
+                        {
+                          skipped.push_back (&neighbor);
+                          continue;
+                        }
+                      links.push_back (neighbor.memory_id);
+                      distances.push_back (neighbor.distance);
+                    }
+                  for (const Neighbor *neighbor : skipped)
+                    {
+                      if (links.size () >= link_limit)
+                        break;
+                      links.push_back (neighbor->memory_id);
+                      distances.push_back (neighbor->distance);
+                    }
+                  // Upper-level members are sparse in the proposal set, so a
+                  // relinked hierarchy node keeps its prior upper-level
+                  // links behind the new ones. Level zero, which owns exact
+                  // locality, is rebuilt only from the moved vector. A kept
+                  // link carries its prior distance; it only orders eviction.
+                  if (relink && level > 0)
+                    {
+                      const auto &prior_links = prior->second.links[
+                          static_cast<std::size_t> (level)];
+                      const auto &prior_distances
+                          = prior->second.link_distances[
+                              static_cast<std::size_t> (level)];
+                      for (std::size_t index = 0;
+                           index < prior_links.size (); ++index)
+                        {
+                          if (links.size () >= link_limit)
+                            break;
+                          const long long prior_link = prior_links[index];
+                          if (prior_link != memory_id
+                              && impl_->removed.count (prior_link) == 0
+                              && std::find (links.begin (), links.end (),
+                                            prior_link)
+                                     == links.end ())
+                            {
+                              links.push_back (prior_link);
+                              distances.push_back (prior_distances[index]);
+                            }
+                        }
                     }
                 }
+              if (relink && !prior->second.links.empty ())
+                for (const long long target : prior->second.links.front ())
+                  --indegree_delta[target];
+              for (const long long target : node.links.front ())
+                ++indegree_delta[target];
               updates[memory_id] = node;
-              ++next_active_count;
+              if (!relink)
+                ++next_active_count;
               if (next_entry_memory_id == 0 || node.level > next_max_level)
                 {
                   next_entry_memory_id = memory_id;
                   next_max_level = node.level;
                 }
 
+              // Every selected neighbor receives the reciprocal link. A full
+              // neighbor list admits the new node only by replacing its
+              // farthest member when the new node is closer, so a mature
+              // node keeps its nearest neighborhood as later neighbors
+              // arrive instead of churning one slot.
               for (int level = 0; level <= node.level; ++level)
                 {
-                  std::size_t reciprocal_count = 0;
+                  const std::size_t link_limit = link_limit_at (level);
+                  const auto &selected
+                      = node.links[static_cast<std::size_t> (level)];
                   for (const auto &candidate : neighbors)
                     {
-                      if (candidate.node.level < level)
+                      if (candidate.node.level < level
+                          || std::find (selected.begin (), selected.end (),
+                                        candidate.memory_id)
+                                 == selected.end ())
                         continue;
-                      NodeRow neighbor = candidate.node;
                       const auto updated = updates.find (
                           candidate.memory_id);
-                      if (updated != updates.end ())
-                        neighbor = updated->second;
-                      auto &level_links
-                          = neighbor.links[static_cast<std::size_t> (level)];
-                      if (std::find (level_links.begin (), level_links.end (),
-                                     memory_id)
-                          == level_links.end ())
-                        {
-                          const std::size_t link_limit
-                              = level == 0
-                                    ? impl_->parameters
-                                          .row_addressed_level_zero_links
-                                    : impl_->parameters
-                                          .row_addressed_neighbor_count;
-                          if (level_links.size () < link_limit)
-                            level_links.push_back (memory_id);
-                          else if (!level_links.empty ())
-                            level_links.back () = memory_id;
-                        }
-                      updates[neighbor.memory_id] = std::move (neighbor);
-                      if (++reciprocal_count
-                          >= impl_->parameters.reciprocal_update_count)
-                        break;
+                      NodeRow neighbor = updated != updates.end ()
+                                             ? updated->second
+                                             : candidate.node;
+                      const auto admitted
+                          = AdmitLink (neighbor, level, memory_id,
+                                       candidate.distance, link_limit,
+                                       evictable);
+                      record_admission (level, memory_id, admitted);
+                      if (admitted.changed)
+                        updates[neighbor.memory_id] = std::move (neighbor);
                     }
                 }
+              // A node no full neighbor admitted would be unreachable at
+              // level 0. Its nearest neighbor that can give up a member whose
+              // inbound link survives elsewhere links it regardless of
+              // distance order.
+              if (indegree (memory_id) == 0)
+                for (const auto &candidate : neighbors)
+                  {
+                    const auto updated = updates.find (candidate.memory_id);
+                    NodeRow neighbor = updated != updates.end ()
+                                           ? updated->second
+                                           : candidate.node;
+                    const auto admitted = AdmitLink (
+                        neighbor, 0, memory_id, candidate.distance,
+                        link_limit_at (0), evictable, true);
+                    record_admission (0, memory_id, admitted);
+                    if (!admitted.changed)
+                      continue;
+                    updates[neighbor.memory_id] = std::move (neighbor);
+                    break;
+                  }
             }
 
           if (next_active_count < 0)
@@ -1690,7 +2244,7 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
                   "generation = excluded.generation",
                   { node.memory_id, EncodeEmbedding (node.embedding),
                     static_cast<long long> (node.level),
-                    EncodeLinks (node.links),
+                    EncodeLinks (node.links, node.link_distances),
                     static_cast<long long> (node.active ? 1 : 0),
                     next_generation });
             }
@@ -1756,11 +2310,11 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               impl_->activation_centroid.clear ();
               impl_->activation_identity_ids.clear ();
             }
-          // A seal can invalidate cached rows out of FIFO order. Clear the
-          // bookkeeping with the cache so stale order entries cannot grow
-          // across repeated update/search cycles.
-          impl_->node_cache.clear ();
-          impl_->node_cache_order.clear ();
+          // The committed rows are exactly `updates`; make them resident.
+          for (const long long memory_id : update_ids)
+            impl_->Admit (NodeRow (updates.at (memory_id)));
+          impl_->walked_neighborhoods.clear ();
+          impl_->walked_order.clear ();
           impl_->delta_embeddings.clear ();
           impl_->removed.clear ();
           return true;
@@ -1834,7 +2388,8 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
               "links = excluded.links, active = excluded.active, "
               "generation = excluded.generation",
               { node.memory_id, EncodeEmbedding (node.embedding),
-                static_cast<long long> (node.level), EncodeLinks (node.links),
+                static_cast<long long> (node.level),
+                EncodeLinks (node.links, node.link_distances),
                 static_cast<long long> (node.active ? 1 : 0), next_generation });
         }
       const std::string metadata_table
@@ -1894,11 +2449,18 @@ Route::Seal (const sparse_retrieval_route_internal::Route *hnsw_route)
           impl_->activation_centroid.clear ();
           impl_->activation_identity_ids.clear ();
         }
-      // A seal can invalidate cached rows out of FIFO order. Clear the
-      // bookkeeping with the cache so stale order entries cannot grow
-      // across repeated update/search cycles.
-      impl_->node_cache.clear ();
-      impl_->node_cache_order.clear ();
+      {
+        std::vector<long long> written;
+        written.reserve (snapshot->nodes.size ());
+        for (const auto &node : snapshot->nodes)
+          written.push_back (node.memory_id);
+        if (!impl_->ReloadRows (written))
+          {
+            // The commit stands; a route that cannot mirror it is unusable.
+            impl_->last_seal_failure_code = 63;
+            return false;
+          }
+      }
       impl_->delta_embeddings.clear ();
       impl_->removed.clear ();
       return true;
@@ -2072,7 +2634,7 @@ Route::HasDirtyMemoryIds () const
 std::size_t
 Route::RestartRowsLoaded () const
 {
-  return impl_ ? 1 : 0;
+  return impl_ ? impl_->restart_rows_loaded : 0;
 }
 
 std::size_t
@@ -2094,15 +2656,6 @@ Route::LastActivationSnapshotRows () const
 }
 
 std::size_t
-Route::LastActivationSnapshotCacheMissRows () const
-{
-  if (!impl_)
-    return 0;
-  std::lock_guard<std::mutex> lock (impl_->mutex);
-  return impl_->last_activation_snapshot_cache_miss_rows;
-}
-
-std::size_t
 Route::LastActivationFrontierSeedCount () const
 {
   if (!impl_)
@@ -2121,22 +2674,15 @@ Route::LastSearchDistanceEvaluations () const
 }
 
 std::size_t
-Route::CachedNodeRows () const
+Route::ResidentNodeRows () const
 {
   if (!impl_)
     return 0;
   std::lock_guard<std::mutex> lock (impl_->mutex);
-  return impl_->node_cache.size ();
+  return impl_->resident.size ();
 }
 
-std::size_t
-Route::CacheOrderRows () const
-{
-  if (!impl_)
-    return 0;
-  std::lock_guard<std::mutex> lock (impl_->mutex);
-  return impl_->node_cache_order.size ();
-}
+
 
 int
 Route::LastSearchFailureCode () const
@@ -2145,6 +2691,15 @@ Route::LastSearchFailureCode () const
     return 0;
   std::lock_guard<std::mutex> lock (impl_->mutex);
   return impl_->last_search_failure_code;
+}
+
+std::size_t
+Route::LastSealWalkReuseCount () const
+{
+  if (!impl_)
+    return 0;
+  std::lock_guard<std::mutex> lock (impl_->mutex);
+  return impl_->last_seal_walk_reuse_count;
 }
 
 int

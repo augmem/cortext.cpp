@@ -35,7 +35,6 @@ LOGICAL_TABLES = {
 }
 REQUIRED_WORK_COUNTERS = (
     "retrieval_suppression_id_count",
-    "predictive_id_count",
     "rollback_full_cache_copy_count",
     "rollback_cache_entry_copy_count",
     "graph_candidate_count",
@@ -116,7 +115,6 @@ COUNTER_ACTIVITY_OPERATIONS = {
     "retrieval_suppression_id_count": (
         "SignalProcessor.retrieval_suppression_id_activity",
     ),
-    "predictive_id_count": ("SignalProcessor.predictive_id_activity",),
     "rollback_full_cache_copy_count": (
         "SignalProcessor.snapshot_full_cache_copy_activity",
     ),
@@ -149,7 +147,6 @@ COUNTER_SOURCE_OPERATIONS = {
     "retrieval_suppression_id_count": (
         "SignalProcessor.retrieval_suppression_id_count",
     ),
-    "predictive_id_count": ("SignalProcessor.predictive_id_count",),
     "rollback_full_cache_copy_count": (
         "SignalProcessor.snapshot_full_cache_copy_count",
     ),
@@ -186,7 +183,6 @@ OTHER_DIAGNOSTIC_OPERATION_KEYS = {
     "GraphRetrieve.sqlite_sparse_route_activated_identities",
     "GraphRetrieve.sqlite_sparse_route_node_rows",
     "GraphRetrieve.sqlite_sparse_route_activation_snapshot_rows",
-    "GraphRetrieve.sqlite_sparse_route_activation_snapshot_cache_miss_rows",
     "GraphRetrieve.sqlite_sparse_route_distance_evaluations",
     "GraphRetrieve.sqlite_sparse_route_restart_rows",
     "GraphRetrieve.sqlite_sparse_route_dirty_rows",
@@ -203,7 +199,7 @@ OTHER_DIAGNOSTIC_OPERATION_KEYS = {
     "SignalProcessor.rif_active_epoch_required",
     "SignalProcessor.rif_epoch_publication_rebuild_count",
     "SignalProcessor.rif_epoch_publication_recovery_count",
-    "SignalProcessor.sqlite_wal_checkpoint_failure_count",
+    "SignalProcessor.sqlite_wal_sync_failure_count",
     "MemoryStorage.supersession_current_rows_visited",
     "MemoryStorage.supersession_historical_rows_visited",
     "MemoryStorage.supersession_sparse_route_node_rows",
@@ -219,7 +215,6 @@ OTHER_DIAGNOSTIC_OPERATION_KEYS = {
     "WriteGate.window_score",
     "WriteGate.threshold_dynamic",
     "WriteGate.refractory_multiplier",
-    "WriteGate.write_scale",
     "WriteGate.effective_threshold",
     "WriteGate.score_margin",
     "WriteGate.force_write",
@@ -1334,20 +1329,20 @@ def validate_profile_rows(
                 raise ValueError("event fallback hydration limit differs from F/S/T")
         if (
             retention == "durable"
-            and "SignalProcessor.sqlite_wal_checkpoint" not in operations
+            and "SignalProcessor.sqlite_wal_sync" not in operations
         ):
             raise ValueError("durable row lacks post-commit barrier attribution")
         if (
             retention == "durable"
-            and "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+            and "SignalProcessor.sqlite_wal_sync_failure_count"
             not in operations
         ):
             raise ValueError("durable row lacks barrier failure diagnostic")
         checkpoint_failures = finite_nonnegative(
             operations.get(
-                "SignalProcessor.sqlite_wal_checkpoint_failure_count", 0.0
+                "SignalProcessor.sqlite_wal_sync_failure_count", 0.0
             ),
-            "operation_ms.SignalProcessor.sqlite_wal_checkpoint_failure_count",
+            "operation_ms.SignalProcessor.sqlite_wal_sync_failure_count",
         )
         if retention == "durable" and checkpoint_failures != 0.0:
             raise ValueError("durable row reports a failed post-commit barrier")
@@ -1362,8 +1357,8 @@ def validate_profile_rows(
                 "post-warmup supersession SQL fallback prevents bounded plateau accounting"
             )
         operation_barrier_ms = finite_nonnegative(
-            operations.get("SignalProcessor.sqlite_wal_checkpoint", 0.0),
-            "operation_ms.SignalProcessor.sqlite_wal_checkpoint",
+            operations.get("SignalProcessor.sqlite_wal_sync", 0.0),
+            "operation_ms.SignalProcessor.sqlite_wal_sync",
         )
         if not math.isclose(
             durable_barrier_ms, operation_barrier_ms, rel_tol=1e-9, abs_tol=1e-9

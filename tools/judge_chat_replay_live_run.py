@@ -2447,7 +2447,6 @@ def summarize_db(conn: sqlite3.Connection) -> dict:
         "working_memories": scalar("select count(*) from memories where kind = 'WORKING'"),
         "associations": scalar("select count(*) from associations"),
         "facts": scalar("select count(*) from fact_assertions"),
-        "soft_anchor_links": scalar("select count(*) from soft_anchor_links"),
         "signals": scalar("select count(*) from signals"),
         "source_backed_memories": scalar("select count(*) from memories where blob_id is not null"),
     }

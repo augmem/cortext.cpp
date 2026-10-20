@@ -8,12 +8,16 @@
 #include "cortext/models/embedding_model_pin.hpp"
 #include "cortext/internal/replay_ingress.hpp"
 #include "encoder/text_encoder_factory.hpp"
+#include "models/aist_late_interaction.hpp"
+#include "models/aist_semantic_cache_internal.hpp"
 #include "operations/constructive_recall_internal.hpp"
-#include "operations/meta_learning_internal.hpp"
 #include "operations/retrieval_trace_state.hpp"
 #include "operations/signal_record_rollback_internal.hpp"
 #include "operations/sparse_retrieval_knobs_internal.hpp"
+#include "contiguity_internal.hpp"
+#include "data_time_clock_internal.hpp"
 #include "experimental_env.hpp"
+#include "store/memory_text_index_internal.hpp"
 #include "signal_filter.hpp"
 #include "streaming_text_probe.hpp"
 
@@ -25,9 +29,7 @@
 #include "cortext/store/utils.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
-#include "cortext/operations/consolidation.hpp"
 #include "cortext/operations/blend.hpp"
-#include "cortext/operations/graph_build.hpp"
 #include "cortext/operations/graph_retrieval.hpp"
 
 #include "cortext/operations/embedding_prediction_error.hpp"
@@ -40,6 +42,7 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -57,37 +60,24 @@
 #include <utility>
 #include <vector>
 
-// ConsolidationGate operation declaration
 #include "cortext/operations/boundary.hpp"
 #include "cortext/operations/coherence.hpp"
-#include "cortext/operations/competition.hpp"
 #include "cortext/operations/effective_focus.hpp"
-#include "cortext/operations/emotion.hpp"
 #include "cortext/operations/focus.hpp"
-#include "cortext/operations/focus_feedback.hpp"
 #include "cortext/operations/focus_spread.hpp"
-#include "cortext/operations/influence.hpp"
 #include "cortext/operations/interrupt_gate.hpp"
-#include "cortext/operations/memory_strength.hpp"
+#include "cortext/operations/memory_usage_record.hpp"
 #include "cortext/operations/metrics.hpp"
 #include "cortext/operations/neuromodulators.hpp"
-#include "cortext/operations/predictive.hpp"
 #include "cortext/operations/recent_context.hpp"
-#include "cortext/operations/reconsolidation.hpp"
-#include "cortext/operations/sensitivity_feedback.hpp"
-#include "cortext/operations/serial_position.hpp"
-#include "cortext/operations/serial_position_apply.hpp"
 #include "cortext/operations/signal_metrics_persistence.hpp"
 #include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
-#include "cortext/operations/soft_anchor.hpp"
 #include "cortext/operations/memory_storage.hpp"
-#include "cortext/operations/stability_feedback.hpp"
 #include "cortext/operations/working_memory.hpp"
 #include "cortext/operations/detect_memory_usage.hpp"
 #include "cortext/operations/drift_accumulation.hpp"
 #include "cortext/operations/streaming_pacing.hpp"
-#include "cortext/operations/synaptic_tagging.hpp"
 
 // Section 4.4: Memory Accumulation
 #include "cortext/operations/accumulator.hpp"
@@ -98,11 +88,7 @@
 #include "cortext/operations/spike_bypass.hpp"
 #include "cortext/operations/write_gate.hpp"
 
-#include "cortext/operations/consolidation_cluster.hpp"
-#include "cortext/operations/consolidation_gate.hpp"
-#include "cortext/operations/consolidation_shallow.hpp"
 // Phase 4: Knowledge Graph Enhancement
-#include "cortext/operations/emotion_cascade.hpp"
 #include "cortext/telemetry/telemetry.hpp"
 
 namespace cortext
@@ -112,12 +98,6 @@ namespace
 {
 
 constexpr const char *kMaintenanceSourceId = "cortext/maintenance";
-
-double
-Clamp01 (double value)
-{
-  return std::clamp (value, 0.0, 1.0);
-}
 
 bool
 SourceBlobsDisabled ()
@@ -132,6 +112,13 @@ RawImageMime (int width, int height, int channels)
   return "image/raw;width=" + std::to_string (width)
          + ";height=" + std::to_string (height)
          + ";channels=" + std::to_string (channels);
+}
+
+std::size_t
+RawImageBytes (int width, int height, int channels)
+{
+  return static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
+         * static_cast<std::size_t> (channels);
 }
 #endif
 
@@ -182,12 +169,21 @@ ValidateMedia (const Cortext::Media &media)
     }
 }
 
+// The durable payload is the caller's Media when it carries bytes, else the
+// canonical processing input (raw pixels / f32le PCM). Every stored signal
+// thus keeps a payload, and with it a searchable shared-space vector.
 void
-ApplyStoredMedia (Signal &signal, const Cortext::Media &media)
+ApplyStoredMedia (Signal &signal, const Cortext::Media &media,
+                  const void *canonical, std::size_t canonical_bytes,
+                  std::string canonical_mimetype)
 {
   ValidateMedia (media);
   if (media.size == 0)
     {
+      const auto *bytes = static_cast<const unsigned char *> (canonical);
+      signal.payload
+          = std::vector<unsigned char> (bytes, bytes + canonical_bytes);
+      signal.mimetype = std::move (canonical_mimetype);
       return;
     }
 
@@ -271,18 +267,6 @@ RetrievalEmbeddingView (const std::vector<float> &encoded)
   return out;
 }
 
-std::optional<Eigen::VectorXf>
-SoftAnchorEmbeddingView (const std::vector<float> &encoded)
-{
-  if (encoded.size () >= 1536)
-    {
-      std::vector<float> out (encoded.begin (), encoded.begin () + 1536);
-      NormalizeVector (out);
-      return ToEigen (out);
-    }
-  return std::nullopt;
-}
-
 std::vector<float>
 ToStdVector (const Eigen::VectorXf &v)
 {
@@ -337,25 +321,32 @@ void
 ApplyRetrievalScore (Cortext::Context::Memory &memory,
                      const std::unordered_map<long long,
                                               operations::retrieval_trace::RankedCandidate>
-                         &ranked_by_memory_id,
-                     const operations::retrieval_trace::RankedCandidate
-                         *fallback = nullptr)
+                         &ranked_by_memory_id)
 {
   auto it = ranked_by_memory_id.find (memory.id);
-  const auto *ranked
-      = it != ranked_by_memory_id.end () ? &it->second : fallback;
-  if (!ranked)
+  if (it == ranked_by_memory_id.end ())
     {
       return;
     }
-  memory.composite_score = ranked->score;
-  memory.relevance = ranked->relevance;
+  memory.composite_score = it->second.score;
+  memory.relevance = it->second.relevance;
 }
+
+// An object-store read transaction shared by a run of hydrations, so each
+// payload read does not open and commit a transaction of its own. Reads only:
+// the run must not write. object_tx is set when the cortext has an object
+// store, else db_tx is the metadata transaction objects are read through.
+struct SharedObjectReads
+{
+  ObjectTransaction *object_tx = nullptr;
+  Transaction *db_tx = nullptr;
+};
 
 bool
 LoadObjectPayload (Store *store, ObjectStore *object_store,
                    const std::vector<unsigned char> &blob_id,
-                   std::vector<unsigned char> &out)
+                   std::vector<unsigned char> &out,
+                   SharedObjectReads *shared = nullptr)
 {
   if (blob_id.empty ())
     {
@@ -363,7 +354,18 @@ LoadObjectPayload (Store *store, ObjectStore *object_store,
     }
   try
     {
-      if (object_store)
+      if (shared && (shared->object_tx || shared->db_tx))
+        {
+          auto payload = shared->object_tx
+                             ? shared->object_tx->Get (blob_id)
+                             : GetObject (nullptr, *shared->db_tx, blob_id);
+          if (payload && !payload->empty ())
+            {
+              out = std::move (*payload);
+              return true;
+            }
+        }
+      else if (object_store)
         {
           auto tx = object_store->Begin ();
           auto payload = tx->Get (blob_id);
@@ -460,10 +462,16 @@ LoadSignalBlobs (Store *store, long long memory_id,
                  const std::string &memory_mime,
                  int max_signal_blobs,
                  std::size_t *loaded_signal_blobs,
-                 std::vector<std::vector<unsigned char>> &out)
+                 std::vector<std::vector<unsigned char>> &out,
+                 std::vector<std::string> &out_mimetypes,
+                 SharedObjectReads *shared = nullptr)
 {
   if (!store || memory_id <= 0)
     return false;
+  // A mixed memory returns the payloads of all its signals.
+  const bool mixed = memory_modality == "mixed";
+  const std::string modality_filter = mixed ? std::string () : memory_modality;
+  const std::string mime_filter = mixed ? std::string () : memory_mime;
 
   try
     {
@@ -471,6 +479,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
       long long cursor_position = std::numeric_limits<long long>::max ();
       long long cursor_signal_id = std::numeric_limits<long long>::max ();
       std::vector<std::vector<unsigned char>> matched_payloads;
+      std::vector<std::string> matched_mimetypes;
       matched_payloads.reserve (static_cast<std::size_t> (limit));
       while (static_cast<long long> (matched_payloads.size ()) < limit)
         {
@@ -485,7 +494,7 @@ LoadSignalBlobs (Store *store, long long memory_id,
               "           AND signal_id < ?)) "
               "ORDER BY sort_position DESC, signal_id DESC "
               "LIMIT ?",
-              { memory_id, memory_modality, memory_modality,
+              { memory_id, modality_filter, modality_filter,
                 cursor_position, cursor_position, cursor_signal_id, limit });
           if (rows.empty ())
             break;
@@ -510,18 +519,19 @@ LoadSignalBlobs (Store *store, long long memory_id,
                     {
                       std::vector<unsigned char> payload;
                       if (LoadObjectPayload (store, object_store, blob_id,
-                                             payload))
+                                             payload, shared))
                         {
                           const std::string signal_modality
                               = RowString (row, "modality");
                           const std::string signal_mime
                               = RowString (row, "mime");
                           if (PayloadMatchesMemorySurface (
-                                  memory_modality, memory_mime,
+                                  modality_filter, mime_filter,
                                   signal_modality, signal_mime, payload))
                             {
                               matched_payloads.push_back (
                                   std::move (payload));
+                              matched_mimetypes.push_back (signal_mime);
                               if (static_cast<long long> (
                                       matched_payloads.size ())
                                   == limit)
@@ -535,11 +545,15 @@ LoadSignalBlobs (Store *store, long long memory_id,
             break;
         }
       std::reverse (matched_payloads.begin (), matched_payloads.end ());
+      std::reverse (matched_mimetypes.begin (), matched_mimetypes.end ());
       if (loaded_signal_blobs)
         *loaded_signal_blobs += matched_payloads.size ();
       out.insert (out.end (),
                   std::make_move_iterator (matched_payloads.begin ()),
                   std::make_move_iterator (matched_payloads.end ()));
+      out_mimetypes.insert (out_mimetypes.end (),
+                            std::make_move_iterator (matched_mimetypes.begin ()),
+                            std::make_move_iterator (matched_mimetypes.end ()));
       return !out.empty ();
     }
   catch (const std::exception &e)
@@ -565,99 +579,31 @@ LoadContentBlob (Store *store, ObjectStore *object_store,
                  const std::vector<unsigned char> &blob_id,
                  const std::string &memory_modality,
                  const std::string &memory_mime,
-                 std::vector<std::vector<unsigned char>> &out)
+                 std::vector<std::vector<unsigned char>> &out,
+                 std::vector<std::string> &out_mimetypes,
+                 SharedObjectReads *shared = nullptr)
 {
   if (!store || blob_id.empty ())
     return false;
 
   std::vector<unsigned char> payload;
-  if (LoadObjectPayload (store, object_store, blob_id, payload)
+  if (LoadObjectPayload (store, object_store, blob_id, payload, shared)
       && PayloadMatchesMemorySurface (memory_modality, memory_mime,
                                       memory_modality, memory_mime, payload))
     {
       out.push_back (std::move (payload));
+      out_mimetypes.push_back (memory_mime);
       return true;
     }
   return false;
 }
 
 void
-LoadSoftAnchors (
-    Store *store, long long memory_id,
-    std::vector<Cortext::Context::Memory::SoftAnchor> &out,
-    int max_hydrated_soft_anchors)
-{
-  out.clear ();
-  if (!store || memory_id <= 0)
-    return;
-  const int limit = std::max (1, max_hydrated_soft_anchors);
-
-  try
-    {
-      auto rows = store->Execute (
-          "SELECT anchor_id, anchor_strength, anchor_label, memory_tier, "
-          "       score, margin, entropy "
-          "FROM soft_anchor_links "
-          "WHERE memory_id = ? "
-          "  AND anchor_label NOT IN ('none', 'rejected') "
-          "ORDER BY anchor_strength DESC, score DESC, updated_step DESC "
-          "LIMIT ?",
-          { memory_id, static_cast<long long> (limit) });
-
-      out.reserve (rows.size ());
-      for (const auto &row : rows)
-        {
-          auto get_s = [&row] (const char *k) -> std::string {
-            auto it = row.find (k);
-            if (it == row.end () || !it->second.has_value ())
-              return {};
-            if (it->second.type () == typeid (std::string))
-              return std::any_cast<std::string> (it->second);
-            return {};
-          };
-
-          auto get_dbl = [&row] (const char *k, double def = 0.0) -> double {
-            auto it = row.find (k);
-            if (it == row.end () || !it->second.has_value ())
-              return def;
-            return store::AnyToDouble (it->second, def);
-          };
-
-          Cortext::Context::Memory::SoftAnchor anchor;
-          anchor.id = get_s ("anchor_id");
-          anchor.strength = Clamp01 (get_dbl ("anchor_strength"));
-          anchor.likelihood = anchor.strength;
-          anchor.label = get_s ("anchor_label");
-          anchor.tier = get_s ("memory_tier");
-          anchor.score = Clamp01 (get_dbl ("score"));
-          anchor.margin = get_dbl ("margin");
-          anchor.entropy = Clamp01 (get_dbl ("entropy"));
-          out.push_back (std::move (anchor));
-        }
-    }
-  catch (const std::exception &e)
-    {
-      telemetry::LogWarn (
-          "Failed to load soft anchors",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id),
-            telemetry::Attribute::String ("error", e.what ()) });
-    }
-  catch (...)
-    {
-      telemetry::LogWarn (
-          "Failed to load soft anchors (unknown error)",
-          { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id) });
-    }
-}
-
-void
 HydrateMemory (Store *store, ObjectStore *object_store, long long id,
                Cortext::Context::Memory &m,
-               int max_hydrated_soft_anchors,
                int max_fallback_signal_blobs,
-               std::size_t *loaded_fallback_signal_blobs)
+               std::size_t *loaded_fallback_signal_blobs,
+               SharedObjectReads *shared = nullptr)
 {
   if (!store)
     return;
@@ -743,11 +689,13 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             {
               std::vector<unsigned char> payload;
               if (LoadObjectPayload (store, object_store,
-                                     reconstruction->blob_id, payload)
+                                     reconstruction->blob_id, payload,
+                                     shared)
                   && PayloadMatchesMemorySurface (
                       m.modality, m.mimetype, m.modality, m.mimetype, payload))
                 {
                   m.content.push_back (std::move (payload));
+                  m.content_mimetypes.push_back (m.mimetype);
                 }
             }
 
@@ -755,7 +703,8 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
             {
               const auto blob_id = get_blob ("blob_id");
               LoadContentBlob (store, object_store, blob_id, m.modality,
-                               m.mimetype, m.content);
+                               m.mimetype, m.content, m.content_mimetypes,
+                               shared);
             }
 
           if (m.content.empty ())
@@ -764,7 +713,7 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
               LoadSignalBlobs (store, memory_id, object_store, m.modality,
                                m.mimetype, max_fallback_signal_blobs,
                                loaded_fallback_signal_blobs,
-                               m.content);
+                               m.content, m.content_mimetypes, shared);
             }
 
           // v2: Counts are inline on memories table
@@ -787,8 +736,6 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           m.arousal = 0.0;
           m.composite_score = 0.0;
           m.threshold_t = 0.0;
-          LoadSoftAnchors (store, memory_id, m.soft_anchors,
-                           max_hydrated_soft_anchors);
         }
     }
   catch (const std::exception &e)
@@ -827,207 +774,1449 @@ StripSourceBlobsIfDisabled (Cortext::Context::Memory &memory)
   if (SourceBlobsDisabled ())
     {
       memory.content.clear ();
+      memory.content_mimetypes.clear ();
     }
+}
+
+// Episodic contiguity completion for retrieved conversational turns.
+//
+// Recalling one moment of a conversation brings back what was said around it
+// (the temporal-contiguity effect of episodic recall), and the effect fades
+// with distance. A retrieved turn is rarely self-contained: a question's
+// answer, the statement an acknowledgement refers to, or the user message an
+// assistant reply was written for lives one or two turns away. For each
+// retrieved turn, of any modality, the adjacent turns from the same source
+// stream (adjacent LONG_TERM rows in write order, within a short time gap;
+// contiguity_internal.hpp) are hydrated as extra content blobs of that same
+// retrieved memory under a per-context byte budget, text clipped to the
+// window that best covers a text query's terms and other media whole,
+// charged as one clipped neighbour each: first the immediate successor and
+// predecessor of every anchor in rank order, then, with what budget is
+// left, the turns two steps away. A 2026-10 sweep found the old 6 KiB budget and
+// lag-2 cap (top 6 anchors) binding; 12 KiB with lag 2 for every anchor raised
+// judged sufficiency on Eval 1 by +0.037 (budgets past 12 KiB change nothing). Cost is O(anchors): primary-key range lookups
+// bounded by a fixed id span plus one indexed supersession check per
+// neighbor, issued as two statements (lag 1, lag 2) for all anchors. Query
+// retrieval does not spend anchor slots on these neighbours
+// (DeferAttachedNeighbours in graph_retrieval.cpp).
+constexpr std::size_t kContiguityAnchorLimit = 11;
+constexpr std::size_t kContiguityNeighborMaxBytes = 480;
+constexpr std::size_t kContiguityContextBudgetBytes = 12288;
+constexpr long long kContiguityIdScanSpan = internal::contiguity::kIdScanSpan;
+constexpr long long kContiguityMaxGapMs = internal::contiguity::kMaxGapMs;
+
+bool
+IsTextMime (const std::string &mimetype)
+{
+  return mimetype.empty () || mimetype.rfind ("text/", 0) == 0;
+}
+
+// True when the memory carries text among its content (a text memory, or a
+// mixed memory with text signals); index i of content is text when its MIME
+// type is text/*.
+bool
+HasTextContent (const Cortext::Context::Memory &memory)
+{
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
+    {
+      const std::string mime = i < memory.content_mimetypes.size ()
+                                   ? memory.content_mimetypes[i]
+                                   : memory.mimetype;
+      if (!memory.content[i].empty () && IsTextMime (mime))
+        return true;
+    }
+  return false;
+}
+
+// Before inserting attached blobs: one MIME type per existing content blob.
+void
+AlignContentMimetypes (Cortext::Context::Memory &memory)
+{
+  memory.content_mimetypes.resize (memory.content.size (), memory.mimetype);
 }
 
 std::string
-LoadMemoryKind (Store *store, long long memory_id)
+SourceStreamOf (const std::string &source_id)
 {
-  if (!store || memory_id <= 0)
+  return internal::contiguity::StreamOf (source_id);
+}
+
+long long
+RowLongLong (const std::map<std::string, std::any> &row, const char *key)
+{
+  const auto it = row.find (key);
+  if (it == row.end () || !it->second.has_value ())
     {
-      return {};
+      return 0;
     }
+  return store::AnyToLongLong (it->second).value_or (0);
+}
+
+// Clip text bytes to max_bytes on a UTF-8 code point boundary.
+std::vector<unsigned char>
+ClipTextBlob (const std::vector<unsigned char> &text, std::size_t max_bytes)
+{
+  if (text.size () <= max_bytes)
+    {
+      return text;
+    }
+  std::size_t cut = max_bytes;
+  while (cut > 0 && (text[cut] & 0xC0u) == 0x80u)
+    {
+      --cut;
+    }
+  std::vector<unsigned char> out (text.begin (),
+                                  text.begin () + static_cast<std::ptrdiff_t> (cut));
+  static constexpr char kEllipsis[] = "...";
+  out.insert (out.end (), kEllipsis, kEllipsis + 3);
+  return out;
+}
+
+// Terms that pick the clipped window of attached text: the query's
+// keywords (the keyword channel's stopword-filtered words) of 3+ bytes,
+// lowercased and cut to 5 bytes so inflections match ("assemble",
+// "assembly"). Only a query (Ephemeral retention) that carries text has
+// terms; any other query, and every ingest-time hydration, keeps the
+// leading window, so ingest pays nothing for the windowing scan.
+std::vector<std::string>
+ClipTermsOf (const cortext::Signal *query)
+{
+  if (!query || query->retention != Retention::Ephemeral || !query->payload
+      || !IsTextMime (query->mimetype))
+    return {};
+  const std::string_view text (
+      reinterpret_cast<const char *> (query->payload->data ()),
+      query->payload->size ());
+  std::vector<std::string> terms;
+  for (auto &w : store::memory_text_index_internal::QueryWords (text, 32))
+    {
+      if (w.size () < 3)
+        continue;
+      if (w.size () > 5)
+        w.resize (5);
+      if (std::find (terms.begin (), terms.end (), w) == terms.end ())
+        terms.push_back (std::move (w));
+    }
+  return terms;
+}
+
+// Clips text to max_bytes keeping the window with the most distinct query
+// terms: the first kClipHeadBytes (turn header: time, speaker) stay, then
+// the best window. Falls back to the head clip when no window beats it.
+std::vector<unsigned char>
+ClipTextAroundTerms (const std::vector<unsigned char> &text,
+                     std::size_t max_bytes,
+                     const std::vector<std::string> &terms)
+{
+  if (text.size () <= max_bytes)
+    return text;
+  constexpr std::size_t kClipHeadBytes = 64;
+  const auto is_word = [] (unsigned char c) {
+    return c >= 0x80 || std::isalnum (c);
+  };
+  // (position, term index) of every word that starts with a term.
+  std::vector<std::pair<std::size_t, std::size_t> > hits;
+  for (std::size_t i = 0; i < text.size ();)
+    {
+      while (i < text.size () && !is_word (text[i]))
+        ++i;
+      const std::size_t start = i;
+      while (i < text.size () && is_word (text[i]))
+        ++i;
+      if (i == start)
+        continue;
+      for (std::size_t t = 0; t < terms.size (); ++t)
+        {
+          const auto &term = terms[t];
+          if (i - start < term.size ())
+            continue;
+          bool match = true;
+          for (std::size_t k = 0; k < term.size () && match; ++k)
+            match = static_cast<char> (std::tolower (text[start + k])) == term[k];
+          if (match)
+            {
+              hits.emplace_back (start, t);
+              break;
+            }
+        }
+    }
+  const auto distinct_in = [&] (std::size_t lo, std::size_t hi) {
+    std::vector<bool> seen (terms.size (), false);
+    std::size_t n = 0;
+    for (const auto &[pos, t] : hits)
+      if (pos >= lo && pos < hi && !seen[t])
+        {
+          seen[t] = true;
+          ++n;
+        }
+    return n;
+  };
+  const std::size_t head_score = distinct_in (0, max_bytes);
+  const std::size_t window = max_bytes - kClipHeadBytes - 8;
+  std::size_t best_start = 0, best_score = head_score;
+  for (const auto &[pos, t] : hits)
+    {
+      (void)t;
+      // Start a little before the hit so the sentence around it survives.
+      std::size_t lo = pos > 96 ? pos - 96 : 0;
+      if (lo < kClipHeadBytes)
+        continue;
+      while (lo < pos && is_word (text[lo - 1]))
+        ++lo;
+      const std::size_t score = distinct_in (lo, lo + window);
+      if (score > best_score)
+        {
+          best_score = score;
+          best_start = lo;
+        }
+    }
+  if (best_start == 0)
+    return ClipTextBlob (text, max_bytes);
+  std::vector<unsigned char> head (
+      text.begin (), text.begin () + static_cast<std::ptrdiff_t> (kClipHeadBytes));
+  auto out = ClipTextBlob (head, kClipHeadBytes - 3);
+  out.push_back (' ');
+  std::size_t lo = best_start;
+  while (lo < text.size () && (text[lo] & 0xC0u) == 0x80u)
+    ++lo;
+  std::vector<unsigned char> tail (text.begin () + static_cast<std::ptrdiff_t> (lo),
+                                   text.end ());
+  auto clipped = ClipTextBlob (tail, window);
+  out.insert (out.end (), clipped.begin (), clipped.end ());
+  return out;
+}
+
+// Hydrations for the attachment steps, which read but never write. A memory
+// a step hydrates again (a neighbour that did not fit the budget, a
+// predecessor that is also a neighbour of another anchor) is served from the
+// first hydration; the fallback signal rows that hydration loaded are counted
+// again, as a fresh hydration would count them. Payload reads go through one
+// shared object-store transaction when one is supplied.
+class AttachmentHydrations
+{
+public:
+  AttachmentHydrations (Store *store, ObjectStore *object_store,
+                        SharedObjectReads *shared,
+                        int max_fallback_signal_blobs,
+                        std::size_t *loaded_fallback_signal_blobs,
+                        std::vector<std::string> clip_terms = {})
+      : store_ (store), object_store_ (object_store), shared_ (shared),
+        max_fallback_signal_blobs_ (max_fallback_signal_blobs),
+        loaded_fallback_signal_blobs_ (loaded_fallback_signal_blobs),
+        clip_terms_ (std::move (clip_terms))
+  {
+  }
+
+  // Content of a memory to attach to another memory, whatever its
+  // modalities: its text blobs joined by spaces into one clipped text/plain
+  // blob, then each non-text blob whole. cost charges text by its bytes and
+  // each non-text blob as one full clipped neighbour.
+  struct AttachedParts
+  {
+    std::vector<std::vector<unsigned char> > blobs;
+    std::vector<std::string> mimetypes;
+    std::size_t cost = 0;
+  };
+
+  AttachedParts
+  AttachedContent (long long memory_id, std::size_t max_text_bytes)
+  {
+    AttachedParts parts;
+    auto text = AttachedText (memory_id, max_text_bytes);
+    if (!text.empty ())
+      {
+        parts.cost += text.size ();
+        parts.blobs.push_back (std::move (text));
+        parts.mimetypes.push_back ("text/plain");
+      }
+    const Hydrated &memory = Hydrate (memory_id);
+    for (std::size_t i = 0; i < memory.content.size (); ++i)
+      {
+        const std::string &mime = i < memory.content_mimetypes.size ()
+                                      ? memory.content_mimetypes[i]
+                                      : memory.mimetype;
+        if (memory.content[i].empty () || IsTextMime (mime))
+          continue;
+        parts.cost += max_text_bytes;
+        parts.blobs.push_back (memory.content[i]);
+        parts.mimetypes.push_back (mime);
+      }
+    return parts;
+  }
+
+  // Text of a memory to attach to another memory's content: its content
+  // blobs joined by spaces and clipped to max_bytes, or empty when the
+  // memory has no text surface.
+  std::vector<unsigned char>
+  AttachedText (long long memory_id, std::size_t max_bytes)
+  {
+    const Hydrated &memory = Hydrate (memory_id);
+    if (!memory.has_content)
+      {
+        return {};
+      }
+    std::vector<unsigned char> text;
+    for (std::size_t i = 0; i < memory.content.size (); ++i)
+      {
+        const auto &blob = memory.content[i];
+        const std::string &mime = i < memory.content_mimetypes.size ()
+                                      ? memory.content_mimetypes[i]
+                                      : memory.mimetype;
+        if (blob.empty () || !IsTextMime (mime))
+          {
+            continue;
+          }
+        if (!text.empty ())
+          {
+            text.push_back (' ');
+          }
+        text.insert (text.end (), blob.begin (), blob.end ());
+        if (clip_terms_.empty () && text.size () > max_bytes)
+          {
+            break;
+          }
+      }
+    if (!clip_terms_.empty ())
+      return ClipTextAroundTerms (text, max_bytes, clip_terms_);
+    return ClipTextBlob (text, max_bytes);
+  }
+
+private:
+  struct Hydrated
+  {
+    std::string modality;
+    std::string mimetype;
+    std::vector<std::vector<unsigned char> > content;
+    std::vector<std::string> content_mimetypes;
+    bool has_content = false;
+    std::size_t fallback_signal_blobs = 0;
+  };
+
+  const Hydrated &
+  Hydrate (long long memory_id)
+  {
+    auto it = cache_.find (memory_id);
+    if (it == cache_.end ())
+      {
+        Cortext::Context::Memory memory;
+        std::size_t fallback_signal_blobs = 0;
+        HydrateMemory (store_, object_store_, memory_id, memory,
+                       max_fallback_signal_blobs_, &fallback_signal_blobs,
+                       shared_);
+        Hydrated hydrated;
+        hydrated.modality = std::move (memory.modality);
+        hydrated.mimetype = std::move (memory.mimetype);
+        hydrated.has_content = HasTextContent (memory);
+        hydrated.content = std::move (memory.content);
+        hydrated.content_mimetypes = std::move (memory.content_mimetypes);
+        hydrated.fallback_signal_blobs = fallback_signal_blobs;
+        it = cache_.emplace (memory_id, std::move (hydrated)).first;
+      }
+    if (loaded_fallback_signal_blobs_)
+      {
+        *loaded_fallback_signal_blobs_ += it->second.fallback_signal_blobs;
+      }
+    return it->second;
+  }
+
+  Store *store_;
+  ObjectStore *object_store_;
+  SharedObjectReads *shared_;
+  int max_fallback_signal_blobs_;
+  std::size_t *loaded_fallback_signal_blobs_;
+  std::vector<std::string> clip_terms_;
+  std::unordered_map<long long, Hydrated> cache_;
+};
+
+// Standing block budget (Context::standing_memory): directive signals are
+// short (standing_memory_internal::kMaxTextBytes each), so this holds the
+// best few; text is charged by its bytes, other media as
+// Cortext::kMediaEvidenceBytes each.
+constexpr std::size_t kStandingPacketBytes = 2048;
+
+// Appends a stored directive signal's payload to `memory`'s content and
+// returns its charge against kStandingPacketBytes; 0 when the signal or its
+// payload is missing.
+std::size_t
+LoadStandingSignal (Store *store, ObjectStore *object_store,
+                    long long signal_id, Cortext::Context::Memory &memory)
+{
+  if (!store || signal_id <= 0)
+    return 0;
   try
     {
-      auto rows = store->Execute (
-          "SELECT kind FROM memories WHERE memory_id = ?",
-          { memory_id });
+      const auto rows = store->Execute (
+          "SELECT blob_id, modality, mime FROM signals WHERE signal_id = ?",
+          { signal_id });
       if (rows.empty ())
-        {
-          return {};
-        }
-      auto it = rows[0].find ("kind");
-      if (it != rows[0].end () && it->second.type () == typeid (std::string))
-        {
-          return std::any_cast<std::string> (it->second);
-        }
+        return 0;
+      const auto blob = rows[0].find ("blob_id");
+      if (blob == rows[0].end () || !blob->second.has_value ())
+        return 0;
+      std::vector<unsigned char> payload;
+      if (!LoadObjectPayload (store, object_store,
+                              store::BlobFromAny (blob->second), payload)
+          || payload.empty ())
+        return 0;
+      std::string mimetype = RowString (rows[0], "mime");
+      const std::string modality = RowString (rows[0], "modality");
+      if (mimetype.empty ())
+        mimetype = "text/plain";
+      const bool text = IsTextMime (mimetype)
+                        && (modality.empty () || modality == "text");
+      const std::size_t cost
+          = text ? payload.size () : Cortext::kMediaEvidenceBytes;
+      memory.content.push_back (std::move (payload));
+      memory.content_mimetypes.push_back (std::move (mimetype));
+      return cost;
     }
   catch (const std::exception &e)
     {
       telemetry::LogWarn (
-          "Failed to load memory kind",
+          "Failed to load standing signal",
           { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id),
             telemetry::Attribute::String ("error", e.what ()) });
+      return 0;
     }
-  return {};
 }
 
-struct LinkedDisplayMemory
+// Evidence budget (Cortext::EvidenceBudget): the bytes of evidence a query
+// packet (standing block, retrieved memories and their attached neighbours)
+// may hold. Text is charged by its bytes and other media as
+// Cortext::kMediaEvidenceBytes each.
+std::size_t
+EvidenceCharge (const std::string &mime, const std::string &modality,
+                std::size_t bytes)
 {
-  long long memory_id = 0;
-  std::optional<double> relevance;
-  std::optional<double> composite_score;
+  const bool text
+      = IsTextMime (mime) && (modality.empty () || modality == "text");
+  return text ? bytes : Cortext::kMediaEvidenceBytes;
+}
+
+// A packet blob is text by its MIME type, or by the memory's modality when
+// it has none.
+std::size_t
+BlobCharge (const Cortext::Context::Memory &m, std::size_t i)
+{
+  const std::string &mime = i < m.content_mimetypes.size ()
+                                ? m.content_mimetypes[i]
+                                : m.mimetype;
+  const bool text = mime.empty ()
+                        ? m.modality.empty () || m.modality == "text"
+                        : mime.rfind ("text/", 0) == 0;
+  return text ? m.content[i].size () : Cortext::kMediaEvidenceBytes;
+}
+
+// A retrieved memory's own content before neighbours are attached around it:
+// its first blob's buffer (moved, never copied, by the attachment steps) and
+// its blob count.
+struct OwnContent
+{
+  const unsigned char *first = nullptr;
+  std::size_t count = 0;
 };
 
-std::vector<LinkedDisplayMemory>
-ResolveDisplayMemoriesForEmptyRetrieval (Store *store, long long memory_id,
-                                         const Eigen::VectorXf *query,
-                                         int max_linked_candidates,
-                                         std::pair<double, double>
-                                             query_ordering_weights)
+std::vector<OwnContent>
+OwnContentOf (const std::vector<Cortext::Context::Memory> &memories)
 {
-  if (!store || memory_id <= 0)
+  std::vector<OwnContent> own (memories.size ());
+  for (std::size_t i = 0; i < memories.size (); ++i)
+    if (!memories[i].content.empty () && !memories[i].content[0].empty ())
+      own[i] = { memories[i].content[0].data (), memories[i].content.size () };
+  return own;
+}
+
+struct EvidenceFit
+{
+  std::size_t bytes = 0;      // evidence charge after the fit
+  std::size_t trimmed = 0;    // grouped memories cut to their best members
+  std::size_t stripped = 0;   // memories that dropped attached neighbours
+  std::size_t dropped = 0;    // memories left out
+  std::size_t member_cap = 0; // member cap the fit settled on
+};
+
+// Fits retrieved memories (and their attached neighbours) to `budget` less
+// `standing_bytes`. A memory grouped from several signals is focusable when
+// each member has a stored shared-space vector (memory_signal_vectors) and a
+// payload and its own content is found among its attached neighbours; its
+// floor is the best member of each modality by cosine to the query (cosines
+// are not comparable across modalities: a text query sits closer to every
+// text member than to any image). Memories join in rank order at their
+// floor (focusable) or whole, with their neighbours when those fit too,
+// else without them, else not at all. One member cap shared by every
+// focusable memory then grows to the largest with which the packet fits:
+// each keeps its floor, then its other members best first while its
+// members fit the cap. Kept members return in their original order
+// (consecutive text joined by newlines, as the stored memory text is) in
+// place of the memory's own content, between its attached neighbours.
+// Cost: query-time only, and only for packets over the budget: one indexed
+// signal read for the retrieved memories plus their members' payloads.
+EvidenceFit
+FitEvidenceToBudget (Store *store, ObjectStore *object_store,
+                     SharedObjectReads *shared,
+                     std::vector<Cortext::Context::Memory> &memories,
+                     const std::vector<OwnContent> &own,
+                     std::size_t standing_bytes,
+                     const Eigen::VectorXf *query, std::size_t budget)
+{
+  EvidenceFit fit;
+  std::size_t total = standing_bytes;
+  for (const auto &m : memories)
+    for (std::size_t i = 0; i < m.content.size (); ++i)
+      total += BlobCharge (m, i);
+  fit.bytes = total;
+  if (total <= budget || memories.empty ())
+    return fit;
+
+  struct Member
+  {
+    std::vector<unsigned char> blob_id;
+    std::string modality;
+    std::string mime;
+    double score = -2.0;
+    bool has_vector = false;
+    bool floor = false;
+    bool keep = true;
+    std::size_t cost = 0;
+    std::vector<unsigned char> payload;
+  };
+  std::unordered_map<long long, std::vector<Member> > members;
+  const float query_norm = query ? query->norm () : 0.0f;
+  if (store && query && query->size () > 0 && query_norm > 0.0f)
     {
-      return {};
+      std::string ids;
+      std::vector<std::any> params;
+      for (const auto &m : memories)
+        {
+          if (m.id <= 0)
+            continue;
+          ids += ids.empty () ? "?" : ",?";
+          params.emplace_back (static_cast<long long> (m.id));
+        }
+      try
+        {
+          const auto rows = params.empty ()
+              ? std::vector<std::map<std::string, std::any> > ()
+              : store->Execute (
+                    "SELECT s.memory_id AS memory_id, s.blob_id AS blob_id, "
+                    "       s.modality AS modality, s.mime AS mime, "
+                    "       v.embedding AS embedding "
+                    "FROM signals s "
+                    "LEFT JOIN memory_signal_vectors v "
+                    "  ON v.blob_id = s.blob_id "
+                    "WHERE s.memory_id IN (" + ids + ") "
+                    "ORDER BY s.memory_id, s.serial_position, s.signal_id",
+                    params);
+          const int dim = static_cast<int> (query->size ());
+          Eigen::VectorXf vec;
+          for (const auto &row : rows)
+            {
+              Member member;
+              if (const auto it = row.find ("blob_id");
+                  it != row.end () && it->second.has_value ())
+                member.blob_id = store::BlobFromAny (it->second);
+              member.modality = RowString (row, "modality");
+              member.mime = RowString (row, "mime");
+              if (const auto it = row.find ("embedding");
+                  it != row.end () && it->second.has_value ()
+                  && core::DecodeFloatBlob (it->second, dim, vec))
+                {
+                  const float n = vec.norm ();
+                  if (n > 0.0f)
+                    {
+                      member.score = static_cast<double> (
+                          query->dot (vec) / (query_norm * n));
+                      member.has_vector = true;
+                    }
+                }
+              members[RowLongLong (row, "memory_id")].push_back (
+                  std::move (member));
+            }
+        }
+      catch (const std::exception &e)
+        {
+          telemetry::LogWarn (
+              "Failed to read retrieved memory members",
+              { telemetry::Attribute::String ("component", "cortext"),
+                telemetry::Attribute::String ("error", e.what ()) });
+          members.clear ();
+        }
     }
 
-  const int limit = std::max (1, max_linked_candidates);
-  const bool query_source_ordering_enabled = !internal::experimental_env::Flag (
-      "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
-  try
+  struct Entry
+  {
+    std::size_t own_begin = 0;
+    std::size_t own_count = 0;
+    std::size_t own_charge = 0;
+    std::size_t attach_charge = 0;
+    std::vector<Member> *list = nullptr; // set when focusable
+    std::vector<std::size_t> order;      // floor first, then by cosine
+    std::size_t floor_charge = 0;
+    std::size_t member_charge = 0;
+    bool joined = false;
+    bool with_neighbours = false;
+  };
+  std::vector<Entry> entries (memories.size ());
+  for (std::size_t rank = 0; rank < memories.size (); ++rank)
     {
-      const std::string linked_query
-          = "FROM ("
-          "  SELECT routes.memory_id, MIN(routes.rel_rank) AS rel_rank, "
-          "         MAX(routes.weight) AS weight "
-          "  FROM ("
-          "  SELECT df.target_memory_id AS memory_id, 0 AS rel_rank, "
-          "         hl.weight * df.weight AS weight "
-          "  FROM associations hl "
-          "  JOIN associations df ON df.source_memory_id = hl.source_memory_id "
-          "                       AND df.edge_type = 'derived_from' "
-          "  WHERE hl.target_memory_id = ? AND hl.edge_type = 'has_label' "
-          "  UNION ALL "
-          "  SELECT hl.source_memory_id AS memory_id, 1 AS rel_rank, "
-          "         hl.weight AS weight "
-          "  FROM associations hl "
-          "  WHERE hl.target_memory_id = ? AND hl.edge_type = 'has_label' "
-          "  UNION ALL "
-          "  SELECT a.target_memory_id AS memory_id, 0 AS rel_rank, "
-          "         a.weight AS weight "
-          "  FROM associations a "
-          "  WHERE a.source_memory_id = ? AND a.edge_type = 'derived_from' "
-          "  UNION ALL "
-          "  SELECT a.source_memory_id AS memory_id, 2 AS rel_rank, "
-          "         a.weight AS weight "
-          "  FROM associations a "
-          "  WHERE a.target_memory_id = ? "
-          "    AND a.edge_type IN ('reinforces', 'derived_from') "
-          "  ) routes "
-          "  GROUP BY routes.memory_id "
-          ") linked "
-          "JOIN memories m ON m.memory_id = linked.memory_id "
-          "LEFT JOIN current_memory_embeddings cme "
-          "  ON cme.memory_id = m.memory_id "
-          "LEFT JOIN embeddings e ON e.embedding_id = m.embedding_id "
-          "WHERE m.memory_id != ? "
-          "  AND m.kind NOT IN ('WORKING', 'LABEL', 'ASSOCIATION') ";
-      std::vector<std::map<std::string, std::any> > rows;
-      if (query_source_ordering_enabled && query && query->size () > 0)
+      auto &m = memories[rank];
+      auto &e = entries[rank];
+      AlignContentMimetypes (m);
+      e.own_count = m.content.size ();
+      bool located = false;
+      if (rank < own.size () && own[rank].first)
+        for (std::size_t i = 0; i < m.content.size (); ++i)
+          if (m.content[i].data () == own[rank].first
+              && i + own[rank].count <= m.content.size ())
+            {
+              e.own_begin = i;
+              e.own_count = own[rank].count;
+              located = true;
+              break;
+            }
+      for (std::size_t i = 0; i < m.content.size (); ++i)
         {
-          std::vector<float> query_values (
-              query->data (), query->data () + query->size ());
-          rows = store->Execute (
-              "SELECT memory_id, query_score, "
-              "       (? * query_score + ? * weight) AS composite_score "
-              "FROM ("
-              "  SELECT linked.memory_id, linked.rel_rank, linked.weight, "
-              "         COALESCE(cme.embedding, e.embedding) AS embedding, "
-              "         COALESCE(m.last_access, 0) AS last_access, "
-              "         m.created_at, "
-              "         CASE WHEN COALESCE(cme.embedding, e.embedding) IS NULL "
-              "              THEN 0.0 "
-              "              ELSE MAX(0.0, 1.0 - vec_distance_cosine("
-              "                   COALESCE(cme.embedding, e.embedding), ?)) "
-              "         END AS query_score "
-              + linked_query
-              + ") ranked_linked "
-                "ORDER BY composite_score DESC, "
-                "         rel_rank ASC, weight DESC, last_access DESC, "
-                "         created_at DESC "
-                "LIMIT ?",
-              { query_ordering_weights.first,
-                query_ordering_weights.second, query_values, memory_id,
-                memory_id, memory_id, memory_id, memory_id,
-                static_cast<long long> (limit) });
+          const bool own_blob
+              = i >= e.own_begin && i < e.own_begin + e.own_count;
+          (own_blob ? e.own_charge : e.attach_charge) += BlobCharge (m, i);
+        }
+      const auto it = members.find (m.id);
+      if (it == members.end () || it->second.size () < 2 || !located)
+        continue;
+      auto &list = it->second;
+      if (std::any_of (list.begin (), list.end (), [] (const Member &x) {
+            return !x.has_vector || x.blob_id.empty ();
+          }))
+        continue;
+      bool complete = true;
+      for (auto &x : list)
+        {
+          if (!LoadObjectPayload (store, object_store, x.blob_id, x.payload,
+                                  shared))
+            {
+              complete = false;
+              break;
+            }
+          // Text members are charged one more byte for the newline that
+          // joins consecutive kept text.
+          x.cost = EvidenceCharge (x.mime, x.modality, x.payload.size ());
+          if (x.cost == x.payload.size ())
+            ++x.cost;
+          e.member_charge += x.cost;
+        }
+      if (!complete)
+        {
+          e.member_charge = 0;
+          continue;
+        }
+      std::unordered_map<std::string, std::size_t> best_of;
+      for (std::size_t i = 0; i < list.size (); ++i)
+        {
+          const auto b = best_of.find (list[i].modality);
+          if (b == best_of.end () || list[i].score > list[b->second].score)
+            best_of[list[i].modality] = i;
+        }
+      for (const auto &[modality, i] : best_of)
+        {
+          list[i].floor = true;
+          e.floor_charge += list[i].cost;
+        }
+      e.order.resize (list.size ());
+      for (std::size_t i = 0; i < list.size (); ++i)
+        e.order[i] = i;
+      std::stable_sort (e.order.begin (), e.order.end (),
+                        [&] (std::size_t a, std::size_t b) {
+                          if (list[a].floor != list[b].floor)
+                            return list[a].floor;
+                          return list[a].score > list[b].score;
+                        });
+      e.list = &list;
+    }
+
+  // Memories join in rank order at their floor.
+  std::size_t used = standing_bytes;
+  std::size_t fixed = standing_bytes;
+  std::size_t widest = 0;
+  for (auto &e : entries)
+    {
+      const std::size_t least = e.list ? e.floor_charge : e.own_charge;
+      if (used + e.attach_charge + least <= budget)
+        {
+          e.joined = true;
+          e.with_neighbours = true;
+          used += e.attach_charge + least;
+          fixed += e.attach_charge;
+        }
+      else if (used + least <= budget)
+        {
+          e.joined = true;
+          used += least;
         }
       else
-        {
-          rows = store->Execute (
-              "SELECT linked.memory_id "
-              + linked_query
-              + "ORDER BY linked.rel_rank ASC, linked.weight DESC, "
-                "         COALESCE(m.last_access, 0) DESC, m.created_at DESC "
-                "LIMIT ?",
-              { memory_id, memory_id, memory_id, memory_id, memory_id,
-                static_cast<long long> (limit) });
-        }
+        continue;
+      if (e.list)
+        widest = std::max (widest, e.member_charge);
+      else
+        fixed += e.own_charge;
+    }
+  // Packet bytes with member cap `cap`; marks kept members when `mark`.
+  const auto fill = [&] (std::size_t cap, bool mark) {
+    std::size_t sum = fixed;
+    for (auto &e : entries)
+      {
+        if (!e.joined || !e.list)
+          continue;
+        std::size_t kept = 0;
+        for (const std::size_t i : e.order)
+          {
+            auto &x = (*e.list)[i];
+            const bool keep = x.floor || kept + x.cost <= cap;
+            if (mark)
+              x.keep = keep;
+            if (keep)
+              kept += x.cost;
+          }
+        sum += kept;
+      }
+    return sum;
+  };
+  std::size_t lo = 0;
+  std::size_t hi = widest;
+  while (lo < hi)
+    {
+      const std::size_t mid = lo + (hi - lo + 1) / 2;
+      if (fill (mid, false) <= budget)
+        lo = mid;
+      else
+        hi = mid - 1;
+    }
+  fit.member_cap = lo;
+  (void)fill (lo, true);
 
-      std::vector<LinkedDisplayMemory> out;
-      out.reserve (rows.size ());
-      std::unordered_set<long long> seen;
-      seen.reserve (rows.size ());
-      for (const auto &row : rows)
+  std::vector<Cortext::Context::Memory> fitted;
+  fitted.reserve (memories.size ());
+  for (std::size_t rank = 0; rank < memories.size (); ++rank)
+    {
+      auto &m = memories[rank];
+      auto &e = entries[rank];
+      if (!e.joined)
         {
-          auto it = row.find ("memory_id");
-          if (it == row.end ())
+          ++fit.dropped;
+          continue;
+        }
+      const bool trim
+          = e.list
+            && std::any_of (e.list->begin (), e.list->end (),
+                            [] (const Member &x) { return !x.keep; });
+      if (!trim && e.with_neighbours)
+        {
+          fitted.push_back (std::move (m));
+          continue;
+        }
+      std::vector<std::vector<unsigned char> > content;
+      std::vector<std::string> mimetypes;
+      const auto take = [&] (std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i)
+          {
+            content.push_back (std::move (m.content[i]));
+            mimetypes.push_back (std::move (m.content_mimetypes[i]));
+          }
+      };
+      if (e.with_neighbours)
+        take (0, e.own_begin);
+      if (trim)
+        {
+          bool last_text = false;
+          for (auto &x : *e.list)
+            {
+              if (!x.keep)
+                continue;
+              const bool text = IsTextMime (x.mime)
+                                && (x.modality.empty ()
+                                    || x.modality == "text");
+              if (text && last_text)
+                {
+                  content.back ().push_back ('\n');
+                  content.back ().insert (content.back ().end (),
+                                          x.payload.begin (),
+                                          x.payload.end ());
+                  continue;
+                }
+              content.push_back (std::move (x.payload));
+              mimetypes.push_back (text ? std::string ("text/plain")
+                                        : x.mime);
+              last_text = text;
+            }
+          ++fit.trimmed;
+        }
+      else
+        take (e.own_begin, e.own_begin + e.own_count);
+      if (e.with_neighbours)
+        take (e.own_begin + e.own_count, m.content.size ());
+      else if (e.attach_charge > 0)
+        ++fit.stripped;
+      m.content = std::move (content);
+      m.content_mimetypes = std::move (mimetypes);
+      fitted.push_back (std::move (m));
+    }
+  // The charges above bound the fitted content; this keeps the bound if a
+  // stored memory's own content is larger than its members.
+  fit.bytes = standing_bytes;
+  for (const auto &m : fitted)
+    for (std::size_t i = 0; i < m.content.size (); ++i)
+      fit.bytes += BlobCharge (m, i);
+  while (fit.bytes > budget && !fitted.empty ())
+    {
+      for (std::size_t i = 0; i < fitted.back ().content.size (); ++i)
+        fit.bytes -= BlobCharge (fitted.back (), i);
+      fitted.pop_back ();
+      ++fit.dropped;
+    }
+  memories = std::move (fitted);
+  return fit;
+}
+
+// A step from a turn to the adjacent LONG_TERM turn in an anchor's stream.
+struct ContiguityProbe
+{
+  long long position_id = 0;
+  long long anchor_start_ts = 0;
+  std::string anchor_stream;
+  bool forward = false;
+};
+
+// The adjacent turn a probe found.
+struct ContiguousTurn
+{
+  // The adjacent turn when it belongs to the same stretch of conversation
+  // (same stream, inside the contiguity gap), else 0. A walk continues from
+  // it even when it is not attachable.
+  long long position_id = 0;
+  // Set to position_id when the turn is a text turn not hidden by a
+  // correction from the same stretch of conversation.
+  long long memory_id = 0;
+};
+
+// Resolves every probe in one statement: one UNION ALL arm per probe, each
+// a primary-key range lookup bounded by a fixed id span plus one indexed
+// supersession check. Forward arms come first so the statement text depends
+// only on how many probes go each way. Supersessions from other
+// conversations are topical successors and do not hide the turn.
+std::vector<ContiguousTurn>
+FindContiguousTurns (Store *store, const std::vector<ContiguityProbe> &probes)
+{
+  std::vector<ContiguousTurn> turns (probes.size ());
+  if (!store || probes.empty ())
+    {
+      return turns;
+    }
+  std::string sql;
+  std::vector<std::any> params;
+  params.reserve (probes.size () * 9);
+  for (const bool forward : { true, false })
+    {
+      for (std::size_t k = 0; k < probes.size (); ++k)
+        {
+          const auto &probe = probes[k];
+          if (probe.forward != forward)
             {
               continue;
             }
-          const long long linked_id
-              = cortext::store::AnyToLongLong (it->second).value_or (0);
-          if (linked_id > 0 && seen.insert (linked_id).second)
+          if (!sql.empty ())
             {
-              LinkedDisplayMemory linked;
-              linked.memory_id = linked_id;
-              auto read_double = [&row] (const char *key)
-                  -> std::optional<double> {
-                auto value_it = row.find (key);
-                if (value_it == row.end ())
-                  {
-                    return std::nullopt;
-                  }
-                if (value_it->second.type () == typeid (double))
-                  {
-                    return std::any_cast<double> (value_it->second);
-                  }
-                if (value_it->second.type () == typeid (float))
-                  {
-                    return static_cast<double> (
-                        std::any_cast<float> (value_it->second));
-                  }
-                return std::nullopt;
-              };
-              linked.relevance = read_double ("query_score");
-              linked.composite_score = read_double ("composite_score");
-              out.push_back (std::move (linked));
+              sql += " UNION ALL ";
+            }
+          sql += "SELECT ? AS probe, n.memory_id, n.start_ts, n.source_id, "
+                 "  n.modality, "
+                 "  EXISTS (SELECT 1 FROM associations a "
+                 "          JOIN memories c ON c.memory_id = a.source_memory_id "
+                 "          WHERE a.target_memory_id = n.memory_id "
+                 "            AND a.edge_type = 'supersedes' "
+                 "            AND c.start_ts BETWEEN n.start_ts - ? "
+                 "                               AND n.start_ts + ? "
+                 "            AND ((c.source_id >= ? AND c.source_id < ? "
+                 "                  AND instr(substr(c.source_id, ?), '/') = 0) "
+                 "                 OR (c.source_id = ? "
+                 "                     AND instr(c.source_id, '/') = 0))) "
+                 "    AS corrected "
+                 "FROM (SELECT memory_id, start_ts, source_id, modality "
+                 "      FROM memories WHERE ";
+          sql += forward ? "memory_id > ? AND memory_id <= ? "
+                           "AND kind = 'LONG_TERM' "
+                           "ORDER BY memory_id ASC LIMIT 1) n"
+                         : "memory_id < ? AND memory_id >= ? "
+                           "AND kind = 'LONG_TERM' "
+                           "ORDER BY memory_id DESC LIMIT 1) n";
+          const std::string stream_prefix = probe.anchor_stream + "/";
+          const std::string stream_end
+              = probe.anchor_stream + "0"; // '0' follows '/'
+          const long long bound
+              = forward ? probe.position_id + kContiguityIdScanSpan
+                        : probe.position_id - kContiguityIdScanSpan;
+          params.emplace_back (static_cast<long long> (k));
+          params.emplace_back (kContiguityMaxGapMs);
+          params.emplace_back (kContiguityMaxGapMs);
+          params.emplace_back (stream_prefix);
+          params.emplace_back (stream_end);
+          params.emplace_back (
+              static_cast<long long> (stream_prefix.size () + 1));
+          params.emplace_back (probe.anchor_stream);
+          params.emplace_back (probe.position_id);
+          params.emplace_back (bound);
+        }
+    }
+  const auto rows = store->Execute (sql, params);
+  for (const auto &row : rows)
+    {
+      const long long k = RowLongLong (row, "probe");
+      if (k < 0 || static_cast<std::size_t> (k) >= probes.size ())
+        {
+          continue;
+        }
+      const auto &probe = probes[static_cast<std::size_t> (k)];
+      const long long neighbor_id = RowLongLong (row, "memory_id");
+      if (neighbor_id <= 0
+          || SourceStreamOf (RowString (row, "source_id"))
+                 != probe.anchor_stream)
+        {
+          continue;
+        }
+      const long long gap
+          = RowLongLong (row, "start_ts") - probe.anchor_start_ts;
+      if (gap > kContiguityMaxGapMs || gap < -kContiguityMaxGapMs)
+        {
+          continue;
+        }
+      auto &turn = turns[static_cast<std::size_t> (k)];
+      turn.position_id = neighbor_id;
+      if (RowLongLong (row, "corrected") == 0)
+        {
+          turn.memory_id = neighbor_id;
+        }
+    }
+  return turns;
+}
+
+// Kind and start time of the first `limit` retrieved memories, in one
+// indexed primary-key lookup.
+struct AnchorRow
+{
+  std::string kind;
+  long long start_ts = 0;
+};
+
+std::unordered_map<long long, AnchorRow>
+LoadAnchorRows (Store *store,
+                const std::vector<Cortext::Context::Memory> &retrieved,
+                std::size_t limit)
+{
+  std::unordered_map<long long, AnchorRow> out;
+  std::vector<std::any> params;
+  std::string placeholders;
+  for (std::size_t i = 0; i < std::min (limit, retrieved.size ()); ++i)
+    {
+      if (retrieved[i].id <= 0)
+        continue;
+      if (!params.empty ())
+        placeholders += ", ";
+      placeholders += "?";
+      params.emplace_back (retrieved[i].id);
+    }
+  if (!store || params.empty ())
+    return out;
+  try
+    {
+      const auto rows = store->Execute (
+          "SELECT memory_id, kind, start_ts FROM memories "
+          "WHERE memory_id IN (" + placeholders + ")",
+          params);
+      for (const auto &row : rows)
+        out[RowLongLong (row, "memory_id")]
+            = { RowString (row, "kind"), RowLongLong (row, "start_ts") };
+    }
+  catch (const std::exception &e)
+    {
+      out.clear ();
+      telemetry::LogWarn (
+          "Failed to load retrieved anchor rows",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  return out;
+}
+
+// Attaches adjacent-turn context to retrieved text turns: lag 1 for every
+// anchor in rank order, then lag 2. The adjacent turns are found up front,
+// all lag-1 steps in one statement and all lag-2 steps in another; which of
+// them are attached is then decided in the same order as a turn-by-turn walk.
+// Returns the number of neighbor blobs attached; their memory ids are added
+// to attached_ids.
+std::size_t
+AttachContiguousTurns (Store *store,
+                       std::vector<Cortext::Context::Memory> &retrieved,
+                       const std::unordered_map<long long, AnchorRow>
+                           &anchor_rows,
+                       AttachmentHydrations &hydrations,
+                       std::unordered_set<long long> &attached_ids)
+{
+  if (!store || retrieved.empty () || SourceBlobsDisabled ())
+    {
+      return 0;
+    }
+  std::unordered_set<long long> retrieved_ids;
+  retrieved_ids.reserve (retrieved.size ());
+  for (const auto &memory : retrieved)
+    {
+      retrieved_ids.insert (memory.id);
+    }
+  std::unordered_set<long long> excluded_ids = retrieved_ids;
+  std::size_t budget = kContiguityContextBudgetBytes;
+  std::size_t attached = 0;
+  const std::size_t anchors
+      = std::min (kContiguityAnchorLimit, retrieved.size ());
+  struct AnchorWalk
+  {
+    std::size_t index = 0;
+    long long start_ts = 0;
+    std::string stream;
+    ContiguousTurn successor;
+    ContiguousTurn predecessor;
+    ContiguousTurn successor_lag2;
+    ContiguousTurn predecessor_lag2;
+  };
+  // Attaches the adjacent turn to the anchor when it is still unattached
+  // and fits the budget; returns the walked position (0 when the stretch
+  // ends).
+  auto attach_adjacent = [&] (const AnchorWalk &walk,
+                              const ContiguousTurn &turn,
+                              bool forward) -> long long {
+    if (turn.memory_id <= 0 || excluded_ids.count (turn.memory_id) != 0)
+      {
+        return turn.position_id;
+      }
+    auto parts = hydrations.AttachedContent (turn.memory_id,
+                                             kContiguityNeighborMaxBytes);
+    if (!parts.blobs.empty () && parts.cost <= budget)
+      {
+        auto &anchor = retrieved[walk.index];
+        budget -= parts.cost;
+        AlignContentMimetypes (anchor);
+        const auto at = forward ? anchor.content.size () : 0;
+        anchor.content.insert (
+            anchor.content.begin () + static_cast<std::ptrdiff_t> (at),
+            std::make_move_iterator (parts.blobs.begin ()),
+            std::make_move_iterator (parts.blobs.end ()));
+        anchor.content_mimetypes.insert (
+            anchor.content_mimetypes.begin () + static_cast<std::ptrdiff_t> (at),
+            parts.mimetypes.begin (), parts.mimetypes.end ());
+        excluded_ids.insert (turn.memory_id);
+        attached_ids.insert (turn.memory_id);
+        ++attached;
+      }
+    return turn.position_id;
+  };
+  try
+    {
+      std::vector<AnchorWalk> walks;
+      walks.reserve (anchors);
+      for (std::size_t i = 0; i < anchors; ++i)
+        {
+          const auto &anchor = retrieved[i];
+          if (anchor.id <= 0 || !HasHydratedContent (anchor))
+            {
+              continue;
+            }
+          const auto anchor_row = anchor_rows.find (anchor.id);
+          if (anchor_row == anchor_rows.end ()
+              || anchor_row->second.kind != "LONG_TERM")
+            {
+              continue;
+            }
+          AnchorWalk walk;
+          walk.index = i;
+          walk.start_ts = anchor_row->second.start_ts;
+          walk.stream = SourceStreamOf (anchor.source_id);
+          walks.push_back (std::move (walk));
+        }
+      if (walks.empty ())
+        {
+          return 0;
+        }
+      // Lag-1 steps of every anchor, both ways.
+      std::vector<ContiguityProbe> probes;
+      probes.reserve (walks.size () * 2);
+      for (const auto &walk : walks)
+        {
+          const long long anchor_id = retrieved[walk.index].id;
+          probes.push_back ({ anchor_id, walk.start_ts, walk.stream, true });
+          probes.push_back ({ anchor_id, walk.start_ts, walk.stream, false });
+        }
+      auto turns = FindContiguousTurns (store, probes);
+      for (std::size_t w = 0; w < walks.size (); ++w)
+        {
+          walks[w].successor = turns[2 * w];
+          walks[w].predecessor = turns[2 * w + 1];
+        }
+      // Lag-2 steps continue from the lag-1 turns of the top anchors.
+      probes.clear ();
+      std::vector<ContiguousTurn *> lag2_targets;
+      for (auto &walk : walks)
+        {
+          if (walk.successor.position_id > 0)
+            {
+              probes.push_back ({ walk.successor.position_id, walk.start_ts,
+                                  walk.stream, true });
+              lag2_targets.push_back (&walk.successor_lag2);
+            }
+          if (walk.predecessor.position_id > 0)
+            {
+              probes.push_back ({ walk.predecessor.position_id,
+                                  walk.start_ts, walk.stream, false });
+              lag2_targets.push_back (&walk.predecessor_lag2);
             }
         }
-      return out;
+      if (!probes.empty ())
+        {
+          turns = FindContiguousTurns (store, probes);
+          for (std::size_t k = 0; k < lag2_targets.size (); ++k)
+            {
+              *lag2_targets[k] = turns[k];
+            }
+        }
+      // Lag 1, in rank order. Forward association is stronger than
+      // backward: the successor (the reply) is attached first.
+      std::size_t walked = 0;
+      for (auto &walk : walks)
+        {
+          if (budget == 0)
+            break;
+          attach_adjacent (walk, walk.successor, true);
+          if (budget > 0)
+            attach_adjacent (walk, walk.predecessor, false);
+          else
+            walk.predecessor = {};
+          ++walked;
+        }
+      // Lag 2 with what is left of the budget: contiguity decays with
+      // distance, so the second turn out comes after every first one.
+      for (std::size_t w = 0; w < walked; ++w)
+        {
+          const auto &walk = walks[w];
+          if (budget == 0)
+            break;
+          if (walk.successor.position_id > 0)
+            attach_adjacent (walk, walk.successor_lag2, true);
+          if (budget > 0 && walk.predecessor.position_id > 0)
+            attach_adjacent (walk, walk.predecessor_lag2, false);
+        }
     }
   catch (const std::exception &e)
     {
       telemetry::LogWarn (
-          "Failed to resolve display memories for retrieval node",
+          "Failed to attach contiguous turns",
           { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id),
             telemetry::Attribute::String ("error", e.what ()) });
     }
-  catch (...)
+  return attached;
+}
+
+// Recall of superseded predecessors for retrieved memories.
+//
+// At write time every new memory gets 'supersedes' edges to the few older
+// memories it is most similar to (weight grows with similarity), and
+// retrieval treats any memory with an active incoming 'supersedes' edge as
+// replaced: it is never a seed again. Those edges are topical, not only
+// corrections, so a large share of older statements (an earlier course
+// count, a previous status, the session where an event was first mentioned)
+// becomes unreachable as soon as a similar later turn arrives. People do not
+// lose the earlier version of a fact when they learn the newer one: recalling
+// the update brings back the earlier episode it updated. Within one stretch
+// of conversation (same source stream, inside the contiguity gap) a newer
+// statement is a correction that replaces the stale one outright, so those
+// predecessors stay suppressed. For each of the top retrieved
+// memories, the older memories it supersedes (strongest edges first) are
+// hydrated as extra content blobs of that same retrieved memory, placed
+// before its own content so the packet reads oldest to newest, clipped and
+// under a per-context byte budget. Cost is O(anchors): one indexed lookup on
+// idx_associations_source for all anchors plus a bounded number of
+// hydrations.
+// Ranking, the retrieval pool and the number of retrieved memories are
+// unchanged.
+constexpr std::size_t kSupersededRecallAnchorLimit = 11;
+constexpr long long kSupersededRecallPerAnchor = 2;
+constexpr std::size_t kSupersededRecallMaxBytes = 512;
+constexpr std::size_t kSupersededRecallContextBudgetBytes = 4096;
+
+// A superseded target of an anchor, strongest edge first.
+struct SupersededTarget
+{
+  long long memory_id = 0;
+};
+
+// The `per_anchor` strongest LONG_TERM text targets of the 'supersedes'
+// edges out of each anchor (by weight, then newest target), in one statement
+// over idx_associations_source.
+std::unordered_map<long long, std::vector<SupersededTarget> >
+LoadSupersededTargets (Store *store, const std::vector<long long> &anchor_ids,
+                       long long per_anchor)
+{
+  std::unordered_map<long long, std::vector<SupersededTarget> > out;
+  if (!store || anchor_ids.empty ())
+    {
+      return out;
+    }
+  std::string placeholders;
+  std::vector<std::any> params;
+  params.reserve (anchor_ids.size () + 1);
+  for (const long long id : anchor_ids)
+    {
+      if (!placeholders.empty ())
+        placeholders += ", ";
+      placeholders += "?";
+      params.emplace_back (id);
+    }
+  params.emplace_back (per_anchor);
+  const auto rows = store->Execute (
+      "SELECT r.anchor_id, r.memory_id "
+      "FROM (SELECT a.source_memory_id AS anchor_id, "
+      "             a.target_memory_id AS memory_id, "
+      "             ROW_NUMBER() OVER ("
+      "               PARTITION BY a.source_memory_id "
+      "               ORDER BY a.weight DESC, a.target_memory_id DESC) "
+      "               AS edge_rank "
+      "      FROM associations a "
+      "      JOIN memories m ON m.memory_id = a.target_memory_id "
+      "      WHERE a.source_memory_id IN (" + placeholders + ") "
+      "        AND a.edge_type = 'supersedes' "
+      "        AND m.kind = 'LONG_TERM' "
+      "        AND m.modality IN ('text', 'mixed')) r "
+      "WHERE r.edge_rank <= ? "
+      "ORDER BY r.anchor_id, r.edge_rank",
+      params);
+  for (const auto &row : rows)
+    {
+      out[RowLongLong (row, "anchor_id")].push_back (
+          { RowLongLong (row, "memory_id") });
+    }
+  return out;
+}
+
+// Returns the number of superseded-predecessor blobs attached.
+std::size_t
+AttachSupersededPredecessors (
+    Store *store, std::vector<Cortext::Context::Memory> &retrieved,
+    const std::unordered_map<long long, AnchorRow> &anchor_rows,
+    std::unordered_set<long long> excluded_ids,
+    AttachmentHydrations &hydrations)
+{
+  if (!store || retrieved.empty () || SourceBlobsDisabled ())
+    {
+      return 0;
+    }
+  for (const auto &memory : retrieved)
+    {
+      excluded_ids.insert (memory.id);
+    }
+  std::size_t budget = kSupersededRecallContextBudgetBytes;
+  std::size_t attached = 0;
+  const std::size_t anchors
+      = std::min (kSupersededRecallAnchorLimit, retrieved.size ());
+  try
+    {
+      // Which anchors recall predecessors does not depend on what earlier
+      // anchors attached (an anchor's content only grows), so all their
+      // edges are read at once.
+      std::vector<std::size_t> anchor_indexes;
+      std::vector<long long> anchor_ids;
+      std::unordered_set<long long> seen_anchor_ids;
+      for (std::size_t i = 0; i < anchors; ++i)
+        {
+          const auto &anchor = retrieved[i];
+          if (anchor.id <= 0
+              || !HasTextContent (anchor)
+              || !HasHydratedContent (anchor)
+              || anchor_rows.find (anchor.id) == anchor_rows.end ())
+            {
+              continue;
+            }
+          anchor_indexes.push_back (i);
+          if (seen_anchor_ids.insert (anchor.id).second)
+            {
+              anchor_ids.push_back (anchor.id);
+            }
+        }
+      // Over-fetch so already-packeted targets do not starve the anchor.
+      const auto targets = LoadSupersededTargets (
+          store, anchor_ids, kSupersededRecallPerAnchor * 2);
+      for (const std::size_t i : anchor_indexes)
+        {
+          if (budget == 0)
+            {
+              break;
+            }
+          auto &anchor = retrieved[i];
+          const auto anchor_targets = targets.find (anchor.id);
+          if (anchor_targets == targets.end ())
+            {
+              continue;
+            }
+          std::vector<std::vector<unsigned char> > recalled;
+          for (const auto &target : anchor_targets->second)
+            {
+              if (static_cast<long long> (recalled.size ())
+                  >= kSupersededRecallPerAnchor)
+                {
+                  break;
+                }
+              const long long target_id = target.memory_id;
+              if (target_id <= 0 || !excluded_ids.insert (target_id).second)
+                {
+                  continue;
+                }
+              auto text = hydrations.AttachedText (target_id,
+                                                   kSupersededRecallMaxBytes);
+              if (text.empty () || text.size () > budget)
+                {
+                  continue;
+                }
+              budget -= text.size ();
+              recalled.push_back (std::move (text));
+            }
+          // Strongest edge first in rank, but oldest-to-newest in the packet:
+          // the recalled predecessors precede the anchor's own content.
+          AlignContentMimetypes (anchor);
+          anchor.content_mimetypes.insert (anchor.content_mimetypes.begin (),
+                                           recalled.size (), "text/plain");
+          anchor.content.insert (
+              anchor.content.begin (),
+              std::make_move_iterator (recalled.rbegin ()),
+              std::make_move_iterator (recalled.rend ()));
+          attached += recalled.size ();
+        }
+    }
+  catch (const std::exception &e)
     {
       telemetry::LogWarn (
-          "Failed to resolve display memories for retrieval node (unknown error)",
+          "Failed to attach superseded predecessors",
           { telemetry::Attribute::String ("component", "cortext"),
-            telemetry::Attribute::Int64 ("memory_id", memory_id) });
+            telemetry::Attribute::String ("error", e.what ()) });
     }
-  return {};
+  return attached;
+}
+
+// Knowledge updates: a retrieved memory may be an older version of a fact
+// that a later memory restates ('supersedes' edge from the later memory). An
+// answer needs the latest version, which often ranks below the older one
+// (the question is phrased like the first statement). For each of the top
+// retrieved memories, its newest superseding memory is hydrated as an extra
+// content blob placed after the anchor's own content, so the packet reads
+// oldest to newest; clipped and under a per-context byte budget. One indexed
+// lookup on idx_associations_target for all anchors.
+constexpr std::size_t kSupersedingRecallAnchorLimit = 11;
+constexpr std::size_t kSupersedingRecallMaxBytes = 512;
+constexpr std::size_t kSupersedingRecallContextBudgetBytes = 4096;
+
+// Returns the number of superseding-successor blobs attached.
+std::size_t
+AttachSupersedingSuccessors (Store *store,
+                             std::vector<Cortext::Context::Memory> &retrieved,
+                             const std::unordered_map<long long, AnchorRow> &anchor_rows,
+                             std::unordered_set<long long> excluded_ids,
+                             AttachmentHydrations &hydrations)
+{
+  if (!store || retrieved.empty () || SourceBlobsDisabled ())
+    return 0;
+  for (const auto &memory : retrieved)
+    excluded_ids.insert (memory.id);
+  std::size_t budget = kSupersedingRecallContextBudgetBytes;
+  std::size_t attached = 0;
+  const std::size_t anchors
+      = std::min (kSupersedingRecallAnchorLimit, retrieved.size ());
+  try
+    {
+      std::vector<std::size_t> anchor_indexes;
+      std::string placeholders;
+      std::vector<std::any> params;
+      std::unordered_set<long long> seen_anchor_ids;
+      for (std::size_t i = 0; i < anchors; ++i)
+        {
+          const auto &anchor = retrieved[i];
+          if (anchor.id <= 0 || !HasTextContent (anchor)
+              || !HasHydratedContent (anchor)
+              || anchor_rows.find (anchor.id) == anchor_rows.end ())
+            continue;
+          anchor_indexes.push_back (i);
+          if (seen_anchor_ids.insert (anchor.id).second)
+            {
+              if (!placeholders.empty ())
+                placeholders += ", ";
+              placeholders += "?";
+              params.emplace_back (anchor.id);
+            }
+        }
+      if (params.empty ())
+        return 0;
+      // Newest first per anchor; two per anchor so an already-packeted
+      // successor does not starve it.
+      const auto rows = store->Execute (
+          "SELECT r.anchor_id, r.memory_id "
+          "FROM (SELECT a.target_memory_id AS anchor_id, "
+          "             a.source_memory_id AS memory_id, "
+          "             ROW_NUMBER() OVER ("
+          "               PARTITION BY a.target_memory_id "
+          "               ORDER BY m.start_ts DESC, a.source_memory_id DESC) "
+          "               AS edge_rank "
+          "      FROM associations a "
+          "      JOIN memories m ON m.memory_id = a.source_memory_id "
+          "      WHERE a.target_memory_id IN (" + placeholders + ") "
+          "        AND a.edge_type = 'supersedes' "
+          "        AND m.kind = 'LONG_TERM' "
+          "        AND m.modality IN ('text', 'mixed')) r "
+          "WHERE r.edge_rank <= 2 "
+          "ORDER BY r.anchor_id, r.edge_rank",
+          params);
+      std::unordered_map<long long, std::vector<long long> > successors;
+      for (const auto &row : rows)
+        successors[RowLongLong (row, "anchor_id")].push_back (
+            RowLongLong (row, "memory_id"));
+      for (const std::size_t i : anchor_indexes)
+        {
+          if (budget == 0)
+            break;
+          auto &anchor = retrieved[i];
+          const auto it = successors.find (anchor.id);
+          if (it == successors.end ())
+            continue;
+          for (const long long successor_id : it->second)
+            {
+              if (successor_id <= 0 || !excluded_ids.insert (successor_id).second)
+                continue;
+              auto text = hydrations.AttachedText (successor_id,
+                                                   kSupersedingRecallMaxBytes);
+              if (text.empty () || text.size () > budget)
+                continue;
+              budget -= text.size ();
+              AlignContentMimetypes (anchor);
+              anchor.content_mimetypes.push_back ("text/plain");
+              anchor.content.push_back (std::move (text));
+              ++attached;
+              break;
+            }
+        }
+    }
+  catch (const std::exception &e)
+    {
+      telemetry::LogWarn (
+          "Failed to attach superseding successors",
+          { telemetry::Attribute::String ("component", "cortext"),
+            telemetry::Attribute::String ("error", e.what ()) });
+    }
+  return attached;
 }
 
 void
 HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
                             std::vector<Cortext::Context::Memory> &out,
-                            int max_hydrated_soft_anchors,
                             int max_fallback_signal_blobs,
                             std::size_t *loaded_fallback_signal_blobs)
 {
@@ -1040,7 +2229,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
       // Content blobs are loaded separately via LoadSignalBlobs
       auto rows = store->Execute (
           "SELECT m.memory_id, m.source_id, m.modality, m.start_ts, "
-          "       rif.strength, m.last_access, m.n_signals, "
+          "       m.strength, m.last_access, m.n_signals, "
           "       m.s_max, m.s_avg, m.s_arousal_avg, "
           "       m.retrieved_count, m.used_count, m.blob_id, "
           "       (SELECT mr.blob_id FROM memory_reconstructions mr "
@@ -1055,9 +2244,8 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           "          ORDER BY s.serial_position LIMIT 1)"
           "       ) AS signal_mime "
           "FROM memories m "
-          "JOIN rif_effective_memories rif ON rif.memory_id = m.memory_id "
           "WHERE m.kind = 'WORKING' AND m.end_ts IS NULL "
-          "ORDER BY m.start_ts ASC");
+          "ORDER BY m.start_ts ASC, m.memory_id ASC");
 
       for (const auto &row : rows)
         {
@@ -1104,7 +2292,7 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           m.modality = get_s ("modality");
           m.mimetype = get_s ("signal_mime");
           // Preserve conversational/order semantics using the slot start time.
-          // last_access can move when rehearsal/access updates touch a slot,
+          // last_access can move when a slot is touched,
           // which should not reorder working-memory prompt reconstruction.
           m.timestamp = static_cast<std::uint64_t> (get_ll ("start_ts"));
 
@@ -1118,10 +2306,12 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
           const auto reconstruction_blob_id
               = get_blob ("reconstruction_blob_id");
           if (!LoadContentBlob (store, object_store, reconstruction_blob_id,
-                                m.modality, m.mimetype, m.content))
+                                m.modality, m.mimetype, m.content,
+                                m.content_mimetypes))
             {
               LoadContentBlob (store, object_store, get_blob ("blob_id"),
-                               m.modality, m.mimetype, m.content);
+                               m.modality, m.mimetype, m.content,
+                               m.content_mimetypes);
             }
           if (m.content.empty ())
             {
@@ -1129,11 +2319,9 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
               LoadSignalBlobs (store, m.id, object_store, m.modality,
                                m.mimetype, max_fallback_signal_blobs,
                                loaded_fallback_signal_blobs,
-                               m.content);
+                               m.content, m.content_mimetypes);
             }
           StripSourceBlobsIfDisabled (m);
-          LoadSoftAnchors (store, m.id, m.soft_anchors,
-                           max_hydrated_soft_anchors);
 
           out.push_back (std::move (m));
         }
@@ -1158,28 +2346,28 @@ HydrateWorkingMemoryFromDB (Store *store, ObjectStore *object_store,
 namespace
 {
 
+/// Maintenance signals (`force_consolidation`, sent by Consolidate()) run no
+/// per-signal operations; the processor seals and recenters the sparse
+/// retrieval route around them.
 class SignalOperationDispatch final : public IOperation
 {
 public:
-  SignalOperationDispatch (std::unique_ptr<IOperation> signal_operation,
-                           std::unique_ptr<IOperation> maintenance_operation)
-      : signal_operation_ (std::move (signal_operation)),
-        maintenance_operation_ (std::move (maintenance_operation))
+  explicit SignalOperationDispatch (
+      std::unique_ptr<IOperation> signal_operation)
+      : signal_operation_ (std::move (signal_operation))
   {
   }
 
   void
   Execute (OperationContext &context, Transaction &tx) const override
   {
-    IOperation *operation = context.GetSignal ().force_consolidation
-                                ? maintenance_operation_.get ()
-                                : signal_operation_.get ();
-    operation->Execute (context, tx);
+    if (context.GetSignal ().force_consolidation)
+      return;
+    signal_operation_->Execute (context, tx);
   }
 
 private:
   std::unique_ptr<IOperation> signal_operation_;
-  std::unique_ptr<IOperation> maintenance_operation_;
 };
 
 } // namespace
@@ -1187,18 +2375,6 @@ private:
 std::unique_ptr<IOperation>
 BuildRootOperationSet (bool probe_mode)
 {
-  using cortext::operations::ApplyEmotionalConsolidation;
-  using cortext::operations::ApplyFocusFeedback;
-  using cortext::operations::ApplyInfluenceFeedback;
-  using cortext::operations::ApplyPredictivePreActivation;
-  using cortext::operations::ApplyReconsolidation;
-  using cortext::operations::ApplyRetrievalCompetition;
-  using cortext::operations::ApplySensitivityFeedback;
-  using cortext::operations::ApplySerialPositionEffects;
-  using cortext::operations::ApplySerialPositionMultiplier;
-  using cortext::operations::ApplyStabilityFeedback;
-  using cortext::operations::ApplySynapticTagging;
-  using cortext::operations::BuildGraphFromConsolidation;
   using cortext::operations::CheckSpikeBypass;
   using cortext::operations::CheckStreamingPacing;
   using cortext::operations::ComputeCoherence;
@@ -1208,11 +2384,8 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::ComputeMetrics;
   using cortext::operations::ComputeMniGateDecision;
   using cortext::operations::ComputeWriteGate;
-  using cortext::operations::ConsolidationCluster;
-  using cortext::operations::ConsolidationGate;
   using cortext::operations::DetectBoundary;
   using cortext::operations::DetectMemoryUsage;
-  using cortext::operations::EvaluateConsolidation;
   using cortext::operations::FitMetricWeightsRLS;
   using cortext::operations::GraphAugmentedRetrieveCandidates;
   using cortext::operations::InitializeEmbeddedCentroids;
@@ -1220,9 +2393,7 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::InitializeSensitivityPriors;
   using cortext::operations::InitializeStabilityPriors;
   using cortext::operations::MemoryStorage;
-  using cortext::operations::ApplyMetaLearning;
   using cortext::operations::PersistSignalMetrics;
-  using cortext::operations::PropagateEmotionalCascade;
   using cortext::operations::ResetAccumulatorAfterFlush;
   using cortext::operations::ResetAccumulatorOnInterrupt;
   using cortext::operations::UpdateAccumulator;
@@ -1230,15 +2401,13 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::UpdateDriftAccumulation;
   using cortext::operations::UpdateEmbeddingPredictionError;
   using cortext::operations::UpdateFocus;
-  using cortext::operations::UpdateMemoryStrength;
+  using cortext::operations::RecordMemoryUsage;
   using cortext::operations::UpdateMood;
   using cortext::operations::UpdateNeuromodulators;
   using cortext::operations::UpdatePrecisionDelta;
   using cortext::operations::UpdateRateState;
   using cortext::operations::UpdateRecentContext;
   using cortext::operations::UpdateSensitivity;
-  using cortext::operations::UpdateSoftAnchor;
-  using cortext::operations::UpdateStability;
   using cortext::operations::UpdateThreshold;
   using cortext::operations::UpdateUncertainty;
   using cortext::operations::WorkingMemory;
@@ -1263,9 +2432,7 @@ BuildRootOperationSet (bool probe_mode)
 
       DetectBoundary, CheckSpikeBypass, ComputeWriteGate>;
 
-  using StorageStage = OperationSet<MemoryStorage, UpdateSoftAnchor,
-                                    ApplySynapticTagging,
-                                    PersistSignalMetrics>;
+  using StorageStage = OperationSet<MemoryStorage, PersistSignalMetrics>;
 
   using RetrievalStage
       = OperationSet<CheckStreamingPacing, GraphAugmentedRetrieveCandidates,
@@ -1273,23 +2440,12 @@ BuildRootOperationSet (bool probe_mode)
                      DetectMemoryUsage>;
 
   using FeedbackStage = OperationSet<
-      ApplyRetrievalCompetition, ApplyPredictivePreActivation,
-      ApplyReconsolidation, ApplyFocusFeedback, ApplySensitivityFeedback,
-      ApplyStabilityFeedback, UpdateStability, ApplyInfluenceFeedback,
-      ApplySerialPositionEffects, ApplySerialPositionMultiplier,
-      UpdateMemoryStrength, ApplyEmotionalConsolidation, WorkingMemory,
-      ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt,
-      EvaluateConsolidation, ConsolidationGate,
-      ConsolidationCluster, cortext::operations::ConsolidationShallow,
-      BuildGraphFromConsolidation, PropagateEmotionalCascade,
-      ApplyMetaLearning>;
+      RecordMemoryUsage, WorkingMemory,
+      ResetAccumulatorAfterFlush, ResetAccumulatorOnInterrupt>;
 
   using ProbeRoot = OperationSet<CoreStage, RetrievalStage>;
   using FullRoot
       = OperationSet<CoreStage, StorageStage, RetrievalStage, FeedbackStage>;
-  using MaintenanceRoot = OperationSet<
-      EvaluateConsolidation, ConsolidationGate, ConsolidationCluster,
-      cortext::operations::ConsolidationShallow, BuildGraphFromConsolidation>;
 
   // Every operation declares its Requires/Satisfies contract; the chain
   // aggregation proves at compile time that both root variants are
@@ -1302,9 +2458,6 @@ BuildRootOperationSet (bool probe_mode)
                  "probe operation set consumes a value no operation produces");
   static_assert (IsSelfContained<FullRoot>,
                  "full operation set consumes a value no operation produces");
-  static_assert (
-      IsSelfContained<MaintenanceRoot>,
-      "maintenance operation set consumes a value no operation produces");
 
   if (probe_mode)
     {
@@ -1315,8 +2468,7 @@ BuildRootOperationSet (bool probe_mode)
   return operations::signal_record_rollback_internal::
       MarkEngineOwnedJournalAware (
           std::make_unique<SignalOperationDispatch> (
-              std::make_unique<FullRoot> (),
-              std::make_unique<MaintenanceRoot> ()));
+              std::make_unique<FullRoot> ()));
 }
 
 namespace
@@ -1404,29 +2556,113 @@ struct Cortext::Impl
   std::string db_path;
 
   std::unique_ptr<Encoder> encoder;
-  std::shared_ptr<cortext::Clock> clock;
+  std::shared_ptr<internal::DataTimeClock> clock;
   std::shared_ptr<cortext::Store> store;
   std::shared_ptr<cortext::ObjectStore> object_store;
   std::unique_ptr<cortext::IOperation> root_operations;
   std::unique_ptr<cortext::SignalProcessor> processor;
 
   std::string embedding_model_pin;
+  /// Learned late-interaction reranker (required with the AIST encoder).
+  std::unique_ptr<internal::LateInteractionModel> late_interaction;
+
+  /// @brief Encodes a signal and builds its late-interaction set (query set
+  /// for Ephemeral signals, stored codes otherwise) from the encoder's
+  /// position features.
+  void
+  EncodeTextSignal (const std::string &text, Retention retention,
+                    std::vector<float> &v, LateInteractionSet &li)
+  {
+    // A repeated query reuses its query set; the encoder's own semantic
+    // cache then serves the embedding, as it did before position features.
+    if (retention == Retention::Ephemeral)
+      {
+        if (const std::vector<float> *hit = query_set_cache.Find (text))
+          {
+            UnpackQuerySet (*hit, li);
+            encoder->EncodeText (text, v);
+            return;
+          }
+      }
+    EncoderPositions positions;
+    encoder->EncodeTextPositions (text, v, positions);
+    li = BuildLateInteraction (positions, retention);
+    if (retention == Retention::Ephemeral)
+      {
+        query_set_cache.Put (text, PackQuerySet (li));
+      }
+  }
+
+  /// Query sets of recent text queries, packed as
+  /// [count, dim, values (count x dim), gate (count)], byte-bounded LRU.
+  internal::AistSemanticCache query_set_cache;
+
+  static std::vector<float>
+  PackQuerySet (const LateInteractionSet &set)
+  {
+    std::vector<float> out;
+    out.reserve (2 + set.values.size () + set.gate.size ());
+    out.push_back (static_cast<float> (set.count));
+    out.push_back (static_cast<float> (set.dim));
+    out.insert (out.end (), set.values.begin (), set.values.end ());
+    out.insert (out.end (), set.gate.begin (), set.gate.end ());
+    return out;
+  }
+
+  static void
+  UnpackQuerySet (const std::vector<float> &packed, LateInteractionSet &set)
+  {
+    set = {};
+    set.count = static_cast<int> (packed[0]);
+    set.dim = static_cast<int> (packed[1]);
+    const auto n = static_cast<std::ptrdiff_t> (set.count) * set.dim;
+    set.values.assign (packed.begin () + 2, packed.begin () + 2 + n);
+    set.gate.assign (packed.begin () + 2 + n, packed.end ());
+  }
+
+  void
+  EncodeImageSignal (const std::uint8_t *data, int width, int height,
+                     int channels, Retention retention, std::vector<float> &v,
+                     LateInteractionSet &li)
+  {
+    EncoderPositions positions;
+    encoder->EncodeImagePositions (data, width, height, channels, v,
+                                   positions);
+    li = BuildLateInteraction (positions, retention);
+  }
+
+  void
+  EncodeAudioSignal (const float *pcm, std::size_t num_samples,
+                     Retention retention, std::vector<float> &v,
+                     LateInteractionSet &li)
+  {
+    EncoderPositions positions;
+    encoder->EncodeAudioPositions (pcm, num_samples, v, positions);
+    li = BuildLateInteraction (positions, retention);
+  }
+
+  LateInteractionSet
+  BuildLateInteraction (const EncoderPositions &positions,
+                        Retention retention) const
+  {
+    return retention == Retention::Ephemeral
+               ? late_interaction->QuerySet (positions)
+               : late_interaction->MemorySet (positions);
+  }
 
   Impl (const Config &c, std::shared_ptr<cortext::Store> supplied_store,
         std::shared_ptr<cortext::ObjectStore> supplied_object_store,
         std::shared_ptr<cortext::Clock> supplied_clock)
       : cfg (c), signal_filter (MakeSignalFilterConfig (c)),
-        clock (std::move (supplied_clock)),
+        clock (std::make_shared<internal::DataTimeClock> (
+            supplied_clock ? std::move (supplied_clock)
+                           : std::make_shared<cortext::SystemClock> ())),
         store (std::move (supplied_store)),
         object_store (std::move (supplied_object_store))
   {
     if (!store)
       {
         throw std::invalid_argument ("Cortext requires a non-null Store");
-      }
-    if (!clock)
-      {
-        clock = std::make_shared<cortext::SystemClock> ();
       }
     if (!object_store)
       {
@@ -1442,11 +2678,70 @@ struct Cortext::Impl
         text_encoder.backend_name, text_encoder.resolved_path, 256);
     VerifyEmbeddingModel (*store, embedding_model_pin);
     encoder = std::move (text_encoder.encoder);
+    // The late-interaction reranker ships with the AIST model (Git shards
+    // linked into the library) and is required with it, like the encoder.
+    const auto li_path = internal::ResolveLateInteractionModelPath (
+        text_encoder.resolved_path);
+    if (!li_path)
+      {
+        throw std::runtime_error (
+            "AIST late-interaction reranker (AIST-87M-LI.gguf) not found beside "
+            + text_encoder.resolved_path.string ()
+            + " and not linked into this build; set CORTEXT_LI_MODEL_PATH "
+              "to its .gguf file");
+      }
+    late_interaction = internal::LateInteractionModel::Load (*li_path);
 
     root_operations = BuildRootOperationSet (false);
     processor = std::make_unique<cortext::SignalProcessor> (
         MakeProcessorConfig (), store, std::move (root_operations),
         object_store);
+    ObserveStoredSignalTime ();
+  }
+
+  // Engine time starts at the newest stored signal (indexed max) so a
+  // reopened store is never in the future of its own clock.
+  void
+  ObserveStoredSignalTime ()
+  {
+    try
+      {
+        auto rows = store->Execute (
+            "SELECT MAX(timestamp) AS newest FROM signals", {});
+        if (!rows.empty ())
+          {
+            auto it = rows[0].find ("newest");
+            if (it != rows[0].end () && it->second.has_value ()
+                && it->second.type () == typeid (long long))
+              {
+                const auto newest = std::any_cast<long long> (it->second);
+                if (newest > 0)
+                  clock->Observe (static_cast<std::uint64_t> (newest));
+              }
+          }
+      }
+    catch (const std::exception &e)
+      {
+        telemetry::LogWarn ("cortext.clock.stored_time_unavailable",
+                            { telemetry::Attribute::String ("error",
+                                                            e.what ()) });
+        return;
+      }
+    if (const auto lag = clock->LagMillis (); lag > 0)
+      telemetry::LogInfo (
+          "cortext.clock.behind_stored_signals",
+          { telemetry::Attribute::Int64 ("lag_ms",
+                                         static_cast<std::int64_t> (lag)) });
+  }
+
+  // Every signal goes through here: a stored signal's timestamp becomes
+  // the floor of engine time before it is processed.
+  cortext::SignalProcessor::Output
+  Process (const cortext::Signal &signal)
+  {
+    if (signal.retention != Retention::Ephemeral)
+      clock->Observe (signal.timestamp);
+    return processor->Process (signal);
   }
 
   Impl (const Config &c, std::string db,
@@ -1474,10 +2769,10 @@ struct Cortext::Impl
     pcfg.affect_interrupt = cfg.affect_interrupt;
     pcfg.affect_retrieval = cfg.affect_retrieval;
     pcfg.reinforcement_enabled = cfg.reinforcement_enabled;
-    pcfg.procedural_enabled = cfg.procedural_enabled;
     pcfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
     pcfg.encoder = encoder.get ();
     pcfg.clock = clock;
+    pcfg.late_interaction = late_interaction.get ();
 
     return pcfg;
   }
@@ -1514,7 +2809,6 @@ struct Cortext::Impl
 
     cortext::Signal s;
     s.embedding = ToEigen (RetrievalEmbeddingView (encoded));
-    s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp != 0 ? timestamp : NowMillis ();
     s.source_id = source_id;
     s.retention = retention;
@@ -1522,7 +2816,7 @@ struct Cortext::Impl
     s.modality = "text";
     s.mimetype = "text/plain";
 
-    auto out = processor->Process (s);
+    auto out = Process (s);
     const auto process_end = std::chrono::steady_clock::now ();
     span.SetAttribute (
         "cortext.candidate_memory_count",
@@ -1533,7 +2827,7 @@ struct Cortext::Impl
     span.SetStatusOk ();
     telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
     const auto hydrate_start = std::chrono::steady_clock::now ();
-    Cortext::Context result = HydrateContext (out, true, &s.embedding);
+    Cortext::Context result = HydrateContext (out, true, &s.embedding, true, &s);
     const auto hydrate_end = std::chrono::steady_clock::now ();
     hydrate_span.SetStatusOk ();
     result.encode_ms = 0.0;
@@ -1551,11 +2845,10 @@ struct Cortext::Impl
     const auto encoded = ToStdVector (embedding);
     cortext::Signal s;
     s.embedding = ToEigen (RetrievalEmbeddingView (encoded));
-    s.soft_anchor_embedding = SoftAnchorEmbeddingView (encoded);
     s.timestamp = timestamp;
     s.source_id = source_id;
     s.force_consolidation = force_consolidation;
-    return processor->Process (s);
+    return Process (s);
   }
 
   Cortext::Context
@@ -1576,8 +2869,8 @@ struct Cortext::Impl
     internal::ThrowIfStopRequested ();
     telemetry::ScopedSpan span ("cortext.api.consolidate");
     const auto total_start = std::chrono::steady_clock::now ();
-    // Drive the operation set to allow EvaluateConsolidation to emit events
-    // and ConsolidationGate to run scoring/jobs when start is signaled.
+    // A maintenance signal runs no operations; the processor seals and
+    // recenters the sparse retrieval route around it.
     std::vector<float> v;
     telemetry::ScopedSpan encode_span ("cortext.encode");
     encoder->EncodeText (std::string (), v);
@@ -1615,7 +2908,9 @@ struct Cortext::Impl
   HydrateContext (const cortext::SignalProcessor::Output &out,
                   bool hydrate_working_memory = true,
                   const Eigen::VectorXf *query_embedding = nullptr,
-                  bool hydrate_retrieved_memory = true)
+                  bool hydrate_retrieved_memory = true,
+                  const cortext::Signal *query_signal = nullptr,
+                  Cortext::EvidenceBudget evidence_budget = std::nullopt)
   {
     Cortext::Context result;
     if (query_embedding)
@@ -1663,28 +2958,12 @@ struct Cortext::Impl
   result.output.stored_embedding_id = out.stored_embedding_id;
   result.output.stored_memory_id = out.stored_memory_id;
   result.output.stored_signal_id = out.stored_signal_id;
-  result.output.soft_anchor_enabled = out.soft_anchor_enabled;
-  result.output.soft_anchor_state_count = out.soft_anchor_state_count;
-  result.output.soft_anchor_link_count = out.soft_anchor_link_count;
-  result.output.soft_anchor_create_count = out.soft_anchor_create_count;
-  result.output.soft_anchor_update_count = out.soft_anchor_update_count;
-  result.output.soft_anchor_none_count = out.soft_anchor_none_count;
-  result.output.soft_anchor_last_update_us = out.soft_anchor_last_update_us;
-  result.output.soft_anchor_mean_update_us = out.soft_anchor_mean_update_us;
     
 	    if (!store)
 	      {
 	        return result;
 	      }
 
-	    const int max_hydrated_soft_anchors = core::HydratedSoftAnchorLimit (
-	        cfg.focus, cfg.sensitivity, cfg.stability);
-	    const int max_linked_hydration_candidates
-	        = core::RetrievalLinkedHydrationCandidateLimit (
-	            cfg.focus, cfg.sensitivity, cfg.stability);
-	    const auto linked_hydration_ordering_weights
-	        = core::RetrievalLinkedHydrationOrderingWeights (
-	            cfg.focus, cfg.sensitivity, cfg.stability);
 	    const int max_fallback_signal_blobs
 	        = operations::sparse_retrieval_knobs_internal::
 	            HydrationFallbackSignalLimit (
@@ -1695,7 +2974,6 @@ struct Cortext::Impl
 	      {
 	        HydrateWorkingMemoryFromDB (store.get (), object_store.get (),
 	                                    result.working_memory,
-	                                    max_hydrated_soft_anchors,
 	                                    max_fallback_signal_blobs,
 	                                    &loaded_fallback_signal_blobs);
 	      }
@@ -1743,9 +3021,6 @@ struct Cortext::Impl
       return 0;
     };
 
-    const int max_expanded_display_memories_per_node = std::max (
-        1, core::RetrievalGraphExpandedRagCompactItemLimit (cfg.focus,
-                                                            cfg.stability));
     std::unordered_set<long long> seen_candidate_memory_ids;
     seen_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
     std::unordered_set<long long> seen_output_memory_ids;
@@ -1760,34 +3035,6 @@ struct Cortext::Impl
             ranked_by_memory_id.emplace (candidate.memory_id, candidate);
           }
       }
-
-    auto append_hydrated_memory = [&] (
-                                      long long memory_id, bool require_content,
-                                      const operations::retrieval_trace::RankedCandidate
-                                          *linked_score) -> bool {
-      if (memory_id <= 0 || !seen_output_memory_ids.insert (memory_id).second)
-        {
-          return false;
-        }
-      Cortext::Context::Memory m;
-      m.id = memory_id;
-      HydrateMemory (store.get (), object_store.get (), memory_id, m,
-                     max_hydrated_soft_anchors,
-                     max_fallback_signal_blobs,
-                     &loaded_fallback_signal_blobs);
-      // Prefer a linked memory's own ranked trace. Otherwise use the
-      // source-specific query/relationship score computed during linked
-      // selection; never relabel the routing node's score as a source score.
-      ApplyRetrievalScore (m, ranked_by_memory_id, linked_score);
-      if (require_content && !HasHydratedContent (m))
-        {
-          seen_output_memory_ids.erase (memory_id);
-          return false;
-        }
-      StripSourceBlobsIfDisabled (m);
-      result.retrieved_memory.push_back (std::move (m));
-      return true;
-    };
 
     std::vector<long long> ordered_candidate_memory_ids;
     ordered_candidate_memory_ids.reserve (out.candidate_memory_ids.size ());
@@ -1823,60 +3070,165 @@ struct Cortext::Impl
         Cortext::Context::Memory m;
         m.id = memory_id;
         HydrateMemory (store.get (), object_store.get (), memory_id, m,
-                       max_hydrated_soft_anchors,
                        max_fallback_signal_blobs,
                        &loaded_fallback_signal_blobs);
         ApplyRetrievalScore (m, ranked_by_memory_id);
-        const bool has_content = HasHydratedContent (m);
-        const bool prefer_linked_sources
-            = LoadMemoryKind (store.get (), memory_id) == "ASSOCIATION";
-        if (has_content && !prefer_linked_sources)
+        // Retrieved memories without hydrated content are skipped; nothing
+        // writes the derived_from / has_label routes that used to resolve
+        // them to linked source memories.
+        if (HasHydratedContent (m)
+            && seen_output_memory_ids.insert (memory_id).second)
           {
-            if (seen_output_memory_ids.insert (memory_id).second)
-              {
-                StripSourceBlobsIfDisabled (m);
-                result.retrieved_memory.push_back (std::move (m));
-              }
-            continue;
-          }
-
-        int expanded_count = 0;
-        for (const auto &linked :
-             ResolveDisplayMemoriesForEmptyRetrieval (
-                 store.get (), memory_id, query_embedding,
-                 max_linked_hydration_candidates,
-                 linked_hydration_ordering_weights))
-          {
-            operations::retrieval_trace::RankedCandidate linked_score;
-            const operations::retrieval_trace::RankedCandidate
-                *linked_score_ptr = nullptr;
-            if (linked.relevance && linked.composite_score)
-              {
-                linked_score.memory_id = linked.memory_id;
-                linked_score.relevance = *linked.relevance;
-                linked_score.score = *linked.composite_score;
-                linked_score_ptr = &linked_score;
-              }
-            if (append_hydrated_memory (linked.memory_id, true,
-                                        linked_score_ptr))
-              {
-                ++expanded_count;
-                if (expanded_count >= max_expanded_display_memories_per_node)
-                  {
-                    break;
-                  }
-              }
-          }
-        if (expanded_count == 0 && has_content)
-          {
-            if (seen_output_memory_ids.insert (memory_id).second)
-              {
-                StripSourceBlobsIfDisabled (m);
-                result.retrieved_memory.push_back (std::move (m));
-              }
+            StripSourceBlobsIfDisabled (m);
+            result.retrieved_memory.push_back (std::move (m));
           }
       }
 
+    // The attachment steps only read: one object-store transaction serves
+    // all their payload reads instead of one transaction per read.
+    std::unique_ptr<ObjectTransaction> attachment_object_tx;
+    SharedObjectReads attachment_reads;
+    if (!SourceBlobsDisabled () && object_store)
+      {
+        try
+          {
+            attachment_object_tx = object_store->Begin ();
+            attachment_reads.object_tx = attachment_object_tx.get ();
+          }
+        catch (const std::exception &e)
+          {
+            attachment_object_tx.reset ();
+            attachment_reads = {};
+            telemetry::LogWarn (
+                "Failed to begin attachment object reads",
+                { telemetry::Attribute::String ("component", "cortext"),
+                  telemetry::Attribute::String ("error", e.what ()) });
+          }
+      }
+    AttachmentHydrations attachment_hydrations (
+        store.get (), object_store.get (), &attachment_reads,
+        max_fallback_signal_blobs, &loaded_fallback_signal_blobs,
+        ClipTermsOf (query_signal));
+    // The evidence budget fit (FitEvidenceToBudget) runs once the packet is
+    // complete; it finds each memory's own content among its attached
+    // neighbours.
+    const auto own_content = evidence_budget
+                                 ? OwnContentOf (result.retrieved_memory)
+                                 : std::vector<OwnContent> ();
+    const auto anchor_rows = SourceBlobsDisabled ()
+        ? std::unordered_map<long long, AnchorRow> ()
+        : LoadAnchorRows (store.get (), result.retrieved_memory,
+                          std::max (kContiguityAnchorLimit,
+                                    kSupersededRecallAnchorLimit));
+    std::unordered_set<long long> contiguous_turn_ids;
+    const std::size_t contiguous_turns_attached = AttachContiguousTurns (
+        store.get (), result.retrieved_memory, anchor_rows,
+        attachment_hydrations, contiguous_turn_ids);
+    result.output.operation_ms["Cortext.contiguous_turns_attached"]
+        = static_cast<double> (contiguous_turns_attached);
+    const std::size_t superseding_successors_attached
+        = AttachSupersedingSuccessors (store.get (), result.retrieved_memory,
+                                       anchor_rows, contiguous_turn_ids,
+                                       attachment_hydrations);
+    result.output.operation_ms["Cortext.superseding_successors_attached"]
+        = static_cast<double> (superseding_successors_attached);
+    const std::size_t superseded_predecessors_attached
+        = AttachSupersededPredecessors (
+            store.get (), result.retrieved_memory, anchor_rows,
+            std::move (contiguous_turn_ids), attachment_hydrations);
+    result.output.operation_ms["Cortext.superseded_predecessors_attached"]
+        = static_cast<double> (superseded_predecessors_attached);
+
+    // Standing signals (operations/standing_memory_internal.hpp): short
+    // lasting directives an answer must honour, chosen within their own set.
+    // They form a block of their own (Context::standing_memory), outside the
+    // retrieved ranking: each entry holds only the directive signals of one
+    // memory, best first, within kStandingPacketBytes (and the evidence
+    // budget), and the retrieved memories keep their ranks and content
+    // whether or not they hold one.
+    const std::size_t standing_limit
+        = evidence_budget ? std::min (kStandingPacketBytes, *evidence_budget)
+                          : kStandingPacketBytes;
+    std::size_t standing_bytes = 0;
+    for (const auto &pick :
+         operations::retrieval_trace::GetLastStandingPicks ())
+      {
+        Cortext::Context::Memory directive;
+        directive.id = pick.memory_id;
+        const auto cost = LoadStandingSignal (store.get (), object_store.get (),
+                                              pick.signal_id, directive);
+        if (cost == 0)
+          continue;
+        if ((evidence_budget || !result.standing_memory.empty ())
+            && standing_bytes + cost > standing_limit)
+          continue;
+        standing_bytes += cost;
+        const auto joined = std::find_if (
+            result.standing_memory.begin (), result.standing_memory.end (),
+            [&] (const auto &m) { return m.id == pick.memory_id; });
+        if (joined != result.standing_memory.end ())
+          {
+            // A second directive signal of a memory already in the block.
+            AlignContentMimetypes (*joined);
+            for (std::size_t i = 0; i < directive.content.size (); ++i)
+              {
+                joined->content.push_back (std::move (directive.content[i]));
+                joined->content_mimetypes.push_back (
+                    std::move (directive.content_mimetypes[i]));
+              }
+            continue;
+          }
+        Cortext::Context::Memory m;
+        m.id = pick.memory_id;
+        HydrateMemory (store.get (), object_store.get (), pick.memory_id, m,
+                       max_fallback_signal_blobs,
+                       &loaded_fallback_signal_blobs);
+        if (!HasHydratedContent (m))
+          continue;
+        m.content = std::move (directive.content);
+        m.content_mimetypes = std::move (directive.content_mimetypes);
+        StripSourceBlobsIfDisabled (m);
+        result.standing_memory.push_back (std::move (m));
+      }
+    result.output.operation_ms["Cortext.standing_joined"]
+        = static_cast<double> (result.standing_memory.size ());
+
+    if (evidence_budget)
+      {
+        const auto fit = FitEvidenceToBudget (
+            store.get (), object_store.get (), &attachment_reads,
+            result.retrieved_memory, own_content, standing_bytes,
+            query_embedding, *evidence_budget);
+        result.output.operation_ms["Cortext.evidence_bytes"]
+            = static_cast<double> (fit.bytes);
+        result.output.operation_ms["Cortext.evidence_member_cap"]
+            = static_cast<double> (fit.member_cap);
+        result.output.operation_ms["Cortext.evidence_memories_trimmed"]
+            = static_cast<double> (fit.trimmed);
+        result.output.operation_ms["Cortext.evidence_neighbours_stripped"]
+            = static_cast<double> (fit.stripped);
+        result.output.operation_ms["Cortext.evidence_memories_dropped"]
+            = static_cast<double> (fit.dropped);
+        telemetry::AddCounter ("cortext.evidence_budget.fits_total", 1);
+        telemetry::AddCounter ("cortext.evidence_budget.memories_trimmed_total",
+                               fit.trimmed);
+        telemetry::AddCounter ("cortext.evidence_budget.memories_dropped_total",
+                               fit.dropped);
+      }
+    if (attachment_object_tx)
+      {
+        try
+          {
+            attachment_object_tx->Commit ();
+          }
+        catch (const std::exception &e)
+          {
+            telemetry::LogWarn (
+                "Failed to end attachment object reads",
+                { telemetry::Attribute::String ("component", "cortext"),
+                  telemetry::Attribute::String ("error", e.what ()) });
+          }
+      }
     result.output.operation_ms["Cortext.fallback_hydration_signal_rows"]
         = static_cast<double> (loaded_fallback_signal_blobs);
     return result;
@@ -1995,61 +3347,16 @@ Cortext::~Cortext () = default;
 
 Cortext::Context
 Cortext::ProcessText (const std::string &text, const std::string &source_id,
-                      Retention retention)
+                      Retention retention,
+                      EvidenceBudget evidence_budget)
 {
-  if (!impl_)
-    {
-      throw std::runtime_error ("Cortext not initialized");
-    }
-  telemetry::ScopedSpan span ("cortext.api.process_text");
-  const auto total_start = std::chrono::steady_clock::now ();
-  const auto filter_decision = impl_->signal_filter.EvaluateText (text);
-  if (filter_decision.evaluated && !filter_decision.accepted)
-    {
-      span.SetStatusOk ();
-      return MakeFilteredContext (filter_decision, total_start);
-    }
-  std::vector<float> v;
-  telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeText (text, v);
-  encode_span.SetStatusOk ();
-  const auto encode_end = std::chrono::steady_clock::now ();
-
-  // Build signal with payload for MemoryStorage
-  const auto process_start = std::chrono::steady_clock::now ();
-  cortext::Signal s;
-  s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
-  s.timestamp = impl_->NowMillis ();
-  s.source_id = source_id;
-  s.retention = retention;
-  s.payload = std::vector<unsigned char> (text.begin (), text.end ());
-  s.modality = "text";
-  s.mimetype = "text/plain";
-
-  auto out = impl_->processor->Process (s);
-  const auto process_end = std::chrono::steady_clock::now ();
-  span.SetAttribute ("cortext.candidate_memory_count",
-                     static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
-  span.SetAttribute ("cortext.used_memory_count",
-                     static_cast<std::int64_t> (out.used_memory_ids.size ()));
-  span.SetStatusOk ();
-  telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
-  const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
-  const auto hydrate_end = std::chrono::steady_clock::now ();
-  hydrate_span.SetStatusOk ();
-  result.encode_ms = ToMillis (encode_end - total_start);
-  result.process_ms = ToMillis (process_end - process_start);
-  result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
-  result.total_ms = ToMillis (hydrate_end - total_start);
-  ApplySignalFilterDecision (result.output, filter_decision);
-  return result;
+  return ProcessText (text, source_id, Media{}, retention, evidence_budget);
 }
 
 Cortext::Context
 Cortext::ProcessText (const std::string &text, const std::string &source_id,
-                      const Media &media, Retention retention)
+                      const Media &media, Retention retention,
+                      EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -2066,23 +3373,24 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeText (text, v);
+  LateInteractionSet li;
+  impl_->EncodeTextSignal (text, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
-  // Build signal with optional caller-provided source payload. Text remains
-  // the canonical embedding input.
+  // Build signal with payload for MemoryStorage: the caller's Media when it
+  // carries bytes, else the text itself. Text stays the encoded input.
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.modality = "text";
-  ApplyStoredMedia (s, media);
+  ApplyStoredMedia (s, media, text.data (), text.size (), "text/plain");
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -2091,7 +3399,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2104,7 +3413,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
 
 Cortext::Context
 Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
-                        std::uint64_t timestamp, Retention retention)
+                        std::uint64_t timestamp, Retention retention,
+                        EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -2120,7 +3430,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeText (text, v);
+  LateInteractionSet li;
+  impl_->EncodeTextSignal (text, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -2128,15 +3439,15 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp;
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -2145,7 +3456,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2158,7 +3470,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
 
 Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
-                       const std::string &source_id, Retention retention)
+                       const std::string &source_id, Retention retention,
+                       EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -2175,7 +3488,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+      = impl_->signal_filter.EvaluateAudio (source_id, pcm, num_samples, 16000);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetAttribute ("cortext.signal_filter.modality",
@@ -2187,7 +3500,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  LateInteractionSet li;
+  impl_->EncodeAudioSignal (pcm, num_samples, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -2195,20 +3509,17 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
-  // Store raw PCM bytes (f32le) as payload
-  const std::size_t byte_len = num_samples * sizeof (float);
-  s.payload = std::vector<unsigned char> (byte_len);
-  std::memcpy (s.payload->data (), pcm, byte_len);
+  s.late_interaction = std::move (li);
   s.modality = "audio";
-  s.mimetype = MakeAudioMimePcmF32 ();
+  ApplyStoredMedia (s, Media{}, pcm, num_samples * sizeof (float),
+                    MakeAudioMimePcmF32 ());
   s.sample_rate = 16000; // Public audio ingress contract is 16 kHz mono PCM.
   s.num_samples = num_samples;
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -2217,7 +3528,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2232,7 +3544,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
 Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
                        const std::string &source_id, const Media &media,
-                       Retention retention)
+                       Retention retention,
+                       EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -2251,7 +3564,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   telemetry::ScopedSpan span ("cortext.api.process_audio");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+      = impl_->signal_filter.EvaluateAudio (source_id, pcm, num_samples, 16000);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetAttribute ("cortext.signal_filter.modality",
@@ -2263,23 +3576,25 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  LateInteractionSet li;
+  impl_->EncodeAudioSignal (pcm, num_samples, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.modality = "audio";
-  ApplyStoredMedia (s, media);
+  ApplyStoredMedia (s, media, pcm, num_samples * sizeof (float),
+                    MakeAudioMimePcmF32 ());
   s.sample_rate = 16000;
   s.num_samples = num_samples;
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -2288,7 +3603,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2303,7 +3619,8 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
 Cortext::Context
 Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
                        int channels, const std::string &source_id,
-                       Retention retention)
+                       Retention retention,
+                       EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -2322,7 +3639,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   telemetry::ScopedSpan span ("cortext.api.process_image");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = impl_->signal_filter.EvaluateImage (data, width, height, channels);
+      = impl_->signal_filter.EvaluateImage (source_id, data, width,
+                                            height, channels);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetStatusOk ();
@@ -2330,7 +3648,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeImage (data, width, height, channels, v);
+  LateInteractionSet li;
+  impl_->EncodeImageSignal (data, width, height, channels, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
@@ -2338,23 +3657,18 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
-  // Store raw image bytes as payload
-  const std::size_t byte_len
-      = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
-        * static_cast<std::size_t> (channels);
-  s.payload = std::vector<unsigned char> (byte_len);
-  std::memcpy (s.payload->data (), data, byte_len);
+  s.late_interaction = std::move (li);
   s.modality = "image";
-  s.mimetype = RawImageMime (width, height, channels);
+  ApplyStoredMedia (s, Media{}, data, RawImageBytes (width, height, channels),
+                    RawImageMime (width, height, channels));
   s.width = width;
   s.height = height;
   s.channels = channels;
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -2363,7 +3677,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2378,7 +3693,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
 Cortext::Context
 Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
                        int channels, const std::string &source_id,
-                       const Media &media, Retention retention)
+                       const Media &media, Retention retention,
+                       EvidenceBudget evidence_budget)
 {
   if (!impl_)
     {
@@ -2399,7 +3715,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   telemetry::ScopedSpan span ("cortext.api.process_image");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = impl_->signal_filter.EvaluateImage (data, width, height, channels);
+      = impl_->signal_filter.EvaluateImage (source_id, data, width,
+                                            height, channels);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetStatusOk ();
@@ -2407,24 +3724,26 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  impl_->encoder->EncodeImage (data, width, height, channels, v);
+  LateInteractionSet li;
+  impl_->EncodeImageSignal (data, width, height, channels, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.modality = "image";
-  ApplyStoredMedia (s, media);
+  ApplyStoredMedia (s, media, data, RawImageBytes (width, height, channels),
+                    RawImageMime (width, height, channels));
   s.width = width;
   s.height = height;
   s.channels = channels;
 
-  auto out = impl_->processor->Process (s);
+  auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -2433,7 +3752,8 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   span.SetStatusOk ();
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
-  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding);
+  Cortext::Context result = impl_->HydrateContext (out, true, &s.embedding, true, &s,
+                                                   evidence_budget);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2532,24 +3852,25 @@ internal::ReplayIngress::ProcessTextAt (Cortext &cortext,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  cortext.impl_->encoder->EncodeText (text, v);
+  LateInteractionSet li;
+  cortext.impl_->EncodeTextSignal (text, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   s.payload = std::vector<unsigned char> (text.begin (), text.end ());
   s.modality = "text";
   s.mimetype = "text/plain";
 
   operations::retrieval_trace::ScopedCapture retrieval_trace_capture (
       hydrate_context);
-  auto out = cortext.impl_->processor->Process (s);
+  auto out = cortext.impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (
@@ -2595,7 +3916,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   telemetry::ScopedSpan span ("cortext.internal.replay.process_audio_at");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision
-      = cortext.impl_->signal_filter.EvaluateAudio (pcm, num_samples, 16000);
+      = cortext.impl_->signal_filter.EvaluateAudio (source_id, pcm, num_samples, 16000);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetStatusOk ();
@@ -2603,17 +3924,18 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  cortext.impl_->encoder->EncodeAudio (pcm, num_samples, v);
+  LateInteractionSet li;
+  cortext.impl_->EncodeAudioSignal (pcm, num_samples, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   const std::size_t byte_len = num_samples * sizeof (float);
   s.payload = std::vector<unsigned char> (byte_len);
   std::memcpy (s.payload->data (), pcm, byte_len);
@@ -2622,7 +3944,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   s.sample_rate = 16000;
   s.num_samples = num_samples;
 
-  auto out = cortext.impl_->processor->Process (s);
+  auto out = cortext.impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -2632,7 +3954,7 @@ internal::ReplayIngress::ProcessAudioAt (Cortext &cortext, const float *pcm,
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
   Cortext::Context result
-      = cortext.impl_->HydrateContext (out, true, &s.embedding);
+      = cortext.impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2670,7 +3992,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   telemetry::ScopedSpan span ("cortext.internal.replay.process_image_at");
   const auto total_start = std::chrono::steady_clock::now ();
   const auto filter_decision = cortext.impl_->signal_filter.EvaluateImage (
-      data, width, height, channels);
+      source_id, data, width, height, channels);
   if (filter_decision.evaluated && !filter_decision.accepted)
     {
       span.SetStatusOk ();
@@ -2678,17 +4000,18 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
     }
   std::vector<float> v;
   telemetry::ScopedSpan encode_span ("cortext.encode");
-  cortext.impl_->encoder->EncodeImage (data, width, height, channels, v);
+  LateInteractionSet li;
+  cortext.impl_->EncodeImageSignal (data, width, height, channels, retention, v, li);
   encode_span.SetStatusOk ();
   const auto encode_end = std::chrono::steady_clock::now ();
 
   const auto process_start = std::chrono::steady_clock::now ();
   cortext::Signal s;
   s.embedding = ToEigen (RetrievalEmbeddingView (v));
-  s.soft_anchor_embedding = SoftAnchorEmbeddingView (v);
   s.timestamp = timestamp != 0 ? timestamp : cortext.impl_->NowMillis ();
   s.source_id = source_id;
   s.retention = retention;
+  s.late_interaction = std::move (li);
   const std::size_t byte_len
       = static_cast<std::size_t> (width) * static_cast<std::size_t> (height)
         * static_cast<std::size_t> (channels);
@@ -2702,7 +4025,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   s.height = height;
   s.channels = channels;
 
-  auto out = cortext.impl_->processor->Process (s);
+  auto out = cortext.impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
                      static_cast<std::int64_t> (out.candidate_memory_ids.size ()));
@@ -2712,7 +4035,7 @@ internal::ReplayIngress::ProcessImageAt (Cortext &cortext,
   telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
   const auto hydrate_start = std::chrono::steady_clock::now ();
   Cortext::Context result
-      = cortext.impl_->HydrateContext (out, true, &s.embedding);
+      = cortext.impl_->HydrateContext (out, true, &s.embedding, true, &s);
   const auto hydrate_end = std::chrono::steady_clock::now ();
   hydrate_span.SetStatusOk ();
   result.encode_ms = ToMillis (encode_end - total_start);
@@ -2883,7 +4206,6 @@ struct StreamingTextProbeSession::Impl
 
     cortext::Signal signal;
     signal.embedding = ToEigen (RetrievalEmbeddingView (embedding));
-    signal.soft_anchor_embedding = SoftAnchorEmbeddingView (embedding);
     signal.timestamp = timestamp != 0 ? timestamp
                                       : cortext->impl_->NowMillis ();
     signal.source_id = source_id;
@@ -2897,7 +4219,7 @@ struct StreamingTextProbeSession::Impl
 
     const auto hydrate_start = std::chrono::steady_clock::now ();
     Cortext::Context result
-        = cortext->impl_->HydrateContext (out, false, &signal.embedding);
+        = cortext->impl_->HydrateContext (out, false, &signal.embedding, true, &signal);
     const auto hydrate_end = std::chrono::steady_clock::now ();
 
     result.encode_ms = ToMillis (encode_end - total_start);

@@ -134,7 +134,7 @@ Cortext is built around a local feedback loop:
   derive thresholds, decay, storage cadence, consolidation, and retrieval
   behavior.
 - **Graph-native context:** memories are connected by reinforcement,
-  sequence, soft anchors, consolidation, and supersession edges.
+  sequence, consolidation, and supersession edges.
 - **Small native surface:** C++ facade, stable C ABI, and bindings for Python,
   Go, JavaScript/TypeScript, Dart, and WebAssembly.
 - **Research traceability:** experiments, ablations, and manuscript sections
@@ -288,8 +288,24 @@ and language bindings.
 Top-level fields include:
 
 - `retrieved_memory`: long-term memories selected for the current signal.
+- `standing_memory`: standing directives for a query ("Always ...", "I
+  prefer ..."), outside the retrieved ranking: each entry holds only the
+  stored signals that state a directive, best first, within its own small
+  byte budget. Place it ahead of `retrieved_memory`; it does not count
+  against a cut of the retrieved list.
 - `working_memory`: active short-term memory slots.
 - `embedding`: the current signal embedding when requested.
+
+Every process call takes an optional evidence budget in bytes (C++
+`Cortext::EvidenceBudget`, C `cortext_process_json_options.evidence_budget_bytes`,
+bindings `evidence_budget_bytes` / `evidenceBudgetBytes`). Unset, memories come
+back whole. Set, `standing_memory` plus `retrieved_memory` (with attached
+neighbours) fit within it: text counts its UTF-8 bytes and every other payload
+480 bytes, grouped memories keep their members most similar to the query (the
+best of each modality always), and more distinct memories are kept trimmed
+before lower-ranked ones are left out. A reader budgeted in tokens converts
+with its tokenizer's rate (8,000 tokens at 4.35 characters per token is 34,800
+bytes of ASCII text).
 - `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior.
 - `consolidation_state`: ordered `None`, `Recommended`, or `Required`
   maintenance urgency derived from the current throughput range.
@@ -297,7 +313,7 @@ Top-level fields include:
 - `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
 
 Each memory entry includes provenance, modality, stored content, retrieval
-scores, usage counts, and optional soft-anchor metadata:
+scores, and usage counts:
 
 ```json
 {
@@ -316,8 +332,7 @@ scores, usage counts, and optional soft-anchor metadata:
   "salience": 0.0,
   "contradiction": 0.0,
   "retrieved_count": 1,
-  "used_count": 0,
-  "soft_anchors": []
+  "used_count": 0
 }
 ```
 
@@ -543,7 +558,7 @@ flowchart TD
 
 The production loop is composed from small operations in `src/operations/`.
 Retrieval combines embedding similarity, graph edges, temporal scoring,
-supersession demotion, soft anchors, and working-memory state. Feedback updates
+supersession demotion, and working-memory state. Feedback updates
 F/S/T so later writes, decay, thresholds, attention width, and consolidation
 cadence adapt to the stream.
 

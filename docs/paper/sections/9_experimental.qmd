@@ -11,8 +11,8 @@ The evaluated system is the embedding-first runtime described in
 @sec-implementation and @sec-consolidation. It contains:
 
 * online memory storage, boundary detection, graph construction, retrieval,
-  reconsolidation, working memory, soft anchors, and eviction;
-* explicit shallow consolidation over stored embeddings and graph edges; and
+  reconsolidation, and working memory;
+* explicit maintenance (sparse-route seal and recenter); and
 * C, C++, Python, Go, Dart, JavaScript, and WebAssembly entry points that expose only the
   retained processing, retrieval, consolidation, reset, and embedding APIs.
 
@@ -35,7 +35,7 @@ only the intended surfaces. The verification pass used the following gates.
 | runtime code removal | repository scans over `include/`, `src/`, `bindings/`, `CMakeLists.txt`, and runtime examples find no retained internal decoder, adapter-registry, semantic batch, static taxonomy, fact-layer, or processor-local STM-shadow production path; experiment harnesses under `scripts/` and `tools/` are explicit non-runtime tooling |
 | dependency removal | `.gitmodules` and the worktree no longer contain the removed decoder/runtime submodules; the remaining third-party tree is limited to SQLite/vector/object storage, opt-out OpenTelemetry, and build/test dependencies |
 | API removal | public consolidation mode enums and mode-specific C API calls are gone; bindings no longer expose the removed mode fields |
-| current behavior | `Cortext::Consolidate()` and `Signal::force_consolidation` drive the one retained consolidation path; graph retrieval returns source-backed memory context from vector and graph evidence |
+| current behavior | `Cortext::Consolidate()` and `Signal::force_consolidation` drive the one retained consolidation path; graph retrieval returns source-backed memory context from vector evidence |
 | paper consistency | this section, @sec-consolidation, @sec-implementation, and @sec-optimization describe the current branch rather than deleted adapter-era workflows |
 
 This is intentionally a hard cut. No compatibility aliases, deprecated enum
@@ -152,10 +152,10 @@ target after a sound block-norm upper bound and exact cosine family checks. The
 rebuild installs the recovered surface so subsequent requests do not repeat
 the full SQL scan. A failed rebuild installs a failure sentinel so later
 requests do not retry the two complete surface scans. Shared base vectors keep
-all long-term memory metadata alternatives behind one stored vector so a
-superseded sibling cannot hide an eligible sibling. Retrieval fallback executes
+all long-term memory metadata alternatives behind one stored vector so the
+shared vector surfaces through exactly one eligible sibling. Retrieval fallback executes
 demand-driven ordered pages over the current and historical vector surfaces.
-Every SQL page applies kind, timestamp, and supersession eligibility before
+Every SQL page applies kind and timestamp eligibility before
 distance ordering and a knob-derived top-k page limit; one C++ cosine-family
 index spans the pages until the ordinary seed budget is full or the surface is
 exhausted. Processor hydration records persisted-current currency separately
@@ -747,9 +747,10 @@ ranker.
 
 In the June research branch, temporal retrieval and predictive pre-activation
 stayed because their removal cost measurable packet quality or packet size.
-The hard-cutover production graph ranker retains temporal scoring but no longer
-reads `pre_activation`, so that predictive verdict does not describe current
-runtime behavior. Removing
+The hard-cutover production graph ranker retains temporal scoring but stopped
+reading `pre_activation`, and the 2026-10 engine ablation removed predictive
+pre-activation entirely (see the removal table below), so that predictive
+verdict does not describe current runtime behavior. Removing
 the metacognitive layer was mildly positive and had no long-horizon story to
 defer to, which supported cutting it in v1. Removing daily consolidation was
 also mildly positive at this horizon, but we deferred that arm because
@@ -781,7 +782,19 @@ artifact is
 | encode_retrieve_oscillator removed | 39/117 | 3.08 | 1.21 | 755 | -0.49 | 0.28 | removal hurts; retained |
 | emotion_mood_threshold_cascade removed | 45/117 | 3.44 | 1.16 | 751 | -0.14 | 0.32 | null/deferred; no cut |
 
-The confirmation reverses the preliminary oscillator-null read. Removing the
+A 2026-10 rerun of this protocol on the pruned engine (same 25 validation
+dialogs, warmup 20, probe stride 30, capacity 21; 1,190 turns, 39 probes)
+compared the packets themselves before judging. With the oscillator off, all
+39 probe packets were byte-identical to the control under both Durable and
+Natural retention. With effect scales off, 7/39 differed: five only in order
+and two in which contiguous turns were attached. A sufficiency delta cannot
+come from identical packets, so the July oscillator delta was judge variance
+(the July arm's mean packet tokens, 755, also matched the control). The
+oscillator was removed (artifacts:
+`.claude/hillclimb/ablation/ablate3/msc/`). The July reading follows for the
+record.
+
+The July confirmation reverses the preliminary oscillator-null read. Removing the
 encode/retrieve oscillator costs 0.49 sufficiency, the largest July
 neuromodulator loss, and all three matched repetition deltas are negative, so
 that per-signal fast dynamic stays. Synaptic tagging also clears the 0.15 signal
@@ -879,7 +892,10 @@ split into two evidentiary tiers. Emotion/mood cascade and STM/LTM graph-label
 handoff are retained on measured harm; neuromodulator effect scales, daily
 consolidation, graph expansion, and synaptic-tag TTL are retained by default
 because removal shows no benefit and the apparent harm is below this screen's
-paired-repetition resolution. These verdicts do not remove the ACT-R-inspired
+paired-repetition resolution. The 2026-10 engine ablation later removed
+clustering consolidation, graph expansion and synaptic tagging on the current
+engine, where consolidation never fired at default knobs (see the removal
+table below). These verdicts do not remove the ACT-R-inspired
 activation ledger retained in retrieval traces; that ledger records ranking
 evidence for observability and audits, not an additional
 scoring gate.
@@ -951,6 +967,83 @@ context, Cortext stays competitive with the full-history upper bound while
 spending roughly two orders of magnitude less context than chat RAG. The
 artifact is
 `docs/paper/artifacts/replay_v8_context_blowout/judge_gemma4_12b_local_context128_prioronly.json`.
+
+## Engine Ablation Removals (2026-10)
+
+A leave-one-out study switched off each engine subsystem in turn. It used a build with experiment hooks; the hooks are not part of the release. The evals were Eval 1 (250 cases), LongMemEval-S (48), every second LongMemEval-M episode (24), and full-length BEAM-10M conversations (19-24k turns each). Tier-1 metrics are judge-free: gold-turn recall in the packet and in the seed set, query p95, ingest per turn, instructions retired, peak RSS and store size. A subsystem was removed when switching it off measurably helped quality, or when it left every packet byte-identical with no cost benefit. Each removal was then rechecked on its own commit: build, the full test suite, and byte-identical packets against the parent commit on LongMemEval-S (48), Eval 1 (250) and BEAM-10M conversation 7 (about 21k turns), unless the entry says otherwise.
+
+| Removed | Ablation evidence (packets changed; recall deltas) |
+|---|---|
+| meta-learned knob priors (`ApplyMetaLearning`, `meta_learning_coeffs`) | 0/250 Eval 1, 0/48 S, 0/40 BEAM; no cost change. The priors are the closed-form F/S/T functions again |
+| predictive pre-activation (`ApplyPredictivePreActivation`, `memories.pre_activation` and its indexes) | 0/250, 0/48, 0/40. No ranker read the field |
+| influence feedback (`ApplyInfluenceFeedback`, `memories.influence/sustained_influence/mean_influence`, `state.sustained_influence`) | 0/250, 0/48, 0/40 (as part of the minor-feedback group). The columns were write-only |
+| focus feedback (`ApplyFocusFeedback`) | 0/250, 0/48, 0/40 (as part of the minor-feedback group) |
+| supersession exclusion (seed-time filter of `supersedes` targets, its eligibility sidecar and the SQL `instr()` superseded-id filter) | Not neutral: every packet changes, and recall rises. Packet gold-turn recall +0.025 on S, +0.018 on Eval 1, +0.066 on BEAM-10M conversation 7. Seed gold share +0.136, +0.158 and +0.081. Haiku judge (rubric v2) sufficiency -0.006 ± 0.051 on S and -0.005 ± 0.039 on Eval 1. Misleading 0.021 → 0.021 and 0.022 → 0.016. Instructions +2.5%. `supersedes` edges and superseded-predecessor hydration stay |
+| clustering consolidation (`EvaluateConsolidation`, scoring gate, clusterer, shallow `ASSOCIATION` replay, typed-edge graph build) | Inert at default knobs: 0 candidates per pass because stability never fell below 1.0. With a stability fix that made it fire, packet recall moved -0.012 on S, -0.010 on Eval 1 and 0 on BEAM. Judge sufficiency +0.012 ± 0.023 on S and -0.009 ± 0.023 on Eval 1. Instructions +1–2%. Packets are byte-identical to the inert pipeline after removal |
+| graph expansion (one-hop traversal of `co_occurs`/`similar_to`/`reinforces`/`causes`/`derived_from`/episode edges with a bounded graph bonus) | 0/250, 0/48, 0/40 in phase 1, where only `supersedes` edges existed. After clustering consolidation was removed, no traversable edge is written |
+| memory strength and eviction (`UpdateMemoryStrength` traces, reinforcement and decay, periphery-cutoff eviction, storage-pressure gate, `memory_evictions`) | 0/250, 0/48, 0/40. Eviction never ran at default knobs. Once a stability fix opened its gate (storage floor 0), it deleted 94% of S, 92% of Eval 1 and 99.7% of BEAM conversation 7 memories, and packet recall fell 0.630 → 0.086, 0.587 → 0.084 and 0.103 → 0. Retrieval counters moved to `RecordMemoryUsage` |
+| serial position effects (`ApplySerialPositionEffects`, `ApplySerialPositionMultiplier`) | 0/250, 0/48, 0/40 (minor-feedback group). The multiplier only fed memory-strength reinforcement |
+| synaptic tagging (`ApplySynapticTagging`, `tag_strength`, `tag_expires_at`) | 0/250, 0/48, 0/40. Its only consumer was the consolidation score. The June research-branch "removal hurts" verdict was measured with consolidation live |
+| sensitivity feedback (`ApplySensitivityFeedback`, `memories.redundancy`, the unwritten `connectivity`) | 0/250, 0/48, 0/40 (minor-feedback group). `redundancy` only fed the consolidation score |
+| stability feedback and half-life adaptation (`ApplyStabilityFeedback`, `UpdateStability`, `memories.stability`, persisted half-life/rate-decay/drift-weight/retention state) | 0/250, 0/48, 0/40 (minor-feedback group). Their only consumers were the consolidation score and memory-strength decay |
+| emotional consolidation and cascade (`ApplyEmotionalConsolidation`, `PropagateEmotionalCascade`, emotional-metadata cache, `flashbulb`/`emotional_intensity`/`half_life_bonus`/`detail_suppression`/`gist_components`/`cascade_*` columns) | 0/250, 0/48, 0/40 (affect group). Outputs fed only memory-strength decay and the cascade |
+| linked-source hydration (`LABEL`/`ASSOCIATION` routing rows resolved through `has_label`/`derived_from` routes, query-aware linked ordering, compact-item limit) | 0/250, 0/48, 0/40 with query-aware ordering off. With clustering consolidation removed, nothing writes those routes |
+
+Working-memory items with equal start timestamps were returned in whatever order SQLite's chosen index produced. Dropping the strength and affect columns and indexes changed that plan, which reordered tied working-memory slots in 45/48 S and 244/250 Eval 1 packets (same items, same retrieved list). Hydration now breaks ties by `memory_id`, so the order no longer depends on the query plan.
+
+Five subsystems changed packets when switched off but did not clearly help or hurt on recall alone. They were judged with Haiku (rubric v2) against the pipeline above. S and Eval 1 used one repetition per changed case; BEAM-10M conversation 7 used two. Each delta is "switched off minus on" with a 95% interval.
+
+| Subsystem | Judge sufficiency delta | Recall and cost | Decision |
+|---|---|---|---|
+| embedding movement (reconsolidation drift) | S -0.048 ± 0.045, Eval 1 -0.032 ± 0.029; misleading +0.012 on Eval 1 | packet recall -0.025 / -0.008; instructions -18%, store 380 → 265 MB | kept in round 2; removed in round 3 (below): this arm also switched off the reconstruction representation, and movement alone is neutral |
+| `supersedes` edges and superseded hydration | S -0.036 ± 0.052 (sufficient -0.095 ± 0.090), Eval 1 -0.016 ± 0.013 | packet recall -0.037 / -0.025; instructions -6% | kept: switching it off hurts |
+| working memory | S 0.000 ± 0.047 (sufficient -0.024), Eval 1 -0.014 ± 0.015 (sufficient -0.018) | packet recall -0.012 / -0.015; instructions -25% | kept: every sign is negative, though only just inside the noise; round 3 measured its packet cost (below) |
+| neuromodulator effect scales and encode/retrieve oscillator | S 0.000, Eval 1 0.000 ± 0.009, BEAM +0.028 ± 0.054 | packet recall -0.003 on Eval 1; no cost change | both removed in round 3 (below) |
+| SQLite sparse route (BEAM only; S and Eval 1 packets are identical with it off) | BEAM +0.042 ± 0.059 (n = 18) | recall equal; instructions -22%, store 372 → 279 MB, query p95 906 → 811 ms | kept: at 111k turns it is the cheaper path (round 3, below) |
+
+### Round 3: leave-one-out inside the kept subsystems (2026-10)
+
+Round 3 recursed into the subsystems the second round kept, on the merged
+pruned engine. Each feature was switched off alone (experiment-only hooks) on
+LongMemEval-S (48 cases), Eval 1 (250), BEAM-10M conversation 7 (22.6k turns,
+20 cases) and, where it mattered, an eight-episode LongMemEval-M subset (39k
+turns). Query-time-only parameters were swept by re-querying the stored
+baseline databases, which reproduced the baseline packets exactly. Every
+feature fired at full length (BEAM conversation 7: 45,290 `supersedes` edges,
+4,520 reconsolidation and 14,237 retrieval reconstructions, 15,767 labile
+memories, 18,162 suppressed memories, 5,403 used memories, 21 working-memory
+slots, 2 soft anchors). Tier 1 is packet gold-turn recall; Haiku (rubric v2)
+judged only packets that changed. Instruction counts come from
+`/usr/bin/time -l` because the machine was shared.
+
+| Feature | Packets changed (S / Eval 1 / BEAM) | Recall and judge | Cost | Decision |
+|---|---|---|---|---|
+| reconsolidation ripple over association edges | never fires: only `supersedes` edges exist | none | — | removed |
+| association fanout cache, association embedding cache, suppression id sets, sparse-key index and procedural table, unread retrieval-surface fields, superseded penalty, prediction horizon | write-only or unread | identical by construction, tip identity 0/48 and 0/250 | first query after a flush −54 ms at 20k turns; RSS −10% on BEAM | removed |
+| DA modulator and reward prediction error | consumer removed | identical | — | removed |
+| encode/retrieve oscillator | MSC 0/39 (Durable and Natural) | identical | — | removed |
+| temporal tie-break in retrieval scoring | 0/48, 0/250, 0/20 | identical | — | removed |
+| in-conversation skip in superseded-predecessor hydration | 0/48, 0/250, 17/20 | BEAM 0.103 → 0.118 (2 better) | +0.5 KB packet on BEAM | removed |
+| retrieval competition and RIF state | 0/48, 0/250, 0/20 with the op skipped; the epoch was the only `Required` consolidation hint | 111k chain recall 0.062 → 0.082, judge +0.008 ± 0.040 | −5% to −15% instructions | removed |
+| reconsolidation and retrieval-time reconstruction (together) | 48/48, 241/250, 20/20, 8/8 | S equal (judge 0.000); Eval 1 +0.014 (judge +0.010 ± 0.016); BEAM +0.007 (+0.014 ± 0.027); M equal (0.000) | −5% to −11% instructions, stores −12% to −23% | removed |
+| working-memory rehearsal | 12/48, 33/250, 0/20 | recall equal; judge 0.000 / +0.002 ± 0.003 | −3% to −4% | removed |
+| neuromodulator effect scales (write scale) and NE | 5/48, 32/250, 7/20 | recall within one case; judge 0.000 / −0.001 ± 0.006 / +0.028 ± 0.054 | — | removed |
+| contiguity budget 6 KiB → 12 KiB and lag 2 for all 11 anchors | query-time sweep | S 0.642 → 0.691, Eval 1 0.597 → 0.629; judge +0.048 ± 0.056 / +0.037 ± 0.019 | +2 KB per packet | adopted |
+| `supersedes` edge writing / predecessor hydration | 47/48, 249/250 | −0.037 / −0.025 / −0.015 recall | −5% instructions off | kept |
+| contiguity hydration | all | −0.06 / −0.09 recall off | — | kept |
+| working-memory chunking | 0/48, 0/250, 0/20, MSC 0/39 | never merged a slot | — | kept pending a workload where it fires |
+| family collapse in retrieval | 5/48, 18/250, 10/20 | recall within one case | −1% to −5% off | kept (candidate: wired through the sparse-route cache) |
+| usage detection and usage counters | 0/48, 0/250, 0/20 | identical | −1% each | kept: they feed the public `retrieved_count`/`used_count` fields |
+| soft anchors | 0/48, 0/250, 0/20 | identical | −0.5% to −1% | removed (public API, user-approved) |
+| working-memory packet hydration | 48/48, 250/250, 20/20 | −0.012 / −0.015 / 0 recall; judge +0.012 ± 0.053 / −0.008 ± 0.016 | packets −66% / −60% / −84% | kept: public API, flagged |
+| SQLite sparse route at 111,527 turns (five BEAM conversations chained) | 94/99 | off: recall 0.076 vs 0.062, judge +0.020 ± 0.052 | off: +26% instructions, ingest 170 vs 95 ms/turn past 100k, query median 45 vs 33 ms, RSS 7.4 vs 6.7 GB | kept |
+
+After all round-3 commits, the engine against the merged pruned engine:
+packet gold-turn recall 0.642 → 0.691 (S), 0.597 → 0.644 (Eval 1, 19 cases
+better, 1 worse), 0.103 → 0.118 (BEAM); Haiku-judged sufficiency +0.060 ±
+0.057, +0.039 ± 0.021 and +0.014 ± 0.048; instructions retired −12% (S),
+−12% (Eval 1), −24% (BEAM); peak RSS −14%, −3% and −17%. Artifacts:
+`.claude/hillclimb/ablation/ablate3/`.
 
 ## Experimental Interpretation
 

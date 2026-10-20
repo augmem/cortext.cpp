@@ -50,6 +50,7 @@ struct CliOptions
   std::size_t top = 5;
   bool quiet = false;
   bool durable_recall = false;
+  cortext::Cortext::EvidenceBudget evidence_budget;
   std::string command;
   std::vector<std::string> command_args;
 };
@@ -73,6 +74,8 @@ void PrintUsage (std::ostream &out)
       << "  --sensitivity X    S knob in [0,1] (default 0.5)\n"
       << "  --stability X      T knob in [0,1] (default 0.8)\n"
       << "  --top N            max retrieved memories to print (default 5)\n"
+      << "  --evidence-budget N  fit recall evidence within N bytes\n"
+      << "                     (default: whole memories)\n"
       << "  --quiet            suppress per-call gauges\n"
       << "  --durable          store recall queries as durable memories under\n"
       << "                     cli/recall (default: recall is ephemeral and\n"
@@ -151,6 +154,11 @@ std::string FormatTimestamp (std::uint64_t timestamp_ms)
 void PrintRetrieved (const cortext::Cortext::Context &context,
                      std::size_t top)
 {
+  for (const auto &memory : context.standing_memory)
+    {
+      std::cout << "  standing [#" << memory.id << "] "
+                << ClipForDisplay (MemoryText (memory), 160) << "\n";
+    }
   if (context.retrieved_memory.empty ())
     {
       std::cout << "  (no long-term memories surfaced)\n";
@@ -262,11 +270,13 @@ cortext::Cortext::Context RecallOnce (cortext::Cortext &engine,
   if (!options.durable_recall)
     {
       return engine.ProcessText (query, options.source_id,
-                                 cortext::Retention::Ephemeral);
+                                 cortext::Retention::Ephemeral,
+                                 options.evidence_budget);
     }
   const std::string source
       = options.source_id_overridden ? options.source_id : "cli/recall";
-  return engine.ProcessText (query, source, cortext::Retention::Durable);
+  return engine.ProcessText (query, source, cortext::Retention::Durable,
+                             options.evidence_budget);
 }
 
 int RunRecall (cortext::Cortext &engine, const CliOptions &options)
@@ -422,7 +432,8 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
           continue;
         }
       if (arg == "--db" || arg == "--source" || arg == "--focus"
-          || arg == "--sensitivity" || arg == "--stability" || arg == "--top")
+          || arg == "--sensitivity" || arg == "--stability" || arg == "--top"
+          || arg == "--evidence-budget")
         {
           const std::string *value = take_value (arg);
           if (value == nullptr)
@@ -437,6 +448,16 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
             {
               options.source_id = *value;
               options.source_id_overridden = true;
+            }
+          else if (arg == "--evidence-budget")
+            {
+              const long long bytes = std::atoll (value->c_str ());
+              if (bytes <= 0)
+                {
+                  std::cerr << arg << " expects a positive byte count\n";
+                  return 1;
+                }
+              options.evidence_budget = static_cast<std::size_t> (bytes);
             }
           else if (arg == "--top")
             {

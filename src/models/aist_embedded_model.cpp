@@ -410,9 +410,46 @@ WriteAtomically (const std::filesystem::path &dest, const unsigned char *data,
   WriteSidecarSha (dest, expected_sha);
 }
 
+/// One model linked into the library as Git shards.
+struct EmbeddedShardSet
+{
+  const char *label;
+  std::size_t count;
+  const unsigned char *(*data) (std::size_t);
+  const std::uint64_t *sizes;
+  const char *const *sha256;
+  const char *whole_sha256;
+  std::uint64_t whole_size;
+};
+
+EmbeddedShardSet
+AistShardSet ()
+{
+  return { "AIST",
+           CORTEXT_EMBEDDED_AIST_SHARD_COUNT,
+           &CortextEmbeddedAistShardData,
+           kCortextEmbeddedAistShardSizes,
+           kCortextEmbeddedAistShardSha256,
+           CORTEXT_EMBEDDED_AIST_GGUF_SHA256,
+           CORTEXT_EMBEDDED_AIST_GGUF_SIZE };
+}
+
+EmbeddedShardSet
+LateInteractionShardSet ()
+{
+  return { "AIST late-interaction",
+           CORTEXT_EMBEDDED_AIST_LI_SHARD_COUNT,
+           &CortextEmbeddedAistLiShardData,
+           kCortextEmbeddedAistLiShardSizes,
+           kCortextEmbeddedAistLiShardSha256,
+           CORTEXT_EMBEDDED_AIST_LI_SHA256,
+           CORTEXT_EMBEDDED_AIST_LI_SIZE };
+}
+
 /// Concatenate linked shards into dest; verify per-shard and whole digests.
 void
-AssembleShardsAtomically (const std::filesystem::path &dest)
+AssembleShardsAtomically (const std::filesystem::path &dest,
+                          const EmbeddedShardSet &set)
 {
   std::filesystem::create_directories (dest.parent_path ());
   const auto tmp = UniqueTempPath (dest);
@@ -422,28 +459,27 @@ AssembleShardsAtomically (const std::filesystem::path &dest)
     std::ofstream out (tmp, std::ios::binary | std::ios::trunc);
     if (!out)
       {
-        throw std::runtime_error (
-            "failed to open temp path for embedded AIST reassembly: "
-            + tmp.string ());
+        throw std::runtime_error (std::string ("failed to open temp path for embedded ")
+                                  + set.label + " reassembly: " + tmp.string ());
       }
-    for (std::size_t i = 0; i < CORTEXT_EMBEDDED_AIST_SHARD_COUNT; ++i)
+    for (std::size_t i = 0; i < set.count; ++i)
       {
-        const unsigned char *data = CortextEmbeddedAistShardData (i);
-        const std::size_t size
-            = static_cast<std::size_t> (kCortextEmbeddedAistShardSizes[i]);
+        const unsigned char *data = set.data (i);
+        const std::size_t size = static_cast<std::size_t> (set.sizes[i]);
         if (data == nullptr || size == 0)
           {
             std::error_code ec;
             std::filesystem::remove (tmp, ec);
-            throw std::runtime_error ("missing embedded AIST shard payload");
+            throw std::runtime_error (std::string ("missing embedded ")
+                                      + set.label + " shard payload");
           }
-        if (Sha256Hex (data, size) != kCortextEmbeddedAistShardSha256[i])
+        if (Sha256Hex (data, size) != set.sha256[i])
           {
             std::error_code ec;
             std::filesystem::remove (tmp, ec);
-            throw std::runtime_error (
-                "embedded AIST shard digest mismatch at index "
-                + std::to_string (i));
+            throw std::runtime_error (std::string ("embedded ") + set.label
+                                      + " shard digest mismatch at index "
+                                      + std::to_string (i));
           }
         out.write (reinterpret_cast<const char *> (data),
                    static_cast<std::streamsize> (size));
@@ -451,26 +487,37 @@ AssembleShardsAtomically (const std::filesystem::path &dest)
           {
             std::error_code ec;
             std::filesystem::remove (tmp, ec);
-            throw std::runtime_error (
-                "failed writing embedded AIST shard to temp file");
+            throw std::runtime_error (std::string ("failed writing embedded ")
+                                      + set.label + " shard to temp file");
           }
         whole.Update (data, size);
         total += static_cast<std::uint64_t> (size);
       }
     out.flush ();
   }
-  if (total != CORTEXT_EMBEDDED_AIST_GGUF_SIZE
-      || whole.FinalHex () != CORTEXT_EMBEDDED_AIST_GGUF_SHA256)
+  if (total != set.whole_size || whole.FinalHex () != set.whole_sha256)
     {
       std::error_code ec;
       std::filesystem::remove (tmp, ec);
-      throw std::runtime_error (
-          "assembled embedded AIST model digest/size mismatch");
+      throw std::runtime_error (std::string ("assembled embedded ") + set.label
+                                + " model digest/size mismatch");
     }
-  ReplaceFile (tmp, dest, CORTEXT_EMBEDDED_AIST_GGUF_SHA256,
-               CORTEXT_EMBEDDED_AIST_GGUF_SIZE);
-  WriteSidecarSha (dest, CORTEXT_EMBEDDED_AIST_GGUF_SHA256);
+  ReplaceFile (tmp, dest, set.whole_sha256, set.whole_size);
+  WriteSidecarSha (dest, set.whole_sha256);
 }
+
+/// Assemble the set into dest unless dest already matches its digest.
+void
+MaterializeShardSet (const std::filesystem::path &dest,
+                     const EmbeddedShardSet &set)
+{
+  if (!FileMatchesStreaming (dest, set.whole_sha256, set.whole_size))
+    {
+      AssembleShardsAtomically (dest, set);
+    }
+}
+
+const char *const kLateInteractionRelativePath = "AIST-87M-GGUF/AIST-87M-LI.gguf";
 
 bool
 EmbeddedShardsPresent ()
@@ -488,7 +535,17 @@ EmbeddedShardsPresent ()
         }
       total += kCortextEmbeddedAistShardSizes[i];
     }
+  std::uint64_t li_total = 0;
+  for (std::size_t i = 0; i < CORTEXT_EMBEDDED_AIST_LI_SHARD_COUNT; ++i)
+    {
+      if (CortextEmbeddedAistLiShardData (i) == nullptr)
+        {
+          return false;
+        }
+      li_total += kCortextEmbeddedAistLiShardSizes[i];
+    }
   return total == CORTEXT_EMBEDDED_AIST_GGUF_SIZE
+         && li_total == CORTEXT_EMBEDDED_AIST_LI_SIZE
          && CORTEXT_EMBEDDED_AIST_VOCAB_SIZE > 0;
 }
 
@@ -521,11 +578,7 @@ MaterializeEmbeddedAistModel ()
   const auto vocab_path = cache / "mdbr-leaf-ir" / "vocab.txt";
 
   // Assemble linked shards → full .gguf in the cache (once).
-  if (!FileMatchesStreaming (model_path, CORTEXT_EMBEDDED_AIST_GGUF_SHA256,
-                             CORTEXT_EMBEDDED_AIST_GGUF_SIZE))
-    {
-      AssembleShardsAtomically (model_path);
-    }
+  MaterializeShardSet (model_path, AistShardSet ());
   if (!FileMatchesStreaming (vocab_path, CORTEXT_EMBEDDED_AIST_VOCAB_SHA256,
                              CORTEXT_EMBEDDED_AIST_VOCAB_SIZE))
     {
@@ -533,7 +586,27 @@ MaterializeEmbeddedAistModel ()
                        static_cast<std::size_t> (CORTEXT_EMBEDDED_AIST_VOCAB_SIZE),
                        CORTEXT_EMBEDDED_AIST_VOCAB_SHA256);
     }
+  // The late-interaction reranker resolves beside the model
+  // (ResolveLateInteractionModelPath).
+  MaterializeShardSet (cache / kLateInteractionRelativePath,
+                       LateInteractionShardSet ());
   return model_path;
+#endif
+}
+
+std::optional<std::filesystem::path>
+MaterializeEmbeddedLateInteractionModel ()
+{
+#if !(defined(CORTEXT_HAS_EMBEDDED_AIST_MODEL) && CORTEXT_HAS_EMBEDDED_AIST_MODEL)
+  return std::nullopt;
+#else
+  if (!HasEmbeddedAistModel ())
+    {
+      return std::nullopt;
+    }
+  const auto li_path = DefaultModelCacheRoot () / kLateInteractionRelativePath;
+  MaterializeShardSet (li_path, LateInteractionShardSet ());
+  return li_path;
 #endif
 }
 

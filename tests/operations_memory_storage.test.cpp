@@ -1,5 +1,6 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include "test_helpers.hpp"
 #include <cortext/core/algorithms.hpp>
 #include <cortext/core/knobs.hpp>
@@ -12,7 +13,6 @@
 #include <cortext/store/utils.hpp>
 #include "../src/operations/constructive_recall_internal.hpp"
 #include "../src/operations/active_signal_embedding_ring_internal.hpp"
-#include "../src/operations/execution_cache_sidecar_internal.hpp"
 #include "../src/operations/historical_surface_search_cache_internal.hpp"
 #include <algorithm>
 #include <atomic>
@@ -332,16 +332,13 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   auto sig_blob_id = BlobFromAny (sig_rows[0].at ("blob_id"));
   REQUIRE (!sig_blob_id.empty ());
 
-  // v2: Verify memories has all expected columns (strength, use_frequency now on memories)
+  // v2: Verify memories carries the initial strength
   auto fb_rows = store->Execute (
-      "SELECT strength, stability, use_frequency FROM memories "
+      "SELECT strength FROM memories "
       "WHERE embedding_id = ?", { *stored_id });
   REQUIRE (fb_rows.size () == 1);
   REQUIRE (std::any_cast<double> (fb_rows[0].at ("strength"))
            == Catch::Approx (core::MemoryInitialStrengthPolicy (
-               cfg.focus, cfg.sensitivity, cfg.stability)));
-  REQUIRE (std::any_cast<double> (fb_rows[0].at ("stability"))
-           == Catch::Approx (core::MemoryInitialStabilityPolicy (
                cfg.focus, cfg.sensitivity, cfg.stability)));
 
   // No buffered instructions since we use savepoints
@@ -399,20 +396,15 @@ TEST_CASE ("MemoryStorage initializes scalar memory fields from knobs",
   REQUIRE (stored_id.has_value ());
 
   auto rows = store->Execute (
-      "SELECT strength, stability FROM memories WHERE embedding_id = ?",
+      "SELECT strength FROM memories WHERE embedding_id = ?",
       { *stored_id });
   REQUIRE (rows.size () == 1);
 
   const double expected_strength = core::MemoryInitialStrengthPolicy (
       cfg.focus, cfg.sensitivity, cfg.stability);
-  const double expected_stability = core::MemoryInitialStabilityPolicy (
-      cfg.focus, cfg.sensitivity, cfg.stability);
   REQUIRE (expected_strength < 1.0);
-  REQUIRE (expected_stability < 1.0);
   REQUIRE (std::any_cast<double> (rows[0].at ("strength"))
            == Catch::Approx (expected_strength));
-  REQUIRE (std::any_cast<double> (rows[0].at ("stability"))
-           == Catch::Approx (expected_stability));
 }
 
 TEST_CASE ("MemoryStorage discards when write_decision is false",
@@ -868,9 +860,7 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
 
   ProcessorContext pctx;
   pctx.UpsertRetrievalSurface (
-      { 10, 100, 1000, 1000, 0, 0, 0, 0, "LONG_TERM", "belief/source",
-        "text", -1.0, 0, 0.0, 0.0, 0.0, false, true,
-        stale_embedding });
+      { 10, 100, 1000, 1000, "LONG_TERM", "belief/source", "text", false, true, stale_embedding });
   SignalProcessor::Config cfg;
   cortext::testing::RequireEncoder (cfg);
 
@@ -891,7 +881,6 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
     acc.signals.push_back (std::move (rec));
   }
   pctx.accumulator_states[s.source_id] = std::move (acc);
-  pctx.association_fanout_cache.valid = true;
 
   OperationContext ctx (s, pctx, cfg, store);
   ctx.SetAccumulatorWriteDecision (true);
@@ -912,17 +901,6 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
       { correction_memory_id, 10LL });
   REQUIRE (edge_rows.size () == 1);
   REQUIRE (std::any_cast<double> (edge_rows[0].at ("weight")) > 0.0);
-  REQUIRE (pctx.association_fanout_cache.valid);
-  REQUIRE (pctx.association_fanout_cache.out_by_source
-               .at (correction_memory_id)
-               .front ().memory_id
-           == 10LL);
-  const auto sidecar
-      = operations::execution_cache_sidecar_internal::Find (pctx);
-  REQUIRE (sidecar);
-  REQUIRE (sidecar->supersession_eligibility.valid);
-  REQUIRE (sidecar->supersession_eligibility.activation_ts_by_target.at (10LL)
-           == 2000LL);
 
   auto stale_rows = store->Execute (
       "SELECT source_contradiction_count FROM memories WHERE memory_id = ?",
@@ -945,7 +923,7 @@ TEST_CASE ("Typed supersession candidates retain borrowed cache vectors",
 
   auto owner = cache::Find (pctx);
   REQUIRE (owner != nullptr);
-  const Eigen::VectorXf *borrowed = &owner->entries[0].embedding;
+  const internal::SharedEmbedding *borrowed = &owner->entries[0].embedding;
   cache::SupersessionCandidateRows result;
   result.cache_owner = owner;
   result.rows.push_back ({ 10, borrowed, std::nullopt });
@@ -953,19 +931,21 @@ TEST_CASE ("Typed supersession candidates retain borrowed cache vectors",
   cache::Erase (pctx);
   owner.reset ();
   REQUIRE (cache::Find (pctx) == nullptr);
-  REQUIRE (result.rows[0].Embedding () == borrowed);
-  REQUIRE (result.rows[0].Embedding ()->size () == kEmbeddingDim);
-  REQUIRE (result.rows[0].Embedding ()->norm () == 0.0f);
+  REQUIRE (result.rows[0].borrowed_embedding == borrowed);
+  REQUIRE (result.rows[0].HasEmbedding ());
+  REQUIRE (result.rows[0].EmbeddingSize () == kEmbeddingDim);
+  REQUIRE (result.rows[0].borrowed_embedding->View ().norm () == 0.0f);
 
   cache::SupersessionCandidate owned;
   owned.memory_id = 11;
   owned.owned_embedding = Eigen::VectorXf::Ones (4);
-  REQUIRE (owned.Embedding () == &*owned.owned_embedding);
-  REQUIRE (owned.Embedding ()->size () == 4);
+  REQUIRE (owned.HasEmbedding ());
+  REQUIRE (owned.EmbeddingSize () == 4);
 
   cache::SupersessionCandidate invalid;
   invalid.memory_id = 12;
-  REQUIRE (invalid.Embedding () == nullptr);
+  REQUIRE_FALSE (invalid.HasEmbedding ());
+  REQUIRE (invalid.EmbeddingSize () == 0);
 }
 
 TEST_CASE ("Historical cache tracks only supersession-eligible embeddings",
@@ -1197,7 +1177,10 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
       cfg.focus, cfg.sensitivity, cfg.stability);
   REQUIRE (parameters.route_capacity == 512);
   REQUIRE (parameters.backfill_batch_size == 128);
-  const std::size_t population = parameters.route_capacity + 1;
+  // Historical supersession work must not scale with the stored population
+  // once the current surface is sparse-routed.
+  const std::size_t multiplier = GENERATE (1, 2);
+  const std::size_t population = parameters.route_capacity * multiplier + 1;
   const int candidate_limit = core::SupersessionCandidateLimit (
       cfg.focus, cfg.sensitivity, cfg.stability);
   REQUIRE (candidate_limit == 67);
@@ -1309,7 +1292,8 @@ TEST_CASE ("Large supersession population uses the knob-bounded SQLite route",
                "MemoryStorage.supersession_sparse_route_node_rows"));
   REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_historical_rows_visited")
-           == static_cast<double> (population + 1));
+           <= ctx.GetOperationTimings ().at (
+               "MemoryStorage.supersession_population_mismatch_count"));
   REQUIRE (ctx.GetOperationTimings ().at (
                "MemoryStorage.supersession_historical_coverage_proven")
            == 1.0);

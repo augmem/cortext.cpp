@@ -10,7 +10,6 @@
 #include "../../src/operations/bounded_activation_shadow_internal.hpp"
 #include "../../src/operations/active_signal_embedding_ring_internal.hpp"
 #include "../../src/operations/retrieval_trace_state.hpp"
-#include "../../src/operations/rif_active_epoch_cache_internal.hpp"
 #include "../../src/operations/sparse_retrieval_knobs_internal.hpp"
 #include "../../src/operations/sparse_retrieval_route_sqlite_internal.hpp"
 
@@ -161,9 +160,9 @@ SparseRouteParametersJson (const Config &cfg)
     { "activation_search_effort_step",
       parameters.activation_search_ef_step },
     { "shadow_cache_capacity", parameters.shadow_node_capacity },
-    { "backfill_search_node_budget",
-      parameters.backfill_search_node_budget },
-    { "backfill_search_effort", parameters.backfill_search_ef },
+    { "construction_search_node_budget",
+      parameters.construction_search_node_budget },
+    { "construction_search_effort", parameters.construction_search_ef },
     { "graph_neighbor_count", parameters.row_addressed_neighbor_count },
     { "graph_level_zero_links", parameters.row_addressed_level_zero_links },
     { "family_exact_comparison_limit",
@@ -447,8 +446,7 @@ SQLiteProfileJson (const std::string &profile,
 {
   nlohmann::json env = nlohmann::json::object ();
   for (const char *name :
-       { "CORTEXT_FOREGROUND_WAL_CHECKPOINT",
-         "CORTEXT_SQLITE_JOURNAL_MODE",
+       { "CORTEXT_SQLITE_JOURNAL_MODE",
          "CORTEXT_SQLITE_SYNCHRONOUS",
          "CORTEXT_SQLITE_CACHE_SIZE_KB",
          "CORTEXT_SQLITE_TEMP_STORE",
@@ -475,11 +473,9 @@ ApplySQLiteProfile (const std::string &profile)
     return SQLiteProfileJson (profile, applied);
   if (profile == "durable")
     {
-      SetEnvValue ("CORTEXT_FOREGROUND_WAL_CHECKPOINT", "0", true);
       SetEnvValue ("CORTEXT_SQLITE_JOURNAL_MODE", "wal", true);
       SetEnvValue ("CORTEXT_SQLITE_SYNCHRONOUS", "normal", true);
       applied = {
-        "CORTEXT_FOREGROUND_WAL_CHECKPOINT",
         "CORTEXT_SQLITE_JOURNAL_MODE",
         "CORTEXT_SQLITE_SYNCHRONOUS",
       };
@@ -489,7 +485,6 @@ ApplySQLiteProfile (const std::string &profile)
     throw std::runtime_error (
         "--sqlite-profile must be realtime, durable, or inherit");
 
-  ApplyEnvDefault ("CORTEXT_FOREGROUND_WAL_CHECKPOINT", "0", applied);
   ApplyEnvDefault ("CORTEXT_SQLITE_JOURNAL_MODE", "memory", applied);
   ApplyEnvDefault ("CORTEXT_SQLITE_SYNCHRONOUS", "off", applied);
   return SQLiteProfileJson (profile, applied);
@@ -733,19 +728,6 @@ PublicMemoryBehaviorJson (
               { { "bytes", blob.size () },
                 { "blake3", PrivateValueDigest (blob) } });
         }
-      nlohmann::json soft_anchors = nlohmann::json::array ();
-      for (const auto &anchor : memory.soft_anchors)
-        {
-          soft_anchors.push_back (
-              { { "id_blake3", PrivateValueDigest (anchor.id) },
-                { "strength", anchor.strength },
-                { "likelihood", anchor.likelihood },
-                { "label_blake3", PrivateValueDigest (anchor.label) },
-                { "tier_blake3", PrivateValueDigest (anchor.tier) },
-                { "score", anchor.score },
-                { "margin", anchor.margin },
-                { "entropy", anchor.entropy } });
-        }
       out.push_back (
           { { "source_id_blake3", PrivateValueDigest (memory.source_id) },
             { "id", memory.id },
@@ -768,8 +750,7 @@ PublicMemoryBehaviorJson (
             { "valence", memory.valence },
             { "arousal", memory.arousal },
             { "composite_score", memory.composite_score },
-            { "threshold_t", memory.threshold_t },
-            { "soft_anchors", std::move (soft_anchors) } });
+            { "threshold_t", memory.threshold_t } });
     }
   return out;
 }
@@ -878,12 +859,6 @@ PublicBehaviorJson (const cortext::Cortext::Context &ctx,
         { "signal_filter_threshold", ctx.output.signal_filter_threshold },
         { "signal_filter_quiet_seconds",
           ctx.output.signal_filter_quiet_seconds },
-        { "soft_anchor_enabled", ctx.output.soft_anchor_enabled },
-        { "soft_anchor_state_count", ctx.output.soft_anchor_state_count },
-        { "soft_anchor_link_count", ctx.output.soft_anchor_link_count },
-        { "soft_anchor_create_count", ctx.output.soft_anchor_create_count },
-        { "soft_anchor_update_count", ctx.output.soft_anchor_update_count },
-        { "soft_anchor_none_count", ctx.output.soft_anchor_none_count },
       } },
   };
 }
@@ -979,18 +954,12 @@ RetrievalTraceJson ()
         { "score", candidate.score },
         { "relevance", candidate.relevance },
         { "proc_score", candidate.proc_score },
-        { "predictive_bonus", candidate.predictive_bonus },
-        { "pre_activation", candidate.pre_activation },
         { "label_match_count", candidate.label_match_count },
         { "durable_source_boost", candidate.durable_source_boost },
         { "durable_source_count", candidate.durable_source_count },
         { "activation",
           {
               { "base_level", candidate.activation.base_level },
-              { "spreading_activation",
-                candidate.activation.spreading_activation },
-              { "partial_match_penalty",
-                candidate.activation.partial_match_penalty },
               { "recent_inhibition", candidate.activation.recent_inhibition },
               { "utility", candidate.activation.utility },
               { "exploration_noise", candidate.activation.exploration_noise },
@@ -1013,18 +982,12 @@ RetrievalTraceJson ()
         { "score", candidate.score },
         { "relevance", candidate.relevance },
         { "proc_score", candidate.proc_score },
-        { "predictive_bonus", candidate.predictive_bonus },
-        { "pre_activation", candidate.pre_activation },
         { "label_match_count", candidate.label_match_count },
         { "durable_source_boost", candidate.durable_source_boost },
         { "durable_source_count", candidate.durable_source_count },
         { "activation",
           {
               { "base_level", candidate.activation.base_level },
-              { "spreading_activation",
-                candidate.activation.spreading_activation },
-              { "partial_match_penalty",
-                candidate.activation.partial_match_penalty },
               { "recent_inhibition", candidate.activation.recent_inhibition },
               { "utility", candidate.activation.utility },
               { "exploration_noise", candidate.activation.exploration_noise },
@@ -1054,10 +1017,6 @@ RetrievalTraceJson ()
 	            { "activation",
               {
                   { "base_level", member.activation.base_level },
-                  { "spreading_activation",
-                    member.activation.spreading_activation },
-                  { "partial_match_penalty",
-                    member.activation.partial_match_penalty },
                   { "recent_inhibition",
                     member.activation.recent_inhibition },
                   { "utility", member.activation.utility },
@@ -1120,9 +1079,6 @@ WorkCountersJson (const cortext::Cortext::Context &ctx)
   const double supersession_sparse_route_rows
       = value ("MemoryStorage.supersession_sparse_route_node_rows");
   return {
-    { "retrieval_suppression_id_count",
-      value ("SignalProcessor.retrieval_suppression_id_count") },
-    { "predictive_id_count", value ("SignalProcessor.predictive_id_count") },
     { "rollback_full_cache_copy_count",
       value ("SignalProcessor.snapshot_full_cache_copy_count") },
     { "rollback_cache_entry_copy_count",
@@ -1190,28 +1146,6 @@ ConsolidationEpochCountersJson (const cortext::Cortext::Context &ctx,
       counter ("consolidation_dirty_association_count") },
     { "consolidation_dirty_index_count",
       counter ("consolidation_dirty_index_count") },
-  };
-}
-
-nlohmann::json
-ActiveEpochCountersJson (const cortext::Cortext::Context &ctx)
-{
-  return {
-    { "event_count",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_event_count") },
-    { "mutation_count",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_mutation_count") },
-    { "allocated_bytes",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_allocated_bytes") },
-    { "row_batch_high_water",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_row_batch_high_water") },
-    { "required",
-      RequiredOperationCounter (
-          ctx, "SignalProcessor.rif_active_epoch_required") == 1.0 },
   };
 }
 
@@ -1909,12 +1843,6 @@ StoreCheckpoint (const fs::path &db_path, std::size_t event_end)
                     "current_memory_embeddings_rowids") },
         { "memory_reconstructions",
           SqlCount (db_path, "SELECT COUNT(*) FROM memory_reconstructions") },
-        { "rif_recovery_clock",
-          SqlCount (db_path, "SELECT COUNT(*) FROM rif_recovery_clock") },
-        { "rif_generation_resets",
-          SqlCount (db_path, "SELECT COUNT(*) FROM rif_generation_resets") },
-        { "rif_active_state",
-          SqlCount (db_path, "SELECT COUNT(*) FROM rif_active_state") },
       } },
   };
 }
@@ -2920,13 +2848,11 @@ RunPacketCorpusProfile (const Config &cfg,
     "GraphRetrieve.seed_knn_cache_rebuild",
     "GraphRetrieve.seed_knn_sql",
     "GraphRetrieve.seed_rank",
-    "GraphRetrieve.association_expansion",
     "GraphRetrieve.rank_candidates",
     "GraphRetrieve.reconstruction_versions",
     "cortext::operations::ApplyRetrievalCompetition",
     "Competition.rif_recovery_active_sql",
     "Competition.score_candidates",
-    "Predictive.decay_active_sql",
     "cortext::operations::MemoryStorage",
     "MemoryStorage.supersession_edges",
     "MemoryStorage.supersession_candidate_load",
@@ -2949,8 +2875,6 @@ RunPacketCorpusProfile (const Config &cfg,
     "SignalProcessor.profile_mutation_audit",
     "SignalProcessor.retrieval_suppression_id_count",
     "SignalProcessor.retrieval_suppression_id_activity",
-    "SignalProcessor.predictive_id_count",
-    "SignalProcessor.predictive_id_activity",
     "SignalProcessor.snapshot_full_cache_copy_count",
     "SignalProcessor.snapshot_full_cache_copy_activity",
     "SignalProcessor.snapshot_cache_entry_copy_count",
@@ -2988,7 +2912,6 @@ RunPacketCorpusProfile (const Config &cfg,
     "WriteGate.window_score",
     "WriteGate.threshold_dynamic",
     "WriteGate.refractory_multiplier",
-    "WriteGate.write_scale",
     "WriteGate.effective_threshold",
     "WriteGate.score_margin",
     "WriteGate.force_write",
@@ -2999,7 +2922,6 @@ RunPacketCorpusProfile (const Config &cfg,
     "SignalProcessor.sqlite_sparse_route_recenter_overlap_failure_code",
     "SignalProcessor.sqlite_sparse_route_recenter_derived_centroid",
     "SignalProcessor.sqlite_sparse_route_recenter_centroid_source",
-    "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count",
     "SignalProcessor.sqlite_sparse_route_recenter_centroid_member_count",
     "SignalProcessor.sqlite_sparse_route_recenter_pre_activated_count",
     "SignalProcessor.sqlite_sparse_route_recenter_post_activated_count",
@@ -3282,10 +3204,6 @@ RunPacketCorpusProfile (const Config &cfg,
               OperationValue (
                   consolidation_ctx,
                   "SignalProcessor.sqlite_sparse_route_recenter_centroid_source") },
-            { "sqlite_sparse_route_recenter_centroid_cluster_count",
-              OperationValue (
-                  consolidation_ctx,
-                  "SignalProcessor.sqlite_sparse_route_recenter_centroid_cluster_count") },
             { "sqlite_sparse_route_recenter_centroid_member_count",
               OperationValue (
                   consolidation_ctx,
@@ -3364,8 +3282,6 @@ RunPacketCorpusProfile (const Config &cfg,
             { "post_reset_counters",
               ConsolidationEpochCountersJson (
                   consolidation_ctx, "ConsolidationEpoch.post") },
-            { "post_reset_active_epoch",
-              ActiveEpochCountersJson (consolidation_ctx) },
             { "state_after",
               ConsolidationStateName (
                   consolidation_ctx.consolidation_state) },
@@ -3392,7 +3308,6 @@ RunPacketCorpusProfile (const Config &cfg,
           row["consolidation_epoch_counters"]
               = ConsolidationEpochCountersJson (
                   ctx, "ConsolidationEpoch");
-          row["active_epoch"] = ActiveEpochCountersJson (ctx);
           const auto shadow_work
               = cortext::operations::bounded_activation_shadow_internal::
                   SingleWorkSnapshot ();
@@ -3420,9 +3335,9 @@ RunPacketCorpusProfile (const Config &cfg,
             };
           row["durable_barrier_ms"]
               = ctx.output.operation_ms.count (
-                    "SignalProcessor.sqlite_wal_checkpoint")
+                    "SignalProcessor.sqlite_wal_sync")
                     ? ctx.output.operation_ms.at (
-                          "SignalProcessor.sqlite_wal_checkpoint")
+                          "SignalProcessor.sqlite_wal_sync")
                     : 0.0;
           row["end_to_end_ms"] = std::chrono::duration<double, std::milli> (
                                      event_ended - event_started)
@@ -3477,15 +3392,6 @@ RunPacketCorpusProfile (const Config &cfg,
                    ? "live-required-hint"
                    : "none")
             : "fixed-one-based-control-derived-indices";
-  const auto active_epoch_limits
-      = cortext::operations::rif_active_epoch_cache_internal::DeriveLimits (
-          cfg.focus, cfg.sensitivity, cfg.stability);
-  out["active_epoch_limits"] = {
-    { "event_count", active_epoch_limits.event_count },
-    { "mutation_count", active_epoch_limits.mutation_count },
-    { "allocated_bytes", active_epoch_limits.allocated_bytes },
-    { "row_batch_size", active_epoch_limits.row_batch_size },
-  };
   out["active_signal_embedding_ring"] = {
     { "capacity",
       cortext::operations::active_signal_embedding_ring_internal::Capacity (

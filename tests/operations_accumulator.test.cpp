@@ -374,7 +374,6 @@ TEST_CASE ("Write gate computes window score", "[accumulator][4.4.5]")
     state.s_sum = 7.0;
     state.s_max = 0.9;
     state.e_peak = MakeRandomEmbedding ();
-    state.last_write_ts = 0;
     pctx.accumulator_states["test_source"] = std::move (state);
 
     SignalProcessor::Config cfg;
@@ -423,45 +422,6 @@ TEST_CASE ("Write gate computes window score", "[accumulator][4.4.5]")
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     REQUIRE (ctx.GetAccumulatorWriteDecision () == false);
-  }
-}
-
-TEST_CASE ("Write refractory suppresses rapid writes", "[accumulator][4.4.5]")
-{
-  SECTION ("GIVEN recent write timestamp")
-  {
-    Signal s;
-    s.source_id = "test_source";
-    s.embedding = MakeRandomEmbedding ();
-    s.timestamp = 3000; // Only 2 seconds after last write
-
-    ProcessorContext pctx;
-    AccumulatorState state;
-    state.Reset (MakeRandomEmbedding (), 1000);
-    state.n_signals = 5;
-    state.s_sum = 2.5;
-    state.s_max = 0.6;
-    state.e_peak = MakeRandomEmbedding ();
-    state.last_write_ts = 1000; // Wrote 2 seconds ago
-    pctx.accumulator_states["test_source"] = std::move (state);
-
-    SignalProcessor::Config cfg;
-
-    cortext::testing::RequireEncoder (cfg);
-    cfg.stability = 0.0; // Low stability = strong refractory
-
-    OperationContext ctx (s, pctx, cfg);
-    ctx.SetFlushRequired (true);
-    ctx.SetThresholdTDynamic (0.4);
-
-    ComputeWriteGate op;
-    op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-    // With recent write and refractory multiplier, threshold is elevated
-    // Medium-quality accumulator should be rejected
-    auto window_score = ctx.GetWindowScore ();
-    REQUIRE (window_score.has_value ());
-    // The refractory multiplier raises effective threshold
   }
 }
 
@@ -520,14 +480,6 @@ TEST_CASE ("Knob-derived accumulator functions", "[accumulator][knobs]")
     double high = core::SpikeMargin (1.0, 0.0);
     REQUIRE (low == Catch::Approx (0.24));
     REQUIRE (high == Catch::Approx (0.16));
-  }
-
-  SECTION ("WriteRefractoryTau varies with stability")
-  {
-    double low = core::WriteRefractoryTau (0.0);
-    double high = core::WriteRefractoryTau (1.0);
-    REQUIRE (low == Catch::Approx (5.0));
-    REQUIRE (high == Catch::Approx (30.0));
   }
 
   SECTION ("RepresentativeBlendRho varies with focus")

@@ -190,10 +190,6 @@ o_user ← user_accept_t  # explicit accept/correct signal if available, else 0
 
 [w_use, w_pred, w_unc, w_user] ← normalize([0.4 + 0.2F, 0.3 + 0.2S, 0.2 + 0.2T, 0.1])
 outcome_t ← clamp(w_use×o_use + w_pred×o_pred + w_unc×o_unc + w_user×o_user, 0, 1)
-
-α_out(T) = lerp(0.12, 0.03, T)
-outcome_pred_t ← EWMA(outcome_pred_{t−1}, outcome_t, α_out(T))
-δ_reward_t ← outcome_t − outcome_pred_t  # reward prediction error for DA-like modulation
 ```
 
 Update cadence and forgetting:

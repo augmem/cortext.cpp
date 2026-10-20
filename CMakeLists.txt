@@ -160,7 +160,8 @@ if(CORTEXT_EMBED_AIST_MODEL)
   set(_cortext_embed_table "${CORTEXT_EMBEDDED_AIST_GEN_DIR}/aist_embedded_table.inc")
   # Prefer tracked Git shards (no LFS). Full .gguf is never required in the tree.
   file(GLOB _cortext_aist_shard_files
-       "${CMAKE_CURRENT_SOURCE_DIR}/models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*")
+       "${CMAKE_CURRENT_SOURCE_DIR}/models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*"
+       "${CMAKE_CURRENT_SOURCE_DIR}/models/AIST-87M-GGUF/chunks/AIST-87M-LI.gguf.part-*")
   add_custom_command(
     OUTPUT
       "${_cortext_embed_stamp}"
@@ -295,12 +296,14 @@ add_library(cortext
     src/store/extension_loader.cpp
     src/store/object_store.cpp
     src/store/schema.cpp
+    src/store/memory_text_index_internal.cpp
     src/internal/cancellation.cpp
     src/processor/operation_context.cpp
     src/signal_processor.cpp
     src/signal_filter.cpp
     src/cortext.cpp
     src/core/thread_config.cpp
+    src/core/embedding_arena.cpp
     src/capi.cpp
     src/telemetry/telemetry.cpp
     src/data/centroids.cpp
@@ -318,45 +321,27 @@ add_library(cortext
     src/operations/effective_focus.cpp
     src/operations/focus_spread.cpp
     src/operations/boundary.cpp
-    src/operations/memory_strength.cpp
-    src/operations/focus_feedback.cpp
-    src/operations/sensitivity_feedback.cpp
-    src/operations/stability_feedback.cpp
-    src/operations/influence.cpp
-    src/operations/reconsolidation.cpp
-    src/operations/competition.cpp
-    src/operations/predictive.cpp
-    src/operations/emotion.cpp
+    src/operations/memory_usage_record.cpp
     src/operations/working_memory.cpp
-    src/operations/serial_position.cpp
-    src/operations/serial_position_apply.cpp
     src/operations/interrupt_gate.cpp
-    src/operations/consolidation.cpp
-    src/operations/consolidation_cluster.cpp
-    src/operations/consolidation_gate.cpp
-    src/operations/consolidation_shallow.cpp
     src/operations/embedding_prediction_error.cpp
     src/operations/precision.cpp
     src/operations/constructive_recall_internal.cpp
-    src/operations/meta_learning_internal.cpp
-    src/operations/graph_build.cpp
     src/operations/graph_retrieval.cpp
+    src/operations/member_vector_index_internal.cpp
+    src/operations/cross_modal_index_internal.cpp
     src/operations/sparse_retrieval_route_internal.cpp
     src/operations/sparse_retrieval_route_sqlite_internal.cpp
-    src/operations/eviction_policy_override.cpp
-    src/operations/storage_pressure.cpp
     src/operations/retrieval_trace_state.cpp
+    src/operations/standing_memory_internal.cpp
     src/operations/neuromodulators.cpp
     # Phase 4: Knowledge Graph Enhancement
-    src/operations/emotion_cascade.cpp
     src/operations/signal_metrics_persistence.cpp
     src/operations/write_gate.cpp
     src/operations/memory_storage.cpp
     src/operations/detect_memory_usage.cpp
-    src/operations/synaptic_tagging.cpp
     src/operations/drift_accumulation.cpp
     src/operations/streaming_pacing.cpp
-    src/operations/soft_anchor.cpp
     # Section 4.4: Accumulator operations
     src/operations/accumulator_scores.cpp
     src/operations/accumulator.cpp
@@ -619,7 +604,8 @@ endif()
 
 # The AIST GGUF encoder is Cortext's required embedding model; its native
 # runtime always builds.
-target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp)
+target_sources(cortext PRIVATE src/models/aist_gguf_encoder.cpp
+                               src/models/aist_late_interaction.cpp)
 
 add_library(cortext::cortext ALIAS cortext)
 

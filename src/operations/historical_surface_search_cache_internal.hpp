@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cortext/internal/embedding_arena.hpp"
 #include "cortext/processor/processor_context.hpp"
 #include "family_embedding_features_internal.hpp"
 #include "sparse_retrieval_route_internal.hpp"
@@ -17,6 +18,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -39,16 +41,19 @@ struct Entry
   long long start_ts = 0;
   std::string kind;
   std::string source_id;
-  Eigen::VectorXf embedding;
+  internal::SharedEmbedding embedding; ///< Arena row (shared, immutable)
   std::vector<MemoryReference> memory_references;
-  mutable std::optional<family_embedding_features_internal::Features>
-      family_features;
+  /// Lazily built family-collapse norms; the normalized vector itself is
+  /// re-expanded from the arena row on use.
+  mutable std::shared_ptr<const family_embedding_features_internal::Norms>
+      family_norms;
 
   Entry () = default;
 
   Entry (long long embedding_id_value, long long memory_id_value,
          long long start_ts_value, std::string kind_value,
-         std::string source_id_value, Eigen::VectorXf embedding_value,
+         std::string source_id_value,
+         internal::SharedEmbedding embedding_value,
          long long base_embedding_id_value = 0)
       : embedding_id (embedding_id_value),
         base_embedding_id (base_embedding_id_value),
@@ -60,13 +65,45 @@ struct Entry
   }
 };
 
-inline const family_embedding_features_internal::Features &
+inline family_embedding_features_internal::Features
 FamilyFeatures (const Entry &entry)
 {
-  if (!entry.family_features)
-    entry.family_features
-        = family_embedding_features_internal::Build (entry.embedding);
-  return *entry.family_features;
+  if (!entry.family_norms)
+    entry.family_norms
+        = std::make_shared<const family_embedding_features_internal::Norms> (
+            family_embedding_features_internal::BuildNorms (
+                entry.embedding.data (), entry.embedding.size ()));
+  return family_embedding_features_internal::Expand (
+      entry.embedding.data (), entry.embedding.size (), *entry.family_norms);
+}
+
+/// Squared Euclidean distance from one arena row to @p query, evaluated as
+/// the same row-major partial reduction the flat search buffers used, so a
+/// scan over arena rows ranks bit-identically to the former matrix scan.
+inline float
+RowSquaredDistance (const internal::SharedEmbedding &row,
+                    const Eigen::VectorXf &query)
+{
+  using RowMajorMatrix
+      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+  const Eigen::Map<const RowMajorMatrix> matrix (row.data (), 1,
+                                                 query.size ());
+  return (matrix.rowwise () - query.transpose ()).rowwise ().squaredNorm ()(
+      0);
+}
+
+/// Squared Euclidean distance from one arena row to @p query, evaluated as
+/// the row-block expression `(matrix.row (i) - query^T).squaredNorm ()` the
+/// flat search buffers used for candidate rescoring.
+inline float
+RowBlockSquaredDistance (const internal::SharedEmbedding &row,
+                         const Eigen::VectorXf &query)
+{
+  using RowMajorMatrix
+      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+  const Eigen::Map<const RowMajorMatrix> matrix (row.data (), 1,
+                                                 query.size ());
+  return (matrix.row (0) - query.transpose ()).squaredNorm ();
 }
 
 struct RankedEntry
@@ -125,13 +162,16 @@ FindSupersessionMemoryReference (const Entry &entry, long long memory_id)
 
 struct State
 {
+  /// Processor context this state is registered under. Route embedding
+  /// providers resolve the context's live state through it, so a route handle
+  /// carried across Reset keeps resolving current rows.
+  const ProcessorContext *owner = nullptr;
   bool recovery_failed = false;
   bool current_surface_database_current = false;
   bool current_surface_search_current = false;
   bool processor_surface_complete = false;
   int embedding_dim = 0;
   std::vector<Entry> entries;
-  std::vector<float> search;
   std::unordered_map<long long, std::size_t> embedding_index;
   std::vector<std::size_t> long_term_entry_indices;
   std::unordered_map<std::size_t, std::size_t> long_term_index_positions;
@@ -147,7 +187,6 @@ struct State
   long long supersession_max_embedding_id = 0;
   long long supersession_max_memory_id = 0;
   std::vector<Entry> current_entries;
-  std::vector<float> current_search;
   std::unordered_map<long long, std::size_t> current_memory_index;
   std::map<long long, std::size_t> current_memory_order;
   mutable std::vector<float> distance_scratch;
@@ -166,6 +205,30 @@ struct State
   std::size_t sqlite_sparse_route_backfill_failure_count = 0;
 };
 
+inline std::shared_ptr<const State> Find (const ProcessorContext &ctx);
+
+/// Lets a SQLite route share the current surface's arena rows for resident
+/// graph nodes instead of holding its own normalized copies. The route
+/// verifies every shared row bit for bit, so a stale provider only costs a
+/// copy, never a different distance.
+inline sparse_retrieval_route_sqlite_internal::Route::EmbeddingProvider
+EmbeddingProviderFor (const State &state)
+{
+  const ProcessorContext *owner = state.owner;
+  if (owner == nullptr)
+    return {};
+  return [owner] (long long memory_id) -> internal::SharedEmbedding {
+        const auto current = Find (*owner);
+        if (!current || current->recovery_failed)
+          return {};
+        const auto index = current->current_memory_index.find (memory_id);
+        if (index == current->current_memory_index.end ()
+            || index->second >= current->current_entries.size ())
+          return {};
+        return current->current_entries[index->second].embedding;
+      };
+}
+
 inline std::shared_ptr<sparse_retrieval_route_internal::Route>
 EnsureSparseRoute (State &state)
 {
@@ -178,7 +241,7 @@ EnsureSparseRoute (State &state)
       if (entry.memory_id <= 0
           || entry.embedding.size () != state.embedding_dim)
         return nullptr;
-      entries.emplace_back (entry.memory_id, entry.embedding);
+      entries.emplace_back (entry.memory_id, entry.embedding.ToVector ());
     }
   state.sparse_route = sparse_retrieval_route_internal::Route::Create (
       state.embedding_dim, entries, state.sparse_route_parameters.hnsw);
@@ -205,7 +268,8 @@ OpenSQLiteSparseRoute (State &state, Store &store)
     return state.sqlite_sparse_route;
   state.sqlite_sparse_route
       = sparse_retrieval_route_sqlite_internal::Route::Open (
-          store, state.embedding_dim, state.sparse_route_parameters);
+          store, state.embedding_dim, state.sparse_route_parameters,
+          EmbeddingProviderFor (state));
   if (!state.sqlite_sparse_route)
     return nullptr;
 
@@ -251,7 +315,7 @@ StageSQLiteSparseRouteDirtyForSearch (
       if (index >= state.current_entries.size ()
           || state.current_entries[index].memory_id != memory_id
           || !route.StagePendingUpsert (
-              memory_id, state.current_entries[index].embedding))
+              memory_id, state.current_entries[index].embedding.View ()))
         return std::nullopt;
     }
   return dirty_memory_ids->size ();
@@ -274,7 +338,8 @@ AdvanceSQLiteSparseRouteBackfill (State &state, Store &store)
   if (!state.sqlite_sparse_route_backfill)
     state.sqlite_sparse_route_backfill
         = sparse_retrieval_route_sqlite_internal::Route::OpenOrBeginBuild (
-            store, state.embedding_dim, state.sparse_route_parameters);
+            store, state.embedding_dim, state.sparse_route_parameters,
+            EmbeddingProviderFor (state));
   auto &build = state.sqlite_sparse_route_backfill;
   if (!build || !build->IsBuilding ())
     return false;
@@ -298,7 +363,7 @@ AdvanceSQLiteSparseRouteBackfill (State &state, Store &store)
       if (index >= state.current_entries.size ()
           || state.current_entries[index].memory_id != memory_id
           || !build->StagePendingUpsert (
-              memory_id, state.current_entries[index].embedding))
+              memory_id, state.current_entries[index].embedding.View ()))
         return false;
       ++dirty_staged;
     }
@@ -315,7 +380,7 @@ AdvanceSQLiteSparseRouteBackfill (State &state, Store &store)
       if (index >= state.current_entries.size ()
           || state.current_entries[index].memory_id != memory_id
           || !build->StagePendingUpsert (
-              memory_id, state.current_entries[index].embedding))
+              memory_id, state.current_entries[index].embedding.View ()))
         {
           (void)build->Invalidate ();
           build.reset ();
@@ -388,7 +453,7 @@ ReconcileSQLiteSparseRoute (
           if (index >= state.current_entries.size ()
               || state.current_entries[index].memory_id != memory_id
               || !prior->StagePendingUpsert (
-                  memory_id, state.current_entries[index].embedding))
+                  memory_id, state.current_entries[index].embedding.View ()))
             return false;
         }
       if (!dirty_memory_ids->empty () && !prior->Seal ())
@@ -402,7 +467,8 @@ ReconcileSQLiteSparseRoute (
     }
   if (auto persisted
       = sparse_retrieval_route_sqlite_internal::Route::Open (
-          store, state.embedding_dim, state.sparse_route_parameters))
+          store, state.embedding_dim, state.sparse_route_parameters,
+          EmbeddingProviderFor (state)))
     {
       state.sqlite_sparse_route = std::move (persisted);
       return true;
@@ -416,12 +482,12 @@ ReconcileSQLiteSparseRoute (
       if (entry.memory_id <= 0
           || entry.embedding.size () != state.embedding_dim)
         return false;
-      entries.emplace_back (entry.memory_id, entry.embedding);
+      entries.emplace_back (entry.memory_id, entry.embedding.ToVector ());
     }
   state.sqlite_sparse_route
       = sparse_retrieval_route_sqlite_internal::Route::Create (
           store, state.embedding_dim, entries, *hnsw,
-          state.sparse_route_parameters);
+          state.sparse_route_parameters, EmbeddingProviderFor (state));
   return state.sqlite_sparse_route != nullptr;
 }
 
@@ -467,7 +533,7 @@ ReconcileSparseRoute (
       if (entry.memory_id <= 0
           || entry.embedding.size () != state.embedding_dim)
         return false;
-      entries.emplace_back (entry.memory_id, entry.embedding);
+      entries.emplace_back (entry.memory_id, entry.embedding.ToVector ());
     }
   if (prior && prior->Sync (entries) && prior->SealDelta ())
     {
@@ -501,7 +567,8 @@ CurrentMatchesSupersessionEntry (const State &state, long long memory_id)
   const auto &surface = state.current_entries[current->second];
   return surface.base_embedding_id == base.embedding_id
          && surface.embedding.size () == base.embedding.size ()
-         && surface.embedding.isApprox (base.embedding, 0.0f);
+         && surface.embedding.View ().isApprox (base.embedding.View (),
+                                               0.0f);
 }
 
 inline void
@@ -540,15 +607,22 @@ CurrentPopulationCoversHistorical (const State &state,
 struct SupersessionCandidate
 {
   long long memory_id = 0;
-  const Eigen::VectorXf *borrowed_embedding = nullptr;
+  /// Arena row borrowed from a cache entry kept alive by the rows' owner.
+  const internal::SharedEmbedding *borrowed_embedding = nullptr;
   std::optional<Eigen::VectorXf> owned_embedding;
 
-  const Eigen::VectorXf *
-  Embedding () const
+  bool
+  HasEmbedding () const
+  {
+    return borrowed_embedding != nullptr || owned_embedding.has_value ();
+  }
+
+  Eigen::Index
+  EmbeddingSize () const
   {
     return borrowed_embedding != nullptr
-               ? borrowed_embedding
-               : (owned_embedding ? &*owned_embedding : nullptr);
+               ? borrowed_embedding->size ()
+               : (owned_embedding ? owned_embedding->size () : 0);
   }
 };
 
@@ -558,15 +632,17 @@ struct SupersessionCandidateRows
   std::vector<SupersessionCandidate> rows;
 };
 
+template <typename Target>
 inline double
 SupersessionCosineSimilarity (const Eigen::VectorXf &query,
                               double query_norm,
-                              const Eigen::VectorXf &target)
+                              const Eigen::MatrixBase<Target> &target)
 {
   if (query.size () == 0 || query.size () != target.size ())
     {
       return 0.0;
     }
+  static_assert (std::is_same_v<typename Target::Scalar, float>);
   const double target_norm = target.norm ();
   if (query_norm == 0.0 || target_norm == 0.0)
     {
@@ -637,6 +713,7 @@ SetCurrentSurfaceDatabaseCurrent (const ProcessorContext &ctx,
   if (!state)
     {
       state = std::make_shared<State> ();
+      state->owner = &ctx;
     }
   state->current_surface_database_current = database_current;
 }
@@ -650,6 +727,7 @@ SetProcessorSurfaceComplete (const ProcessorContext &ctx, bool complete)
   if (!state)
     {
       state = std::make_shared<State> ();
+      state->owner = &ctx;
     }
   state->processor_surface_complete = complete;
 }
@@ -663,7 +741,10 @@ SetSparseRouteParameters (
   std::lock_guard<std::mutex> lock (registry.mutex);
   auto &state = registry.states[&ctx];
   if (!state)
-    state = std::make_shared<State> ();
+    {
+      state = std::make_shared<State> ();
+      state->owner = &ctx;
+    }
   state->sparse_route_parameters = std::move (parameters);
 }
 
@@ -672,6 +753,7 @@ MarkRecoveryFailed (const ProcessorContext &ctx,
                     bool preserve_surface_state = false)
 {
   auto state = std::make_shared<State> ();
+  state->owner = &ctx;
   state->recovery_failed = true;
   auto &registry = Registry ();
   std::lock_guard<std::mutex> lock (registry.mutex);
@@ -687,8 +769,8 @@ MarkRecoveryFailed (const ProcessorContext &ctx,
       state->sparse_route_parameters
           = existing->second->sparse_route_parameters;
       // Preserve only the current-to-base lineage needed to reconstruct the
-      // search surface.  The searchable vector buffer is intentionally not
-      // copied, and recovery_failed keeps every cache reader fail-closed.
+      // search surface (entries share their arena rows), and recovery_failed
+      // keeps every cache reader fail-closed.
       state->current_entries = existing->second->current_entries;
       state->current_memory_index = existing->second->current_memory_index;
       state->current_memory_order = existing->second->current_memory_order;
@@ -713,36 +795,13 @@ Erase (const ProcessorContext &ctx)
   registry.states.erase (&ctx);
 }
 
-inline void
-InvalidateHistoricalPreserveCurrent (const ProcessorContext &ctx)
-{
-  auto state = FindMutable (ctx);
-  if (!state)
-    return;
-  state->entries.clear ();
-  state->search.clear ();
-  state->embedding_index.clear ();
-  state->long_term_entry_indices.clear ();
-  state->long_term_index_positions.clear ();
-  state->supersession_entry_indices.clear ();
-  state->supersession_index_positions.clear ();
-  state->supersession_entry_by_memory.clear ();
-  state->supersession_population_mismatches.clear ();
-  state->supersession_population_ambiguous = false;
-  state->supersession_tie_order_equivalent = true;
-  state->supersession_embedding_fanout = false;
-  state->supersession_max_embedding_id = 0;
-  state->supersession_max_memory_id = 0;
-  state->distance_scratch.clear ();
-  state->ranked_scratch.clear ();
-}
-
 inline bool
 Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
        std::vector<Entry> current_entries = {})
 {
   const auto prior_state = FindMutable (ctx);
   auto state = std::make_shared<State> ();
+  state->owner = &ctx;
   std::unordered_map<long long, std::size_t> unique_embedding_index;
   state->entries.reserve (entries.size ());
   for (auto &entry : entries)
@@ -763,7 +822,8 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
         }
       auto &representative = state->entries[existing->second];
       if (entry.embedding.size () != representative.embedding.size ()
-          || !entry.embedding.isApprox (representative.embedding, 0.0f))
+          || !entry.embedding.View ().isApprox (
+              representative.embedding.View (), 0.0f))
         {
           Erase (ctx);
           return false;
@@ -808,8 +868,6 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
       Erase (ctx);
       return false;
     }
-  state->search.reserve (state->entries.size ()
-                         * static_cast<std::size_t> (state->embedding_dim));
   state->embedding_index.reserve (state->entries.size ());
   for (std::size_t index = 0; index < state->entries.size (); ++index)
     {
@@ -821,8 +879,6 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
           Erase (ctx);
           return false;
         }
-      state->search.insert (state->search.end (), entry.embedding.data (),
-                            entry.embedding.data () + entry.embedding.size ());
       if (HasLongTermReference (entry))
         {
           state->long_term_index_positions.emplace (
@@ -877,9 +933,6 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
     }
   state->current_entries = std::move (current_entries);
   state->current_memory_index.reserve (state->current_entries.size ());
-  state->current_search.reserve (
-      state->current_entries.size ()
-      * static_cast<std::size_t> (state->embedding_dim));
   for (std::size_t index = 0; index < state->current_entries.size (); ++index)
     {
       auto &entry = state->current_entries[index];
@@ -894,10 +947,6 @@ Reset (const ProcessorContext &ctx, std::vector<Entry> entries,
           return false;
         }
       state->current_memory_order.emplace (entry.memory_id, index);
-      state->current_search.insert (state->current_search.end (),
-                                    entry.embedding.data (),
-                                    entry.embedding.data ()
-                                        + entry.embedding.size ());
     }
   for (const auto &[memory_id, index] :
        state->supersession_entry_by_memory)
@@ -965,29 +1014,22 @@ UpsertCurrent (const ProcessorContext &ctx, Entry entry)
         entry.base_embedding_id
             = state.current_entries[index].base_embedding_id;
       state.current_entries[index] = std::move (entry);
-      const std::size_t offset
-          = index * static_cast<std::size_t> (state.embedding_dim);
-      std::copy (state.current_entries[index].embedding.data (),
-                 state.current_entries[index].embedding.data ()
-                     + state.embedding_dim,
-                 state.current_search.begin ()
-                     + static_cast<std::ptrdiff_t> (offset));
       RefreshSupersessionPopulationMismatch (
           state, state.current_entries[index].memory_id);
       if (state.sparse_route
           && !state.sparse_route->Upsert (
               state.current_entries[index].memory_id,
-              state.current_entries[index].embedding))
+              state.current_entries[index].embedding.ToVector ()))
         state.sparse_route.reset ();
       if (state.sqlite_sparse_route
           && !state.sqlite_sparse_route->Upsert (
               state.current_entries[index].memory_id,
-              state.current_entries[index].embedding))
+              state.current_entries[index].embedding.View ()))
         state.sqlite_sparse_route.reset ();
       if (state.sqlite_sparse_route_backfill
           && !state.sqlite_sparse_route_backfill->Upsert (
               state.current_entries[index].memory_id,
-              state.current_entries[index].embedding))
+              state.current_entries[index].embedding.View ()))
         state.sqlite_sparse_route_backfill.reset ();
       return;
     }
@@ -997,25 +1039,23 @@ UpsertCurrent (const ProcessorContext &ctx, Entry entry)
                                       state.current_entries.size ());
   state.current_memory_order.emplace (entry.memory_id,
                                       state.current_entries.size ());
-  state.current_search.insert (state.current_search.end (),
-                               entry.embedding.data (),
-                               entry.embedding.data () + entry.embedding.size ());
   state.current_entries.push_back (std::move (entry));
   RefreshSupersessionPopulationMismatch (
       state, state.current_entries.back ().memory_id);
   if (state.sparse_route
-      && !state.sparse_route->Upsert (state.current_entries.back ().memory_id,
-                                     state.current_entries.back ().embedding))
+      && !state.sparse_route->Upsert (
+          state.current_entries.back ().memory_id,
+          state.current_entries.back ().embedding.ToVector ()))
     state.sparse_route.reset ();
   if (state.sqlite_sparse_route
       && !state.sqlite_sparse_route->Upsert (
           state.current_entries.back ().memory_id,
-          state.current_entries.back ().embedding))
+          state.current_entries.back ().embedding.View ()))
     state.sqlite_sparse_route.reset ();
   if (state.sqlite_sparse_route_backfill
       && !state.sqlite_sparse_route_backfill->Upsert (
           state.current_entries.back ().memory_id,
-          state.current_entries.back ().embedding))
+          state.current_entries.back ().embedding.View ()))
     state.sqlite_sparse_route_backfill.reset ();
 }
 
@@ -1061,21 +1101,10 @@ RemoveCurrent (const ProcessorContext &ctx, long long memory_id)
       state.current_memory_index[state.current_entries[index].memory_id] = index;
       state.current_memory_order[state.current_entries[index].memory_id]
           = index;
-      const std::size_t dst
-          = index * static_cast<std::size_t> (state.embedding_dim);
-      const std::size_t src
-          = last * static_cast<std::size_t> (state.embedding_dim);
-      std::copy_n (
-          state.current_search.begin () + static_cast<std::ptrdiff_t> (src),
-          state.embedding_dim,
-          state.current_search.begin () + static_cast<std::ptrdiff_t> (dst));
     }
   state.current_memory_index.erase (memory_id);
   state.current_memory_order.erase (memory_id);
   state.current_entries.pop_back ();
-  state.current_search.resize (
-      state.current_entries.size ()
-      * static_cast<std::size_t> (state.embedding_dim));
   RefreshSupersessionPopulationMismatch (state, memory_id);
   if (state.sparse_route && !state.sparse_route->Remove (memory_id))
     state.sparse_route.reset ();
@@ -1119,8 +1148,6 @@ Append (const ProcessorContext &ctx, Entry entry)
     }
   state.embedding_index.emplace (entry.embedding_id, state.entries.size ());
   const std::size_t index = state.entries.size ();
-  state.search.insert (state.search.end (), entry.embedding.data (),
-                       entry.embedding.data () + entry.embedding.size ());
   state.entries.push_back (std::move (entry));
   if (HasLongTermReference (state.entries.back ()))
     {
@@ -1189,6 +1216,10 @@ RemoveEmbedding (const ProcessorContext &ctx, long long embedding_id)
       return;
     }
   const std::size_t last = state.entries.size () - 1;
+  // Only removing a fan-out entry can clear the fan-out flag; otherwise it
+  // is unchanged and needs no store-sized rescan.
+  const bool removed_fanout
+      = SupersessionReferenceCount (state.entries[index]) > 1;
   std::vector<long long> removed_supersession_memory_ids;
   if (IsSupersessionCandidateEntry (state.entries[index]))
     for (const auto &reference : state.entries[index].memory_references)
@@ -1265,22 +1296,14 @@ RemoveEmbedding (const ProcessorContext &ctx, long long embedding_id)
                 state.supersession_entry_by_memory[reference.memory_id]
                     = index;
         }
-      const std::size_t dst
-          = index * static_cast<std::size_t> (state.embedding_dim);
-      const std::size_t src
-          = last * static_cast<std::size_t> (state.embedding_dim);
-      std::copy_n (state.search.begin () + static_cast<std::ptrdiff_t> (src),
-                   state.embedding_dim,
-                   state.search.begin () + static_cast<std::ptrdiff_t> (dst));
     }
   state.embedding_index.erase (embedding_id);
   state.entries.pop_back ();
-  state.search.resize (state.entries.size ()
-      * static_cast<std::size_t> (state.embedding_dim));
-  state.supersession_embedding_fanout = std::any_of (
-      state.entries.begin (), state.entries.end (), [] (const auto &entry) {
-        return SupersessionReferenceCount (entry) > 1;
-      });
+  if (removed_fanout)
+    state.supersession_embedding_fanout = std::any_of (
+        state.entries.begin (), state.entries.end (), [] (const auto &entry) {
+          return SupersessionReferenceCount (entry) > 1;
+        });
   for (const long long memory_id : removed_supersession_memory_ids)
     RefreshSupersessionPopulationMismatch (
         state, memory_id);

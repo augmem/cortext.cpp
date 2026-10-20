@@ -1,4 +1,5 @@
 #include "cortext/models/aist_gguf_encoder.hpp"
+#include "aist_semantic_cache_internal.hpp"
 #include "ggml_support.hpp"
 #include "../experimental_env.hpp"
 
@@ -19,6 +20,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#endif
+#include <thread>
+
 #if defined(__APPLE__) && __has_include(<Accelerate/Accelerate.h>)
 #ifndef ACCELERATE_NEW_LAPACK
 #define ACCELERATE_NEW_LAPACK
@@ -31,6 +37,7 @@
 
 #if defined(CORTEXT_ENABLE_GGML)
 #include <ggml.h>
+#include <ggml-alloc.h>
 #include CORTEXT_GGML_BACKEND_HEADER_PATH
 #endif
 
@@ -1066,6 +1073,48 @@ private:
   std::unordered_map<std::string, RuntimeTensor> tensors_;
 };
 
+// Runs body(begin, end) over [0, n) split into a few contiguous chunks on
+// the system work queue (Apple) or short-lived threads. Image layers are
+// large enough that this pays for itself; small n runs inline.
+template <typename Body>
+void
+ParallelRanges (int n, Body &&body)
+{
+  constexpr int kMaxChunks = 4;
+  const int hw = static_cast<int> (std::max (1u, std::thread::hardware_concurrency ()));
+  const int chunks = std::min ({ kMaxChunks, hw, std::max (1, n / 8) });
+  if (chunks <= 1)
+    {
+      body (0, n);
+      return;
+    }
+  struct Ctx
+  {
+    Body *body;
+    int n;
+    int chunks;
+  } ctx{ &body, n, chunks };
+  auto run = [] (void *raw, std::size_t i) {
+    auto *c = static_cast<Ctx *> (raw);
+    const int begin = static_cast<int> (i) * c->n / c->chunks;
+    const int end = (static_cast<int> (i) + 1) * c->n / c->chunks;
+    (*c->body) (begin, end);
+  };
+#if defined(__APPLE__)
+  dispatch_apply_f (static_cast<std::size_t> (chunks),
+                    dispatch_get_global_queue (QOS_CLASS_USER_INITIATED, 0),
+                    &ctx, run);
+#else
+  std::vector<std::thread> workers;
+  workers.reserve (static_cast<std::size_t> (chunks - 1));
+  for (int i = 1; i < chunks; ++i)
+    workers.emplace_back (run, &ctx, static_cast<std::size_t> (i));
+  run (&ctx, 0);
+  for (auto &w : workers)
+    w.join ();
+#endif
+}
+
 struct HwcTensor
 {
   int height = 0;
@@ -1295,7 +1344,8 @@ StandardConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
   const int col_count = in_channels * kh * kw;
   std::vector<float> patches (
       static_cast<std::size_t> (row_count * col_count), 0.0F);
-  for (int oy = 0; oy < out_h; ++oy)
+  ParallelRanges (out_h, [&] (int oy_begin, int oy_end) {
+  for (int oy = oy_begin; oy < oy_end; ++oy)
     {
       for (int ox = 0; ox < out_w; ++ox)
         {
@@ -1323,6 +1373,7 @@ StandardConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
             }
         }
     }
+  });
   std::vector<float> out_rows = MulRowsByWeightTranspose (
       patches, row_count, col_count, weight, out_channels);
   HwcTensor out (out_h, out_w, out_channels);
@@ -1350,36 +1401,41 @@ DepthwiseConv2dHwc (const HwcTensor &input, const RuntimeTensor &weight,
   const int out_h = (input.height + 2 * pad - kh) / stride + 1;
   const int out_w = (input.width + 2 * pad - kw) / stride + 1;
   HwcTensor out (out_h, out_w, channels);
-  for (int oy = 0; oy < out_h; ++oy)
-    {
-      for (int ox = 0; ox < out_w; ++ox)
-        {
-          for (int c = 0; c < channels; ++c)
-            {
-              float sum = 0.0F;
-              for (int ky = 0; ky < kh; ++ky)
-                {
-                  const int iy = oy * stride + ky - pad;
-                  if (iy < 0 || iy >= input.height)
-                    {
+  // Taps-major weights ([ky][kx][c]) so the channel loop is contiguous in
+  // both input and weights and vectorizes.
+  std::vector<float> taps (static_cast<std::size_t> (kh * kw * channels));
+  for (int c = 0; c < channels; ++c)
+    for (int k = 0; k < kh * kw; ++k)
+      taps[static_cast<std::size_t> (k * channels + c)]
+          = weight.data[static_cast<std::size_t> (c * kh * kw + k)];
+  ParallelRanges (out_h, [&] (int oy_begin, int oy_end) {
+    for (int oy = oy_begin; oy < oy_end; ++oy)
+      {
+        for (int ox = 0; ox < out_w; ++ox)
+          {
+            float *acc = &out.data[static_cast<std::size_t> (
+                (oy * out_w + ox) * channels)];
+            for (int ky = 0; ky < kh; ++ky)
+              {
+                const int iy = oy * stride + ky - pad;
+                if (iy < 0 || iy >= input.height)
+                  continue;
+                for (int kx = 0; kx < kw; ++kx)
+                  {
+                    const int ix = ox * stride + kx - pad;
+                    if (ix < 0 || ix >= input.width)
                       continue;
-                    }
-                  for (int kx = 0; kx < kw; ++kx)
-                    {
-                      const int ix = ox * stride + kx - pad;
-                      if (ix < 0 || ix >= input.width)
-                        {
-                          continue;
-                        }
-                      const auto w_idx = static_cast<std::size_t> (
-                          ((c * multiplier) * kh + ky) * kw + kx);
-                      sum += input (iy, ix, c) * weight.data[w_idx];
-                    }
-                }
-              out (oy, ox, c) = sum;
-            }
-        }
-    }
+                    const float *in = &input.data[static_cast<std::size_t> (
+                        (iy * input.width + ix) * channels)];
+                    const float *w = &taps[static_cast<std::size_t> (
+                        (ky * kw + kx) * channels)];
+                    for (int c = 0; c < channels; ++c)
+                      acc[c] += in[c] * w[c];
+                  }
+              }
+          }
+      }
+  });
   return out;
 }
 
@@ -1498,9 +1554,11 @@ AveragePoolChannels (const HwcTensor &x)
   return out;
 }
 
-std::vector<float>
-EncodeAistImageFeaturesNative (const RuntimeTensorStore &store,
-                                 const std::vector<float> &input_hwc)
+/// @brief MobileNetV4 trunk through blocks.4: the 12x12x960 patch map that
+/// the pooled head summarizes (row-major HWC: patch index y * 12 + x).
+HwcTensor
+EncodeAistImagePatchesNative (const RuntimeTensorStore &store,
+                              const std::vector<float> &input_hwc)
 {
   if (input_hwc.size () != static_cast<std::size_t> (384 * 384 * 3))
     {
@@ -1538,14 +1596,22 @@ EncodeAistImageFeaturesNative (const RuntimeTensorStore &store,
     {
       x = ImageUniversalBlockNative (store, x, block.first, block.second);
     }
-  x = ImageConvBnActNative (store, x, "image_encoder.blocks.4.0.conv",
-                            "image_encoder.blocks.4.0.bn1", 1, 0, false,
-                            true);
-  std::vector<float> pooled = AveragePoolChannels (x);
+  return ImageConvBnActNative (store, x, "image_encoder.blocks.4.0.conv",
+                               "image_encoder.blocks.4.0.bn1", 1, 0, false,
+                               true);
+}
+
+/// @brief Pooled image head over the patch map: average pool, conv_head,
+/// norm_head (folded BN + ReLU).
+std::vector<float>
+EncodeAistImageHeadNative (const RuntimeTensorStore &store,
+                           const HwcTensor &patches)
+{
+  std::vector<float> pooled = AveragePoolChannels (patches);
   HwcTensor pooled_tensor (1, 1, static_cast<int> (pooled.size ()));
   pooled_tensor.data = std::move (pooled);
-  x = PointwiseConv2dHwc (pooled_tensor,
-                          store.Required ("image_encoder.conv_head.weight"));
+  HwcTensor x = PointwiseConv2dHwc (
+      pooled_tensor, store.Required ("image_encoder.conv_head.weight"));
   ApplyBatchNormAndActivationInPlace (
       x, LoadFoldedBatchNorm (store, "image_encoder.norm_head"), true);
   return x.data;
@@ -1692,7 +1758,7 @@ public:
     image_plan_.reset ();
     audio_plan_.reset ();
     plans_.clear ();
-    full_text_plans_.clear ();
+    ReleaseTextGraph ();
     if (weights_buffer_ != nullptr)
       {
         ggml_backend_buffer_free (weights_buffer_);
@@ -1809,7 +1875,7 @@ public:
         error = ex.what ();
         image_plan_.reset ();
         audio_plan_.reset ();
-        full_text_plans_.clear ();
+        ReleaseTextGraph ();
         plans_.clear ();
         weights_.clear ();
         biases_.clear ();
@@ -1859,6 +1925,14 @@ public:
   UsesFullAudioGraph () const
   {
     return full_audio_graph_used_;
+  }
+
+  std::size_t
+  TextGraphBufferBytes () const
+  {
+    return text_allocator_ == nullptr
+               ? 0
+               : ggml_gallocr_get_buffer_size (text_allocator_, 0);
   }
 
   const std::string &
@@ -1940,7 +2014,8 @@ public:
   }
 
   std::vector<float>
-  EncodeTextTokensFullGraph (const std::vector<int> &ids)
+  EncodeTextTokensFullGraph (const std::vector<int> &ids,
+                             std::vector<float> *hidden = nullptr)
   {
     if (!IsReady ())
       {
@@ -1960,6 +2035,19 @@ public:
       }
     ggml_backend_tensor_set (plan.token_ids, token_ids.data (), 0,
                              sizeof (std::int32_t) * token_ids.size ());
+    // The shared activation buffer may have reused input memory for
+    // intermediates on the previous compute, so every input is rewritten.
+    const std::size_t seq = ids.size ();
+    std::vector<std::int32_t> positions (seq);
+    std::iota (positions.begin (), positions.end (), 0);
+    const std::vector<std::int32_t> token_types (seq, 0);
+    const std::vector<float> mean (seq, 1.0F / static_cast<float> (seq));
+    ggml_backend_tensor_set (plan.position_ids, positions.data (), 0,
+                             sizeof (std::int32_t) * positions.size ());
+    ggml_backend_tensor_set (plan.token_type_ids, token_types.data (), 0,
+                             sizeof (std::int32_t) * token_types.size ());
+    ggml_backend_tensor_set (plan.mean_weights, mean.data (), 0,
+                             sizeof (float) * mean.size ());
     const enum ggml_status status = ggml_backend_graph_compute (
         backend_, plan.graph);
     if (status != GGML_STATUS_SUCCESS)
@@ -1972,6 +2060,14 @@ public:
         static_cast<std::size_t> (ggml_nelements (plan.output)), 0.0F);
     ggml_backend_tensor_get (plan.output, out.data (), 0,
                              sizeof (float) * out.size ());
+    if (hidden != nullptr)
+      {
+        // ne0 = hidden width, ne1 = seq: row-major [seq x width]
+        hidden->assign (
+            static_cast<std::size_t> (ggml_nelements (plan.hidden)), 0.0F);
+        ggml_backend_tensor_get (plan.hidden, hidden->data (), 0,
+                                 sizeof (float) * hidden->size ());
+      }
     full_text_graph_used_ = true;
     return out;
   }
@@ -2101,26 +2197,25 @@ private:
     struct ggml_cgraph *graph = nullptr;
   };
 
+  // Activations live in the kernel's shared text_allocator_ buffer, so a
+  // plan owns only graph metadata.
   struct FullTextPlan
   {
     ~FullTextPlan ()
     {
-      if (buffer != nullptr)
-        {
-          ggml_backend_buffer_free (buffer);
-        }
       if (ctx != nullptr)
         {
           ggml_free (ctx);
         }
     }
 
+    Eigen::Index seq = 0;
     struct ggml_context *ctx = nullptr;
-    ggml_backend_buffer_t buffer = nullptr;
     struct ggml_tensor *token_ids = nullptr;
     struct ggml_tensor *position_ids = nullptr;
     struct ggml_tensor *token_type_ids = nullptr;
     struct ggml_tensor *mean_weights = nullptr;
+    struct ggml_tensor *hidden = nullptr;
     struct ggml_tensor *output = nullptr;
     struct ggml_cgraph *graph = nullptr;
   };
@@ -2603,20 +2698,36 @@ private:
     return ggml_cont_2d (ctx, context, kHeads * kHeadDim, seq);
   }
 
+  void
+  ReleaseTextGraph ()
+  {
+    full_text_plan_.reset ();
+    if (text_allocator_ != nullptr)
+      {
+        ggml_gallocr_free (text_allocator_);
+        text_allocator_ = nullptr;
+      }
+  }
+
   FullTextPlan &
   GetOrCreateFullTextPlan (Eigen::Index seq)
   {
-    const auto found = full_text_plans_.find (seq);
-    if (found != full_text_plans_.end ())
+    // One plan at a time: caching a fully allocated graph per sequence
+    // length held up to context_length activation sets at once.
+    if (full_text_plan_ && full_text_plan_->seq == seq)
       {
-        return *found->second;
+        return *full_text_plan_;
       }
+    full_text_plan_.reset ();
 
+    constexpr std::size_t kMaxTextGraphNodes = 4096;
     ggml_init_params params{};
-    params.mem_size = 64 * 1024 * 1024;
+    params.mem_size = ggml_tensor_overhead () * kMaxTextGraphNodes
+                      + ggml_graph_overhead_custom (kMaxTextGraphNodes, false);
     params.mem_buffer = nullptr;
     params.no_alloc = true;
     std::unique_ptr<FullTextPlan> plan = std::make_unique<FullTextPlan> ();
+    plan->seq = seq;
     plan->ctx = ggml_init (params);
     if (plan->ctx == nullptr)
       {
@@ -2628,6 +2739,10 @@ private:
     plan->position_ids = ggml_new_tensor_1d (ctx, GGML_TYPE_I32, seq);
     plan->token_type_ids = ggml_new_tensor_1d (ctx, GGML_TYPE_I32, seq);
     plan->mean_weights = ggml_new_tensor_2d (ctx, GGML_TYPE_F32, seq, 1);
+    ggml_set_input (plan->token_ids);
+    ggml_set_input (plan->position_ids);
+    ggml_set_input (plan->token_type_ids);
+    ggml_set_input (plan->mean_weights);
 
     struct ggml_tensor *word = Weight (
         "text_encoder.0.model.embeddings.word_embeddings.weight");
@@ -2671,6 +2786,10 @@ private:
                          prefix + ".output.LayerNorm", 1e-12F);
       }
 
+    // Last hidden states stay readable after compute: the late-interaction
+    // reranker consumes them as per-token position features.
+    plan->hidden = x;
+    ggml_set_output (plan->hidden);
     struct ggml_tensor *x_t = ggml_cont (ctx, ggml_transpose (ctx, x));
     struct ggml_tensor *pooled = ggml_mul_mat (ctx, x_t, plan->mean_weights);
     struct ggml_tensor *features = LinearOp (ctx, pooled,
@@ -2678,35 +2797,24 @@ private:
     struct ggml_tensor *semantic = ProjectionBlockOp (ctx, features,
                                                       "text_projection");
     plan->output = ggml_l2_norm (ctx, semantic, 1e-12F);
+    ggml_set_output (plan->output);
 
-    plan->graph = ggml_new_graph_custom (ctx, 4096, false);
+    plan->graph = ggml_new_graph_custom (ctx, kMaxTextGraphNodes, false);
     ggml_build_forward_expand (plan->graph, plan->output);
-    plan->buffer = ggml_backend_alloc_ctx_tensors (ctx, backend_);
-    if (plan->buffer == nullptr)
+    if (text_allocator_ == nullptr)
+      {
+        text_allocator_ = ggml_gallocr_new (
+            ggml_backend_get_default_buffer_type (backend_));
+      }
+    if (text_allocator_ == nullptr
+        || !ggml_gallocr_alloc_graph (text_allocator_, plan->graph))
       {
         throw std::runtime_error (
             "ggml backend failed to allocate AIST full text graph tensors");
       }
 
-    std::vector<std::int32_t> positions (static_cast<std::size_t> (seq));
-    std::vector<std::int32_t> token_types (static_cast<std::size_t> (seq),
-                                           0);
-    std::vector<float> mean (static_cast<std::size_t> (seq),
-                             1.0F / static_cast<float> (seq));
-    for (Eigen::Index i = 0; i < seq; ++i)
-      {
-        positions[static_cast<std::size_t> (i)] =
-            static_cast<std::int32_t> (i);
-      }
-    ggml_backend_tensor_set (plan->position_ids, positions.data (), 0,
-                             sizeof (std::int32_t) * positions.size ());
-    ggml_backend_tensor_set (plan->token_type_ids, token_types.data (), 0,
-                             sizeof (std::int32_t) * token_types.size ());
-    ggml_backend_tensor_set (plan->mean_weights, mean.data (), 0,
-                             sizeof (float) * mean.size ());
-
-    auto inserted = full_text_plans_.emplace (seq, std::move (plan));
-    return *inserted.first->second;
+    full_text_plan_ = std::move (plan);
+    return *full_text_plan_;
   }
 
   ModalityPlan &
@@ -2903,8 +3011,8 @@ private:
   std::unordered_map<std::string, std::vector<float>> host_vectors_;
   std::vector<std::pair<std::string, std::vector<float>>> folded_constants_;
   std::unordered_map<std::string, std::unique_ptr<LinearPlan>> plans_;
-  std::unordered_map<Eigen::Index, std::unique_ptr<FullTextPlan>>
-      full_text_plans_;
+  std::unique_ptr<FullTextPlan> full_text_plan_;
+  ggml_gallocr_t text_allocator_ = nullptr;
   std::unique_ptr<ModalityPlan> image_plan_;
   std::unique_ptr<ModalityPlan> audio_plan_;
   struct ggml_context *weights_ctx_ = nullptr;
@@ -2966,6 +3074,12 @@ public:
     return false;
   }
 
+  std::size_t
+  TextGraphBufferBytes () const
+  {
+    return 0;
+  }
+
   const std::string &
   FullTextGraphError () const
   {
@@ -2981,7 +3095,8 @@ public:
   }
 
   std::vector<float>
-  EncodeTextTokensFullGraph (const std::vector<int> &)
+  EncodeTextTokensFullGraph (const std::vector<int> &,
+                             std::vector<float> * = nullptr)
   {
     throw std::runtime_error ("ggml kernel runtime unavailable");
   }
@@ -3341,23 +3456,38 @@ public:
     return tokenizer_path_;
   }
 
+  /// @param hidden When non-null, receives the last hidden states
+  /// [tokens x 384] row-major (bypasses the semantic cache lookup).
   std::vector<float>
-  Encode (const std::string &text)
+  Encode (const std::string &text, std::vector<float> *hidden = nullptr)
   {
-    return EncodeSemantic (text);
+    return EncodeSemantic (text, hidden);
   }
 
+  /// @param patches When non-null, receives the 12x12x960 patch map
+  /// [144 x 960] row-major (native path only; left empty otherwise).
   std::vector<float>
-  EncodeImage (const std::uint8_t *data, int width, int height, int channels)
+  EncodeImage (const std::uint8_t *data, int width, int height, int channels,
+               std::vector<float> *patches = nullptr)
   {
     native_image_used_ = false;
+    if (patches != nullptr)
+      {
+        patches->clear ();
+      }
     if (!internal::experimental_env::Flag (
             "CORTEXT_AIST_DISABLE_NATIVE_IMAGE_KERNELS"))
       {
         std::vector<float> input = PreprocessAistImageHWC (
             data, width, height, channels);
-        std::vector<float> features = EncodeAistImageFeaturesNative (
-            tensors_, input);
+        const HwcTensor patch_map = EncodeAistImagePatchesNative (tensors_,
+                                                                  input);
+        if (patches != nullptr)
+          {
+            *patches = patch_map.data;
+          }
+        std::vector<float> features = EncodeAistImageHeadNative (tensors_,
+                                                                 patch_map);
         std::vector<float> semantic = ProjectionBlockHostVector (
             tensors_, features, "image_projection");
         NormalizeL2InPlace (semantic);
@@ -3400,7 +3530,12 @@ public:
   AistRuntimeStats
   Stats () const
   {
-    return stats_;
+    AistRuntimeStats stats = stats_;
+    if (kernel_ != nullptr)
+      {
+        stats.text_graph_buffer_bytes = kernel_->TextGraphBufferBytes ();
+      }
+    return stats;
   }
 
   bool
@@ -3695,14 +3830,16 @@ private:
   }
 
   std::vector<float>
-  EncodeSemantic (const std::string &text)
+  EncodeSemantic (const std::string &text, std::vector<float> *hidden)
   {
     ++stats_.semantic_requests;
-    const auto cache_it = semantic_cache_.find (text);
-    if (cache_it != semantic_cache_.end ())
+    if (hidden == nullptr)
       {
-        ++stats_.semantic_cache_hits;
-        return cache_it->second;
+        if (const std::vector<float> *cached = semantic_cache_.Find (text))
+          {
+            ++stats_.semantic_cache_hits;
+            return *cached;
+          }
       }
     ++stats_.semantic_cache_misses;
 
@@ -3714,11 +3851,10 @@ private:
         try
           {
             std::vector<float> semantic = kernel_->EncodeTextTokensFullGraph (
-                ids);
+                ids, hidden);
             NormalizeL2InPlace (semantic);
-            auto inserted = semantic_cache_.emplace (text,
-                                                     std::move (semantic));
-            return inserted.first->second;
+            semantic_cache_.Put (text, semantic);
+            return semantic;
           }
         catch (const std::exception &ex)
           {
@@ -3760,6 +3896,10 @@ private:
         LayerNormRowsInPlace (x, prefix + ".output.LayerNorm", 1e-12F);
       }
 
+    if (hidden != nullptr)
+      {
+        hidden->assign (x.data (), x.data () + x.size ());
+      }
     Eigen::VectorXf pooled = x.colwise ().mean ();
     std::vector<float> pooled_raw (static_cast<std::size_t> (pooled.size ()));
     for (Eigen::Index i = 0; i < pooled.size (); ++i)
@@ -3771,8 +3911,8 @@ private:
     std::vector<float> semantic = ProjectionBlock (text_features,
                                                    "text_projection");
     L2Normalize (semantic);
-    auto inserted = semantic_cache_.emplace (text, std::move (semantic));
-    return inserted.first->second;
+    semantic_cache_.Put (text, semantic);
+    return semantic;
   }
 
   std::vector<float>
@@ -3823,7 +3963,7 @@ private:
   std::string kernel_error_;
   std::string full_graph_error_;
   bool native_image_used_ = false;
-  std::unordered_map<std::string, std::vector<float>> semantic_cache_;
+  internal::AistSemanticCache semantic_cache_;
   AistRuntimeStats stats_;
 };
 
@@ -4258,6 +4398,71 @@ AistGgufEncoder::EncodeText (const std::string &text,
     {
       throw std::runtime_error ("AIST semantic_vector output unavailable");
     }
+}
+
+void
+AistGgufEncoder::EncodeTextPositions (const std::string &text,
+                                      std::vector<float> &out_embedding,
+                                      EncoderPositions &out_positions)
+{
+  if (!loaded_)
+    {
+      throw std::runtime_error ("AIST GGUF encoder is not loaded");
+    }
+  if (!runtime_)
+    {
+      throw std::runtime_error (info_.runtime_error.empty ()
+                                    ? RuntimeUnavailableReason ()
+                                    : info_.runtime_error);
+    }
+  constexpr int kTextWidth = 384;
+  out_positions = {};
+  out_embedding = runtime_->Encode (text, &out_positions.values);
+  if (out_embedding.empty ())
+    {
+      throw std::runtime_error ("AIST semantic_vector output unavailable");
+    }
+  if (!out_positions.values.empty ())
+    {
+      out_positions.tower = "text";
+      out_positions.dim = kTextWidth;
+      out_positions.count
+          = static_cast<int> (out_positions.values.size () / kTextWidth);
+    }
+}
+
+void
+AistGgufEncoder::EncodeImagePositions (const std::uint8_t *data, int width,
+                                       int height, int channels,
+                                       std::vector<float> &out_embedding,
+                                       EncoderPositions &out_positions)
+{
+#if defined(CORTEXT_DISABLE_IMAGE)
+  (void)out_positions;
+  EncodeImage (data, width, height, channels, out_embedding);
+#else
+  if (!loaded_)
+    {
+      throw std::runtime_error ("AIST GGUF encoder is not loaded");
+    }
+  if (!runtime_ || !info_.runtime_available)
+    {
+      throw std::runtime_error (info_.runtime_error.empty ()
+                                    ? RuntimeUnavailableReason ()
+                                    : info_.runtime_error);
+    }
+  constexpr int kPatchWidth = 960;
+  out_positions = {};
+  out_embedding = runtime_->EncodeImage (data, width, height, channels,
+                                         &out_positions.values);
+  if (!out_positions.values.empty ())
+    {
+      out_positions.tower = "image";
+      out_positions.dim = kPatchWidth;
+      out_positions.count
+          = static_cast<int> (out_positions.values.size () / kPatchWidth);
+    }
+#endif
 }
 
 void

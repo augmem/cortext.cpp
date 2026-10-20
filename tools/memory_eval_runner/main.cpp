@@ -4,11 +4,13 @@
 // durable retention, then benchmark questions are issued with ephemeral
 // retention so the query path does not pollute long-term memory.
 
+#include <cortext/clock.hpp>
 #include <cortext/cortext.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -41,9 +43,39 @@ struct Options
   double sensitivity = 0.5;
   double stability = 0.5;
   std::size_t top_k = 8;
+  // Per-query evidence budget in bytes (Cortext::EvidenceBudget); unset
+  // returns whole memories.
+  cortext::Cortext::EvidenceBudget evidence_budget;
   int max_episodes = 0;
   int max_queries = 0;
   bool reuse_engine = false;
+  bool consolidate_on_recommend = false;
+  // Drive the engine clock from the stream (turn timestamps). Needed for
+  // image/audio signals, whose public API has no explicit-timestamp form.
+  bool stream_clock = false;
+  // Engine default is on; "off" measures images the change detector drops.
+  bool image_filter = true;
+  // "on": a turn is one multi-signal unit. Image signals whose source_id is
+  // "<text source>/<suffix>" and that directly follow that text signal are
+  // sent under the text's source id; the text goes in as Natural and the
+  // turn's last signal as Durable, so the engine stores them as one memory.
+  bool turn_signals = false;
+  // Ingest source id. "conversation": one id per conversation/session
+  // (<dataset id prefix>/conv), "speaker": one per speaker in it
+  // (<prefix>/<speaker>). The dataset's per-turn ids stay in rows/logs.
+  bool speaker_sources = false;
+  // Durable forces a boundary and a write per turn; Natural leaves
+  // boundary detection, grouping and the write gate to the engine (a real
+  // host's default). Both flush at episode end, before queries.
+  cortext::Retention retention = cortext::Retention::Durable;
+  // Query-time-only variants: copy <dir>/store_<i>.sqlite (kept by an
+  // earlier run with the same --db stem) and skip ingest.
+  std::string query_from;
+  // Natural only: send each conversation's last signal as Boundary, as a
+  // host that knows a conversation ended (closes the open unit; the write
+  // gate still decides).
+  bool close_conversations = false;
+  std::filesystem::path ingest_log_path;
 };
 
 struct Signal
@@ -58,6 +90,11 @@ struct Signal
   int height = 0;
   int channels = 0;
   std::uint64_t timestamp_ms = 0;
+  // Multimodal file inputs: decoded pixels for ProcessImage, and the original
+  // compressed bytes stored as Media. media_ref is echoed into packet rows.
+  std::string pixels_path;
+  std::string media_path;
+  nlohmann::json media_ref;
 };
 
 struct Episode
@@ -77,6 +114,7 @@ struct Query
   std::vector<std::string> answers;
   std::vector<std::string> evidence;
   bool requires_abstention = false;
+  std::uint64_t timestamp_ms = 0;
 };
 
 struct Counts
@@ -102,9 +140,27 @@ void PrintUsage (std::ostream &out)
       << "  --sensitivity X     S knob in [0,1], default 0.5\n"
       << "  --stability X       T knob in [0,1], default 0.5\n"
       << "  --top-k N           Retrieval packet depth to score, default 8\n"
+      << "  --evidence-budget-bytes=N  Per-query evidence budget in bytes\n"
+      << "                      (standing + retrieved packet); default unset\n"
       << "  --max-episodes N    Limit episodes, 0 means all\n"
       << "  --max-queries N     Limit queries, 0 means all\n"
       << "  --reuse-engine      Reuse one engine/DB across episodes\n"
+      << "  --consolidate=recommended  Run Consolidate() whenever an ingest\n"
+      << "                      context reports Recommended or Required\n"
+      << "  --stream-clock      Engine clock follows turn timestamps (needed\n"
+      << "                      for image/audio, which have no *At API)\n"
+      << "  --image-filter=on|off  Engine image signal filter, default on\n"
+      << "  --source-ids=conversation|speaker  Ingest source id per\n"
+      << "                      conversation (default) or per speaker\n"
+      << "  --retention=durable|natural  Ingest retention, default durable\n"
+      << "                      (one memory per turn); natural lets the\n"
+      << "                      engine group turns into memories\n"
+      << "  --conversation-end=none|boundary  Natural only: boundary sends\n"
+      << "                      each conversation's last signal as Boundary\n"
+      << "  --query-from=DIR    Query DIR/store_<i>.sqlite (copied) without\n"
+      << "                      ingesting; needs a per-episode --db file\n"
+      << "  --ingest-log PATH   Write one JSONL row per ingested signal\n"
+      << "                      (modality, wall/encode/process ms, filter)\n"
       << "  -h, --help          Show this help\n";
 }
 
@@ -165,6 +221,13 @@ Options ParseArgs (int argc, char **argv)
         {
           opts.top_k = static_cast<std::size_t> (std::stoul (*v));
         }
+      else if (auto v = TakeArg (arg, "--evidence-budget-bytes="))
+        {
+          const auto bytes = std::stoull (*v);
+          if (bytes == 0)
+            throw std::runtime_error ("--evidence-budget-bytes must be > 0");
+          opts.evidence_budget = static_cast<std::size_t> (bytes);
+        }
       else if (auto v = TakeArg (arg, "--max-episodes="))
         {
           opts.max_episodes = std::stoi (*v);
@@ -173,9 +236,60 @@ Options ParseArgs (int argc, char **argv)
         {
           opts.max_queries = std::stoi (*v);
         }
+      else if (arg == "--stream-clock")
+        {
+          opts.stream_clock = true;
+        }
+      else if (auto v = TakeArg (arg, "--image-filter="))
+        {
+          if (*v != "on" && *v != "off")
+            throw std::runtime_error ("--image-filter must be on or off");
+          opts.image_filter = *v == "on";
+        }
+      else if (auto v = TakeArg (arg, "--turn-signals="))
+        {
+          if (*v != "on" && *v != "off")
+            throw std::runtime_error ("--turn-signals must be on or off");
+          opts.turn_signals = *v == "on";
+        }
+      else if (auto v = TakeArg (arg, "--source-ids="))
+        {
+          if (*v != "conversation" && *v != "speaker")
+            throw std::runtime_error (
+                "--source-ids must be conversation or speaker");
+          opts.speaker_sources = *v == "speaker";
+        }
+      else if (auto v = TakeArg (arg, "--retention="))
+        {
+          if (*v != "durable" && *v != "natural")
+            throw std::runtime_error ("--retention must be durable or natural");
+          opts.retention = *v == "natural" ? cortext::Retention::Natural
+                                           : cortext::Retention::Durable;
+        }
+      else if (auto v = TakeArg (arg, "--conversation-end="))
+        {
+          if (*v != "none" && *v != "boundary")
+            throw std::runtime_error (
+                "--conversation-end must be none or boundary");
+          opts.close_conversations = *v == "boundary";
+        }
+      else if (auto v = TakeArg (arg, "--query-from="))
+        {
+          opts.query_from = *v;
+        }
+      else if (auto v = TakeArg (arg, "--ingest-log="))
+        {
+          opts.ingest_log_path = *v;
+        }
       else if (arg == "--reuse-engine")
         {
           opts.reuse_engine = true;
+        }
+      else if (auto v = TakeArg (arg, "--consolidate="))
+        {
+          if (*v != "recommended" && *v != "off")
+            throw std::runtime_error ("--consolidate must be recommended or off");
+          opts.consolidate_on_recommend = *v == "recommended";
         }
       else
         {
@@ -189,6 +303,18 @@ Options ParseArgs (int argc, char **argv)
   if (opts.answer_key_path.empty ())
     {
       throw std::runtime_error ("Missing --answer-key");
+    }
+  if (opts.close_conversations
+      && opts.retention != cortext::Retention::Natural)
+    {
+      throw std::runtime_error (
+          "--conversation-end=boundary needs --retention=natural");
+    }
+  if (!opts.query_from.empty ()
+      && (opts.db_path == ":memory:" || opts.reuse_engine))
+    {
+      throw std::runtime_error (
+          "--query-from needs a per-episode --db file");
     }
   if (opts.out_path.empty ())
     {
@@ -327,6 +453,98 @@ std::string MemoryText (const cortext::Cortext::Context::Memory &memory)
   return text;
 }
 
+/// Engine clock for --stream-clock: the stream's latest timestamp, or the
+/// wall clock until the first timestamped signal arrives.
+class StreamClock final : public cortext::Clock
+{
+public:
+  std::uint64_t
+  NowMillis () const override
+  {
+    const auto now = now_ms_.load ();
+    return now != 0 ? now : system_.NowMillis ();
+  }
+  void
+  Set (std::uint64_t ms)
+  {
+    if (ms > now_ms_.load ())
+      {
+        now_ms_.store (ms);
+      }
+  }
+
+private:
+  std::atomic<std::uint64_t> now_ms_{0};
+  cortext::SystemClock system_;
+};
+
+std::uint64_t Fnv1a64 (const unsigned char *data, std::size_t size)
+{
+  std::uint64_t h = 1469598103934665603ULL;
+  for (std::size_t i = 0; i < size; ++i)
+    {
+      h ^= data[i];
+      h *= 1099511628211ULL;
+    }
+  return h ^ static_cast<std::uint64_t> (size);
+}
+
+/// Payload bytes the runner ingested as media -> reference echoed in packets.
+using MediaRegistry = std::unordered_map<std::uint64_t, nlohmann::json>;
+
+bool LooksLikeEncodedImage (const std::vector<unsigned char> &blob)
+{
+  static const unsigned char kJpeg[] = {0xFF, 0xD8, 0xFF};
+  static const unsigned char kPng[] = {0x89, 'P', 'N', 'G'};
+  return (blob.size () >= 3 && std::memcmp (blob.data (), kJpeg, 3) == 0)
+         || (blob.size () >= 4 && std::memcmp (blob.data (), kPng, 4) == 0);
+}
+
+/// Split a memory's blobs into text (joined exactly as MemoryText) and media
+/// references. Media blobs are never flattened into text.
+std::pair<std::string, nlohmann::json>
+MemoryTextAndMedia (const cortext::Cortext::Context::Memory &memory,
+                    const MediaRegistry &registry)
+{
+  cortext::Cortext::Context::Memory text_only;
+  nlohmann::json media = nlohmann::json::array ();
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
+    {
+      const auto &blob = memory.content[i];
+      const std::string &mime = i < memory.content_mimetypes.size ()
+                                    ? memory.content_mimetypes[i]
+                                    : memory.mimetype;
+      const auto it = registry.find (Fnv1a64 (blob.data (), blob.size ()));
+      if (it != registry.end ())
+        {
+          media.push_back (it->second);
+        }
+      else if (LooksLikeEncodedImage (blob)
+               || (!mime.empty () && mime.rfind ("text/", 0) != 0))
+        {
+          media.push_back ({{"mimetype", mime},
+                            {"bytes", blob.size ()},
+                            {"unregistered", true}});
+        }
+      else
+        {
+          text_only.content.push_back (blob);
+        }
+    }
+  return {MemoryText (text_only), media};
+}
+
+std::vector<unsigned char> ReadFileBytes (const std::string &path)
+{
+  std::ifstream in (path, std::ios::binary);
+  if (!in)
+    {
+      throw std::runtime_error ("Failed to open media file: " + path);
+    }
+  return std::vector<unsigned char> (std::istreambuf_iterator<char> (in),
+                                     std::istreambuf_iterator<char> ());
+}
+
 std::string Normalize (const std::string &text)
 {
   std::string out;
@@ -374,7 +592,13 @@ std::string Clip (const std::string &text, std::size_t max_chars)
     {
       return text;
     }
-  return text.substr (0, max_chars);
+  // Back off to a UTF-8 code point boundary so the JSON dump stays valid.
+  std::size_t cut = max_chars;
+  while (cut > 0 && (static_cast<unsigned char> (text[cut]) & 0xC0u) == 0x80u)
+    {
+      --cut;
+    }
+  return text.substr (0, cut);
 }
 
 int Base64Value (char c)
@@ -473,6 +697,55 @@ int JsonInt (const nlohmann::json &j, const std::string &key)
   return 0;
 }
 
+// Dataset ids are <prefix>/<turn index>[/<attachment>...], prefix being
+// eval/<episode>[/<session>]. Returns the prefix (at least two segments).
+std::string ConversationPrefix (const std::string &dataset_source_id)
+{
+  std::vector<std::string> parts;
+  std::stringstream ss (dataset_source_id);
+  std::string part;
+  while (std::getline (ss, part, '/'))
+    parts.push_back (part);
+  auto numeric = [] (const std::string &x) {
+    return !x.empty ()
+           && std::all_of (x.begin (), x.end (), [] (unsigned char c) {
+                return std::isdigit (c) != 0;
+              });
+  };
+  while (parts.size () > 2 && !numeric (parts.back ()))
+    parts.pop_back ();
+  if (parts.size () > 2)
+    parts.pop_back ();
+  std::string out;
+  for (const auto &p : parts)
+    out += (out.empty () ? "" : "/") + p;
+  return out;
+}
+
+// "[<timestamp>] <speaker>: ..." -> lowercase speaker, else empty.
+std::string TurnSpeaker (const std::string &text)
+{
+  if (text.empty () || text[0] != '[')
+    return "";
+  const auto close = text.find (']');
+  if (close == std::string::npos)
+    return "";
+  std::size_t b = close + 1;
+  while (b < text.size () && text[b] == ' ')
+    ++b;
+  std::size_t e = b;
+  while (e < text.size ()
+         && (std::isalnum (static_cast<unsigned char> (text[e])) != 0
+             || text[e] == '_'))
+    ++e;
+  if (e == b || e >= text.size () || text[e] != ':')
+    return "";
+  std::string speaker = text.substr (b, e - b);
+  for (auto &c : speaker)
+    c = static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+  return speaker;
+}
+
 Signal ParseSignal (const nlohmann::json &j, const std::string &episode_id,
                     std::size_t index)
 {
@@ -518,6 +791,22 @@ Signal ParseSignal (const nlohmann::json &j, const std::string &episode_id,
       signal.samples = DecodeFloat32Base64 (audio_f32);
     }
   signal.timestamp_ms = JsonU64 (j, "timestamp_ms");
+  signal.pixels_path = JsonString (j, "pixels_path");
+  signal.media_path = JsonString (j, "media_path");
+  if (!signal.media_path.empty ())
+    {
+      signal.media_ref = {{"source_id", signal.source_id},
+                          {"mimetype", signal.mimetype},
+                          {"path", signal.media_path}};
+      for (const char *key : {"caption", "judge_path", "media_sha"})
+        {
+          const std::string value = JsonString (j, key);
+          if (!value.empty ())
+            {
+              signal.media_ref[key] = value;
+            }
+        }
+    }
   return signal;
 }
 
@@ -638,6 +927,7 @@ LoadQueries (const std::filesystem::path &path, int max_queries)
       q.question_type = JsonString (j, "question_type", "unknown");
       q.answers = JsonStringList (j, "answers");
       q.evidence = JsonStringList (j, "evidence");
+      q.timestamp_ms = JsonU64 (j, "query_timestamp_ms");
       if (q.evidence.empty ())
         {
           q.evidence = JsonStringList (j, "evidence_phrases");
@@ -660,14 +950,78 @@ LoadQueries (const std::filesystem::path &path, int max_queries)
   return out;
 }
 
-std::unique_ptr<cortext::Cortext> CreateEngine (const Options &opts,
-                                                const std::string &db_path)
+bool ImageSignalUsable (const Signal &signal)
+{
+  return !(signal.data_base64.empty () && signal.pixels_path.empty ())
+         && signal.width > 0 && signal.height > 0 && signal.channels > 0;
+}
+
+// Decoded pixels of a usable image signal; throws on a size mismatch.
+std::vector<unsigned char> ImagePixels (const Signal &signal)
+{
+  auto pixels = signal.pixels_path.empty () ? DecodeBase64 (signal.data_base64)
+                                            : ReadFileBytes (signal.pixels_path);
+  const std::size_t want = static_cast<std::size_t> (signal.width)
+                           * static_cast<std::size_t> (signal.height)
+                           * static_cast<std::size_t> (signal.channels);
+  if (pixels.size () != want)
+    {
+      throw std::runtime_error ("pixel buffer size mismatch for "
+                                + signal.source_id);
+    }
+  return pixels;
+}
+
+// Packet rows echo a media ref for stored image bytes, keyed by content hash.
+void RegisterImageMedia (const Signal &signal,
+                         const std::vector<unsigned char> &stored,
+                         MediaRegistry &registry)
+{
+  nlohmann::json ref = signal.media_ref.is_null ()
+                           ? nlohmann::json{{"source_id", signal.source_id},
+                                            {"mimetype", signal.mimetype}}
+                           : signal.media_ref;
+  ref["bytes"] = stored.size ();
+  registry[Fnv1a64 (stored.data (), stored.size ())] = ref;
+}
+
+std::unique_ptr<cortext::Cortext>
+CreateEngine (const Options &opts, const std::string &db_path,
+              const std::shared_ptr<StreamClock> &clock)
 {
   cortext::Cortext::Config cfg;
   cfg.focus = opts.focus;
   cfg.sensitivity = opts.sensitivity;
   cfg.stability = opts.stability;
+  cfg.signal_filter_image_enabled = opts.image_filter;
+  if (clock)
+    {
+      return cortext::Cortext::Create (cfg, db_path, clock);
+    }
   return cortext::Cortext::Create (cfg, db_path);
+}
+
+nlohmann::json Percentiles (std::vector<double> xs)
+{
+  if (xs.empty ())
+    {
+      return {{"n", 0}};
+    }
+  std::sort (xs.begin (), xs.end ());
+  auto at = [&] (double q) {
+    return xs[std::min (xs.size () - 1,
+                        static_cast<std::size_t> (q * static_cast<double> (xs.size ())))];
+  };
+  double sum = 0.0;
+  for (double x : xs)
+    {
+      sum += x;
+    }
+  return {{"n", xs.size ()},
+          {"mean", sum / static_cast<double> (xs.size ())},
+          {"p50", at (0.50)},
+          {"p95", at (0.95)},
+          {"max", xs.back ()}};
 }
 
 std::string DbPathForEpisode (const Options &opts, std::size_t episode_index)
@@ -755,9 +1109,30 @@ int Run (const Options &opts)
   int episode_index = 0;
 
   std::unique_ptr<cortext::Cortext> shared_engine;
+  std::shared_ptr<StreamClock> shared_clock;
   if (opts.reuse_engine)
     {
-      shared_engine = CreateEngine (opts, opts.db_path);
+      if (opts.stream_clock)
+        {
+          shared_clock = std::make_shared<StreamClock> ();
+        }
+      shared_engine = CreateEngine (opts, opts.db_path, shared_clock);
+    }
+  MediaRegistry media_registry;
+  std::map<std::string, std::vector<double>> ingest_ms_by_modality;
+  std::map<std::string, std::vector<double>> encode_ms_by_modality;
+  std::map<std::string, int> filtered_by_modality;
+  std::map<std::string, std::uint64_t> media_bytes_by_modality;
+  std::vector<double> query_ms_all;
+  std::ofstream ingest_log;
+  if (!opts.ingest_log_path.empty ())
+    {
+      ingest_log.open (opts.ingest_log_path);
+      if (!ingest_log)
+        {
+          throw std::runtime_error ("Failed to open ingest log: "
+                                    + opts.ingest_log_path.string ());
+        }
     }
 
   for (const auto &episode : episodes)
@@ -769,11 +1144,38 @@ int Run (const Options &opts)
         }
 
       std::unique_ptr<cortext::Cortext> local_engine;
+      std::shared_ptr<StreamClock> clock = shared_clock;
       cortext::Cortext *engine = shared_engine.get ();
+      const bool query_only = !opts.query_from.empty ();
+      if (query_only)
+        {
+          const auto name
+              = std::filesystem::path (DbPathForEpisode (opts, episode_index))
+                    .filename ()
+                    .string ();
+          const auto src = std::filesystem::path (opts.query_from) / name;
+          if (!std::filesystem::exists (src))
+            throw std::runtime_error ("--query-from store missing: "
+                                      + src.string ());
+          for (const char *suffix : {"", "-wal"})
+            {
+              const auto from = src.string () + suffix;
+              const auto to = DbPathForEpisode (opts, episode_index) + suffix;
+              std::filesystem::remove (to);
+              if (std::filesystem::exists (from))
+                std::filesystem::copy_file (from, to);
+            }
+          std::filesystem::remove (DbPathForEpisode (opts, episode_index)
+                                   + "-shm");
+        }
       if (!engine)
         {
-          local_engine = CreateEngine (opts,
-                                       DbPathForEpisode (opts, episode_index));
+          if (opts.stream_clock)
+            {
+              clock = std::make_shared<StreamClock> ();
+            }
+          local_engine = CreateEngine (
+              opts, DbPathForEpisode (opts, episode_index), clock);
           engine = local_engine.get ();
         }
 
@@ -781,9 +1183,133 @@ int Run (const Options &opts)
       int image_signals = 0;
       int audio_signals = 0;
       int skipped_signals = 0;
-      for (const auto &signal : episode.signals)
+      int consolidations = 0;
+      // Production cadence: the host consolidates when the engine says so.
+      auto settle = [&] (const auto &ingest_context) {
+        if (opts.consolidate_on_recommend
+            && ingest_context.consolidation_state
+                   != cortext::ConsolidationState::None)
+          {
+            (void)engine->Consolidate ();
+            engine->Flush ();
+            ++consolidations;
+          }
+      };
+      std::uint64_t last_timestamp_ms = 0;
+      // Per-signal ingest timing; does not touch engine state.
+      auto record = [&] (const Signal &signal, const auto &ctx,
+                         std::chrono::steady_clock::time_point t0) {
+        const double ms = std::chrono::duration<double, std::milli> (
+                              std::chrono::steady_clock::now () - t0)
+                              .count ();
+        ingest_ms_by_modality[signal.modality].push_back (ms);
+        encode_ms_by_modality[signal.modality].push_back (ctx.encode_ms);
+        const bool accepted = !ctx.output.signal_filter_evaluated
+                              || ctx.output.signal_filter_accepted;
+        if (!accepted)
+          {
+            filtered_by_modality[signal.modality] += 1;
+          }
+        if (ingest_log.is_open ())
+          {
+            ingest_log << nlohmann::json{
+                {"episode_id", episode.id},
+                {"source_id", signal.source_id},
+                {"modality", signal.modality},
+                {"ms", ms},
+                {"encode_ms", ctx.encode_ms},
+                {"process_ms", ctx.process_ms},
+                {"hydrate_ms", ctx.hydrate_ms},
+                {"accepted", accepted},
+                {"filter_reason", ctx.output.signal_filter_reason},
+                {"consolidation", ctx.consolidation_state
+                                      != cortext::ConsolidationState::None},
+            }.dump () << "\n";
+          }
+      };
+      // Per-signal source id and retention (multi-signal turns, see
+      // Options::turn_signals).
+      std::vector<std::string> turn_source;
+      turn_source.reserve (episode.signals.size ());
+      for (const auto &s : episode.signals)
+        turn_source.push_back (s.source_id);
+      std::vector<cortext::Retention> turn_retention (
+          episode.signals.size (), cortext::Retention::Durable);
+      for (std::size_t i = 0; i < episode.signals.size (); ++i)
         {
+          if (!opts.turn_signals || episode.signals[i].modality != "text")
+            continue;
+          const std::string prefix = episode.signals[i].source_id + "/";
+          std::size_t last = i;
+          for (std::size_t j = i + 1; j < episode.signals.size (); ++j)
+            {
+              const auto &next = episode.signals[j];
+              if (next.modality == "text"
+                  || next.source_id.rfind (prefix, 0) != 0)
+                break;
+              last = j;
+            }
+          for (std::size_t j = i + 1; j <= last; ++j)
+            {
+              turn_source[j] = episode.signals[i].source_id;
+              turn_retention[j - 1] = cortext::Retention::Natural;
+            }
+        }
+      // Shared conversation (or speaker) ids instead of per-turn ids.
+      std::string speaker = "unknown";
+      for (std::size_t i = 0; i < episode.signals.size (); ++i)
+        {
+          if (episode.signals[i].modality == "text")
+            {
+              const auto s = TurnSpeaker (episode.signals[i].text);
+              speaker = s.empty () ? "unknown" : s;
+            }
+          turn_source[i] = ConversationPrefix (turn_source[i]) + "/"
+                           + (opts.speaker_sources ? speaker : "conv");
+          if (opts.retention == cortext::Retention::Natural)
+            turn_retention[i] = cortext::Retention::Natural;
+        }
+      if (opts.close_conversations)
+        {
+          std::map<std::string, std::size_t> last_of;
+          for (std::size_t i = 0; i < turn_source.size (); ++i)
+            last_of[turn_source[i]] = i;
+          for (const auto &[source, i] : last_of)
+            turn_retention[i] = cortext::Retention::Boundary;
+        }
+      // Query-only replays what ingest leaves outside the store: the media
+      // registry (packet media refs) and the clamp time, which ingest takes
+      // from timestamped non-empty text signals only.
+      if (query_only)
+        for (const auto &signal : episode.signals)
+          {
+            if (clock && signal.timestamp_ms > 0)
+              clock->Set (signal.timestamp_ms);
+            if (signal.modality == "text" && !signal.text.empty ()
+                && signal.timestamp_ms > 0)
+              last_timestamp_ms
+                  = std::max (last_timestamp_ms, signal.timestamp_ms);
+            if (signal.modality == "image" && ImageSignalUsable (signal))
+              {
+                auto stored = signal.media_path.empty ()
+                                  ? ImagePixels (signal)
+                                  : ReadFileBytes (signal.media_path);
+                RegisterImageMedia (signal, stored, media_registry);
+              }
+          }
+      for (std::size_t signal_index = 0;
+           !query_only && signal_index < episode.signals.size ();
+           ++signal_index)
+        {
+          const auto &signal = episode.signals[signal_index];
+          const auto &source_id = turn_source[signal_index];
+          const auto retention = turn_retention[signal_index];
           signal_modality_counts[signal.modality] += 1;
+          if (clock && signal.timestamp_ms > 0)
+            {
+              clock->Set (signal.timestamp_ms);
+            }
+          const auto signal_start = std::chrono::steady_clock::now ();
           if (signal.modality == "text")
             {
               if (signal.text.empty ())
@@ -794,14 +1320,19 @@ int Run (const Options &opts)
                 }
               if (signal.timestamp_ms > 0)
                 {
-                  (void)engine->ProcessTextAt (signal.text, signal.source_id,
-                                               signal.timestamp_ms,
-                                               cortext::Retention::Durable);
+                  last_timestamp_ms
+                      = std::max (last_timestamp_ms, signal.timestamp_ms);
+                  const auto ctx = engine->ProcessTextAt (
+                      signal.text, source_id, last_timestamp_ms, retention);
+                  record (signal, ctx, signal_start);
+                  settle (ctx);
                 }
               else
                 {
-                  (void)engine->ProcessText (signal.text, signal.source_id,
-                                             cortext::Retention::Durable);
+                  const auto ctx = engine->ProcessText (
+                      signal.text, source_id, retention);
+                  record (signal, ctx, signal_start);
+                  settle (ctx);
                 }
               ++text_signals;
               ++processed_signals;
@@ -809,30 +1340,34 @@ int Run (const Options &opts)
             }
           if (signal.modality == "image")
             {
-              if (signal.data_base64.empty () || signal.width <= 0
-                  || signal.height <= 0 || signal.channels <= 0)
+              if (!ImageSignalUsable (signal))
                 {
                   ++skipped_signals;
                   ++skipped_unsupported_signals;
                   continue;
                 }
-              const auto pixels = DecodeBase64 (signal.data_base64);
+              // Pixel decode happens upstream (build step); file reads are
+              // excluded from the ingest timing below.
+              const auto pixels = ImagePixels (signal);
+              std::vector<unsigned char> media_bytes;
+              if (!signal.media_path.empty ())
+                {
+                  media_bytes = ReadFileBytes (signal.media_path);
+                }
               cortext::Cortext::Media media;
               media.mimetype = signal.mimetype;
-              if (signal.timestamp_ms > 0)
-                {
-                  (void)engine->ProcessImage (pixels.data (), signal.width,
-                                              signal.height, signal.channels,
-                                              signal.source_id, media,
-                                              cortext::Retention::Durable);
-                }
-              else
-                {
-                  (void)engine->ProcessImage (pixels.data (), signal.width,
-                                              signal.height, signal.channels,
-                                              signal.source_id, media,
-                                              cortext::Retention::Durable);
-                }
+              media.data = media_bytes.empty () ? nullptr : media_bytes.data ();
+              media.size = media_bytes.size ();
+              // The engine stores Media bytes when given, else raw pixels.
+              const auto &stored = media_bytes.empty () ? pixels : media_bytes;
+              RegisterImageMedia (signal, stored, media_registry);
+              media_bytes_by_modality["image"] += stored.size ();
+              const auto image_start = std::chrono::steady_clock::now ();
+              const auto ctx = engine->ProcessImage (
+                  pixels.data (), signal.width, signal.height, signal.channels,
+                  source_id, media, retention);
+              record (signal, ctx, image_start);
+              settle (ctx);
               ++image_signals;
               ++processed_signals;
               continue;
@@ -847,10 +1382,11 @@ int Run (const Options &opts)
                 }
               cortext::Cortext::Media media;
               media.mimetype = signal.mimetype;
-              (void)engine->ProcessAudio (signal.samples.data (),
-                                          signal.samples.size (),
-                                          signal.source_id, media,
-                                          cortext::Retention::Durable);
+              const auto ctx = engine->ProcessAudio (
+                  signal.samples.data (), signal.samples.size (),
+                  source_id, media, retention);
+              record (signal, ctx, signal_start);
+              settle (ctx);
               ++audio_signals;
               ++processed_signals;
               continue;
@@ -862,12 +1398,26 @@ int Run (const Options &opts)
 
       for (const auto &query : q_it->second)
         {
+          if (clock)
+            {
+              clock->Set (std::max (query.timestamp_ms, last_timestamp_ms));
+            }
           const auto start = std::chrono::steady_clock::now ();
-          auto context = engine->ProcessText (query.question, "eval/query",
-                                              cortext::Retention::Ephemeral);
+          // Ask at the benchmark's question date when the key carries one,
+          // clamped so engine time never runs backwards.
+          auto context
+              = query.timestamp_ms > 0
+                    ? engine->ProcessTextAt (
+                          query.question, "eval/query",
+                          std::max (query.timestamp_ms, last_timestamp_ms),
+                          cortext::Retention::Ephemeral, opts.evidence_budget)
+                    : engine->ProcessText (query.question, "eval/query",
+                                           cortext::Retention::Ephemeral,
+                                           opts.evidence_budget);
           const auto end = std::chrono::steady_clock::now ();
           const double query_ms =
               std::chrono::duration<double, std::milli> (end - start).count ();
+          query_ms_all.push_back (query_ms);
 
           std::string retrieved_text;
           nlohmann::json retrieved = nlohmann::json::array ();
@@ -876,10 +1426,11 @@ int Run (const Options &opts)
           for (std::size_t i = 0; i < shown; ++i)
             {
               const auto &memory = context.retrieved_memory[i];
-              const std::string text = MemoryText (memory);
+              const auto [text, media]
+                  = MemoryTextAndMedia (memory, media_registry);
               retrieved_text += " ";
               retrieved_text += text;
-              retrieved.push_back ({
+              nlohmann::json item = {
                   {"rank", i + 1},
                   {"id", memory.id},
                   {"source_id", memory.source_id},
@@ -889,7 +1440,54 @@ int Run (const Options &opts)
                   {"salience", memory.salience},
                   {"text", text},
                   {"preview", Clip (text, 240)},
-              });
+              };
+              // Text-only packets keep the exact prior row shape.
+              if (!media.empty ())
+                {
+                  item["media"] = media;
+                }
+              retrieved.push_back (std::move (item));
+            }
+
+          // The standing block is outside the top-k cut (retrieved).
+          nlohmann::json standing = nlohmann::json::array ();
+          for (std::size_t i = 0; i < context.standing_memory.size (); ++i)
+            {
+              const auto &memory = context.standing_memory[i];
+              const auto [text, media]
+                  = MemoryTextAndMedia (memory, media_registry);
+              nlohmann::json item = {
+                  {"rank", i + 1},
+                  {"id", memory.id},
+                  {"source_id", memory.source_id},
+                  {"modality", memory.modality},
+                  {"text", text},
+              };
+              if (!media.empty ())
+                {
+                  item["media"] = media;
+                }
+              standing.push_back (std::move (item));
+            }
+
+          nlohmann::json working = nlohmann::json::array ();
+          for (std::size_t i = 0; i < context.working_memory.size (); ++i)
+            {
+              const auto &memory = context.working_memory[i];
+              const auto [text, media]
+                  = MemoryTextAndMedia (memory, media_registry);
+              nlohmann::json item = {
+                  {"slot", i},
+                  {"id", memory.id},
+                  {"source_id", memory.source_id},
+                  {"modality", memory.modality},
+                  {"text", text},
+              };
+              if (!media.empty ())
+                {
+                  item["media"] = media;
+                }
+              working.push_back (std::move (item));
             }
 
           const bool answer_hit =
@@ -924,7 +1522,11 @@ int Run (const Options &opts)
                      {"ingested_image_signals", image_signals},
                      {"ingested_audio_signals", audio_signals},
                      {"skipped_unsupported_signals", skipped_signals},
+                     {"consolidations", consolidations},
+                     {"query_timestamp_ms", query.timestamp_ms},
                      {"retrieved", retrieved},
+                     {"standing", standing},
+                     {"working", working},
                  }.dump ()
               << "\n";
         }
@@ -957,7 +1559,28 @@ int Run (const Options &opts)
       {"totals", CountsJson (totals)},
       {"by_question_type", by_type_json},
       {"query_rows", opts.out_path.string ()},
+      {"evidence_budget_bytes",
+       opts.evidence_budget ? nlohmann::json (*opts.evidence_budget)
+                            : nlohmann::json ()},
+      {"stream_clock", opts.stream_clock},
+      {"image_filter", opts.image_filter},
+      {"turn_signals", opts.turn_signals},
+      {"source_ids", opts.speaker_sources ? "speaker" : "conversation"},
+      {"conversation_end", opts.close_conversations ? "boundary" : "none"},
+      {"retention", opts.retention == cortext::Retention::Natural
+                        ? "natural"
+                        : "durable"},
+      {"query_ms", Percentiles (query_ms_all)},
+      {"media_bytes_ingested", media_bytes_by_modality},
+      {"filtered_signals", filtered_by_modality},
   };
+  nlohmann::json ingest_ms = nlohmann::json::object ();
+  for (const auto &kv : ingest_ms_by_modality)
+    {
+      ingest_ms[kv.first] = {{"wall", Percentiles (kv.second)},
+                             {"encode", Percentiles (encode_ms_by_modality[kv.first])}};
+    }
+  summary["ingest_ms"] = ingest_ms;
 
   auto summary_path = opts.out_path;
   summary_path.replace_extension (".summary.json");

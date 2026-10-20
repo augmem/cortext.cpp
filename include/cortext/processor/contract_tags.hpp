@@ -86,16 +86,4 @@ struct MniGateDiagnostics;  ///< mni_* and interrupt_gate_* telemetry values
 // DetectMemoryUsage
 struct MemoryUsageEvents;
 
-// ApplySerialPositionEffects -> ApplySerialPositionMultiplier
-struct SerialPositionPolicy;  ///< primacy/recency windows, suppression, ...
-struct SerialPositionMultiplier;
-
-// ApplyStabilityFeedback
-struct DeltaHalfLifeAdjustment;
-
-// Consolidation chain
-struct ConsolidationShouldStart;
-struct ConsolidationCandidates;
-struct ConsolidationClusters;
-
 } // namespace cortext::tags

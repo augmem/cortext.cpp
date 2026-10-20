@@ -40,15 +40,28 @@ BuildBlockNorms (Eigen::Index dimension_count, ValueAccessor value_at,
     block_norm = std::sqrt (block_norm);
 }
 
+/// Everything Features carries except the normalized vector itself, which
+/// is re-expanded from the shared embedding row on use so resident caches
+/// keep only these norms beside the arena row.
+struct Norms
+{
+  bool degenerate = true; ///< zero-norm row: Features stays empty
+  double inverse_norm = 0.0;
+  double normalized_squared_norm = 0.0;
+  std::array<double, kNormBlockCount> block_norms {};
+  std::array<double, kNormBlockCount> hadamard_block_norms {};
+  bool has_hadamard_features = false;
+};
+
 inline Features
-Build (const Eigen::VectorXf &embedding)
+Build (const float *embedding, Eigen::Index size)
 {
   Features features;
-  if (embedding.size () <= 0)
+  if (size <= 0)
     return features;
 
   double squared_norm = 0.0;
-  for (Eigen::Index dimension = 0; dimension < embedding.size (); ++dimension)
+  for (Eigen::Index dimension = 0; dimension < size; ++dimension)
     {
       const double value = static_cast<double> (embedding[dimension]);
       squared_norm += value * value;
@@ -57,8 +70,8 @@ Build (const Eigen::VectorXf &embedding)
     return features;
 
   const double inverse_norm = 1.0 / std::sqrt (squared_norm);
-  features.normalized.resize (embedding.size ());
-  for (Eigen::Index dimension = 0; dimension < embedding.size (); ++dimension)
+  features.normalized.resize (size);
+  for (Eigen::Index dimension = 0; dimension < size; ++dimension)
     {
       features.normalized[dimension] = static_cast<float> (
           static_cast<double> (embedding[dimension]) * inverse_norm);
@@ -105,6 +118,54 @@ Build (const Eigen::VectorXf &embedding)
           features.hadamard_block_norms);
       features.has_hadamard_features = true;
     }
+  return features;
+}
+
+inline Features
+Build (const Eigen::VectorXf &embedding)
+{
+  return Build (embedding.data (), embedding.size ());
+}
+
+/// Norm side table for a row; Expand (row, BuildNorms (row)) == Build (row).
+inline Norms
+BuildNorms (const float *embedding, Eigen::Index size)
+{
+  Norms norms;
+  Features features = Build (embedding, size);
+  if (features.normalized.size () == 0)
+    return norms;
+  double squared_norm = 0.0;
+  for (Eigen::Index dimension = 0; dimension < size; ++dimension)
+    {
+      const double value = static_cast<double> (embedding[dimension]);
+      squared_norm += value * value;
+    }
+  norms.degenerate = false;
+  norms.inverse_norm = 1.0 / std::sqrt (squared_norm);
+  norms.normalized_squared_norm = features.normalized_squared_norm;
+  norms.block_norms = features.block_norms;
+  norms.hadamard_block_norms = features.hadamard_block_norms;
+  norms.has_hadamard_features = features.has_hadamard_features;
+  return norms;
+}
+
+/// Rebuilds the Features of a row from its cached norms (bit-identical to
+/// Build: the normalized vector uses the same double product and rounding).
+inline Features
+Expand (const float *embedding, Eigen::Index size, const Norms &norms)
+{
+  Features features;
+  if (norms.degenerate || size <= 0)
+    return features;
+  features.normalized.resize (size);
+  for (Eigen::Index dimension = 0; dimension < size; ++dimension)
+    features.normalized[dimension] = static_cast<float> (
+        static_cast<double> (embedding[dimension]) * norms.inverse_norm);
+  features.normalized_squared_norm = norms.normalized_squared_norm;
+  features.block_norms = norms.block_norms;
+  features.hadamard_block_norms = norms.hadamard_block_norms;
+  features.has_hadamard_features = norms.has_hadamard_features;
   return features;
 }
 

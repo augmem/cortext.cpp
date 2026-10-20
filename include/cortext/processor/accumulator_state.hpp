@@ -22,6 +22,7 @@ struct SignalRecord
   std::vector<unsigned char> blob_id;     ///< objstore hash (may be empty)
   std::vector<unsigned char> payload;     ///< Raw payload held until write acceptance
   std::string text_payload;               ///< Transient text cache for active WM
+  std::vector<unsigned char> li_codes;    ///< Serialized late-interaction codes (may be empty)
   double score = 0.0;                     ///< Composite score
   int serial_position = 0;                ///< Order within memory (0-based)
 };
@@ -43,7 +44,6 @@ struct AccumulatorState
   int n_signals = 0;            ///< Count of signals in group
   Eigen::VectorXf e_peak;       ///< Accumulator centroid at highest score
   uint64_t t_start = 0;         ///< Timestamp of accumulation start
-  uint64_t last_write_ts = 0;   ///< Timestamp of last write (for refractory)
   uint64_t last_signal_ts = 0;  ///< Timestamp of previous signal (for gap)
   double eta_acc = 0.0;         ///< Drift EWMA (η_acc)
   double coherence_prev = 0.0;  ///< Previous coherence value
@@ -68,7 +68,7 @@ struct AccumulatorState
 
   // v2 aggregated blob tracking (working-memory.plan.md Section 2)
   std::vector<std::vector<unsigned char>> blob_ids;  ///< Aggregated objstore refs
-  std::string primary_modality;                       ///< "text"|"audio"|"image"
+  std::string memory_modality;  ///< shared signal modality, or "mixed"
 
   // Streaming integration (Section 10)
   Eigen::VectorXf prev_x;           ///< Previous accumulator centroid for refractory
@@ -78,6 +78,10 @@ struct AccumulatorState
   double drift_acc_pacing = 0.0;    ///< Drift accumulator for pacing gate
   bool pending_interrupt_abort = false;  ///< Pending interrupt-induced abort
   Eigen::VectorXf pending_interrupt_embedding; ///< Selected interrupt memory
+
+  /// Processor activity sequence of this source's last root signal; orders
+  /// idle sources for eviction (src/processor/source_state_eviction_internal.hpp).
+  uint64_t last_active_seq = 0;
 
   /**
    * @brief Reset accumulator for new memory accumulation
@@ -113,11 +117,10 @@ struct AccumulatorState
     signals.clear ();
     // Clear v2 blob tracking
     blob_ids.clear ();
-    primary_modality.clear ();
+    memory_modality.clear ();
     acc_signals_window.clear ();
     pending_interrupt_abort = false;
     pending_interrupt_embedding = Eigen::VectorXf ();
-    // Note: last_write_ts is preserved across accumulations
   }
 
   /**
@@ -149,7 +152,7 @@ struct AccumulatorState
     s_arousal_sum = 0.0;
     signals.clear ();
     blob_ids.clear ();
-    primary_modality.clear ();
+    memory_modality.clear ();
     acc_signals_window.clear ();
     pending_interrupt_abort = false;
     pending_interrupt_embedding = Eigen::VectorXf ();

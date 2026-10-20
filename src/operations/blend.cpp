@@ -392,9 +392,6 @@ FitMetricWeightsRLS::Execute (OperationContext &context, Transaction &tx) const
                       + w_user * o_user)
                          / w_sum,
                      0.0, 1.0);
-  const double alpha_out = core::BlenderOutcomeAlpha (cfg.stability);
-  p_ctx.outcome_pred = core::Ewma (p_ctx.outcome_pred, outcome_t, alpha_out);
-  p_ctx.delta_reward = outcome_t - p_ctx.outcome_pred;
   double y = outcome_t;
   std::vector<double> w = BuildWeightVector (names, p_ctx.blender_state);
   double y_hat = 0.0;

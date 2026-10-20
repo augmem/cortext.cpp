@@ -68,7 +68,6 @@ def fixture_operation_ms(counters: dict[str, float]) -> dict[str, float]:
         "cortext::operations::ApplyRetrievalCompetition": 0.1,
         "Competition.rif_recovery_active_sql": 0.1,
         "Competition.score_candidates": 0.1,
-        "Predictive.decay_active_sql": 0.1,
         "cortext::operations::MemoryStorage": 0.1,
         "MemoryStorage.supersession_edges": 0.1,
         "MemoryStorage.supersession_candidate_load": 0.1,
@@ -371,9 +370,9 @@ def set_fixture_retention(
     for row in rows:
         row["retention"] = retention
         if retention == "durable":
-            row["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"] = 0.0
+            row["operation_ms"]["SignalProcessor.sqlite_wal_sync"] = 0.0
             row["operation_ms"][
-                "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+                "SignalProcessor.sqlite_wal_sync_failure_count"
             ] = 0.0
 
 
@@ -1731,10 +1730,10 @@ class PlateauContractTest(unittest.TestCase):
                     if retention == "durable":
                         row["durable_barrier_ms"] = 0.25
                         row["operation_ms"][
-                            "SignalProcessor.sqlite_wal_checkpoint"
+                            "SignalProcessor.sqlite_wal_sync"
                         ] = 0.25
                         row["operation_ms"][
-                            "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+                            "SignalProcessor.sqlite_wal_sync_failure_count"
                         ] = 0.0
                 for row in rows[-6:]:
                     row["process_ms"] = 30.0
@@ -1751,12 +1750,12 @@ class PlateauContractTest(unittest.TestCase):
         for row in rows:
             row["retention"] = "durable"
             row["durable_barrier_ms"] = 0.0
-            row["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"] = 0.0
+            row["operation_ms"]["SignalProcessor.sqlite_wal_sync"] = 0.0
             row["operation_ms"][
-                "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+                "SignalProcessor.sqlite_wal_sync_failure_count"
             ] = 0.0
         audit.validate_profile_rows(profile, rows)
-        del rows[0]["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"]
+        del rows[0]["operation_ms"]["SignalProcessor.sqlite_wal_sync"]
         with self.assertRaisesRegex(ValueError, "barrier attribution"):
             audit.validate_profile_rows(profile, rows)
 
@@ -1766,12 +1765,12 @@ class PlateauContractTest(unittest.TestCase):
         for row in rows:
             row["retention"] = "durable"
             row["durable_barrier_ms"] = 0.0
-            row["operation_ms"]["SignalProcessor.sqlite_wal_checkpoint"] = 0.0
+            row["operation_ms"]["SignalProcessor.sqlite_wal_sync"] = 0.0
             row["operation_ms"][
-                "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+                "SignalProcessor.sqlite_wal_sync_failure_count"
             ] = 0.0
         rows[-1]["operation_ms"][
-            "SignalProcessor.sqlite_wal_checkpoint_failure_count"
+            "SignalProcessor.sqlite_wal_sync_failure_count"
         ] = 1.0
         with self.assertRaisesRegex(ValueError, "failed post-commit barrier"):
             audit.validate_profile_rows(profile, rows)
@@ -1838,7 +1837,6 @@ class PlateauContractTest(unittest.TestCase):
             )
         )
         for name in (
-            "GraphRetrieve.sqlite_sparse_route_activation_snapshot_cache_miss_rows",
             "GraphRetrieve.sqlite_sparse_route_restart_rows",
             "GraphRetrieve.sqlite_sparse_route_dirty_rows",
         ):
@@ -1858,7 +1856,6 @@ class PlateauContractTest(unittest.TestCase):
             "WriteGate.window_score",
             "WriteGate.threshold_dynamic",
             "WriteGate.refractory_multiplier",
-            "WriteGate.write_scale",
             "WriteGate.effective_threshold",
             "WriteGate.score_margin",
             "WriteGate.force_write",

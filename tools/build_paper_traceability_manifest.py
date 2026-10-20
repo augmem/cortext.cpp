@@ -29,8 +29,6 @@ ALGORITHM_GROUPS = [
         "id": "consolidation-envelope-and-detector",
         "paths": [
             "src/operations/accumulator_reset.cpp",
-            "src/operations/consolidation.cpp",
-            "src/operations/consolidation_shallow.cpp",
             "src/operations/consolidation_throughput_state_internal.hpp",
         ],
     },
@@ -47,11 +45,7 @@ ALGORITHM_GROUPS = [
     {
         "id": "lazy-rif-active-epoch",
         "paths": [
-            "src/operations/competition.cpp",
-            "src/operations/execution_cache_sidecar_internal.hpp",
-            "src/operations/memory_strength.cpp",
-            "src/operations/rif_active_epoch_cache_internal.hpp",
-            "src/operations/rif_state_internal.hpp",
+            "src/operations/memory_usage_record.cpp",
             "src/store.cpp",
             "src/store/schema.cpp",
         ],
@@ -76,20 +70,14 @@ ALGORITHM_GROUPS = [
         "id": "emotional-propagation-cache",
         "paths": [
             "src/experimental_env.hpp",
-            "src/operations/emotion.cpp",
-            "src/operations/emotion_cascade.cpp",
-            "src/operations/emotional_metadata_cache_internal.hpp",
         ],
     },
     {
         "id": "memory-storage-and-graph-maintenance",
         "paths": [
             "src/operations/active_signal_embedding_ring_internal.hpp",
-            "src/operations/association_fanout_cache_internal.hpp",
             "src/operations/detect_memory_usage.cpp",
-            "src/operations/eviction_policy.hpp",
             "src/operations/memory_storage.cpp",
-            "src/operations/predictive.cpp",
             "src/operations/reconsolidation.cpp",
             "src/operations/stability.cpp",
         ],

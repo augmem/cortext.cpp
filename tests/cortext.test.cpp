@@ -3,18 +3,19 @@
 #include "../src/cortext_pipeline_internal.hpp"
 #include "../src/operations/retrieval_trace_state.hpp"
 #include "../src/operations/bounded_activation_shadow_internal.hpp"
-#include "../src/operations/rif_active_epoch_cache_internal.hpp"
 #include "../src/operations/sparse_retrieval_knobs_internal.hpp"
 #include <algorithm>
 #include <array>
 #include <any>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <stdexcept>
 #include <unordered_map>
@@ -110,8 +111,6 @@ struct DurableRetrievalState
   long long retrieved = 0;
   long long used = 0;
   long long accessed = 0;
-  long long lability_nanos = 0;
-  long long suppression_nanos = 0;
   long long strength_nanos = 0;
   long long associations = 0;
   long long association_weight_nanos = 0;
@@ -133,10 +132,6 @@ SnapshotDurableRetrievalState (cortext::Store &store)
       "COALESCE(SUM(used_count), 0) AS used, "
       "COALESCE(SUM(CASE WHEN last_access IS NOT NULL THEN 1 ELSE 0 END), 0) "
       "  AS accessed, "
-      "COALESCE(CAST(ROUND(SUM(lability_state) * 1000000000.0) AS INTEGER), 0) "
-      "  AS lability_nanos, "
-      "COALESCE(CAST(ROUND(SUM(suppression) * 1000000000.0) AS INTEGER), 0) "
-      "  AS suppression_nanos, "
       "COALESCE(CAST(ROUND(SUM(strength) * 1000000000.0) AS INTEGER), 0) "
       "  AS strength_nanos FROM memories");
   REQUIRE (memories.size () == 1);
@@ -144,9 +139,6 @@ SnapshotDurableRetrievalState (cortext::Store &store)
   out.retrieved = AnyToLongLong (memories[0].at ("retrieved"));
   out.used = AnyToLongLong (memories[0].at ("used"));
   out.accessed = AnyToLongLong (memories[0].at ("accessed"));
-  out.lability_nanos = AnyToLongLong (memories[0].at ("lability_nanos"));
-  out.suppression_nanos
-      = AnyToLongLong (memories[0].at ("suppression_nanos"));
   out.strength_nanos = AnyToLongLong (memories[0].at ("strength_nanos"));
 
   const auto associations = store.Execute (
@@ -426,6 +418,41 @@ TEST_CASE ("Cortext ephemeral public query retrieves durable API memory",
            == AnyToLongLong (before_signals[0].at ("n")));
 }
 
+TEST_CASE ("Engine time never runs behind the signals it holds",
+           "[aist][cortext][clock]")
+{
+  // Histories imported with their own timestamps can sit ahead of the
+  // engine clock (replays, clock skew, dated imports). A query on the
+  // implicit clock must still see every stored memory, during the session
+  // and after reopening the store.
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  constexpr std::uint64_t kClockMs = 1000ULL;
+  constexpr std::uint64_t kDataMs = 86400000ULL * 400ULL;
+  const auto recalls_code = [] (const cortext::Cortext::Context &context) {
+    for (const auto &memory : context.retrieved_memory)
+      if (TextFromMemory (memory).find ("8841") != std::string::npos)
+        return true;
+    return false;
+  };
+  {
+    auto clock = std::make_shared<cortext::FixedClock> (kClockMs);
+    auto ctx = cortext::Cortext::Create (cfg, temp_db.path (), clock);
+    auto ingest = ctx->ProcessTextAt ("The garage door code is 8841.",
+                                      "notes/main", kDataMs,
+                                      cortext::Retention::Durable);
+    REQUIRE (ingest.output.stored_memory_id.has_value ());
+    auto recalled = ctx->ProcessText ("garage door code", "query/public",
+                                      cortext::Retention::Ephemeral);
+    CHECK (recalls_code (recalled));
+  }
+  auto clock = std::make_shared<cortext::FixedClock> (kClockMs);
+  auto reopened = cortext::Cortext::Create (cfg, temp_db.path (), clock);
+  auto recalled = reopened->ProcessText ("garage door code", "query/public",
+                                         cortext::Retention::Ephemeral);
+  CHECK (recalls_code (recalled));
+}
+
 TEST_CASE ("Retention Natural omits force flags; Durable forces boundary+write",
            "[cortext][retention][aist]")
 {
@@ -536,7 +563,109 @@ TEST_CASE ("Durable flushes one shared Natural accumulator unit",
   REQUIRE (AnyToLongLong (signal_rows[2].at ("timestamp")) == 3000);
 }
 
-TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
+TEST_CASE ("Flush closes every open Natural unit",
+           "[cortext][retention][accumulator][flush][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+
+  // Two conversations end with their units still open; Flush is the host
+  // saying "commit what is pending", so neither unit may outlive it.
+  (void)ctx->ProcessTextAt ("A calm sentence in one pending thought.",
+                            "stream/a", 1000ULL, cortext::Retention::Natural);
+  (void)ctx->ProcessTextAt ("A second calm sentence in the same thought.",
+                            "stream/a", 2000ULL, cortext::Retention::Natural);
+  (void)ctx->ProcessTextAt ("Another stream starts a different thought.",
+                            "stream/b", 2500ULL, cortext::Retention::Natural);
+  ctx->Flush ();
+
+  // Every closed unit is stored, whatever its window score.
+  const auto flushed = store->Execute (
+      "SELECT source_id, n_signals FROM memories WHERE kind = 'LONG_TERM' "
+      "ORDER BY source_id");
+  REQUIRE (flushed.size () == 2);
+  REQUIRE (std::any_cast<std::string> (flushed[0].at ("source_id"))
+           == "stream/a");
+  REQUIRE (AnyToLongLong (flushed[0].at ("n_signals")) == 2);
+  REQUIRE (std::any_cast<std::string> (flushed[1].at ("source_id"))
+           == "stream/b");
+  REQUIRE (AnyToLongLong (flushed[1].at ("n_signals")) == 1);
+
+  // A later explicit turn starts a fresh unit on each source: it carries
+  // only itself, not the signals that were open before Flush.
+  for (const auto *source : { "stream/a", "stream/b" })
+    {
+      const auto durable = ctx->ProcessTextAt (
+          "An explicit turn after the flush.", source, 3000ULL,
+          cortext::Retention::Durable);
+      REQUIRE (durable.output.stored_memory_id.has_value ());
+      const auto rows = store->Execute (
+          "SELECT n_signals FROM memories WHERE memory_id = ?",
+          { static_cast<long long> (*durable.output.stored_memory_id) });
+      REQUIRE (rows.size () == 1);
+      INFO ("source=" << source);
+      REQUIRE (AnyToLongLong (rows[0].at ("n_signals")) == 1);
+    }
+}
+
+TEST_CASE ("A failed Flush keeps every open Natural unit for the next Flush",
+           "[cortext][retention][accumulator][flush][rollback][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto unique_store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+  auto store = std::shared_ptr<cortext::Store> (std::move (unique_store));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+
+  (void)ctx->ProcessTextAt ("A calm sentence in one pending thought.",
+                            "stream/a", 1000ULL, cortext::Retention::Natural);
+  (void)ctx->ProcessTextAt ("A second calm sentence in the same thought.",
+                            "stream/a", 2000ULL, cortext::Retention::Natural);
+  (void)ctx->ProcessTextAt ("Another stream starts a different thought.",
+                            "stream/b", 2500ULL, cortext::Retention::Natural);
+
+  // The flush transaction fails after its open units were closed (state is
+  // persisted after the closes); the store rolls back, so the units must
+  // still be open afterwards.
+  store->Execute ("CREATE TEMP TRIGGER fail_state_persist "
+                  "BEFORE INSERT ON state "
+                  "BEGIN SELECT RAISE(ABORT, 'injected flush failure'); END");
+  REQUIRE_THROWS (ctx->Flush ());
+  store->Execute ("DROP TRIGGER fail_state_persist");
+  REQUIRE (store->Execute ("SELECT 1 FROM memories WHERE kind = 'LONG_TERM'")
+               .empty ());
+
+  ctx->Flush ();
+  const auto flushed = store->Execute (
+      "SELECT source_id, n_signals FROM memories WHERE kind = 'LONG_TERM' "
+      "ORDER BY source_id");
+  REQUIRE (flushed.size () == 2);
+  REQUIRE (std::any_cast<std::string> (flushed[0].at ("source_id"))
+           == "stream/a");
+  REQUIRE (AnyToLongLong (flushed[0].at ("n_signals")) == 2);
+  REQUIRE (std::any_cast<std::string> (flushed[1].at ("source_id"))
+           == "stream/b");
+  REQUIRE (AnyToLongLong (flushed[1].at ("n_signals")) == 1);
+}
+
+TEST_CASE ("Cortext recalls durable corrections at default knobs",
            "[cortext][belief_revision][eval][aist]")
 {
   ScopedTempDb temp_db;
@@ -579,40 +708,84 @@ TEST_CASE ("Cortext durable corrections supersede stale facts at default knobs",
       "WHERE edge_type = 'supersedes'");
   REQUIRE (edge_rows.size () >= 2);
 
-  auto assert_correction_precedes_stale =
+  // Superseded facts are no longer excluded from seeding (engine ablation
+  // 2026-10: exclusion lowered gold-turn recall), so the stale fact may rank
+  // ahead of its correction. The contract is that a recall never shows the
+  // stale fact without the correction that replaced it.
+  auto assert_correction_recalled =
       [] (const cortext::Cortext::Context &recalled,
-          const std::string &corrected, const std::string &stale) {
-        std::size_t corrected_index = recalled.retrieved_memory.size ();
-        std::size_t stale_index = recalled.retrieved_memory.size ();
-        for (std::size_t i = 0; i < recalled.retrieved_memory.size (); ++i)
+          const std::string &corrected) {
+        bool found = false;
+        for (const auto &memory : recalled.retrieved_memory)
           {
-            const std::string text = TextFromMemory (
-                recalled.retrieved_memory[i]);
-            if (text.find (corrected) != std::string::npos)
+            if (TextFromMemory (memory).find (corrected) != std::string::npos)
               {
-                corrected_index = std::min (corrected_index, i);
-              }
-            if (text.find (stale) != std::string::npos)
-              {
-                stale_index = std::min (stale_index, i);
+                found = true;
               }
           }
-        REQUIRE (corrected_index < recalled.retrieved_memory.size ());
-        if (stale_index < recalled.retrieved_memory.size ())
-          {
-            REQUIRE (corrected_index < stale_index);
-          }
+        REQUIRE (found);
       };
 
   auto vet_recall = ctx->ProcessTextAt (
       "When is Bailey's vet appointment?", "cli/recall", 5000ULL,
       cortext::Retention::Ephemeral);
-  assert_correction_precedes_stale (vet_recall, corrected_vet, stale_vet);
+  assert_correction_recalled (vet_recall, corrected_vet);
 
   auto pill_recall = ctx->ProcessTextAt (
       "When is Bailey's morning pill?", "cli/recall", 6000ULL,
       cortext::Retention::Ephemeral);
-  assert_correction_precedes_stale (pill_recall, corrected_pill, stale_pill);
+  assert_correction_recalled (pill_recall, corrected_pill);
+}
+
+TEST_CASE ("A retrieved fact brings back its newest restatement after it",
+           "[aist][cortext][retrieval][supersession]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  const std::uint64_t hour = 60ULL * 60ULL * 1000ULL;
+  const auto first = ctx->ProcessTextAt (
+      "I logged 14 tasks in Jira for the sprint, aiming for 85% completion.",
+      "chat/a/1", 1000ULL, cortext::Retention::Durable);
+  const auto second = ctx->ProcessTextAt (
+      "I now have 16 tasks in Jira for the sprint.", "chat/b/1",
+      1000ULL + 5 * hour, cortext::Retention::Durable);
+  const auto latest = ctx->ProcessTextAt (
+      "Jira now shows 17 tasks for the sprint and the target is 88%.",
+      "chat/c/1", 1000ULL + 10 * hour, cortext::Retention::Durable);
+  REQUIRE (first.output.stored_memory_id.has_value ());
+  REQUIRE (second.output.stored_memory_id.has_value ());
+  REQUIRE (latest.output.stored_memory_id.has_value ());
+  const long long first_id = *first.output.stored_memory_id;
+  // Pin the edges so the test does not depend on similarity thresholds.
+  store->Execute ("DELETE FROM associations WHERE edge_type = 'supersedes'");
+  for (const long long source :
+       { *second.output.stored_memory_id, *latest.output.stored_memory_id })
+    store->Execute ("INSERT INTO associations (source_memory_id, "
+                    "target_memory_id, edge_type, weight) "
+                    "VALUES (?, ?, 'supersedes', 1.0)",
+                    { source, first_id });
+
+  const auto packet = ctx->DebugHydrateForTest ({ first_id }, {});
+  REQUIRE (packet.retrieved_memory.size () == 1);
+  const auto &memory = packet.retrieved_memory.front ();
+  std::vector<std::string> blobs;
+  for (const auto &blob : memory.content)
+    blobs.emplace_back (blob.begin (), blob.end ());
+  const auto at = [&blobs] (const std::string &needle) {
+    for (std::size_t i = 0; i < blobs.size (); ++i)
+      if (blobs[i].find (needle) != std::string::npos)
+        return static_cast<long long> (i);
+    return -1LL;
+  };
+  REQUIRE (at ("aiming for 85%") >= 0);
+  REQUIRE (at ("17 tasks") > at ("aiming for 85%"));
+  REQUIRE (at ("16 tasks") == -1); // newest restatement only
+  REQUIRE (packet.output.operation_ms.at (
+               "Cortext.superseding_successors_attached")
+           == 1.0);
 }
 
 TEST_CASE ("internal replay ingress preserves media event timestamps",
@@ -681,63 +854,73 @@ TEST_CASE ("Cortext media overloads validate source media before encoding",
 TEST_CASE ("Cortext text media payload overrides storage, not embedding",
            "[cortext][media][text][aist]")
 {
-  ScopedTempDb temp_db;
-  cortext::Cortext::Config cfg;
-  const std::string &db_path = temp_db.path ();
-
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
   const std::string text = "canonical text remains the embedding input";
+  const std::vector<unsigned char> text_bytes (text.begin (), text.end ());
   const std::vector<unsigned char> supplied_bytes = {
     0x00, 0x01, 0x7f, 0xff, 0x20
   };
-  const cortext::Cortext::Media media{
-    supplied_bytes.data (), supplied_bytes.size (),
-    "application/x-token-kv-cache"
+
+  // One store per variant: the same text in one store would be hydrated as
+  // restatements of each other.
+  struct Stored
+  {
+    std::vector<float> embedding;
+    cortext::Cortext::Context::Memory memory;
+    std::vector<long long> keyword_ids;
+    long long memory_id = 0;
+  };
+  const auto ingest = [&] (const std::optional<cortext::Cortext::Media> &media) {
+    ScopedTempDb temp_db;
+    Stored out;
+    {
+      auto ctx = cortext::Cortext::Create ({}, temp_db.path ());
+      REQUIRE (ctx != nullptr);
+      const auto context
+          = media ? ctx->ProcessText (text, "text/source", *media,
+                                      cortext::Retention::Durable)
+                  : ctx->ProcessText (text, "text/source",
+                                      cortext::Retention::Durable);
+      REQUIRE (context.output.stored_memory_id.has_value ());
+      out.memory_id = static_cast<long long> (*context.output.stored_memory_id);
+      out.embedding = context.embedding;
+      ctx->Flush ();
+      const auto hydrated = ctx->DebugHydrateForTest ({ out.memory_id }, {});
+      REQUIRE (hydrated.retrieved_memory.size () == 1);
+      out.memory = hydrated.retrieved_memory[0];
+    }
+    auto store = cortext::SQLiteStore::Create (temp_db.path ().c_str ());
+    for (const auto &row : store->Execute (
+             "SELECT rowid AS memory_id FROM memory_text_fts "
+             "WHERE memory_text_fts MATCH '\"canonical\"'",
+             {}))
+      out.keyword_ids.push_back (AnyToLongLong (row.at ("memory_id")));
+    return out;
   };
 
-  const auto default_context
-      = ctx->ProcessText (text, "text/default", cortext::Retention::Durable);
-  const auto supplied_context = ctx->ProcessText (
-      text, "text/media", media, cortext::Retention::Durable);
-  const auto empty_media_context = ctx->ProcessText (
-      text, "text/empty-media", cortext::Cortext::Media{},
-      cortext::Retention::Durable);
-  REQUIRE (default_context.output.stored_memory_id.has_value ());
-  REQUIRE (supplied_context.output.stored_memory_id.has_value ());
-  REQUIRE (empty_media_context.output.stored_memory_id.has_value ());
-  ctx->Flush ();
+  const auto plain = ingest (std::nullopt);
+  REQUIRE (plain.memory.content.size () == 1);
+  REQUIRE (plain.memory.content[0] == text_bytes);
+  REQUIRE (plain.memory.mimetype == "text/plain");
+  REQUIRE (plain.keyword_ids == std::vector<long long>{ plain.memory_id });
 
-  const auto default_hydrated = ctx->DebugHydrateForTest (
-      { *default_context.output.stored_memory_id }, {});
-  REQUIRE (default_hydrated.retrieved_memory.size () == 1);
-  REQUIRE (default_hydrated.retrieved_memory[0].content.size () == 1);
-  const std::vector<unsigned char> default_bytes (text.begin (), text.end ());
-  REQUIRE (default_hydrated.retrieved_memory[0].content[0] == default_bytes);
-  REQUIRE (default_hydrated.retrieved_memory[0].mimetype == "text/plain");
-
-  const auto supplied_hydrated = ctx->DebugHydrateForTest (
-      { *supplied_context.output.stored_memory_id }, {});
-  REQUIRE (supplied_hydrated.retrieved_memory.size () == 1);
-  REQUIRE (supplied_hydrated.retrieved_memory[0].content.size () == 1);
-  REQUIRE (supplied_hydrated.retrieved_memory[0].content[0] == supplied_bytes);
-  REQUIRE (supplied_hydrated.retrieved_memory[0].mimetype
-           == "application/x-token-kv-cache");
+  const auto supplied = ingest (cortext::Cortext::Media{
+      supplied_bytes.data (), supplied_bytes.size (),
+      "application/x-token-kv-cache" });
+  REQUIRE (supplied.memory.content.size () == 1);
+  REQUIRE (supplied.memory.content[0] == supplied_bytes);
+  REQUIRE (supplied.memory.mimetype == "application/x-token-kv-cache");
   // Caller media changes only the stored payload; the canonical text still
-  // drives the same retrieval embedding as the legacy overload.
-  REQUIRE (supplied_context.embedding == default_context.embedding);
+  // drives the same retrieval embedding as the overload without media.
+  REQUIRE (supplied.embedding == plain.embedding);
+  // An opaque (non text/*) payload is never read as text.
+  REQUIRE (supplied.keyword_ids.empty ());
 
-  // Empty Media deliberately creates a contentless signal. Hydration omits
-  // contentless memories, so verify the persisted signal row directly.
-  auto store = cortext::SQLiteStore::Create (db_path.c_str ());
-  const auto empty_rows = store->Execute (
-      "SELECT COALESCE(mime, '') AS mime, blob_id IS NULL AS no_blob "
-      "FROM signals WHERE memory_id = ? ORDER BY signal_id DESC LIMIT 1",
-      { *empty_media_context.output.stored_memory_id });
-  REQUIRE (empty_rows.size () == 1);
-  REQUIRE (std::any_cast<std::string> (empty_rows[0].at ("mime")).empty ());
-  REQUIRE (AnyToLongLong (empty_rows[0].at ("no_blob")) == 1);
+  // Empty Media stores the canonical text, like the audio/image overloads.
+  const auto empty = ingest (cortext::Cortext::Media{});
+  REQUIRE (empty.memory.content.size () == 1);
+  REQUIRE (empty.memory.content[0] == text_bytes);
+  REQUIRE (empty.memory.mimetype == "text/plain");
+  REQUIRE (empty.keyword_ids == std::vector<long long>{ empty.memory_id });
 }
 
 TEST_CASE ("Cortext text media overload validates media before encoding",
@@ -866,11 +1049,7 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     const char *secondary;
     double fixed_bound;
   };
-  const std::array<CounterSpec, 17> kCounters { {
-    { "retrieval_suppression_id_count",
-      "SignalProcessor.retrieval_suppression_id_count", nullptr, 4096.0 },
-    { "predictive_id_count", "SignalProcessor.predictive_id_count", nullptr,
-      4096.0 },
+  const std::array<CounterSpec, 9> kCounters { {
     { "rollback_full_cache_copy_count",
       "SignalProcessor.snapshot_full_cache_copy_count", nullptr, 0.0 },
     { "rollback_cache_entry_copy_count",
@@ -885,12 +1064,6 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     { "graph_cache_rebuild_count", "GraphRetrieve.cache_rebuild_count",
       nullptr, 1.0 },
     { "graph_rows_visited", "GraphRetrieve.rows_visited", nullptr, 4096.0 },
-    { "competition_candidate_count", "Competition.candidate_count", nullptr,
-      4096.0 },
-    { "competition_rows_visited", "Competition.rows_visited", nullptr,
-      4096.0 },
-    { "competition_rows_touched", "Competition.rows_touched", nullptr,
-      4096.0 },
     { "supersession_current_candidate_count",
       "MemoryStorage.supersession_current_candidate_count", nullptr,
       4096.0 },
@@ -900,18 +1073,10 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     { "supersession_rows_visited",
       "MemoryStorage.supersession_current_rows_visited",
       "MemoryStorage.supersession_historical_rows_visited", 4096.0 },
-    { "emotional_source_count", "EmotionalCascade.source_count", nullptr,
-      4096.0 },
-    { "emotional_neighbor_count", "EmotionalCascade.neighbor_count", nullptr,
-      4096.0 },
-    { "emotional_update_count", "EmotionalCascade.update_count", nullptr,
-      4096.0 },
   } };
-  constexpr std::array<const char *, 4> kSharedOperations {
+  constexpr std::array<const char *, 2> kSharedOperations {
     "cortext::operations::GraphAugmentedRetrieveCandidates",
-    "cortext::operations::ApplyRetrievalCompetition",
     "cortext::operations::MemoryStorage",
-    "cortext::operations::PropagateEmotionalCascade",
   };
 
   struct RunResult
@@ -930,9 +1095,6 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     cfg.sensitivity = 0.5;
     cfg.stability = 0.5;
     cortext::testing::RequireEncoder (cfg);
-    const auto active_epoch_limits
-        = cortext::operations::rif_active_epoch_cache_internal::DeriveLimits (
-            cfg.focus, cfg.sensitivity, cfg.stability);
     const int supersession_candidate_limit
         = cortext::core::SupersessionCandidateLimit (
             cfg.focus, cfg.sensitivity, cfg.stability);
@@ -960,7 +1122,6 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
         cortext::Signal signal;
         signal.embedding = Eigen::VectorXf::Zero (256);
         signal.embedding[event % 256] = 1.0f;
-        signal.soft_anchor_embedding = signal.embedding;
         signal.source_id = source;
         signal.timestamp = timestamp;
         signal.retention = retention;
@@ -1013,26 +1174,14 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
         REQUIRE (snapshot.metrics.allocation_after_initialization_count == 0);
         result.shadow_sequence.push_back (snapshot);
 
-        REQUIRE (output.operation_ms.at (
-                     "SignalProcessor.rif_active_epoch_event_count")
-                 <= static_cast<double> (active_epoch_limits.event_count));
-        REQUIRE (output.operation_ms.at (
-                     "SignalProcessor.rif_active_epoch_mutation_count")
-                 <= static_cast<double> (
-                     active_epoch_limits.mutation_count));
-        REQUIRE (output.operation_ms.at (
-                     "SignalProcessor.rif_active_epoch_allocated_bytes")
-                 <= static_cast<double> (
-                     active_epoch_limits.allocated_bytes));
-
         for (const auto *operation : kSharedOperations)
           REQUIRE (output.operation_ms.contains (operation));
         if (retention == cortext::Retention::Durable)
           REQUIRE (output.operation_ms.contains (
-              "SignalProcessor.sqlite_wal_checkpoint"));
+              "SignalProcessor.sqlite_wal_sync"));
         else
           REQUIRE_FALSE (output.operation_ms.contains (
-              "SignalProcessor.sqlite_wal_checkpoint"));
+              "SignalProcessor.sqlite_wal_sync"));
         for (std::size_t index = 0; index < kCounters.size (); ++index)
           {
             const auto &spec = kCounters[index];
@@ -1066,16 +1215,7 @@ TEST_CASE ("encoded modalities and source cardinalities share bounded work",
     maintenance.timestamp = 1700000013000ULL;
     maintenance.retention = retention;
     maintenance.force_consolidation = true;
-    const auto reset = processor.Process (maintenance);
-    REQUIRE (reset.operation_ms.at (
-                 "SignalProcessor.rif_active_epoch_event_count")
-             == 0.0);
-    REQUIRE (reset.operation_ms.at (
-                 "SignalProcessor.rif_active_epoch_mutation_count")
-             == 0.0);
-    REQUIRE (reset.operation_ms.at (
-                 "SignalProcessor.rif_active_epoch_allocated_bytes")
-             < static_cast<double> (active_epoch_limits.allocated_bytes));
+    (void)processor.Process (maintenance);
     const auto after_maintenance = shadow::SnapshotsForTest ();
     REQUIRE (after_maintenance.size () == 1);
     REQUIRE (after_maintenance.front ().generation
@@ -1298,7 +1438,7 @@ TEST_CASE ("replay clock override preserves working memory on reopen",
   }
 }
 
-TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
+TEST_CASE ("internal replay consolidation is maintenance that leaves memories unchanged",
            "[cortext][replay][consolidation][aist]")
 {
   ScopedTempDb temp_db;
@@ -1339,10 +1479,6 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
             "SELECT COUNT(*) AS c FROM memories WHERE kind = 'LONG_TERM'", {})
             [0]
             .at ("c"));
-    eligibility_store->Execute (
-        "UPDATE memories SET strength = 0.0, redundancy = 1.0 "
-        "WHERE kind = 'LONG_TERM'",
-        {});
   }
 
   const std::uint64_t consolidation_ts = source_ts + 86400000ULL;
@@ -1369,23 +1505,13 @@ TEST_CASE ("internal replay ingress preserves consolidation event timestamps",
                    {})[0]
                    .at ("c"))
            == long_term_count_before);
-  auto rows = store->Execute (
-      "SELECT start_ts, created_at, source_id, kind FROM memories "
-      "WHERE kind = 'ASSOCIATION' AND source_id LIKE 'association_%' "
-      "ORDER BY memory_id DESC LIMIT 1");
-  REQUIRE (rows.size () == 1);
-  REQUIRE (AnyToLongLong (rows[0].at ("start_ts"))
-           == static_cast<long long> (consolidation_ts));
-  REQUIRE (AnyToLongLong (rows[0].at ("created_at"))
-           == static_cast<long long> (consolidation_ts));
-  REQUIRE (std::any_cast<std::string> (rows[0].at ("kind"))
-           == "ASSOCIATION");
-
   const long long association_count = AnyToLongLong (
       store->Execute (
           "SELECT COUNT(*) AS c FROM memories WHERE kind = 'ASSOCIATION'",
           {})[0]
           .at ("c"));
+  // Clustering consolidation was removed: maintenance writes no nodes.
+  REQUIRE (association_count == 0);
   const long long edge_count = AnyToLongLong (
       store->Execute ("SELECT COUNT(*) AS c FROM associations", {})[0]
           .at ("c"));
@@ -1815,591 +1941,6 @@ TEST_CASE ("Fallback hydration applies its bound after surface filtering",
            == 1.0);
 }
 
-TEST_CASE ("Cortext hydrates SoftAnchor metadata with retrieved memories",
-           "[cortext][hydration][soft_anchor][aist]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto store = cortext::SQLiteStore::Create (db_path);
-  cortext::testing::InitializeCoreSchema (*store);
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> embedding (kEmbeddingDim, 0.0f);
-  embedding[0] = 1.0f;
-
-  const std::string source_text = "I went to Jared's house yesterday.";
-  const std::vector<unsigned char> payload (source_text.begin (),
-                                            source_text.end ());
-  auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                   { payload });
-  REQUIRE (blob_rows.size () == 1);
-  const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
-  REQUIRE (!blob_id.empty ());
-
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?)",
-      { 501LL, embedding, 1000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
-      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
-      "0.5, 0.5, 1.0, 1000)",
-      { 501LL, 501LL, blob_id });
-  store->Execute (
-      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-      "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000)",
-      { 501LL, 501LL, blob_id });
-
-  store->Execute (
-      "INSERT INTO soft_anchor_links "
-      "(memory_id, anchor_id, anchor_strength, anchor_label, memory_tier, "
-      " score, margin, entropy, support_count, contradiction_count, "
-      " created_step, updated_step, created_at) "
-      "VALUES "
-      "(501, 'anchor-low', 0.20, 'tentative', 'STM', 0.30, 0.04, 0.70, "
-      " 1, 0, 1, 1, 1000),"
-      "(501, 'anchor-top', 1.20, 'durable', 'WM', -0.40, 0.22, 1.80, "
-      " 3, 0, 1, 3, 1000),"
-      "(501, 'anchor-mid', 0.73, 'ambiguous', 'STM', 0.64, 0.02, 0.51, "
-      " 2, 0, 1, 2, 1000),"
-      "(501, 'anchor-third', 0.42, 'tentative', 'LTM', 0.44, 0.01, 0.62, "
-      " 1, 0, 1, 2, 1000),"
-      "(501, 'anchor-rejected', 0.99, 'rejected', 'WM', 0.99, 0.60, 0.10, "
-      " 1, 1, 1, 4, 1000)");
-
-  cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
-  auto hydrated = ctx->DebugHydrateForTest ({ 501LL }, {});
-  REQUIRE (hydrated.retrieved_memory.size () == 1);
-  const auto &memory = hydrated.retrieved_memory.front ();
-  REQUIRE (TextFromMemory (memory) == source_text);
-  REQUIRE (memory.soft_anchors.size () == 3);
-
-  REQUIRE (memory.soft_anchors[0].id == "anchor-top");
-  REQUIRE (memory.soft_anchors[0].strength == 1.0);
-  REQUIRE (memory.soft_anchors[0].likelihood == 1.0);
-  REQUIRE (memory.soft_anchors[0].label == "durable");
-  REQUIRE (memory.soft_anchors[0].tier == "WM");
-  REQUIRE (memory.soft_anchors[0].score == 0.0);
-  REQUIRE (memory.soft_anchors[0].entropy == 1.0);
-
-  REQUIRE (memory.soft_anchors[1].id == "anchor-mid");
-  REQUIRE (memory.soft_anchors[2].id == "anchor-third");
-}
-
-TEST_CASE ("Cortext expands internal retrieval nodes to linked text memories",
-           "[cortext][hydration][retrieval][aist]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto store = cortext::SQLiteStore::Create (db_path);
-  cortext::testing::InitializeCoreSchema (*store);
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> embedding (kEmbeddingDim, 0.0f);
-  embedding[0] = 1.0f;
-
-  const std::string source_text = "I am thinking about messaging Jared.";
-  const std::vector<unsigned char> payload (source_text.begin (),
-                                            source_text.end ());
-  auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                   { payload });
-  REQUIRE (blob_rows.size () == 1);
-  const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
-  REQUIRE (!blob_id.empty ());
-
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
-      { 100LL, embedding, 1000LL, 200LL, embedding, 1000LL, 300LL,
-        embedding, 1000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
-      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
-      "0.5, 0.5, 1.0, 1000)",
-      { 100LL, 100LL, blob_id });
-  store->Execute (
-      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-      "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000)",
-      { 100LL, 100LL, blob_id });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
-      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
-      "'associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000), "
-      "(?, ?, 'jared', 'LABEL', 'Jared', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000)",
-      { 200LL, 200LL, 300LL, 300LL });
-  store->Execute (
-      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
-      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'reinforces', 1.0)",
-      { 200LL, 100LL, 100LL, 300LL });
-
-  cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
-  cortext::operations::retrieval_trace::RankedCandidate association_trace;
-  association_trace.memory_id = 200LL;
-  association_trace.score = 0.72;
-  association_trace.relevance = 0.81;
-  ScopedRankedCandidates ranked_candidates;
-  ranked_candidates.Set ({ association_trace });
-
-  auto no_query_score = ctx->DebugHydrateForTest ({ 200LL }, {});
-  REQUIRE (no_query_score.retrieved_memory.size () == 1);
-  REQUIRE_FALSE (no_query_score.retrieved_memory[0].composite_score);
-  REQUIRE_FALSE (no_query_score.retrieved_memory[0].relevance);
-
-  auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {}, embedding);
-  REQUIRE (cue_hydrated.retrieved_memory.size () == 1);
-  REQUIRE (cue_hydrated.retrieved_memory[0].id == 100LL);
-  REQUIRE (TextFromMemory (cue_hydrated.retrieved_memory[0]) == source_text);
-  REQUIRE (cue_hydrated.retrieved_memory[0].composite_score
-           == Catch::Approx (1.0));
-  REQUIRE (cue_hydrated.retrieved_memory[0].relevance
-           == Catch::Approx (1.0));
-
-  const auto binding_json = nlohmann::json::parse (
-      cortext::internal::ContextToJsonForTest (cue_hydrated));
-  REQUIRE (binding_json.at ("retrieved_memory").at (0).at ("composite_score")
-           == Catch::Approx (1.0));
-  REQUIRE (binding_json.at ("retrieved_memory").at (0).at ("relevance")
-           == Catch::Approx (1.0));
-
-  cortext::operations::retrieval_trace::RankedCandidate source_trace;
-  source_trace.memory_id = 100LL;
-  source_trace.score = 0.93;
-  source_trace.relevance = 0.94;
-  ranked_candidates.Set ({ association_trace, source_trace });
-  auto independently_ranked_source
-      = ctx->DebugHydrateForTest ({ 200LL }, {}, embedding);
-  REQUIRE (independently_ranked_source.retrieved_memory.size () == 1);
-  REQUIRE (independently_ranked_source.retrieved_memory[0].composite_score
-           == Catch::Approx (0.93));
-  REQUIRE (independently_ranked_source.retrieved_memory[0].relevance
-           == Catch::Approx (0.94));
-
-  auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {});
-  REQUIRE (label_hydrated.retrieved_memory.size () == 1);
-  REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
-  REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0]) == source_text);
-}
-
-TEST_CASE ("Cortext expands durable association retrieval nodes even when the cue has text",
-           "[cortext][hydration][retrieval][aist]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto store = cortext::SQLiteStore::Create (db_path);
-  cortext::testing::InitializeCoreSchema (*store);
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> embedding (kEmbeddingDim, 0.0f);
-  embedding[0] = 1.0f;
-
-  const std::string source_text = "Jamie mentioned the art show downtown.";
-  const std::string cue_text = "durable cue about art";
-  const std::vector<unsigned char> source_payload (source_text.begin (),
-                                                   source_text.end ());
-  const std::vector<unsigned char> cue_payload (cue_text.begin (),
-                                                cue_text.end ());
-  auto source_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                          { source_payload });
-  auto cue_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                       { cue_payload });
-  REQUIRE (source_blob_rows.size () == 1);
-  REQUIRE (cue_blob_rows.size () == 1);
-  const auto source_blob_id = BlobFromAny (source_blob_rows[0].at ("id"));
-  const auto cue_blob_id = BlobFromAny (cue_blob_rows[0].at ("id"));
-  REQUIRE (!source_blob_id.empty ());
-  REQUIRE (!cue_blob_id.empty ());
-
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?), (?, ?, ?)",
-      { 100LL, embedding, 1000LL, 200LL, embedding, 1000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
-      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
-      "0.5, 0.5, 1.0, 1000), "
-      "(?, ?, 'associative_cue_test', 'ASSOCIATION', ?, 1000, 1000, 1, "
-      "'text', 0.5, 0.5, 1.0, 1000)",
-      { 100LL, 100LL, source_blob_id, 200LL, 200LL, cue_blob_id });
-  store->Execute (
-      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-      "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000), "
-      "(?, ?, 'associative_cue_test', 1000, 'text', 'text/plain', ?, 0, 1000)",
-      { 100LL, 100LL, source_blob_id, 200LL, 200LL, cue_blob_id });
-  store->Execute (
-      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
-      "VALUES (?, ?, 'derived_from', 1.0)",
-      { 200LL, 100LL });
-
-  cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
-  auto cue_hydrated = ctx->DebugHydrateForTest ({ 200LL }, {});
-  REQUIRE (cue_hydrated.retrieved_memory.size () == 1);
-  REQUIRE (cue_hydrated.retrieved_memory[0].id == 100LL);
-  REQUIRE (TextFromMemory (cue_hydrated.retrieved_memory[0]) == source_text);
-}
-
-TEST_CASE ("Cortext expands durable label retrieval nodes through association sources",
-           "[cortext][hydration][retrieval][aist]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto store = cortext::SQLiteStore::Create (db_path);
-  cortext::testing::InitializeCoreSchema (*store);
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> embedding (kEmbeddingDim, 0.0f);
-  embedding[0] = 1.0f;
-
-  const std::string source_text = "Jamie talked about the gallery opening.";
-  const std::vector<unsigned char> source_payload (source_text.begin (),
-                                                   source_text.end ());
-  auto source_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                          { source_payload });
-  REQUIRE (source_blob_rows.size () == 1);
-  const auto source_blob_id = BlobFromAny (source_blob_rows[0].at ("id"));
-  REQUIRE (!source_blob_id.empty ());
-
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
-      { 100LL, embedding, 1000LL, 200LL, embedding, 1000LL, 300LL,
-        embedding, 1000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
-      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
-      "0.5, 0.5, 1.0, 1000)",
-      { 100LL, 100LL, source_blob_id });
-  store->Execute (
-      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-      "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000)",
-      { 100LL, 100LL, source_blob_id });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
-      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
-      "'associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000), "
-      "(?, ?, 'gallery', 'LABEL', 'gallery', 1000, 1, 'text', 0.5, 0.5, "
-      "1.0, 1000)",
-      { 200LL, 200LL, 300LL, 300LL });
-  store->Execute (
-      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
-      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'has_label', 1.0)",
-      { 200LL, 100LL, 200LL, 300LL });
-
-  cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
-  auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {});
-  REQUIRE (label_hydrated.retrieved_memory.size () == 1);
-  REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
-  REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0]) == source_text);
-}
-
-TEST_CASE ("Cortext orders durable label source hydration by query similarity",
-           "[cortext][hydration][retrieval][aist]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto store = cortext::SQLiteStore::Create (db_path);
-  cortext::testing::InitializeCoreSchema (*store);
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> query_embedding (kEmbeddingDim, 0.0f);
-  query_embedding[0] = 1.0f;
-  std::vector<float> unrelated_embedding (kEmbeddingDim, 0.0f);
-  unrelated_embedding[1] = 1.0f;
-
-  const std::string relevant_text = "Jamie talked about noodles at Moon Plaza.";
-  const std::string recent_text = "Jamie mentioned a different errand.";
-  const std::vector<unsigned char> relevant_payload (relevant_text.begin (),
-                                                     relevant_text.end ());
-  const std::vector<unsigned char> recent_payload (recent_text.begin (),
-                                                   recent_text.end ());
-  auto relevant_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                            { relevant_payload });
-  auto recent_blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                          { recent_payload });
-  REQUIRE (relevant_blob_rows.size () == 1);
-  REQUIRE (recent_blob_rows.size () == 1);
-  const auto relevant_blob_id = BlobFromAny (relevant_blob_rows[0].at ("id"));
-  const auto recent_blob_id = BlobFromAny (recent_blob_rows[0].at ("id"));
-  REQUIRE (!relevant_blob_id.empty ());
-  REQUIRE (!recent_blob_id.empty ());
-
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)",
-      { 100LL, query_embedding, 1000LL, 101LL, unrelated_embedding, 2000LL,
-        200LL, unrelated_embedding, 2000LL, 300LL, unrelated_embedding,
-        2000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, blob_id, "
-      "start_ts, end_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, 1000, 1000, 1, 'text', "
-      "0.5, 0.5, 1.0, 1000), "
-      "(?, ?, 'stream/main', 'LONG_TERM', ?, 2000, 2000, 1, 'text', "
-      "0.5, 0.5, 1.0, 2000)",
-      { 100LL, 100LL, relevant_blob_id, 101LL, 101LL, recent_blob_id });
-  store->Execute (
-      "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-      "modality, mime, blob_id, serial_position, created_at) "
-      "VALUES (?, ?, 'stream/main', 1000, 'text', 'text/plain', ?, 0, 1000), "
-      "(?, ?, 'stream/main', 2000, 'text', 'text/plain', ?, 0, 2000)",
-      { 100LL, 100LL, relevant_blob_id, 101LL, 101LL, recent_blob_id });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
-      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
-      "'associative cue test', 2000, 1, 'text', 0.5, 0.5, 1.0, 2000), "
-      "(?, ?, 'dinner errand', 'LABEL', 'dinner errand', 2000, 1, 'text', "
-      "0.5, 0.5, 1.0, 2000)",
-      { 200LL, 200LL, 300LL, 300LL });
-  store->Execute (
-      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, weight) "
-      "VALUES (?, ?, 'derived_from', 1.0), (?, ?, 'derived_from', 1.0), "
-      "       (?, ?, 'has_label', 1.0)",
-      { 200LL, 100LL, 200LL, 101LL, 200LL, 300LL });
-
-  cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
-  auto label_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
-                                                  query_embedding);
-  REQUIRE (label_hydrated.retrieved_memory.size () >= 2);
-  REQUIRE (label_hydrated.retrieved_memory[0].id == 100LL);
-  REQUIRE (TextFromMemory (label_hydrated.retrieved_memory[0])
-           == relevant_text);
-
-  {
-    cortext::testing::ScopedEnvVar disabled (
-        "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION", "1");
-    auto recency_hydrated = ctx->DebugHydrateForTest ({ 300LL }, {},
-                                                      query_embedding);
-    REQUIRE (recency_hydrated.retrieved_memory.size () >= 2);
-#if defined(CORTEXT_EXPERIMENT_HOOKS)
-    REQUIRE (recency_hydrated.retrieved_memory[0].id == 101LL);
-#else
-    REQUIRE (recency_hydrated.retrieved_memory[0].id == 100LL);
-#endif
-  }
-}
-
-TEST_CASE ("Cortext ranks complete linked family before compact limit",
-           "[cortext][hydration][retrieval][aist]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto store = cortext::SQLiteStore::Create (db_path);
-  cortext::testing::InitializeCoreSchema (*store);
-
-  cortext::testing::ScopedEnvVar clear_query_aware_disable (
-      "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION");
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> embedding (kEmbeddingDim, 0.0f);
-  embedding[0] = 1.0f;
-  std::vector<float> unrelated_embedding (kEmbeddingDim, 0.0f);
-  unrelated_embedding[1] = 1.0f;
-
-  constexpr long long kAssociationId = 200LL;
-  constexpr long long kSecondAssociationId = 201LL;
-  constexpr long long kLabelId = 300LL;
-  // The centroid and oldest source are exact query matches. More-recent
-  // unrelated sources exceed the compact cap and must not truncate that source
-  // before relevance ordering.
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
-      { kAssociationId, embedding, 1000LL, kSecondAssociationId, embedding,
-        1000LL, kLabelId, embedding, 1000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
-      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'associative_cue_test', 'ASSOCIATION', "
-      "'associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000), "
-      "(?, ?, 'dense label', 'LABEL', 'dense label', 1000, 1, 'text', "
-      "0.5, 0.5, 1.0, 1000)",
-      { kAssociationId, kAssociationId, kLabelId, kLabelId });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
-      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'second_associative_cue_test', 'ASSOCIATION', "
-      "'second associative cue test', 1000, 1, 'text', 0.5, 0.5, 1.0, "
-      "1000)",
-      { kSecondAssociationId, kSecondAssociationId });
-
-  std::vector<long long> source_ids;
-  for (long long i = 0; i < 5; ++i)
-    {
-      const long long memory_id = 100LL + i;
-      const long long ts = 1000LL + i;
-      const std::string source_text = "linked source " + std::to_string (i);
-      const std::vector<unsigned char> payload (source_text.begin (),
-                                                source_text.end ());
-      auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                       { payload });
-      REQUIRE (blob_rows.size () == 1);
-      const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
-      REQUIRE (!blob_id.empty ());
-
-      const auto &source_embedding
-          = i == 0 ? embedding : unrelated_embedding;
-      store->Execute (
-          "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-          "VALUES (?, ?, ?)",
-          { memory_id, source_embedding, ts });
-      store->Execute (
-          "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
-          "blob_id, start_ts, end_ts, n_signals, modality, s_max, s_avg, "
-          "strength, created_at) "
-          "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, ?, ?, 1, 'text', "
-          "0.5, 0.5, 1.0, ?)",
-          { memory_id, memory_id, blob_id, ts, ts, ts });
-      store->Execute (
-          "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-          "modality, mime, blob_id, serial_position, created_at) "
-          "VALUES (?, ?, 'stream/main', ?, 'text', 'text/plain', ?, 0, ?)",
-          { memory_id, memory_id, ts, blob_id, ts });
-      store->Execute (
-          "INSERT INTO associations(source_memory_id, target_memory_id, "
-          "edge_type, weight) VALUES (?, ?, 'derived_from', 1.0)",
-          { kAssociationId, memory_id });
-      source_ids.push_back (memory_id);
-    }
-  store->Execute (
-      "INSERT INTO associations(source_memory_id, target_memory_id, edge_type, "
-      "weight) VALUES (?, ?, 'has_label', 1.0), "
-      "               (?, ?, 'has_label', 1.0), "
-      "               (?, ?, 'derived_from', 1.0)",
-      { kAssociationId, kLabelId, kSecondAssociationId, kLabelId,
-        kSecondAssociationId, source_ids.front () });
-
-  cortext::Cortext::Config cfg;
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
-  const int expected_limit = std::max (
-      1, cortext::core::RetrievalGraphExpandedRagCompactItemLimit (
-             cfg.focus, cfg.stability));
-  REQUIRE (expected_limit < static_cast<int> (source_ids.size ()));
-
-  auto hydrated = ctx->DebugHydrateForTest ({ kLabelId }, {}, embedding);
-  REQUIRE (static_cast<int> (hydrated.retrieved_memory.size ())
-           == expected_limit);
-  REQUIRE (hydrated.retrieved_memory.front ().id == source_ids.front ());
-  for (const auto &memory : hydrated.retrieved_memory)
-    {
-      REQUIRE (std::find (source_ids.begin (), source_ids.end (), memory.id)
-               != source_ids.end ());
-      REQUIRE (!TextFromMemory (memory).empty ());
-    }
-}
-
-TEST_CASE ("Cortext expands maintenance source hydration without used-memory skip",
-           "[cortext][hydration][retrieval][aist]")
-{
-  ScopedTempDb temp_db;
-  const auto &db_path = temp_db.path ();
-  auto store = cortext::SQLiteStore::Create (db_path);
-  cortext::testing::InitializeCoreSchema (*store);
-
-  cortext::testing::ScopedEnvVar disable_query_ordering (
-      "CORTEXT_DISABLE_QUERY_AWARE_LINKED_SOURCE_HYDRATION", "1");
-
-  constexpr int kEmbeddingDim = 256;
-  std::vector<float> embedding (kEmbeddingDim, 0.0f);
-  embedding[0] = 1.0f;
-
-  constexpr long long kMaintenanceId = 700LL;
-  store->Execute (
-      "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-      "VALUES (?, ?, ?)",
-      { kMaintenanceId, embedding, 1000LL });
-  store->Execute (
-      "INSERT INTO memories (memory_id, embedding_id, source_id, kind, label, "
-      "start_ts, n_signals, modality, s_max, s_avg, strength, created_at) "
-      "VALUES (?, ?, 'cortext/maintenance', 'LONG_TERM', "
-      "'maintenance summary', 1000, 1, 'text', 0.5, 0.5, 1.0, 1000)",
-      { kMaintenanceId, kMaintenanceId });
-
-  cortext::Cortext::Config cfg;
-  const int expected_limit = std::max (
-      1, cortext::core::RetrievalGraphExpandedRagCompactItemLimit (
-             cfg.focus, cfg.stability));
-  REQUIRE (expected_limit >= 2);
-
-  std::vector<long long> linked_ids;
-  for (int i = 0; i < expected_limit + 1; ++i)
-    {
-      const long long memory_id = 800LL + i;
-      const long long ts = 2000LL + i;
-      const std::string source_text
-          = "maintenance linked source " + std::to_string (i);
-      const std::vector<unsigned char> payload (source_text.begin (),
-                                                source_text.end ());
-      auto blob_rows = store->Execute ("SELECT objstore_put(?1) AS id",
-                                       { payload });
-      REQUIRE (blob_rows.size () == 1);
-      const auto blob_id = BlobFromAny (blob_rows[0].at ("id"));
-      REQUIRE (!blob_id.empty ());
-
-      store->Execute (
-          "INSERT INTO embeddings (embedding_id, embedding, created_at) "
-          "VALUES (?, ?, ?)",
-          { memory_id, embedding, ts });
-      store->Execute (
-          "INSERT INTO memories (memory_id, embedding_id, source_id, kind, "
-          "blob_id, start_ts, end_ts, n_signals, modality, s_max, s_avg, "
-          "strength, created_at, used_count) "
-          "VALUES (?, ?, 'stream/main', 'LONG_TERM', ?, ?, ?, 1, 'text', "
-          "0.5, 0.5, 1.0, ?, 3)",
-          { memory_id, memory_id, blob_id, ts, ts, ts });
-      store->Execute (
-          "INSERT INTO signals (memory_id, embedding_id, source_id, timestamp, "
-          "modality, mime, blob_id, serial_position, created_at) "
-          "VALUES (?, ?, 'stream/main', ?, 'text', 'text/plain', ?, 0, ?)",
-          { memory_id, memory_id, ts, blob_id, ts });
-      store->Execute (
-          "INSERT INTO associations(source_memory_id, target_memory_id, "
-          "edge_type, weight) VALUES (?, ?, 'derived_from', 1.0)",
-          { kMaintenanceId, memory_id });
-      linked_ids.push_back (memory_id);
-    }
-
-  auto ctx = cortext::Cortext::Create (cfg, db_path);
-  REQUIRE (ctx != nullptr);
-
-  auto hydrated
-      = ctx->DebugHydrateForTest ({ kMaintenanceId }, {}, embedding);
-  REQUIRE (static_cast<int> (hydrated.retrieved_memory.size ())
-           == expected_limit);
-  for (const auto &memory : hydrated.retrieved_memory)
-    {
-      REQUIRE (std::find (linked_ids.begin (), linked_ids.end (), memory.id)
-               != linked_ids.end ());
-      REQUIRE (!TextFromMemory (memory).empty ());
-    }
-}
-
 TEST_CASE ("Cortext hides unresolved internal retrieval nodes",
            "[cortext][hydration][retrieval][aist]")
 {
@@ -2528,8 +2069,9 @@ TEST_CASE ("C API text media wrappers accept NULL media as empty media",
           { source_id });
       REQUIRE (rows.size () == 1);
       REQUIRE (std::any_cast<std::string> (rows[0].at ("modality")) == "text");
-      REQUIRE (std::any_cast<std::string> (rows[0].at ("mime")).empty ());
-      REQUIRE (AnyToLongLong (rows[0].at ("no_blob")) == 1);
+      REQUIRE (std::any_cast<std::string> (rows[0].at ("mime"))
+               == "text/plain");
+      REQUIRE (AnyToLongLong (rows[0].at ("no_blob")) == 0);
     }
 }
 
@@ -2888,6 +2430,81 @@ TEST_CASE ("C API handles NULL inputs correctly",
     REQUIRE (legacy.guard == 0x1234);
   }
 
+  SECTION ("JSON options carry an evidence budget")
+  {
+    cortext_process_json_options options{};
+    options.struct_size = sizeof (options);
+    options.evidence_budget_bytes = 77;
+    cortext_process_json_options_init (&options);
+    REQUIRE (options.evidence_budget_bytes == 0);
+
+    // A caller built before the budget field keeps its retention.
+    struct RetentionOptions
+    {
+      std::size_t struct_size;
+      int include_embedding;
+      int retention;
+      int reserved;
+    };
+    struct RetentionOptionsWithGuard
+    {
+      RetentionOptions options;
+      std::size_t guard = 0x1234;
+    } prior;
+    prior.options.struct_size = sizeof (prior.options);
+    cortext_process_json_options_init (
+        reinterpret_cast<cortext_process_json_options *> (&prior.options));
+    REQUIRE (prior.options.struct_size
+             == offsetof (cortext_process_json_options, evidence_budget_bytes));
+    REQUIRE (prior.options.retention == CORTEXT_RETENTION_NATURAL);
+    REQUIRE (prior.guard == 0x1234);
+
+    ScopedTempDb temp_db;
+    auto h = cortext_create (0.5, 0.5, 0.5, temp_db.path ().c_str ());
+    REQUIRE (h != nullptr);
+    options.retention = CORTEXT_RETENTION_DURABLE;
+    options.include_embedding = 0;
+    for (int i = 0; i < 6; ++i)
+      {
+        const std::string text = "The ferry to the island leaves at "
+                                 + std::to_string (6 + i)
+                                 + " in the morning from pier four.";
+        char *stored = cortext_process_text_json_with_options (
+            h, text.c_str (), ("ferry/" + std::to_string (i)).c_str (),
+            &options);
+        REQUIRE (stored != nullptr);
+        cortext_string_free (stored);
+      }
+    options.retention = CORTEXT_RETENTION_EPHEMERAL;
+    const auto evidence = [] (const nlohmann::json &packet) {
+      std::size_t bytes = 0;
+      for (const char *block : { "standing_memory", "retrieved_memory" })
+        for (const auto &memory : packet.at (block))
+          for (const auto &item : memory.at ("content"))
+            bytes += item.at ("size_bytes").get<std::size_t> ();
+      return bytes;
+    };
+    char *json_ptr = cortext_process_text_json_with_options (
+        h, "When does the ferry leave?", "query/ferry", &options);
+    REQUIRE (json_ptr != nullptr);
+    auto whole = nlohmann::json::parse (json_ptr);
+    cortext_string_free (json_ptr);
+    REQUIRE (whole.contains ("standing_memory"));
+    REQUIRE (whole.at ("retrieved_memory").size () >= 2);
+    const std::size_t whole_bytes = evidence (whole);
+
+    options.evidence_budget_bytes = whole_bytes / 2;
+    json_ptr = cortext_process_text_json_with_options (
+        h, "When does the ferry leave?", "query/ferry", &options);
+    REQUIRE (json_ptr != nullptr);
+    auto budgeted = nlohmann::json::parse (json_ptr);
+    cortext_string_free (json_ptr);
+    REQUIRE (evidence (budgeted) <= whole_bytes / 2);
+    REQUIRE (budgeted.at ("retrieved_memory").size ()
+             < whole.at ("retrieved_memory").size ());
+    cortext_free (h);
+  }
+
   SECTION ("Embed JSON C API returns parseable embedding")
   {
     ScopedTempDb temp_db;
@@ -2923,4 +2540,1272 @@ TEST_CASE ("C API handles NULL inputs correctly",
     REQUIRE (std::string (cortext_last_error ())
              == "handle, text, and source_id must all be non-NULL");
   }
+}
+
+TEST_CASE ("Sparse route growth recommends consolidation and recenters the "
+           "route repeatedly on a long stream",
+           "[aist][cortext][consolidation][sparse-route][long]")
+{
+  // F = S = T = 0 gives the smallest route capacity C, so the SQLite
+  // sparse route publishes and then outgrows its activation centroid
+  // several times within a short stream. The caller follows the engine's
+  // hint like a host would: consolidate whenever it is not None.
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.focus = 0.0;
+  cfg.sensitivity = 0.0;
+  cfg.stability = 0.0;
+  auto engine = cortext::Cortext::Create (cfg, temp_db.path ());
+  REQUIRE (engine != nullptr);
+  const auto route_capacity = static_cast<std::size_t> (
+      cortext::operations::sparse_retrieval_knobs_internal::RouteCapacity (
+          cfg.focus, cfg.sensitivity, cfg.stability));
+
+  static const std::array<const char *, 12> kSubjects
+      = { "Maya",   "the courier", "Dr. Okafor", "my landlord",
+          "Priya",  "the vet",     "Tomas",      "our neighbor",
+          "Lena",   "the plumber", "Grandpa Joe", "the tutor" };
+  static const std::array<const char *, 12> kActions
+      = { "repaired the bicycle",     "booked a flight to Lisbon",
+          "planted tomatoes",         "lost the spare key",
+          "baked sourdough bread",    "renewed the passport",
+          "painted the fence blue",   "adopted a grey kitten",
+          "sold the old piano",       "fixed the leaking sink",
+          "started learning Korean",  "ran a half marathon" };
+  static const std::array<const char *, 10> kWhen
+      = { "on Monday",     "last winter",   "after lunch",
+          "in March",      "at dawn",       "before the storm",
+          "during the trip", "on my birthday", "late at night",
+          "this weekend" };
+
+  const std::size_t turns = 4 * route_capacity;
+  std::size_t consolidations = 0;
+  std::size_t recentered = 0;
+  std::size_t first_recenter_turn = 0;
+  std::uint64_t ts = 1'700'000'000'000ULL;
+  for (std::size_t i = 0; i < turns; ++i)
+    {
+      const std::string text
+          = std::string (kSubjects[i % kSubjects.size ()]) + " "
+            + kActions[(i / kSubjects.size ()) % kActions.size ()] + " "
+            + kWhen[(i * 7) % kWhen.size ()] + ", note "
+            + std::to_string (i) + " with code " + std::to_string (i * 7919 % 10007)
+            + ".";
+      ts += 60'000;
+      const auto context = cortext::internal::ReplayIngress::ProcessTextAt (
+          *engine, text, "stream", ts, cortext::Retention::Durable, false);
+      if (context.consolidation_state == cortext::ConsolidationState::None)
+        continue;
+      ts += 1'000;
+      const auto maintenance
+          = cortext::internal::ReplayIngress::ConsolidateAt (*engine, ts);
+      ++consolidations;
+      const auto it = maintenance.output.operation_ms.find (
+          "SignalProcessor.sqlite_sparse_route_recenter_succeeded");
+      if (it != maintenance.output.operation_ms.end () && it->second == 1.0)
+        {
+          if (recentered == 0)
+            first_recenter_turn = i;
+          ++recentered;
+        }
+    }
+  INFO ("route capacity " << route_capacity << ", consolidations "
+                          << consolidations << ", recentered " << recentered
+                          << ", first recenter at turn "
+                          << first_recenter_turn);
+  // Once the route is published, every C new memories must earn a
+  // recentering consolidation: at least two more after the first.
+  REQUIRE (recentered >= 3);
+  REQUIRE (consolidations <= turns / (route_capacity / 2));
+}
+
+namespace
+{
+const std::vector<std::uint8_t> kFakeJpeg = { 0xFF, 0xD8, 0xFF, 0xE0, 0x00,
+                                              0x10, 'J',  'F',  'I',  'F',
+                                              0x00, 0xFF, 0xD9 };
+
+const cortext::Cortext::Context::Memory *
+FindMemoryWithText (const std::vector<cortext::Cortext::Context::Memory> &mems,
+                    const std::string &needle)
+{
+  for (const auto &memory : mems)
+    {
+      for (const auto &blob : memory.content)
+        {
+          if (std::string (blob.begin (), blob.end ()).find (needle)
+              != std::string::npos)
+            return &memory;
+        }
+    }
+  return nullptr;
+}
+
+std::vector<std::string>
+ContentMimes (const cortext::Cortext::Context::Memory &memory)
+{
+  std::vector<std::string> out;
+  for (std::size_t i = 0; i < memory.content.size (); ++i)
+    {
+      out.push_back (i < memory.content_mimetypes.size ()
+                         ? memory.content_mimetypes[i]
+                         : memory.mimetype);
+    }
+  return out;
+}
+} // namespace
+
+TEST_CASE ("Cortext multi-modality memory keeps and returns every signal",
+           "[cortext][media][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+
+  // One turn = one source: a text signal and the photo sent with it, as
+  // peers. The turn's last signal commits it.
+  (void)ctx->ProcessTextAt ("The parking garage ticket says level 4 spot 27.",
+                            "chat/user/turn1", 1000ULL,
+                            cortext::Retention::Natural);
+  std::vector<std::uint8_t> pixels (8 * 8 * 3, 128);
+  cortext::Cortext::Media photo;
+  photo.data = kFakeJpeg.data ();
+  photo.size = kFakeJpeg.size ();
+  photo.mimetype = "image/jpeg";
+  auto commit = ctx->ProcessImage (pixels.data (), 8, 8, 3, "chat/user/turn1",
+                                   photo, cortext::Retention::Durable);
+  REQUIRE (commit.output.stored_memory_id.has_value ());
+  const long long memory_id = *commit.output.stored_memory_id;
+  const auto signals = store->Execute (
+      "SELECT COUNT(*) AS n FROM signals WHERE memory_id = ?", { memory_id });
+  REQUIRE (AnyToLongLong (signals[0].at ("n")) == 2);
+  const auto rows = store->Execute (
+      "SELECT modality FROM memories WHERE memory_id = ?", { memory_id });
+  REQUIRE (std::any_cast<std::string> (rows[0].at ("modality")) == "mixed");
+  // The text signal is keyword-indexed without making the memory "text".
+  const auto fts = store->Execute (
+      "SELECT rowid FROM memory_text_fts WHERE memory_text_fts MATCH 'garage'");
+  REQUIRE (fts.size () == 1);
+
+  auto recalled = ctx->ProcessTextAt ("parking garage level spot",
+                                      "query/public", 2000ULL,
+                                      cortext::Retention::Ephemeral);
+  const auto *memory
+      = FindMemoryWithText (recalled.retrieved_memory, "level 4 spot 27");
+  REQUIRE (memory != nullptr);
+  REQUIRE (memory->modality == "mixed");
+  const auto mimes = ContentMimes (*memory);
+  REQUIRE (std::count (mimes.begin (), mimes.end (), "text/plain") == 1);
+  REQUIRE (std::count (mimes.begin (), mimes.end (), "image/jpeg") == 1);
+  bool photo_returned = false;
+  for (const auto &blob : memory->content)
+    photo_returned = photo_returned
+                     || blob == std::vector<unsigned char> (kFakeJpeg.begin (),
+                                                            kFakeJpeg.end ());
+  REQUIRE (photo_returned);
+
+  const auto *slot
+      = FindMemoryWithText (recalled.working_memory, "level 4 spot 27");
+  REQUIRE (slot != nullptr);
+  const auto slot_mimes = ContentMimes (*slot);
+  REQUIRE (std::count (slot_mimes.begin (), slot_mimes.end (), "image/jpeg")
+           == 1);
+}
+
+namespace
+{
+std::vector<float>
+RetrievalView (std::vector<float> v)
+{
+  v.resize (256);
+  double norm = 0.0;
+  for (float x : v)
+    norm += static_cast<double> (x) * x;
+  for (float &x : v)
+    x = static_cast<float> (x / std::sqrt (norm));
+  return v;
+}
+} // namespace
+
+TEST_CASE ("Cortext keeps a payload and vector for media-less audio and images",
+           "[cortext][media][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_image_enabled = false;
+  cfg.signal_filter_audio_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto clock = std::make_shared<cortext::FixedClock> (1000);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  const auto stored = [&] (long long memory_id, const std::string &modality) {
+    auto rows = store->Execute (
+        "SELECT s.mime AS mime, COUNT(v.blob_id) AS vectors FROM signals s "
+        "LEFT JOIN memory_signal_vectors v ON v.blob_id = s.blob_id "
+        "WHERE s.memory_id = ? AND s.modality = ?",
+        { memory_id, modality });
+    REQUIRE (rows.size () == 1);
+    return std::make_pair (std::any_cast<std::string> (rows[0].at ("mime")),
+                           AnyToLongLong (rows[0].at ("vectors")));
+  };
+
+  std::vector<std::uint8_t> pixels (8 * 8 * 3, 91);
+  auto image = ctx->ProcessImage (pixels.data (), 8, 8, 3, "camera/raw",
+                                  cortext::Cortext::Media{},
+                                  cortext::Retention::Durable);
+  REQUIRE (image.output.stored_memory_id.has_value ());
+  const auto [image_mime, image_vectors]
+      = stored (*image.output.stored_memory_id, "image");
+  CHECK (image_mime == "image/raw;width=8;height=8;channels=3");
+  CHECK (image_vectors == 1);
+
+  clock->SetNowMillis (3600000);
+  std::vector<float> pcm (16000);
+  for (std::size_t i = 0; i < pcm.size (); ++i)
+    pcm[i] = 0.25f * std::sin (0.05f * static_cast<float> (i));
+  auto audio = ctx->ProcessAudio (pcm.data (), pcm.size (), "mic/raw",
+                                  cortext::Cortext::Media{},
+                                  cortext::Retention::Durable);
+  REQUIRE (audio.output.stored_memory_id.has_value ());
+  const auto [audio_mime, audio_vectors]
+      = stored (*audio.output.stored_memory_id, "audio");
+  CHECK (audio_mime == cortext::Cortext::MakeAudioMimePcmF32 ());
+  CHECK (audio_vectors == 1);
+}
+
+TEST_CASE ("Cortext recalls memories across modalities in both directions",
+           "[cortext][media][aist]")
+{
+  // Photos arrive with encoded Media bytes, or as raw pixels only (empty
+  // Media): either way each stored signal must keep a searchable vector.
+  const bool with_media = GENERATE (true, false);
+  INFO ("with_media " << with_media);
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_image_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto clock = std::make_shared<cortext::FixedClock> (1000);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  // The stand-in vector replaces what the signal shows, so its
+  // late-interaction codes (computed from the real payload) are dropped too:
+  // the reranker then sees the member through the stand-in vector alone.
+  const auto set_vector = [&] (long long memory_id, const std::string &modality,
+                               const std::vector<float> &v) {
+    store->Execute ("UPDATE memory_signal_vectors SET embedding = ? "
+                    "WHERE blob_id IN (SELECT blob_id FROM signals "
+                    "WHERE memory_id = ? AND modality = ?)",
+                    { v, memory_id, modality });
+    store->Execute ("DELETE FROM memory_signal_li_codes "
+                    "WHERE blob_id IN (SELECT blob_id FROM signals "
+                    "WHERE memory_id = ? AND modality = ?)",
+                    { memory_id, modality });
+  };
+
+  // Photos (image memories). Their stored vectors stand in for what each
+  // photo shows; the image tower itself is not under test.
+  const std::vector<std::string> scenes = {
+    "a bowl of tomato soup",        "a snowy mountain trail",
+    "a laptop on a desk",           "a cat sleeping on a sofa",
+    "a crowded subway platform",    "a plate of sushi",
+    "a sunset over the ocean",      "a pile of autumn leaves",
+    "a birthday cake with candles", "a city skyline at night",
+    "a red bicycle leaning on a fence",
+  };
+  std::uint64_t ts = 1000;
+  long long bicycle_photo = 0;
+  for (std::size_t i = 0; i < scenes.size (); ++i)
+    {
+      std::vector<std::uint8_t> pixels (8 * 8 * 3,
+                                        static_cast<std::uint8_t> (20 * i));
+      std::vector<std::uint8_t> bytes = kFakeJpeg;
+      bytes.push_back (static_cast<std::uint8_t> (i));
+      cortext::Cortext::Media photo;
+      if (with_media)
+        {
+          photo.data = bytes.data ();
+          photo.size = bytes.size ();
+          photo.mimetype = "image/jpeg";
+        }
+      clock->SetNowMillis (ts += 60000);
+      auto ingest = ctx->ProcessImage (pixels.data (), 8, 8, 3,
+                                       "camera/roll/" + std::to_string (i),
+                                       photo, cortext::Retention::Durable);
+      REQUIRE (ingest.output.stored_memory_id.has_value ());
+      REQUIRE (AnyToLongLong (
+                   store->Execute (
+                       "SELECT COUNT(*) AS n FROM signals s "
+                       "JOIN memory_signal_vectors v ON v.blob_id = s.blob_id "
+                       "WHERE s.memory_id = ? AND s.modality = 'image'",
+                       { *ingest.output.stored_memory_id })[0]
+                       .at ("n"))
+               == 1);
+      set_vector (*ingest.output.stored_memory_id, "image",
+                  RetrievalView (ctx->EmbedText (scenes[i])));
+      if (i + 1 == scenes.size ())
+        bicycle_photo = *ingest.output.stored_memory_id;
+    }
+  // Notes (text memories); one is about what a query photo will show.
+  std::vector<std::uint8_t> query_pixels (8 * 8 * 3, 77);
+  long long matching_note = 0;
+  for (int i = 0; i < 40; ++i)
+    {
+      const bool target = i == 39;
+      auto ingest = ctx->ProcessTextAt (
+          target ? "Remember to water the plants on Friday."
+                 : "Weekly note " + std::to_string (i)
+                       + ": the red invoice for the bicycle shop fence repair"
+                         " is due next week.",
+          "notes/main", ts += 60000, cortext::Retention::Durable);
+      clock->SetNowMillis (ts);
+      REQUIRE (ingest.output.stored_memory_id.has_value ());
+      if (target)
+        {
+          matching_note = *ingest.output.stored_memory_id;
+          set_vector (matching_note, "text",
+                      RetrievalView (ctx->EmbedImage (query_pixels.data (), 8,
+                                                      8, 3)));
+        }
+    }
+
+  const auto contains = [] (const cortext::Cortext::Context &c, long long id) {
+    return std::any_of (c.retrieved_memory.begin (), c.retrieved_memory.end (),
+                        [id] (const auto &m) { return m.id == id; });
+  };
+  clock->SetNowMillis (ts += 60000);
+  auto by_text = ctx->ProcessTextAt ("the red bicycle by the fence",
+                                     "query/public", ts,
+                                     cortext::Retention::Ephemeral);
+  INFO ("xmodal hits "
+        << by_text.output.operation_ms.at ("GraphRetrieve.cross_modal_hits")
+        << " added "
+        << by_text.output.operation_ms.at ("GraphRetrieve.cross_modal_added")
+        << " vectors "
+        << AnyToLongLong (store->Execute ("SELECT COUNT(*) AS n FROM "
+                                          "memory_signal_vectors")[0]
+                              .at ("n"))
+        << " retrieved " << by_text.retrieved_memory.size ());
+  REQUIRE (contains (by_text, bicycle_photo));
+  REQUIRE (by_text.output.operation_ms.at ("GraphRetrieve.cross_modal_hits")
+           >= 1.0);
+
+  clock->SetNowMillis (ts += 60000);
+  auto by_image = ctx->ProcessImage (query_pixels.data (), 8, 8, 3,
+                                     "query/camera",
+                                     cortext::Retention::Ephemeral);
+  REQUIRE (contains (by_image, matching_note));
+}
+
+namespace
+{
+// Contiguity tests pin the engine's own anchor order: without late-interaction
+// codes the reranker keeps every memory in its slot (graph_retrieval
+// RerankLateInteraction), so deferral and attachment decide the packet.
+void
+DropLateInteractionCodes (cortext::Store &store)
+{
+  store.Execute ("DELETE FROM memory_signal_li_codes", {});
+}
+
+// Unrelated turns, each its own stream and hours apart, so a query has more
+// candidates than packet anchors and none of them is anyone's neighbour.
+void
+AddUnrelatedTurns (cortext::Cortext &ctx, cortext::FixedClock *clock,
+                   std::uint64_t &ts)
+{
+  const std::vector<std::string> topics = {
+    "The quarterly tax filing is due at the end of April.",
+    "My sister adopted a grey kitten named Pebble.",
+    "The bakery on Elm Street sells sourdough on Sundays.",
+    "We repainted the guest bedroom a pale green colour.",
+    "The marathon route passes the old harbour bridge.",
+    "Our team switched the build system to Bazel last month.",
+    "The dentist moved my cleaning appointment to Friday.",
+    "Grandpa's vinyl collection includes rare jazz records.",
+    "The library extended its weekend opening hours.",
+    "I need new brake pads for the blue hatchback.",
+    "The community garden plot gets full sun until noon.",
+    "Our flight to Lisbon departs from terminal two.",
+    "The thermostat schedule drops to sixty at night.",
+    "She is learning to play the cello with a tutor.",
+  };
+  for (std::size_t i = 0; i < topics.size (); ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      if (clock)
+        clock->SetNowMillis (ts);
+      (void)ctx.ProcessTextAt (topics[i],
+                               "other/" + std::to_string (i) + "/0", ts,
+                               cortext::Retention::Durable);
+    }
+}
+
+std::string
+PacketText (const cortext::Cortext::Context &context)
+{
+  std::string out;
+  for (const auto &memory : context.retrieved_memory)
+    for (std::size_t i = 0; i < memory.content.size (); ++i)
+      {
+        const auto mimes = ContentMimes (memory);
+        if (mimes[i].rfind ("text/", 0) == 0 || mimes[i].empty ())
+          out.append (memory.content[i].begin (), memory.content[i].end ())
+              .append ("\n");
+      }
+  return out;
+}
+
+} // namespace
+
+namespace
+{
+
+std::string
+StandingText (const cortext::Cortext::Context::Memory &memory)
+{
+  std::string text;
+  for (const auto &blob : memory.content)
+    text.append (blob.begin (), blob.end ());
+  return text;
+}
+
+} // namespace
+
+TEST_CASE ("Standing directives join query packets outside the retrieved ranking",
+           "[aist][cortext][retrieval][standing]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  const auto directive = ctx->ProcessTextAt (
+      "Always include version numbers when I ask about software libraries.",
+      "chat/rules/1", ts, cortext::Retention::Durable);
+  REQUIRE (directive.output.stored_memory_id.has_value ());
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  // A long turn that mentions "always" is not a standing directive.
+  std::string explanation = "Always check the lockfile first. ";
+  for (int i = 0; i < 12; ++i)
+    explanation += "The resolver reads the manifest and pins transitive "
+                   "dependencies to exact versions. ";
+  const auto long_turn = ctx->ProcessTextAt (explanation, "chat/notes/1", ts,
+                                             cortext::Retention::Durable);
+  REQUIRE (long_turn.output.stored_memory_id.has_value ());
+  // Turns about the query topic fill every anchor slot ahead of the
+  // directive.
+  for (int i = 0; i < 16; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt (
+          "Which libraries does the reporting service use, part "
+              + std::to_string (i) + "? It uses pandas and requests.",
+          "chat/libs/" + std::to_string (i), ts, cortext::Retention::Durable);
+    }
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+
+  const auto packet = ctx->ProcessTextAt (
+      "Which libraries does the reporting service use?", "query/public",
+      ts + 1000, cortext::Retention::Ephemeral);
+  REQUIRE_FALSE (packet.retrieved_memory.empty ());
+  REQUIRE (packet.standing_memory.size () == 1);
+  REQUIRE (packet.standing_memory.front ().id
+           == *directive.output.stored_memory_id);
+  REQUIRE (StandingText (packet.standing_memory.front ())
+           == "Always include version numbers when I ask about software "
+              "libraries.");
+  REQUIRE (packet.output.operation_ms.at ("Cortext.standing_joined") == 1.0);
+  for (const auto &memory : packet.standing_memory)
+    REQUIRE (memory.id != *long_turn.output.stored_memory_id);
+
+  // Ingest does not join standing memories.
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  const auto ingest = ctx->ProcessTextAt (
+      "Which libraries does the reporting service use?", "chat/libs/x", ts,
+      cortext::Retention::Durable);
+  REQUIRE (ingest.standing_memory.empty ());
+  const auto joined = ingest.output.operation_ms.find ("Cortext.standing_joined");
+  REQUIRE ((joined == ingest.output.operation_ms.end () || joined->second == 0.0));
+}
+
+TEST_CASE ("The standing block stays within its byte budget",
+           "[aist][cortext][retrieval][standing]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  // Five directives of about 450 bytes: the set holds all five, the block
+  // (2 KiB) only four.
+  for (int i = 0; i < 5; ++i)
+    {
+      std::string text = "Always mention the library version number "
+                         + std::to_string (i) + " when I ask about it";
+      while (text.size () < 440)
+        text += " and the release date";
+      text += ".";
+      REQUIRE (ctx->ProcessTextAt (text, "chat/rules/" + std::to_string (i),
+                                   ts, cortext::Retention::Durable)
+                   .output.stored_memory_id.has_value ());
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+    }
+  const auto packet = ctx->ProcessTextAt (
+      "Which library version do we use?", "query/public", ts + 1000,
+      cortext::Retention::Ephemeral);
+  std::size_t bytes = 0;
+  for (const auto &memory : packet.standing_memory)
+    bytes += StandingText (memory).size ();
+  REQUIRE (packet.standing_memory.size () == 4);
+  REQUIRE (bytes <= 2048);
+}
+
+TEST_CASE ("A directive inside a grouped memory joins query packets alone",
+           "[cortext][retrieval][standing][retention][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  // A Natural unit: a long turn, the directive, another long turn.
+  std::string before = "The bakery oven runs hot on the left side. ";
+  while (before.size () < 2000)
+    before += "The bakery oven runs hot on the left side. ";
+  std::string after = "The delivery van needs new tires next month. ";
+  while (after.size () < 2000)
+    after += "The delivery van needs new tires next month. ";
+  const std::string directive
+      = "Always include version numbers when I ask about software libraries.";
+  for (const std::string &text : std::vector<std::string>{ before, directive, after })
+    {
+      (void)ctx->ProcessTextAt (text, "chat/unit", ts,
+                                cortext::Retention::Natural);
+      ts += 60000;
+    }
+  ctx->Flush ();
+  const auto members = store->Execute (
+      "SELECT m.n_signals AS n FROM standing_signals ss "
+      "JOIN signals s ON s.signal_id = ss.signal_id "
+      "JOIN memories m ON m.memory_id = s.memory_id");
+  REQUIRE (members.size () == 1);
+  REQUIRE (AnyToLongLong (members[0].at ("n")) >= 2);
+  for (int i = 0; i < 16; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt (
+          "Which libraries does the reporting service use, part "
+              + std::to_string (i) + "? It uses pandas and requests.",
+          "chat/libs/" + std::to_string (i), ts, cortext::Retention::Durable);
+    }
+  const auto packet = ctx->ProcessTextAt (
+      "Which libraries does the reporting service use?", "query/public",
+      ts + 1000, cortext::Retention::Ephemeral);
+  // The standing block holds the directive signal alone, not its unit.
+  REQUIRE (packet.standing_memory.size () == 1);
+  REQUIRE (StandingText (packet.standing_memory.front ()) == directive);
+  REQUIRE (packet.output.operation_ms.at ("Cortext.standing_joined") == 1.0);
+}
+
+TEST_CASE ("Stores from before the standing set fill it once on open",
+           "[aist][cortext][standing][migration]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  long long directive_id = 0;
+  {
+    auto ctx = cortext::Cortext::Create (cfg, temp_db.path ());
+    const auto directive = ctx->ProcessTextAt (
+        "From now on, answer in French.", "chat/rules/1", 1000ULL,
+        cortext::Retention::Durable);
+    (void)ctx->ProcessTextAt ("I always forget my keys on Mondays.",
+                              "chat/notes/1", 2000ULL,
+                              cortext::Retention::Durable);
+    REQUIRE (directive.output.stored_memory_id.has_value ());
+    directive_id = *directive.output.stored_memory_id;
+    ctx->Flush ();
+  }
+  {
+    // A store written before migration 53: no members, backfill queued.
+    auto store = std::shared_ptr<cortext::Store> (
+        cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+    store->Execute ("DELETE FROM standing_signals");
+    store->Execute ("INSERT INTO cortext_pending_backfills(name) "
+                    "VALUES ('standing_signals')");
+  }
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  (void)ctx->ProcessTextAt ("What language should replies use?",
+                            "query/public", 5000ULL,
+                            cortext::Retention::Ephemeral);
+  const auto members = store->Execute (
+      "SELECT s.memory_id AS memory_id FROM standing_signals ss "
+      "JOIN signals s ON s.signal_id = ss.signal_id");
+  REQUIRE (members.size () == 1);
+  REQUIRE (AnyToLongLong (members[0].at ("memory_id")) == directive_id);
+  REQUIRE (store->Execute ("SELECT 1 FROM cortext_pending_backfills "
+                           "WHERE name = 'standing_signals'")
+               .empty ());
+}
+
+TEST_CASE ("Late interaction reranks text queries and leaves audio queries "
+           "in engine order",
+           "[cortext][retrieval][late_interaction][aist]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_audio_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+  // Stored text signals carry late-interaction codes.
+  REQUIRE (AnyToLongLong (store->Execute ("SELECT COUNT(*) AS n FROM "
+                                          "memory_signal_li_codes")[0]
+                              .at ("n"))
+           > 0);
+  const auto text = ctx->ProcessTextAt ("When is the tax filing due?",
+                                        "query/public", ts + 1000,
+                                        cortext::Retention::Ephemeral);
+  REQUIRE (text.output.operation_ms.count ("GraphRetrieve.li_moved") == 1);
+  // A repeated query reuses its cached query set: same rerank, same packet.
+  const auto again = ctx->ProcessTextAt ("When is the tax filing due?",
+                                         "query/public", ts + 2000,
+                                         cortext::Retention::Ephemeral);
+  REQUIRE (again.output.operation_ms.at ("GraphRetrieve.li_moved")
+           == text.output.operation_ms.at ("GraphRetrieve.li_moved"));
+  REQUIRE (again.retrieved_memory.size () == text.retrieved_memory.size ());
+  for (std::size_t i = 0; i < text.retrieved_memory.size (); ++i)
+    REQUIRE (again.retrieved_memory[i].id == text.retrieved_memory[i].id);
+  // The audio tower has no trained position map: no query vectors, so the
+  // reranker does not run and the engine order stands.
+  std::vector<float> pcm (16000, 0.01F);
+  const auto audio = ctx->ProcessAudio (pcm.data (), pcm.size (),
+                                        "query/audio",
+                                        cortext::Retention::Ephemeral);
+  REQUIRE (audio.output.operation_ms.count ("GraphRetrieve.li_moved") == 0);
+}
+
+TEST_CASE ("Query retrieval defers the adjacent turn of a higher anchor",
+           "[aist][cortext][retrieval][contiguity]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  // One exchange: both turns match the query, and hydration attaches each
+  // to the other when only one of them is an anchor.
+  const auto question = ctx->ProcessTextAt (
+      "When does the zebra kite festival start at Marlow beach?",
+      "chat/kites/1", ts, cortext::Retention::Durable);
+  const auto reply = ctx->ProcessTextAt (
+      "The zebra kite festival at Marlow beach starts Saturday at ten.",
+      "chat/kites/2", ts + 60000, cortext::Retention::Durable);
+  REQUIRE (question.output.stored_memory_id.has_value ());
+  REQUIRE (reply.output.stored_memory_id.has_value ());
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+  DropLateInteractionCodes (*store);
+
+  const auto packet = ctx->ProcessTextAt ("zebra kite festival Marlow beach",
+                                          "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral);
+  std::size_t exchange_anchors = 0;
+  for (const auto &memory : packet.retrieved_memory)
+    if (memory.id == *question.output.stored_memory_id
+        || memory.id == *reply.output.stored_memory_id)
+      ++exchange_anchors;
+  // One anchor slot for the exchange; the other turn rides along with it.
+  REQUIRE (exchange_anchors == 1);
+  const std::string text = PacketText (packet);
+  REQUIRE (text.find ("When does the zebra kite festival") != std::string::npos);
+  REQUIRE (text.find ("starts Saturday at ten") != std::string::npos);
+  REQUIRE (packet.output.operation_ms.at ("GraphRetrieve.neighbours_deferred")
+           >= 1.0);
+}
+
+TEST_CASE ("Attached turns keep the window that covers the query",
+           "[aist][cortext][retrieval][contiguity]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  (void)ctx->ProcessTextAt ("Can you book tickets for the orchid conservatory?",
+                            "chat/garden/1", ts, cortext::Retention::Durable);
+  std::string reply = "Sure. ";
+  for (int i = 0; i < 24; ++i)
+    reply += "Weekend traffic downtown is heavy, so leave early. ";
+  reply += "The orchid conservatory opens at nine and tickets cost twelve.";
+  REQUIRE (reply.size () > 1000);
+  (void)ctx->ProcessTextAt (reply, "chat/garden/2", ts + 60000,
+                            cortext::Retention::Durable);
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  AddUnrelatedTurns (*ctx, nullptr, ts);
+  DropLateInteractionCodes (*store);
+
+  const auto packet = ctx->ProcessTextAt ("orchid conservatory tickets",
+                                          "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral);
+  const auto *anchor = FindMemoryWithText (packet.retrieved_memory,
+                                           "book tickets for the orchid");
+  REQUIRE (anchor != nullptr);
+  bool clipped_window = false;
+  for (const auto &blob : anchor->content)
+    {
+      const std::string s (blob.begin (), blob.end ());
+      if (s.find ("opens at nine") != std::string::npos && s.size () <= 480)
+        clipped_window = s.rfind ("Sure.", 0) == 0; // head kept too
+    }
+  REQUIRE (clipped_window);
+
+  // Ingest-time hydration skips the windowing scan and keeps the head.
+  // Short turns on the same topic fill the anchor slots ahead of the long
+  // reply, so the reply comes back attached (clipped) to its question.
+  for (int i = 0; i < 12; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt ("Orchid conservatory tickets note "
+                                    + std::to_string (i) + ".",
+                                "notes/" + std::to_string (i) + "/0", ts,
+                                cortext::Retention::Durable);
+    }
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  const auto ingest = ctx->ProcessTextAt (
+      "Can you book tickets for the orchid conservatory?", "chat/other/1", ts,
+      cortext::Retention::Durable);
+  std::size_t head_clips = 0, window_clips = 0;
+  for (const auto &m : ingest.retrieved_memory)
+    for (const auto &blob : m.content)
+      {
+        const std::string s (blob.begin (), blob.end ());
+        if (s.rfind ("Sure.", 0) != 0 || s.size () > 600) // clipped only
+          continue;
+        if (s.find ("opens at nine") == std::string::npos)
+          ++head_clips;
+        else
+          ++window_clips;
+      }
+  REQUIRE (head_clips >= 1);
+  REQUIRE (window_clips == 0);
+}
+
+namespace
+{
+
+// Evidence charge of a packet (Cortext::EvidenceBudget): text by its bytes,
+// other media as Cortext::kMediaEvidenceBytes each.
+std::size_t
+EvidenceCharge (const cortext::Cortext::Context::Memory &m)
+{
+  std::size_t bytes = 0;
+  for (std::size_t i = 0; i < m.content.size (); ++i)
+    {
+      const std::string mime = i < m.content_mimetypes.size ()
+                                   ? m.content_mimetypes[i]
+                                   : m.mimetype;
+      const bool text = mime.empty ()
+                            ? m.modality.empty () || m.modality == "text"
+                            : mime.rfind ("text/", 0) == 0;
+      bytes += text ? m.content[i].size ()
+                    : cortext::Cortext::kMediaEvidenceBytes;
+    }
+  return bytes;
+}
+
+std::size_t
+EvidenceCharge (const cortext::Cortext::Context &packet)
+{
+  std::size_t bytes = 0;
+  for (const auto &m : packet.standing_memory)
+    bytes += EvidenceCharge (m);
+  for (const auto &m : packet.retrieved_memory)
+    bytes += EvidenceCharge (m);
+  return bytes;
+}
+
+std::string
+JoinedContent (const cortext::Cortext::Context::Memory &m)
+{
+  std::string s;
+  for (const auto &blob : m.content)
+    s.append (blob.begin (), blob.end ());
+  return s;
+}
+
+const std::vector<std::string> kUnitTopics = {
+  "My sourdough starter needs feeding twice a day with rye flour. ",
+  "The quarterly tax filing for the bakery is due on the fifteenth. ",
+  "Our cat Miso hates the vacuum and hides under the porch. ",
+  "The marathon training plan has a long run every Sunday morning. ",
+  "The bathroom tiles are cracked and the plumber comes on Tuesday. ",
+  "The garden needs tomato cages before the heat wave in July. ",
+};
+
+// Natural units of long turns on different subjects (the engine groups
+// them), then short unrelated turns; returns the next timestamp.
+std::uint64_t
+AddGroupedUnits (cortext::Cortext &ctx, cortext::Store &store)
+{
+  std::uint64_t ts = 1000;
+  for (const auto &topic : kUnitTopics)
+    {
+      std::string turn;
+      while (turn.size () < 1600)
+        turn += topic;
+      (void)ctx.ProcessTextAt (turn, "chat/unit", ts,
+                               cortext::Retention::Natural);
+      ts += 60000;
+    }
+  ctx.Flush ();
+  const auto units = store.Execute (
+      "SELECT n_signals FROM memories WHERE kind = 'LONG_TERM' "
+      "AND n_signals >= 2");
+  REQUIRE (!units.empty ());
+  return ts;
+}
+
+const cortext::Cortext::Context::Memory *
+MemoryWith (const std::vector<cortext::Cortext::Context::Memory> &ms,
+            const std::string &needle)
+{
+  for (const auto &m : ms)
+    if (JoinedContent (m).find (needle) != std::string::npos)
+      return &m;
+  return nullptr;
+}
+
+// The memory's own content: its largest blob (attached neighbours are
+// clipped to a few hundred bytes).
+std::string
+OwnBlob (const cortext::Cortext::Context::Memory &m)
+{
+  std::string best;
+  for (const auto &blob : m.content)
+    if (blob.size () > best.size ())
+      best.assign (blob.begin (), blob.end ());
+  return best;
+}
+
+} // namespace
+
+TEST_CASE ("Without an evidence budget a recalled grouped memory comes back whole",
+           "[cortext][retrieval][retention][focus][evidence][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+  const std::uint64_t ts = AddGroupedUnits (*ctx, *store);
+
+  const std::string query
+      = "When is the marathon long run in my training plan?";
+  const auto packet = ctx->ProcessTextAt (query, "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral);
+  const auto *recalled = MemoryWith (packet.retrieved_memory,
+                                     "marathon training plan");
+  REQUIRE (recalled != nullptr);
+  // Ingest-time hydration has never trimmed: the query returns the same
+  // stored content.
+  const auto ingest = ctx->ProcessTextAt (query, "chat/other", ts + 2000,
+                                          cortext::Retention::Durable);
+  const auto *whole = MemoryWith (ingest.retrieved_memory,
+                                  "marathon training plan");
+  REQUIRE (whole != nullptr);
+  REQUIRE (whole->id == recalled->id);
+  REQUIRE (OwnBlob (*recalled).size () > 3072);
+  REQUIRE (OwnBlob (*recalled) == OwnBlob (*whole));
+  REQUIRE (packet.output.operation_ms.count ("Cortext.evidence_bytes") == 0);
+}
+
+TEST_CASE ("An evidence budget keeps more memories at their best members",
+           "[cortext][retrieval][retention][focus][evidence][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+  std::uint64_t ts = AddGroupedUnits (*ctx, *store);
+  for (int i = 0; i < 12; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt ("Running log " + std::to_string (i)
+                                    + ": an easy five miles before work.",
+                                "chat/run/" + std::to_string (i), ts,
+                                cortext::Retention::Durable);
+    }
+
+  const std::string query
+      = "When is the marathon long run in my training plan?";
+  const auto whole = ctx->ProcessTextAt (query, "query/public", ts + 1000,
+                                         cortext::Retention::Ephemeral);
+  const std::size_t whole_bytes = EvidenceCharge (whole);
+  REQUIRE (whole_bytes > 6000);
+  for (const std::size_t budget :
+       { std::size_t{ 300 }, std::size_t{ 2000 }, std::size_t{ 6000 },
+         whole_bytes - 1, whole_bytes, whole_bytes + 4096 })
+    {
+      CAPTURE (budget);
+      const auto packet
+          = ctx->ProcessTextAt (query, "query/public", ts + 1000,
+                                cortext::Retention::Ephemeral, budget);
+      REQUIRE (EvidenceCharge (packet) <= budget);
+      REQUIRE (packet.output.operation_ms.at ("Cortext.evidence_bytes")
+               == static_cast<double> (EvidenceCharge (packet)));
+      // Kept memories stay in rank order.
+      std::size_t at = 0;
+      for (const auto &m : packet.retrieved_memory)
+        {
+          while (at < whole.retrieved_memory.size ()
+                 && whole.retrieved_memory[at].id != m.id)
+            ++at;
+          REQUIRE (at < whole.retrieved_memory.size ());
+        }
+      if (budget >= whole_bytes)
+        {
+          REQUIRE (packet.retrieved_memory.size ()
+                   == whole.retrieved_memory.size ());
+          for (std::size_t i = 0; i < packet.retrieved_memory.size (); ++i)
+            REQUIRE (packet.retrieved_memory[i].content
+                     == whole.retrieved_memory[i].content);
+        }
+    }
+
+  // At 6,000 bytes the grouped memory keeps the members the query is about,
+  // and the packet holds more memories than whole ones would fit.
+  const auto packet = ctx->ProcessTextAt (query, "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral,
+                                          std::size_t{ 6000 });
+  const auto *focused = MemoryWith (packet.retrieved_memory,
+                                    "marathon training plan");
+  REQUIRE (focused != nullptr);
+  const auto *unit = MemoryWith (whole.retrieved_memory,
+                                 "marathon training plan");
+  REQUIRE (unit != nullptr);
+  REQUIRE (OwnBlob (*focused).size () < OwnBlob (*unit).size ());
+  std::size_t whole_fit = 0, used = 0;
+  for (const auto &m : whole.retrieved_memory)
+    {
+      used += EvidenceCharge (m);
+      if (used > 6000)
+        break;
+      ++whole_fit;
+    }
+  REQUIRE (packet.retrieved_memory.size () > whole_fit);
+  REQUIRE (packet.output.operation_ms.at ("Cortext.evidence_memories_trimmed")
+           >= 1.0);
+}
+
+TEST_CASE ("An evidence budget counts the standing block",
+           "[aist][cortext][retrieval][standing][evidence]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  std::uint64_t ts = 1000;
+  // Five directives of about 450 bytes.
+  for (int i = 0; i < 5; ++i)
+    {
+      std::string text = "Always mention the library version number "
+                         + std::to_string (i) + " when I ask about it";
+      while (text.size () < 440)
+        text += " and the release date";
+      text += ".";
+      REQUIRE (ctx->ProcessTextAt (text, "chat/rules/" + std::to_string (i),
+                                   ts, cortext::Retention::Durable)
+                   .output.stored_memory_id.has_value ());
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+    }
+  const auto standing_bytes = [] (const cortext::Cortext::Context &packet) {
+    std::size_t bytes = 0;
+    for (const auto &memory : packet.standing_memory)
+      bytes += EvidenceCharge (memory);
+    return bytes;
+  };
+  const std::string query = "Which library version do we use?";
+  const auto unbudgeted = ctx->ProcessTextAt (
+      query, "query/public", ts + 1000, cortext::Retention::Ephemeral);
+  REQUIRE (unbudgeted.standing_memory.size () == 4);
+  for (const std::size_t budget :
+       { std::size_t{ 100 }, std::size_t{ 1000 }, std::size_t{ 1500 },
+         std::size_t{ 4000 } })
+    {
+      CAPTURE (budget);
+      const auto packet = ctx->ProcessTextAt (
+          query, "query/public", ts + 1000, cortext::Retention::Ephemeral,
+          budget);
+      REQUIRE (standing_bytes (packet) <= std::min<std::size_t> (budget, 2048));
+      REQUIRE (EvidenceCharge (packet) <= budget);
+      REQUIRE (packet.standing_memory.size ()
+               == std::min<std::size_t> (4, budget / 450));
+    }
+}
+
+TEST_CASE ("An evidence budget keeps the best member of each modality",
+           "[cortext][retrieval][retention][focus][evidence][media][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_image_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto clock = std::make_shared<cortext::FixedClock> (1000);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  REQUIRE (ctx != nullptr);
+  // One unit: four long text turns and a photo, as peers.
+  std::uint64_t ts = 1000;
+  for (std::size_t t = 0; t < 4; ++t)
+    {
+      std::string turn;
+      while (turn.size () < 1600)
+        turn += kUnitTopics[t + 1];
+      clock->SetNowMillis (ts);
+      (void)ctx->ProcessTextAt (turn, "chat/unit", ts,
+                                cortext::Retention::Natural);
+      ts += 60000;
+    }
+  std::vector<std::uint8_t> pixels (8 * 8 * 3, 90);
+  cortext::Cortext::Media photo;
+  photo.data = kFakeJpeg.data ();
+  photo.size = kFakeJpeg.size ();
+  photo.mimetype = "image/jpeg";
+  clock->SetNowMillis (ts);
+  const auto commit = ctx->ProcessImage (pixels.data (), 8, 8, 3, "chat/unit",
+                                         photo, cortext::Retention::Durable);
+  REQUIRE (commit.output.stored_memory_id.has_value ());
+  ctx->Flush ();
+  const long long unit = *commit.output.stored_memory_id;
+  const auto members = store->Execute (
+      "SELECT COUNT(*) AS n FROM signals WHERE memory_id = ?", { unit });
+  REQUIRE (AnyToLongLong (members[0].at ("n")) == 5);
+
+  const std::string query
+      = "When is the marathon long run in my training plan?";
+  clock->SetNowMillis (ts + 1000);
+  const auto whole = ctx->ProcessTextAt (query, "query/public", ts + 1000,
+                                         cortext::Retention::Ephemeral);
+  const auto *whole_unit = MemoryWith (whole.retrieved_memory,
+                                       "marathon training plan");
+  REQUIRE (whole_unit != nullptr);
+  REQUIRE (whole_unit->id == unit);
+  const auto packet = ctx->ProcessTextAt (query, "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral,
+                                          std::size_t{ 2600 });
+  REQUIRE (EvidenceCharge (packet) <= 2600);
+  const auto *focused = MemoryWith (packet.retrieved_memory,
+                                    "marathon training plan");
+  REQUIRE (focused != nullptr);
+  REQUIRE (focused->id == unit);
+  // The best text member and the photo (the best, and only, image member).
+  const auto mimes = ContentMimes (*focused);
+  REQUIRE (std::count (mimes.begin (), mimes.end (), "image/jpeg") == 1);
+  const std::string text = JoinedContent (*focused);
+  for (std::size_t t = 0; t < 4; ++t)
+    if (t + 1 != 3)
+      REQUIRE (text.find (kUnitTopics[t + 1]) == std::string::npos);
+}
+
+TEST_CASE ("A query finds a grouped memory by its best member",
+           "[cortext][retrieval][retention][focus][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto ctx = cortext::Cortext::Create (cfg, store);
+  REQUIRE (ctx != nullptr);
+  std::uint64_t ts = 1000;
+  // One grouped memory: the queried member among four unrelated ones, so
+  // its pooled vector sits far from the query.
+  const std::vector<std::string> topics = {
+    "My sourdough starter needs feeding twice a day with rye flour. ",
+    "The quarterly tax filing for the bakery is due on the fifteenth. ",
+    "The orchid conservatory renewal costs ninety dollars a year. ",
+    "Our cat Miso hates the vacuum and hides under the porch. ",
+    "The bathroom tiles are cracked and the plumber comes on Tuesday. ",
+  };
+  for (const auto &topic : topics)
+    {
+      std::string turn;
+      while (turn.size () < 600)
+        turn += topic;
+      (void)ctx->ProcessTextAt (turn, "chat/unit", ts,
+                                cortext::Retention::Natural);
+      ts += 60000;
+    }
+  ctx->Flush ();
+  // Single turns near the query's subject fill the anchor slots.
+  for (int i = 0; i < 40; ++i)
+    {
+      ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+      (void)ctx->ProcessTextAt (
+          "Greenhouse visit " + std::to_string (i)
+              + ": the botanical garden has ferns, cacti and a koi pond.",
+          "chat/garden/" + std::to_string (i), ts,
+          cortext::Retention::Durable);
+    }
+  const auto packet = ctx->ProcessTextAt (
+      "What do I pay annually for the flower greenhouse pass?",
+      "query/public", ts + 1000, cortext::Retention::Ephemeral);
+  bool found = false;
+  for (const auto &m : packet.retrieved_memory)
+    for (const auto &blob : m.content)
+      found = found
+              || std::string (blob.begin (), blob.end ())
+                         .find ("orchid conservatory renewal")
+                     != std::string::npos;
+  REQUIRE (found);
+  REQUIRE (packet.output.operation_ms.at ("GraphRetrieve.member_index_size")
+           >= 5.0);
+}
+
+TEST_CASE ("A reopened store reads its member vectors at open",
+           "[cortext][retrieval][retention][focus][aist]")
+{
+  cortext::testing::ScopedEnvVar disable_natural_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_NATURAL", "1");
+  cortext::testing::ScopedEnvVar disable_pressure_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_PRESSURE", "1");
+  cortext::testing::ScopedEnvVar disable_surprisal_boundary (
+      "CORTEXT_BOUNDARY_DISABLE_SURPRISAL", "1");
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  const std::vector<std::string> topics = {
+    "My sourdough starter needs feeding twice a day with rye flour. ",
+    "The quarterly tax filing for the bakery is due on the fifteenth. ",
+    "The orchid conservatory renewal costs ninety dollars a year. ",
+    "Our cat Miso hates the vacuum and hides under the porch. ",
+    "The bathroom tiles are cracked and the plumber comes on Tuesday. ",
+  };
+  std::uint64_t ts = 1000;
+  {
+    auto ctx = cortext::Cortext::Create (cfg, temp_db.path ());
+    for (const auto &topic : topics)
+      {
+        std::string turn;
+        while (turn.size () < 600)
+          turn += topic;
+        (void)ctx->ProcessTextAt (turn, "chat/unit", ts,
+                                  cortext::Retention::Natural);
+        ts += 60000;
+      }
+    ctx->Flush ();
+  }
+  auto ctx = cortext::Cortext::Create (cfg, temp_db.path ());
+  const auto packet = ctx->ProcessTextAt (
+      "What do I pay annually for the flower greenhouse pass?",
+      "query/public", ts + 1000, cortext::Retention::Ephemeral);
+  REQUIRE (packet.output.operation_ms.at ("GraphRetrieve.member_index_size")
+           >= 5.0);
+  // The warm read at open holds every member; the query reads none itself.
+  REQUIRE (packet.output.operation_ms.at ("GraphRetrieve.member_refresh_rows")
+           == 0.0);
+}
+
+TEST_CASE ("Contiguity attaches adjacent turns of any modality",
+           "[aist][cortext][retrieval][contiguity][media]")
+{
+  ScopedTempDb temp_db;
+  cortext::Cortext::Config cfg;
+  cfg.signal_filter_image_enabled = false;
+  auto store = std::shared_ptr<cortext::Store> (
+      cortext::SQLiteStore::Create (temp_db.path ().c_str ()));
+  auto clock = std::make_shared<cortext::FixedClock> (1000);
+  auto ctx = cortext::Cortext::Create (cfg, store, clock);
+  std::uint64_t ts = 1000;
+  AddUnrelatedTurns (*ctx, clock.get (), ts);
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  clock->SetNowMillis (ts);
+  const auto text_turn = ctx->ProcessTextAt (
+      "Here is the receipt from the hardware store run.", "chat/errand/1", ts,
+      cortext::Retention::Durable);
+  REQUIRE (text_turn.output.stored_memory_id.has_value ());
+  // The next turn is a photo alone.
+  clock->SetNowMillis (ts + 60000);
+  std::vector<std::uint8_t> pixels (8 * 8 * 3, 90);
+  cortext::Cortext::Media photo;
+  photo.data = kFakeJpeg.data ();
+  photo.size = kFakeJpeg.size ();
+  photo.mimetype = "image/jpeg";
+  const auto image_turn = ctx->ProcessImage (
+      pixels.data (), 8, 8, 3, "chat/errand/2", photo,
+      cortext::Retention::Durable);
+  REQUIRE (image_turn.output.stored_memory_id.has_value ());
+  ts += 3ULL * 60ULL * 60ULL * 1000ULL;
+  AddUnrelatedTurns (*ctx, clock.get (), ts);
+  clock->SetNowMillis (ts + 1000);
+
+  const auto packet = ctx->ProcessTextAt ("receipt from the hardware store",
+                                          "query/public", ts + 1000,
+                                          cortext::Retention::Ephemeral);
+  const auto *anchor = FindMemoryWithText (packet.retrieved_memory,
+                                           "receipt from the hardware store");
+  REQUIRE (anchor != nullptr);
+  bool photo_in_packet = false;
+  for (const auto &memory : packet.retrieved_memory)
+    for (const auto &blob : memory.content)
+      photo_in_packet = photo_in_packet
+                        || blob == std::vector<unsigned char> (
+                               kFakeJpeg.begin (), kFakeJpeg.end ());
+  REQUIRE (photo_in_packet);
+  // One anchor for the two turns: the photo rides along with the text turn
+  // (or the text with the photo), whichever ranks first.
+  std::size_t errand_anchors = 0;
+  for (const auto &memory : packet.retrieved_memory)
+    if (memory.id == *image_turn.output.stored_memory_id
+        || memory.id == *text_turn.output.stored_memory_id)
+      ++errand_anchors;
+  REQUIRE (errand_anchors == 1);
 }

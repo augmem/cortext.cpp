@@ -1,18 +1,18 @@
 #include "cortext/operations/memory_storage.hpp"
 #include "constructive_recall_internal.hpp"
+#include "../store/memory_text_index_internal.hpp"
 #include "active_signal_embedding_ring_internal.hpp"
 #include "historical_surface_search_cache_internal.hpp"
 #include "retrieval_trace_state.hpp"
-#include "association_fanout_cache_internal.hpp"
-#include "emotional_metadata_cache_internal.hpp"
 #include "signal_record_rollback_internal.hpp"
+#include "standing_memory_internal.hpp"
 #include "cortext/core/algorithms.hpp"
 #include "cortext/core/knobs.hpp"
+#include "cortext/internal/text_payload.hpp"
 #include "cortext/core/utils.hpp"
 #include "cortext/processor/accumulator_state.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/signal.hpp"
-#include "cortext/core/sparse.hpp"
 #include "cortext/store/object_store.hpp"
 #include "cortext/store/schema_helpers.hpp"
 #include "cortext/store/store.hpp"
@@ -47,33 +47,23 @@ ElapsedMillis (SteadyClock::time_point start)
       .count ();
 }
 
-/// @brief Determine primary modality from signal records (majority vote)
+/// @brief A memory's modality: the one its signals share, or "mixed" when
+/// signals of different modalities were stored together as peers.
 std::string
-GetPrimaryModality (const std::vector<SignalRecord> &signals,
-                    const std::string &fallback_modality)
+GetMemoryModality (const std::vector<SignalRecord> &signals,
+                   const std::string &fallback_modality)
 {
   if (signals.empty ())
     {
       return fallback_modality;
     }
-
-  std::unordered_map<std::string, int> counts;
-  for (const auto &sig : signals)
-    {
-      counts[sig.modality]++;
-    }
-
-  std::string primary = signals[0].modality;
-  int max_count = 0;
-  for (const auto &kv : counts)
-    {
-      if (kv.second > max_count)
-        {
-          max_count = kv.second;
-          primary = kv.first;
-        }
-    }
-  return primary;
+  const std::string &first = signals[0].modality;
+  const bool uniform
+      = std::all_of (signals.begin (), signals.end (),
+                     [&first] (const SignalRecord &sig) {
+                       return sig.modality == first;
+                     });
+  return uniform ? first : std::string ("mixed");
 }
 
 /// @brief Serialize 6d emotion/mood vector to blob
@@ -138,7 +128,7 @@ ToFloatVector (const Eigen::VectorXf &v)
 struct BorrowedSupersessionCandidate
 {
   long long memory_id = 0;
-  const Eigen::VectorXf *embedding = nullptr;
+  const internal::SharedEmbedding *embedding = nullptr;
 };
 
 struct CurrentSupersessionSearchProof
@@ -237,7 +227,7 @@ HistoricalCandidatePopulationCovered (
           || entry.embedding.size () != query_embedding.size ())
         return std::nullopt;
       ranked.push_back (
-          { index, (entry.embedding - query_embedding).squaredNorm () });
+          { index, (entry.embedding.View () - query_embedding).squaredNorm () });
     }
   auto by_distance = [&state] (
                          const historical_surface_search_cache_internal::RankedEntry &a,
@@ -328,7 +318,7 @@ HistoricalCandidatePopulationCoveredByCurrentProof (
       if (base.embedding.size () != query_embedding.size ())
         return false;
       const float base_distance
-          = (base.embedding - query_embedding).squaredNorm ();
+          = (base.embedding.View () - query_embedding).squaredNorm ();
       const bool base_before_cutoff = base_order_less (
           base_distance, reference->memory_id, proof.cutoff_distance,
           proof.cutoff_memory_id);
@@ -375,6 +365,71 @@ HistoricalCandidatePopulationCoveredByCurrentProof (
   return true;
 }
 
+// Exact top-k over the historical embeddings of population mismatches only.
+// Work is O(|mismatches|), independent of the stored population. Returns
+// nullopt when the per-memory historical index is ambiguous, so the caller
+// falls back to the SQL search.
+std::optional<std::vector<BorrowedSupersessionCandidate>>
+LoadHistoricalMismatchRows (
+    const historical_surface_search_cache_internal::State &state,
+    const Eigen::VectorXf &query_embedding, long long memory_id,
+    long long end_ts, int candidate_limit,
+    const std::unordered_set<long long> &seen_memory_ids,
+    std::size_t *rows_visited)
+{
+  if (state.supersession_population_ambiguous)
+    return std::nullopt;
+  struct RankedMismatch
+  {
+    float distance = 0.0f;
+    long long memory_id = 0;
+    const internal::SharedEmbedding *embedding = nullptr;
+  };
+  std::vector<RankedMismatch> ranked;
+  for (const long long mismatch_id : state.supersession_population_mismatches)
+    {
+      if (mismatch_id == memory_id || seen_memory_ids.count (mismatch_id) != 0)
+        continue;
+      const auto base_it = state.supersession_entry_by_memory.find (
+          mismatch_id);
+      // Current-only memories are searched through the current route.
+      if (base_it == state.supersession_entry_by_memory.end ())
+        continue;
+      if (base_it->second >= state.entries.size ())
+        return std::nullopt;
+      const auto &base = state.entries[base_it->second];
+      if (base.embedding.size () != query_embedding.size ())
+        return std::nullopt;
+      const auto *reference = historical_surface_search_cache_internal::
+          FindSupersessionMemoryReference (base, mismatch_id);
+      if (!reference)
+        return std::nullopt;
+      if (reference->start_ts >= end_ts)
+        continue;
+      if (rows_visited)
+        ++*rows_visited;
+      ranked.push_back ({ (base.embedding.View () - query_embedding).squaredNorm (),
+                          mismatch_id, &base.embedding });
+    }
+  auto by_distance = [] (const RankedMismatch &a, const RankedMismatch &b) {
+    if (a.distance != b.distance)
+      return a.distance < b.distance;
+    return a.memory_id < b.memory_id;
+  };
+  if (static_cast<int> (ranked.size ()) > candidate_limit)
+    {
+      std::nth_element (ranked.begin (), ranked.begin () + candidate_limit,
+                        ranked.end (), by_distance);
+      ranked.resize (static_cast<std::size_t> (candidate_limit));
+    }
+  std::sort (ranked.begin (), ranked.end (), by_distance);
+  std::vector<BorrowedSupersessionCandidate> rows;
+  rows.reserve (ranked.size ());
+  for (const auto &candidate : ranked)
+    rows.push_back ({ candidate.memory_id, candidate.embedding });
+  return rows;
+}
+
 std::optional<std::vector<BorrowedSupersessionCandidate>>
 LoadHistoricalSupersessionRowsFromCache (
     const std::shared_ptr<
@@ -392,18 +447,28 @@ LoadHistoricalSupersessionRowsFromCache (
   const std::size_t embedding_count = state ? state->entries.size () : 0;
   const int embedding_dim = static_cast<int> (query_embedding.size ());
   if (!state || embedding_dim <= 0 || candidate_limit <= 0
-      || state->embedding_dim != embedding_dim
-      || state->search.size ()
-             != embedding_count * static_cast<std::size_t> (embedding_dim))
+      || state->embedding_dim != embedding_dim)
     {
       return std::nullopt;
     }
 
-  // A bounded sparse result is a candidate set, not an exact coverage proof.
-  // Keep the historical proof path active so an omitted current candidate can
-  // still be recovered before supersession edges are written.
-  if (!current_search_proof.bounded_current_surface
-      && historical_surface_search_cache_internal::
+  // Once the current surface is sparse-routed, the route is the bounded
+  // candidate index for every memory whose historical embedding equals its
+  // current one. Only the population mismatches (memories whose historical
+  // embedding differs from, or has no, current surface row) can contribute a
+  // candidate the route cannot see, so search those exactly instead of
+  // scanning the whole historical population on every store.
+  if (current_search_proof.bounded_current_surface)
+    {
+      auto rows = LoadHistoricalMismatchRows (
+          *state, query_embedding, memory_id, end_ts, candidate_limit,
+          seen_memory_ids, rows_visited);
+      if (rows && coverage_proven)
+        *coverage_proven = true;
+      return rows;
+    }
+
+  if (historical_surface_search_cache_internal::
           CurrentPopulationCoversHistorical (*state, memory_id))
     {
       if (coverage_proven)
@@ -433,20 +498,8 @@ LoadHistoricalSupersessionRowsFromCache (
       return std::vector<BorrowedSupersessionCandidate>{};
     }
 
-  using RowMajorMatrix
-      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-  const Eigen::Map<const RowMajorMatrix> matrix (
-      state->search.data (), static_cast<Eigen::Index> (embedding_count),
-      embedding_dim);
   if (rows_visited)
     *rows_visited += embedding_count;
-  auto &distance_scratch = state->distance_scratch;
-  distance_scratch.resize (embedding_count);
-  Eigen::Map<Eigen::VectorXf> distances (
-      distance_scratch.data (), static_cast<Eigen::Index> (embedding_count));
-  distances = (matrix.rowwise () - query_embedding.transpose ())
-                  .rowwise ()
-                  .squaredNorm ();
   auto &ranked = state->ranked_scratch;
   ranked.clear ();
   ranked.reserve (embedding_count);
@@ -458,7 +511,8 @@ LoadHistoricalSupersessionRowsFromCache (
           return std::nullopt;
         }
       ranked.push_back (
-          { index, distances[static_cast<Eigen::Index> (index)] });
+          { index, historical_surface_search_cache_internal::RowSquaredDistance (
+                       entry.embedding, query_embedding) });
     }
   auto by_distance = [&state] (
                          const historical_surface_search_cache_internal::RankedEntry &a,
@@ -513,9 +567,7 @@ LoadCurrentSupersessionRowsFromCache (
   const std::size_t entry_count = state ? state->current_entries.size () : 0;
   const int embedding_dim = static_cast<int> (query_embedding.size ());
   if (!state || embedding_dim <= 0 || candidate_limit <= 0
-      || state->embedding_dim != embedding_dim
-      || state->current_search.size ()
-             != entry_count * static_cast<std::size_t> (embedding_dim))
+      || state->embedding_dim != embedding_dim)
     {
       return std::nullopt;
     }
@@ -563,11 +615,6 @@ LoadCurrentSupersessionRowsFromCache (
           proof->sparse_route_dirty_rows = *dirty_rows;
         }
     }
-  using RowMajorMatrix
-      = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-  const Eigen::Map<const RowMajorMatrix> matrix (
-      state->current_search.data (), static_cast<Eigen::Index> (entry_count),
-      embedding_dim);
   const std::size_t comparison_count
       = use_sparse_route ? candidate_indices.size () : entry_count;
   if (rows_visited)
@@ -576,11 +623,10 @@ LoadCurrentSupersessionRowsFromCache (
   if (!use_sparse_route)
     {
       distance_scratch.resize (entry_count);
-      Eigen::Map<Eigen::VectorXf> distances (
-          distance_scratch.data (), static_cast<Eigen::Index> (entry_count));
-      distances = (matrix.rowwise () - query_embedding.transpose ())
-                      .rowwise ()
-                      .squaredNorm ();
+      for (std::size_t index = 0; index < entry_count; ++index)
+        distance_scratch[index]
+            = historical_surface_search_cache_internal::RowSquaredDistance (
+                state->current_entries[index].embedding, query_embedding);
     }
   auto &ranked = state->ranked_scratch;
   ranked.clear ();
@@ -611,7 +657,7 @@ LoadCurrentSupersessionRowsFromCache (
       ranked.push_back ({
         index,
         use_sparse_route
-            ? (entry.embedding - query_embedding).squaredNorm ()
+            ? (entry.embedding.View () - query_embedding).squaredNorm ()
             : distance_scratch[static_cast<std::size_t> (index)]
       });
     }
@@ -926,17 +972,21 @@ WriteSupersessionEdges (OperationContext &context, Transaction &tx,
         {
           continue;
         }
-      const Eigen::VectorXf *target_embedding = row.Embedding ();
-      if (target_embedding == nullptr
-          || target_embedding->size () != embedding_dim)
+      if (!row.HasEmbedding () || row.EmbeddingSize () != embedding_dim)
         {
           continue;
         }
       ++decoded_count;
       const double similarity
-          = historical_surface_search_cache_internal::
-              SupersessionCosineSimilarity (embedding_to_store, query_norm,
-                                             *target_embedding);
+          = row.borrowed_embedding != nullptr
+                ? historical_surface_search_cache_internal::
+                      SupersessionCosineSimilarity (
+                          embedding_to_store, query_norm,
+                          row.borrowed_embedding->View ())
+                : historical_surface_search_cache_internal::
+                      SupersessionCosineSimilarity (embedding_to_store,
+                                                    query_norm,
+                                                    *row.owned_embedding);
       best_similarity = std::max (best_similarity, similarity);
       if (similarity < similarity_threshold)
         {
@@ -1128,9 +1178,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const std::vector<char> emotion_blob = SerializeEmotionVector (emotion_probs);
       const std::vector<char> mood_blob = SerializeEmotionVector (mood_vec);
 
-      // 3. Determine primary modality from tracked signals
-      const std::string primary_modality
-          = GetPrimaryModality (acc.signals, signal.modality);
+      // 3. Determine the memory's modality from tracked signals
+      const std::string memory_modality
+          = GetMemoryModality (acc.signals, signal.modality);
 
       const std::string origin = SourceOriginFor ();
       const double source_reliability
@@ -1181,7 +1231,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const bool text_mode = std::all_of (
           ordered_signals.begin (), ordered_signals.end (),
           [] (const SignalRecord *rec) {
-            return rec && rec->modality == "text";
+            return rec && rec->modality == "text"
+                   && ::cortext::internal::IsTextPayload (rec->modality, rec->mime);
           });
       const bool audio_mode = std::all_of (
           ordered_signals.begin (), ordered_signals.end (),
@@ -1288,11 +1339,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           ctx_vec = EigenToFloatVec (acc.c_t);
         }
 
-      const auto initial_trace = core::MemoryInitialTracePolicy (
-          cfg.focus, cfg.sensitivity, cfg.stability);
       const double initial_strength = core::MemoryInitialStrengthPolicy (
-          cfg.focus, cfg.sensitivity, cfg.stability);
-      const double initial_stability = core::MemoryInitialStabilityPolicy (
           cfg.focus, cfg.sensitivity, cfg.stability);
       const auto insert_memory_start = SteadyClock::now ();
       savepoint->Execute (
@@ -1301,21 +1348,18 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score, "
           "  drift_mag, emotion, ambient_mood, episode_id, "
           "  blob_id, created_at, context, source_origin, source_reliability, "
-          "  strength, stability, "
-          "  trace_fast, trace_med, trace_slow, trace_ultra"
-          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "  strength"
+          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
-            static_cast<long long> (n_signals), primary_modality,
+            static_cast<long long> (n_signals), memory_modality,
             s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score,
             drift_mag, emotion_blob, mood_blob, episode_id_any,
             content_blob_id.empty () ? std::any () : std::any (content_blob_id),
             static_cast<long long> (end_ts),
             ctx_vec.empty () ? std::any () : std::any (ctx_vec),
             origin, source_reliability,
-            initial_strength, initial_stability,
-            initial_trace.fast, initial_trace.medium, initial_trace.slow,
-            initial_trace.ultra });
+            initial_strength });
       context.AddOperationTiming ("MemoryStorage.insert_memory",
                                   ElapsedMillis (insert_memory_start));
 
@@ -1329,15 +1373,14 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           = mem_id_rows.empty ()
                 ? 0
                 : AnyToLongLong (mem_id_rows[0].at ("id")).value_or (0);
-      emotional_metadata_cache_internal::Upsert (
-          p_ctx,
-          { memory_id, embedding_id, static_cast<long long> (end_ts), false,
-            0.0, s_arousal_avg, 0.0, 0, 0.0 });
+      // One arena row serves the historical, current, and processor
+      // retrieval surfaces for this memory.
+      const internal::SharedEmbedding stored_embedding (embedding_to_store);
       std::vector<historical_surface_search_cache_internal::Entry>
           inserted_search_entries;
       inserted_search_entries.push_back (
           { embedding_id, memory_id, static_cast<long long> (start_ts),
-            "LONG_TERM", signal.source_id, embedding_to_store });
+            "LONG_TERM", signal.source_id, stored_embedding });
 
       // 10. Insert SIGNALS rows (one per tracked signal)
       std::optional<long long> stored_signal_id;
@@ -1345,6 +1388,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       double signal_embedding_insert_ms = 0.0;
       double signal_row_insert_ms = 0.0;
       double signal_id_select_ms = 0.0;
+      double signal_vector_insert_ms = 0.0;
       const int active_signal_embedding_capacity
           = active_signal_embedding_ring_internal::Capacity (
               cfg.focus, cfg.sensitivity, cfg.stability);
@@ -1393,10 +1437,57 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                   signal_embedding_insert_ms
                       += ElapsedMillis (signal_embedding_start);
                   stored_signal_id = *signal_id;
+                  if (!sig_rec.blob_id.empty ()
+                      && sig_rec.embedding.size () > 0)
+                    {
+                      const auto vector_start = SteadyClock::now ();
+                      savepoint->Execute (
+                          "INSERT OR IGNORE INTO memory_signal_vectors "
+                          "(blob_id, modality, embedding) VALUES (?, ?, ?)",
+                          { sig_rec.blob_id, sig_rec.modality,
+                            EigenToFloatVec (sig_rec.embedding) });
+                      if (!sig_rec.li_codes.empty ())
+                        {
+                          savepoint->Execute (
+                              "INSERT OR IGNORE INTO memory_signal_li_codes "
+                              "(blob_id, codes) VALUES (?, ?)",
+                              { sig_rec.blob_id, sig_rec.li_codes });
+                        }
+                      signal_vector_insert_ms += ElapsedMillis (vector_start);
+                    }
                   if (sig_rec.timestamp == signal.timestamp
                       && sig_rec.modality == signal.modality)
                     {
                       current_signal_id = *signal_id;
+                    }
+                  // Standing set: a stored signal whose text states a
+                  // lasting directive joins the bounded set queries rank
+                  // on their own; a full set drops its oldest member.
+                  if (::cortext::internal::IsTextPayload (sig_rec.modality, sig_rec.mime)
+                      && !sig_rec.payload.empty ())
+                    {
+                      namespace standing = standing_memory_internal;
+                      const std::string_view text (
+                          reinterpret_cast<const char *> (
+                              sig_rec.payload.data ()),
+                          sig_rec.payload.size ());
+                      if (standing::IsStandingDirective (text))
+                        {
+                          savepoint->Execute (
+                              "INSERT OR IGNORE INTO standing_signals "
+                              "(signal_id, start_ts, terms) VALUES (?, ?, ?)",
+                              { *signal_id,
+                                static_cast<long long> (sig_rec.timestamp),
+                                standing::TermsOf (text) });
+                          savepoint->Execute (
+                              "DELETE FROM standing_signals WHERE signal_id "
+                              "IN (SELECT signal_id FROM standing_signals "
+                              "ORDER BY start_ts DESC, signal_id DESC "
+                              "LIMIT -1 OFFSET ?)",
+                              { static_cast<long long> (standing::kCapacity) });
+                          context.AddOperationTiming (
+                              "MemoryStorage.standing_joined", 1.0);
+                        }
                     }
                 }
             }
@@ -1407,6 +1498,8 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
                                   signal_row_insert_ms);
       context.AddOperationTiming ("MemoryStorage.select_signal_ids",
                                   signal_id_select_ms);
+      context.AddOperationTiming ("MemoryStorage.insert_signal_vectors",
+                                  signal_vector_insert_ms);
 
       for (auto &entry : inserted_search_entries)
         {
@@ -1427,9 +1520,56 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           const auto reconstruction_start = SteadyClock::now ();
           constructive_recall::AppendReconstructionWithEmbeddingId (
               *savepoint, memory_id, embedding_id, content_blob_id,
-              static_cast<long long> (end_ts), 0.0, "initial", 1.0, 1.0);
+              static_cast<long long> (end_ts), 0.0, "initial", 1.0, 1.0, {},
+              &context.GetProcessorContext ());
           context.AddOperationTiming ("MemoryStorage.initial_reconstruction",
                                       ElapsedMillis (reconstruction_start));
+        }
+
+      // Keyword index (FTS5): the memory's text content, written in this
+      // savepoint so it commits and rolls back with the memory.
+      std::string memory_text;
+      if (!text_mode)
+        {
+          // Text signals of a mixed memory are keyword-indexed too; this is
+          // an extra channel and does not change the memory's modality.
+          for (const auto *rec : ordered_signals)
+            {
+              if (!rec || !::cortext::internal::IsTextPayload (rec->modality, rec->mime)
+                  || rec->payload.empty ())
+                continue;
+              if (!memory_text.empty ())
+                memory_text.push_back ('\n');
+              memory_text.append (rec->payload.begin (), rec->payload.end ());
+            }
+        }
+      else
+        {
+          if (!content_payload.empty ())
+            memory_text.assign (content_payload.begin (),
+                                 content_payload.end ());
+          else
+            for (const auto *rec : ordered_signals)
+              {
+                if (!rec || rec->payload.empty ())
+                  continue;
+                if (!memory_text.empty ())
+                  memory_text.push_back ('\n');
+                memory_text.append (rec->payload.begin (),
+                                     rec->payload.end ());
+              }
+          if (memory_text.empty () && signal.payload
+              && ::cortext::internal::IsTextPayload (signal.modality, signal.mimetype))
+            memory_text.assign (signal.payload->begin (),
+                                 signal.payload->end ());
+        }
+      if (memory_id > 0 && !memory_text.empty ())
+        {
+          const auto fts_start = SteadyClock::now ();
+          store::memory_text_index_internal::IndexMemoryText (
+              *savepoint, memory_id, memory_text);
+          context.AddOperationTiming ("MemoryStorage.memory_text_fts",
+                                      ElapsedMillis (fts_start));
         }
 
       // Commit external object content before releasing the DB savepoint. If
@@ -1480,87 +1620,26 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           surface_entry.embedding_id = embedding_id;
           surface_entry.created_at = static_cast<long long> (end_ts);
           surface_entry.start_ts = static_cast<long long> (start_ts);
-          surface_entry.event_ts = static_cast<long long> (start_ts);
           surface_entry.kind = "LONG_TERM";
           surface_entry.source_id = signal.source_id;
-          surface_entry.modality = primary_modality;
-          surface_entry.source_reliability = source_reliability;
-          if (acc.c_t.size () > 0)
-            {
-              surface_entry.context_embedding = acc.c_t;
-            }
-          surface_entry.embedding = embedding_to_store;
+          surface_entry.modality = memory_modality;
+          surface_entry.embedding = stored_embedding;
           p_ctx.UpsertRetrievalSurface (std::move (surface_entry));
           retrieval_trace::RecordSurfaceUpsert (
               memory_id, embedding_id, ToFloatVector (embedding_to_store));
-          auto &fanout_cache = p_ctx.association_fanout_cache;
-          if (fanout_cache.valid && !supersession_edges.empty ())
-            {
-              bool incrementally_maintained = true;
-              for (const auto &edge : supersession_edges)
-                {
-                  const auto target_it = p_ctx.retrieval_surface_index.find (
-                      edge.target_memory_id);
-                  if (target_it == p_ctx.retrieval_surface_index.end ()
-                      || target_it->second
-                             >= p_ctx.retrieval_surface_cache.size ())
-                    {
-                      incrementally_maintained = false;
-                      break;
-                    }
-                  const auto &target
-                      = p_ctx.retrieval_surface_cache[target_it->second];
-                  const long long target_embedding_id
-                      = historical_surface_search_cache_internal::
-                          BaseEmbeddingIdForMemory (
-                              p_ctx, edge.target_memory_id,
-                              target.embedding_id);
-                  if (target_embedding_id <= 0)
-                    {
-                      incrementally_maintained = false;
-                      break;
-                    }
-                  association_fanout_cache::UpsertAssociation (
-                      p_ctx, fanout_cache, memory_id, edge.target_memory_id,
-                      embedding_id, target_embedding_id, "supersedes",
-                      edge.weight, static_cast<long long> (end_ts));
-                }
-              if (!incrementally_maintained)
-                fanout_cache.valid = false;
-              else
-                {
-                  const auto sidecar
-                      = execution_cache_sidecar_internal::Ensure (p_ctx);
-                  if (!sidecar->supersession_eligibility.valid)
-                    association_fanout_cache::BuildSupersessionEligibility (
-                        fanout_cache, p_ctx);
-                }
-            }
           if (!constructive_recall::Disabled ()
               && !constructive_recall::CurrentSurfaceWritesDisabled ())
             {
               historical_surface_search_cache_internal::UpsertCurrent (
                   p_ctx,
                   { embedding_id, memory_id, 0, std::string (),
-                    std::string (), embedding_to_store });
+                    std::string (), stored_embedding });
             }
           if (!constructive_recall::Disabled ()
               && constructive_recall::CurrentSurfaceWritesDisabled ())
             {
               historical_surface_search_cache_internal::
                   SetCurrentSurfaceDatabaseCurrent (p_ctx, false);
-            }
-          const int k_key = core::SparseKeySize (
-              context.GetConfig ().focus, context.GetConfig ().sensitivity,
-              context.GetConfig ().stability);
-          const std::string key = core::SparseKey (embedding_to_store, k_key);
-          if (!key.empty ())
-            {
-              signal_record_rollback_internal::
-                  PreserveSparseIndexBeforeInsert (
-                      p_ctx, key, memory_id);
-              p_ctx.index_store[key].push_back (memory_id);
-              p_ctx.index_reverse[memory_id] = key;
             }
           context.AddOperationTiming ("MemoryStorage.retrieval_surface_update",
                                       ElapsedMillis (surface_start));
@@ -1575,7 +1654,7 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           { telemetry::Attribute::Bool ("stored", true),
             telemetry::Attribute::Int64 ("embedding_id", embedding_id),
             telemetry::Attribute::Int64 ("n_signals", n_signals),
-            telemetry::Attribute::String ("primary_modality", primary_modality),
+            telemetry::Attribute::String ("memory_modality", memory_modality),
             telemetry::Attribute::Double ("s_max", s_max),
             telemetry::Attribute::Double ("s_avg", s_avg) });
     }

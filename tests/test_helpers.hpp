@@ -242,25 +242,6 @@ SeedMemoryV2 (Store &store, long long memory_id, long long embedding_id,
   SeedCurrentMemoryEmbeddingV2 (store, memory_id, embedding_id);
 }
 
-/// @brief Seed a memory with extended metadata fields.
-inline void
-SeedMemoryV2Extended (Store &store, long long memory_id, long long embedding_id,
-                      const std::string &source_id, double strength = 1.0,
-                      double redundancy = 0.0, double connectivity = 0.0,
-                      double stability = 1.0, long long start_ts = 0)
-{
-  if (start_ts == 0)
-    start_ts = NowMs ();
-  store.Execute (
-      "INSERT OR REPLACE INTO memories("
-      "memory_id, embedding_id, source_id, kind, start_ts, n_signals, modality, "
-      "s_max, s_avg, strength, redundancy, connectivity, stability, created_at) "
-      "VALUES(?, ?, ?, 'LONG_TERM', ?, 1, 'text', 0.5, 0.5, ?, ?, ?, ?, ?)",
-      { memory_id, embedding_id, source_id, start_ts, strength, redundancy,
-        connectivity, stability, start_ts });
-  SeedCurrentMemoryEmbeddingV2 (store, memory_id, embedding_id);
-}
-
 /// @brief Seed a signal into the v2 signals table with inline metrics.
 /// @param store The store to seed into.
 /// @param signal_id The signal_id (primary key).
@@ -352,27 +333,6 @@ GetNullTransaction ()
 {
   static NullTransaction null_tx;
   return null_tx;
-}
-
-/// @brief Seed a mature label-contrast bank into the processor context.
-///
-/// The optional label-admission paths (floor fill, relation-endpoint
-/// creation) decline until the contrast bank holds kContrastMinBankSize
-/// labels. Fixtures exercising them seed this minimal mature bank; its
-/// embeddings sit on the highest axes so fixture labels (low-index
-/// one-hot by convention) measure mean ~0 against the bank and are never
-/// rejected as generic.
-inline void
-SeedMatureLabelContrastBank (ProcessorContext &p_ctx, int dim = 256,
-                             int count = 4)
-{
-  for (int i = 0; i < count; ++i)
-    {
-      Eigen::VectorXf v = Eigen::VectorXf::Zero (dim);
-      v (dim - 1 - i) = 1.0f;
-      const long long id = 900000 + i;
-      p_ctx.UpsertAssociationCache (id, id, v, false);
-    }
 }
 
 } // namespace cortext::testing
