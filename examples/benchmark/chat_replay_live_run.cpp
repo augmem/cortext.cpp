@@ -159,7 +159,6 @@ SparseRouteParametersJson (const Config &cfg)
       parameters.activation_search_ef_min },
     { "activation_search_effort_step",
       parameters.activation_search_ef_step },
-    { "shadow_cache_capacity", parameters.shadow_node_capacity },
     { "construction_search_node_budget",
       parameters.construction_search_node_budget },
     { "construction_search_effort", parameters.construction_search_ef },
