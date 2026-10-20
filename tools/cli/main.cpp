@@ -51,6 +51,7 @@ struct CliOptions
   bool quiet = false;
   bool durable_recall = false;
   cortext::Cortext::EvidenceBudget evidence_budget;
+  cortext::RetrievalTime retrieval_time;
   std::string command;
   std::vector<std::string> command_args;
 };
@@ -76,6 +77,10 @@ void PrintUsage (std::ostream &out)
       << "  --top N            max retrieved memories to print (default 5)\n"
       << "  --evidence-budget N  fit recall evidence within N bytes\n"
       << "                     (default: whole memories)\n"
+      << "  --reference-ms MS  recall around this time (ms since the Unix\n"
+      << "                     epoch, past or future)\n"
+      << "  --as-of            with --reference-ms, recall only memories\n"
+      << "                     stored by then\n"
       << "  --quiet            suppress per-call gauges\n"
       << "  --durable          store recall queries as durable memories under\n"
       << "                     cli/recall (default: recall is ephemeral and\n"
@@ -271,7 +276,8 @@ cortext::Cortext::Context RecallOnce (cortext::Cortext &engine,
     {
       return engine.ProcessText (query, options.source_id,
                                  cortext::Retention::Ephemeral,
-                                 options.evidence_budget);
+                                 options.evidence_budget,
+                                 options.retrieval_time);
     }
   const std::string source
       = options.source_id_overridden ? options.source_id : "cli/recall";
@@ -431,9 +437,14 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
           options.durable_recall = true;
           continue;
         }
+      if (arg == "--as-of")
+        {
+          options.retrieval_time.as_of = true;
+          continue;
+        }
       if (arg == "--db" || arg == "--source" || arg == "--focus"
           || arg == "--sensitivity" || arg == "--stability" || arg == "--top"
-          || arg == "--evidence-budget")
+          || arg == "--evidence-budget" || arg == "--reference-ms")
         {
           const std::string *value = take_value (arg);
           if (value == nullptr)
@@ -458,6 +469,17 @@ int ParseOptions (int argc, char **argv, CliOptions &options)
                   return 1;
                 }
               options.evidence_budget = static_cast<std::size_t> (bytes);
+            }
+          else if (arg == "--reference-ms")
+            {
+              const long long ms = std::atoll (value->c_str ());
+              if (ms < 0 || (ms == 0 && *value != "0"))
+                {
+                  std::cerr << arg << " expects milliseconds since the epoch\n";
+                  return 1;
+                }
+              options.retrieval_time.reference_ms
+                  = static_cast<std::uint64_t> (ms);
             }
           else if (arg == "--top")
             {
