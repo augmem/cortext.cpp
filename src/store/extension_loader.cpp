@@ -80,7 +80,10 @@ ObjstoreBackendFromEnv ()
   if (backend.empty ())
     {
 #if defined(__EMSCRIPTEN__)
-      return OBJSTORE_BACKEND_AUTO;
+      // The Emscripten filesystem holding the database. AUTO would pick OPFS,
+      // which needs a worker context and an OPFS-capable filesystem this
+      // build does not link, so registration would fail on every open.
+      return OBJSTORE_BACKEND_VFS;
 #else
       // The SQLite backend shares the main database transaction and avoids the
       // file backend's per-message manifest fsync on small text payloads. Large
@@ -234,13 +237,14 @@ TryLoadDynamicExtensions (sqlite3 *db)
 #endif // __EMSCRIPTEN__
 }
 
-void
+int
 RegisterBuiltInExtensionsOnDb (sqlite3 *db)
 {
   if (!db)
-    return;
+    return SQLITE_MISUSE;
 #if defined(CORTEXT_EMBED_VEC)
-  (void)sqlite3_vec_init (db, nullptr, nullptr);
+  if (const int rc = sqlite3_vec_init (db, nullptr, nullptr); rc != SQLITE_OK)
+    return rc;
 #endif
 #if defined(CORTEXT_EMBED_OBJSTORE)
   objstore_config cfg{};
@@ -269,8 +273,10 @@ RegisterBuiltInExtensionsOnDb (sqlite3 *db)
                      + std::to_string (objstore_root_counter.fetch_add (1));
     }
   cfg.storage_root = objects_root.c_str ();
-  (void)objstore_register (db, &cfg);
+  if (const int rc = objstore_register (db, &cfg); rc != SQLITE_OK)
+    return rc;
 #endif
+  return SQLITE_OK;
 }
 
 } // namespace cortext

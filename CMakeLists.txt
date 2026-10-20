@@ -137,6 +137,15 @@ if(BUILD_WASM AND NOT EMSCRIPTEN)
   message(FATAL_ERROR "BUILD_WASM requires the Emscripten toolchain. Use cmake --preset wasm.")
 endif()
 
+# Emscripten disables C++ exception catching by default, so an engine error
+# would escape the C API as a raw exception pointer instead of a NULL/status
+# return with cortext_last_error() set. Native WebAssembly exception handling
+# keeps that contract; every object (dependencies included) must use it.
+if(EMSCRIPTEN)
+  add_compile_options(-fwasm-exceptions)
+  add_link_options(-fwasm-exceptions)
+endif()
+
 include(FetchContent)
 
 if(NOT CORTEXT_AIST_MODEL_QUANT MATCHES "^(q8_0|q5_1|all)$")
@@ -887,6 +896,9 @@ if(EMSCRIPTEN AND BUILD_WASM)
     "lengthBytesUTF8"
     "addFunction"
     "removeFunction"
+    "HEAPU8"
+    "HEAPF32"
+    "ENV"
   )
   list(JOIN _cortext_wasm_runtime_methods "\",\"" _cortext_wasm_runtime_joined)
   set(_cortext_wasm_runtime_json "[\"${_cortext_wasm_runtime_joined}\"]")
@@ -905,6 +917,10 @@ if(EMSCRIPTEN AND BUILD_WASM)
     -sWASM=1
     -sALLOW_MEMORY_GROWTH=1
     -sALLOW_TABLE_GROWTH=1
+    # Emscripten's 64 KiB default stack is smaller than one Eigen GEMM
+    # blocking buffer (EIGEN_STACK_ALLOCATION_LIMIT, 128 KiB) in the
+    # late-interaction reranker; overflowing it corrupts the heap.
+    -sSTACK_SIZE=2097152
     -sFORCE_FILESYSTEM=1
     -sMODULARIZE=1
     -sEXPORT_ES6=1

@@ -34,6 +34,8 @@ void TryLoadDynamicExtensions (sqlite3 *db);
 /// (vec, objstore) on the given connection. Safe to call multiple times;
 /// underlying init functions are idempotent. Required on Apple platforms where
 /// sqlite3_auto_extension() is unavailable.
-void RegisterBuiltInExtensionsOnDb (sqlite3 *db);
+/// @return SQLITE_OK, or the SQLite code of the first extension that failed
+/// to register (the store cannot work without its embedded extensions).
+int RegisterBuiltInExtensionsOnDb (sqlite3 *db);
 
 } // namespace cortext
