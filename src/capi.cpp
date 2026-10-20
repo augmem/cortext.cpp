@@ -976,6 +976,10 @@ memory_to_json (const cortext::Cortext::Context::Memory &memory)
           { "mimetype", i < memory.content_mimetypes.size ()
                             ? memory.content_mimetypes[i]
                             : memory.mimetype },
+          // Stored signal time (ms) of this blob; 0 when unknown.
+          { "timestamp", i < memory.content_timestamps.size ()
+                             ? memory.content_timestamps[i]
+                             : std::uint64_t{ 0 } },
           { "base64", encode_base64 (blob) },
       });
     }
