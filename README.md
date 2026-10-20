@@ -306,6 +306,16 @@ best of each modality always), and more distinct memories are kept trimmed
 before lower-ranked ones are left out. A reader budgeted in tokens converts
 with its tokenizer's rate (8,000 tokens at 4.35 characters per token is 34,800
 bytes of ASCII text).
+
+A query (Ephemeral) call also takes an optional reference time (C++
+`cortext::RetrievalTime{reference_ms, as_of}`, C
+`cortext_process_json_options.has_reference_ms` / `reference_ms` / `as_of`).
+Unset, retrieval is unchanged. Set, the long-term memories nearest that time
+(past or future, by distance to each memory's `[start_ts, end_ts]`) join the
+candidates through a temporal channel fused by reciprocal rank; nothing is
+dropped for being later. With `as_of`, memories that start after the reference
+time are hidden, as are later turns and restatements attached to retrieved
+ones.
 - `should_interrupt`, `interrupt_aborted`, `at_boundary`: realtime behavior.
 - `consolidation_state`: ordered `None`, `Recommended`, or `Required`
   maintenance urgency derived from the current throughput range.

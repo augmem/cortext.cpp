@@ -239,6 +239,15 @@ extern "C"
   /// CORTEXT_MEDIA_EVIDENCE_BYTES. A reader budgeted in tokens converts with
   /// its tokenizer's rate (8,000 tokens at 4.35 characters per token is
   /// 34,800 bytes of ASCII text).
+  ///
+  /// has_reference_ms, as_of and reference_ms are the per-call query
+  /// reference time (cortext::Cortext::RetrievalTime), read only when
+  /// struct_size covers reference_ms. has_reference_ms = 0 (the default)
+  /// leaves retrieval unchanged. Nonzero: reference_ms (ms since the Unix
+  /// epoch, past or future) adds the long-term memories nearest that time as
+  /// retrieval candidates, and nonzero as_of additionally hides memories that
+  /// start after reference_ms. Only CORTEXT_RETENTION_EPHEMERAL calls read
+  /// them.
   typedef struct cortext_process_json_options
   {
     size_t struct_size;
@@ -246,6 +255,9 @@ extern "C"
     int retention; ///< cortext_retention; Natural when field absent/unknown
     int reserved;  ///< Must be zero; distinguishes this layout from v1.1.10.
     size_t evidence_budget_bytes; ///< 0 = unset; read when struct_size covers it
+    int has_reference_ms; ///< nonzero: reference_ms is set
+    int as_of;            ///< nonzero: as-of cutoff at reference_ms
+    uint64_t reference_ms; ///< query reference time, ms since the Unix epoch
   } cortext_process_json_options;
 
 /// @brief Evidence charge of one non-text payload under evidence_budget_bytes.

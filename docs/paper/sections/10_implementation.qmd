@@ -708,6 +708,27 @@ recall rose from 0.41 to 0.67 and judged sufficiency from 0.53 to 0.82, with
 query p95 and ingest time within 2% of the vector-only engine. Ingest-time retrieval stays vector-only;
 lexical seeds there cost per-turn time without improving recall.
 
+A query may carry a reference time $T$ (`Cortext::RetrievalTime`), in the
+past or the future, as signal metadata compared with stored memory times,
+never as text. Unset, retrieval is unchanged (packets byte-identical on the
+LoCoMo clock replay). Set, a temporal seed channel
+(`src/operations/temporal_seed_internal.cpp`) returns the $K = 10$ long-term
+memories nearest $T$ by interval distance: 0 when $T$ falls inside
+$[\text{start}, \text{end}]$, else the distance to the nearer edge. Three
+range scans over partial indexes on long-term `start_ts` and `end_ts`
+(schema migration 55), each limited to $2K + 4$ rows, find them in
+$O(\log N + K)$. The list joins the reciprocal-rank fusion with weight
+$0.5$, $0.5/(60 + r)$, so a memory found only by time ranks after every
+dense seed, while a dense or keyword seed near $T$ rises; the channel adds
+candidates and removes none. Only the query's still-open write unit stays
+excluded. With `as_of`, every seed path and the attached later turns and
+restatements also exclude memories that start after $T$, an as-of view of
+what was stored by then. An oracle probe that sets $T$ to each LoCoMo
+question's earliest gold turn raised evidence hits in the packet from 1767
+to 1783 of 1979 questions (17 gained, 1 lost), with query p50 0.07 to
+0.17 ms higher and p95 within the spread between run orders; it bounds the
+mechanism, not a benchmark score.
+
 Queries rerank the head of the fused candidate pool with a learned
 late-interaction model over the frozen AIST encoder
 (`models/AIST-87M-GGUF/AIST-87M-LI.gguf`, 0.2M parameters,

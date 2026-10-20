@@ -307,6 +307,18 @@ ApplySignalFilterDecision (Cortext::ProcessorOutput &output,
   output.signal_filter_quiet_seconds = decision.quiet_seconds;
 }
 
+// Query reference time travels on the signal as time metadata. Only an
+// Ephemeral (query) signal carries it, so ingest-time retrieval of storing
+// calls is unchanged; as_of without a reference time is ignored.
+void
+ApplyRetrievalTime (Signal &signal, const Cortext::RetrievalTime &time)
+{
+  if (signal.retention != Retention::Ephemeral || !time.reference_ms)
+    return;
+  signal.reference_ts = time.reference_ms;
+  signal.reference_as_of = time.as_of;
+}
+
 Cortext::Context
 MakeFilteredContext (const internal::SignalFilterDecision &decision,
                      std::chrono::steady_clock::time_point total_start)
@@ -1675,7 +1687,8 @@ struct ContiguousTurn
 // only on how many probes go each way. Supersessions from other
 // conversations are topical successors and do not hide the turn.
 std::vector<ContiguousTurn>
-FindContiguousTurns (Store *store, const std::vector<ContiguityProbe> &probes)
+FindContiguousTurns (Store *store, const std::vector<ContiguityProbe> &probes,
+                     std::optional<long long> as_of_ts)
 {
   std::vector<ContiguousTurn> turns (probes.size ());
   if (!store || probes.empty ())
@@ -1759,6 +1772,12 @@ FindContiguousTurns (Store *store, const std::vector<ContiguityProbe> &probes)
         {
           continue;
         }
+      // An as-of query sees no turn stored after its reference time; the
+      // stretch ends there.
+      if (as_of_ts && RowLongLong (row, "start_ts") > *as_of_ts)
+        {
+          continue;
+        }
       auto &turn = turns[static_cast<std::size_t> (k)];
       turn.position_id = neighbor_id;
       if (RowLongLong (row, "corrected") == 0)
@@ -1829,7 +1848,8 @@ AttachContiguousTurns (Store *store,
                        const std::unordered_map<long long, AnchorRow>
                            &anchor_rows,
                        AttachmentHydrations &hydrations,
-                       std::unordered_set<long long> &attached_ids)
+                       std::unordered_set<long long> &attached_ids,
+                       std::optional<long long> as_of_ts)
 {
   if (!store || retrieved.empty () || SourceBlobsDisabled ())
     {
@@ -1926,7 +1946,7 @@ AttachContiguousTurns (Store *store,
           probes.push_back ({ anchor_id, walk.start_ts, walk.stream, true });
           probes.push_back ({ anchor_id, walk.start_ts, walk.stream, false });
         }
-      auto turns = FindContiguousTurns (store, probes);
+      auto turns = FindContiguousTurns (store, probes, as_of_ts);
       for (std::size_t w = 0; w < walks.size (); ++w)
         {
           walks[w].successor = turns[2 * w];
@@ -1952,7 +1972,7 @@ AttachContiguousTurns (Store *store,
         }
       if (!probes.empty ())
         {
-          turns = FindContiguousTurns (store, probes);
+          turns = FindContiguousTurns (store, probes, as_of_ts);
           for (std::size_t k = 0; k < lag2_targets.size (); ++k)
             {
               *lag2_targets[k] = turns[k];
@@ -2033,7 +2053,7 @@ struct SupersededTarget
 // over idx_associations_source.
 std::unordered_map<long long, std::vector<SupersededTarget> >
 LoadSupersededTargets (Store *store, const std::vector<long long> &anchor_ids,
-                       long long per_anchor)
+                       long long per_anchor, std::optional<long long> as_of_ts)
 {
   std::unordered_map<long long, std::vector<SupersededTarget> > out;
   if (!store || anchor_ids.empty ())
@@ -2050,6 +2070,9 @@ LoadSupersededTargets (Store *store, const std::vector<long long> &anchor_ids,
       placeholders += "?";
       params.emplace_back (id);
     }
+  // An as-of query sees no memory stored after its reference time.
+  if (as_of_ts)
+    params.emplace_back (*as_of_ts);
   params.emplace_back (per_anchor);
   const auto rows = store->Execute (
       "SELECT r.anchor_id, r.memory_id "
@@ -2064,7 +2087,8 @@ LoadSupersededTargets (Store *store, const std::vector<long long> &anchor_ids,
       "      WHERE a.source_memory_id IN (" + placeholders + ") "
       "        AND a.edge_type = 'supersedes' "
       "        AND m.kind = 'LONG_TERM' "
-      "        AND m.modality IN ('text', 'mixed')) r "
+      "        AND m.modality IN ('text', 'mixed')"
+      + std::string (as_of_ts ? " AND m.start_ts <= ?" : "") + ") r "
       "WHERE r.edge_rank <= ? "
       "ORDER BY r.anchor_id, r.edge_rank",
       params);
@@ -2082,7 +2106,7 @@ AttachSupersededPredecessors (
     Store *store, std::vector<Cortext::Context::Memory> &retrieved,
     const std::unordered_map<long long, AnchorRow> &anchor_rows,
     std::unordered_set<long long> excluded_ids,
-    AttachmentHydrations &hydrations)
+    AttachmentHydrations &hydrations, std::optional<long long> as_of_ts)
 {
   if (!store || retrieved.empty () || SourceBlobsDisabled ())
     {
@@ -2122,7 +2146,7 @@ AttachSupersededPredecessors (
         }
       // Over-fetch so already-packeted targets do not starve the anchor.
       const auto targets = LoadSupersededTargets (
-          store, anchor_ids, kSupersededRecallPerAnchor * 2);
+          store, anchor_ids, kSupersededRecallPerAnchor * 2, as_of_ts);
       for (const std::size_t i : anchor_indexes)
         {
           if (budget == 0)
@@ -2203,7 +2227,8 @@ AttachSupersedingSuccessors (Store *store,
                              std::vector<Cortext::Context::Memory> &retrieved,
                              const std::unordered_map<long long, AnchorRow> &anchor_rows,
                              std::unordered_set<long long> excluded_ids,
-                             AttachmentHydrations &hydrations)
+                             AttachmentHydrations &hydrations,
+                             std::optional<long long> as_of_ts)
 {
   if (!store || retrieved.empty () || SourceBlobsDisabled ())
     return 0;
@@ -2237,6 +2262,9 @@ AttachSupersedingSuccessors (Store *store,
         }
       if (params.empty ())
         return 0;
+      // An as-of query sees no successor stored after its reference time.
+      if (as_of_ts)
+        params.emplace_back (*as_of_ts);
       // Newest first per anchor; two per anchor so an already-packeted
       // successor does not starve it.
       const auto rows = store->Execute (
@@ -2252,7 +2280,8 @@ AttachSupersedingSuccessors (Store *store,
           "      WHERE a.target_memory_id IN (" + placeholders + ") "
           "        AND a.edge_type = 'supersedes' "
           "        AND m.kind = 'LONG_TERM' "
-          "        AND m.modality IN ('text', 'mixed')) r "
+          "        AND m.modality IN ('text', 'mixed')"
+          + std::string (as_of_ts ? " AND m.start_ts <= ?" : "") + ") r "
           "WHERE r.edge_rank <= 2 "
           "ORDER BY r.anchor_id, r.edge_rank",
           params);
@@ -3217,22 +3246,33 @@ struct Cortext::Impl
         : LoadAnchorRows (store.get (), result.retrieved_memory,
                           std::max (kContiguityAnchorLimit,
                                     kSupersededRecallAnchorLimit));
+    // An as-of query (Cortext::RetrievalTime) attaches no context stored
+    // after its reference time.
+    const std::optional<long long> as_of_ts
+        = query_signal && query_signal->reference_ts
+                  && query_signal->reference_as_of
+              ? std::optional<long long> (static_cast<long long> (
+                    std::min<std::uint64_t> (
+                        *query_signal->reference_ts,
+                        static_cast<std::uint64_t> (
+                            std::numeric_limits<long long>::max ()))))
+              : std::nullopt;
     std::unordered_set<long long> contiguous_turn_ids;
     const std::size_t contiguous_turns_attached = AttachContiguousTurns (
         store.get (), result.retrieved_memory, anchor_rows,
-        attachment_hydrations, contiguous_turn_ids);
+        attachment_hydrations, contiguous_turn_ids, as_of_ts);
     result.output.operation_ms["Cortext.contiguous_turns_attached"]
         = static_cast<double> (contiguous_turns_attached);
     const std::size_t superseding_successors_attached
         = AttachSupersedingSuccessors (store.get (), result.retrieved_memory,
                                        anchor_rows, contiguous_turn_ids,
-                                       attachment_hydrations);
+                                       attachment_hydrations, as_of_ts);
     result.output.operation_ms["Cortext.superseding_successors_attached"]
         = static_cast<double> (superseding_successors_attached);
     const std::size_t superseded_predecessors_attached
         = AttachSupersededPredecessors (
             store.get (), result.retrieved_memory, anchor_rows,
-            std::move (contiguous_turn_ids), attachment_hydrations);
+            std::move (contiguous_turn_ids), attachment_hydrations, as_of_ts);
     result.output.operation_ms["Cortext.superseded_predecessors_attached"]
         = static_cast<double> (superseded_predecessors_attached);
 
@@ -3448,15 +3488,18 @@ Cortext::~Cortext () = default;
 Cortext::Context
 Cortext::ProcessText (const std::string &text, const std::string &source_id,
                       Retention retention,
-                      EvidenceBudget evidence_budget)
+                      EvidenceBudget evidence_budget,
+                      RetrievalTime retrieval_time)
 {
-  return ProcessText (text, source_id, Media{}, retention, evidence_budget);
+  return ProcessText (text, source_id, Media{}, retention, evidence_budget,
+                      retrieval_time);
 }
 
 Cortext::Context
 Cortext::ProcessText (const std::string &text, const std::string &source_id,
                       const Media &media, Retention retention,
-                      EvidenceBudget evidence_budget)
+                      EvidenceBudget evidence_budget,
+                      RetrievalTime retrieval_time)
 {
   if (!impl_)
     {
@@ -3490,6 +3533,7 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
   s.modality = "text";
   ApplyStoredMedia (s, media, text.data (), text.size (), "text/plain");
 
+  ApplyRetrievalTime (s, retrieval_time);
   auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
@@ -3514,7 +3558,8 @@ Cortext::ProcessText (const std::string &text, const std::string &source_id,
 Cortext::Context
 Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
                         std::uint64_t timestamp, Retention retention,
-                        EvidenceBudget evidence_budget)
+                        EvidenceBudget evidence_budget,
+                        RetrievalTime retrieval_time)
 {
   if (!impl_)
     {
@@ -3547,6 +3592,7 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
   s.modality = "text";
   s.mimetype = "text/plain";
 
+  ApplyRetrievalTime (s, retrieval_time);
   auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
@@ -3571,7 +3617,8 @@ Cortext::ProcessTextAt (const std::string &text, const std::string &source_id,
 Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
                        const std::string &source_id, Retention retention,
-                       EvidenceBudget evidence_budget)
+                       EvidenceBudget evidence_budget,
+                       RetrievalTime retrieval_time)
 {
   if (!impl_)
     {
@@ -3619,6 +3666,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.sample_rate = 16000; // Public audio ingress contract is 16 kHz mono PCM.
   s.num_samples = num_samples;
 
+  ApplyRetrievalTime (s, retrieval_time);
   auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
@@ -3645,7 +3693,8 @@ Cortext::Context
 Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
                        const std::string &source_id, const Media &media,
                        Retention retention,
-                       EvidenceBudget evidence_budget)
+                       EvidenceBudget evidence_budget,
+                       RetrievalTime retrieval_time)
 {
   if (!impl_)
     {
@@ -3694,6 +3743,7 @@ Cortext::ProcessAudio (const float *pcm, std::size_t num_samples,
   s.sample_rate = 16000;
   s.num_samples = num_samples;
 
+  ApplyRetrievalTime (s, retrieval_time);
   auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
@@ -3720,7 +3770,8 @@ Cortext::Context
 Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
                        int channels, const std::string &source_id,
                        Retention retention,
-                       EvidenceBudget evidence_budget)
+                       EvidenceBudget evidence_budget,
+                       RetrievalTime retrieval_time)
 {
   if (!impl_)
     {
@@ -3768,6 +3819,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.height = height;
   s.channels = channels;
 
+  ApplyRetrievalTime (s, retrieval_time);
   auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",
@@ -3794,7 +3846,8 @@ Cortext::Context
 Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
                        int channels, const std::string &source_id,
                        const Media &media, Retention retention,
-                       EvidenceBudget evidence_budget)
+                       EvidenceBudget evidence_budget,
+                       RetrievalTime retrieval_time)
 {
   if (!impl_)
     {
@@ -3843,6 +3896,7 @@ Cortext::ProcessImage (const std::uint8_t *data, int width, int height,
   s.height = height;
   s.channels = channels;
 
+  ApplyRetrievalTime (s, retrieval_time);
   auto out = impl_->Process (s);
   const auto process_end = std::chrono::steady_clock::now ();
   span.SetAttribute ("cortext.candidate_memory_count",

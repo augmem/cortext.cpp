@@ -115,6 +115,10 @@ struct Query
   std::vector<std::string> evidence;
   bool requires_abstention = false;
   std::uint64_t timestamp_ms = 0;
+  // Optional query reference time (answer-key "reference_ms", "as_of"),
+  // passed to the engine as Cortext::RetrievalTime.
+  std::optional<std::uint64_t> reference_ms;
+  bool as_of = false;
 };
 
 struct Counts
@@ -142,6 +146,9 @@ void PrintUsage (std::ostream &out)
       << "  --top-k N           Retrieval packet depth to score, default 8\n"
       << "  --evidence-budget-bytes=N  Per-query evidence budget in bytes\n"
       << "                      (standing + retrieved packet); default unset\n"
+      << "                      Answer-key rows may carry \"reference_ms\" (query\n"
+      << "                      reference time, ms) and \"as_of\" (bool), passed\n"
+      << "                      to the engine as Cortext::RetrievalTime\n"
       << "  --max-episodes N    Limit episodes, 0 means all\n"
       << "  --max-queries N     Limit queries, 0 means all\n"
       << "  --reuse-engine      Reuse one engine/DB across episodes\n"
@@ -958,6 +965,17 @@ LoadQueries (const std::filesystem::path &path, int max_queries)
         {
           q.evidence = JsonStringList (j, "evidence_phrases");
         }
+      const auto reference_it = j.find ("reference_ms");
+      if (reference_it != j.end () && reference_it->is_number_integer ()
+          && reference_it->get<long long> () >= 0)
+        {
+          q.reference_ms = reference_it->get<std::uint64_t> ();
+        }
+      const auto as_of_it = j.find ("as_of");
+      if (as_of_it != j.end () && as_of_it->is_boolean ())
+        {
+          q.as_of = as_of_it->get<bool> ();
+        }
       auto abstain_it = j.find ("requires_abstention");
       if (abstain_it != j.end () && abstain_it->is_boolean ())
         {
@@ -1431,15 +1449,19 @@ int Run (const Options &opts)
           const auto start = std::chrono::steady_clock::now ();
           // Ask at the benchmark's question date when the key carries one,
           // clamped so engine time never runs backwards.
+          const cortext::RetrievalTime retrieval_time{ query.reference_ms,
+                                                       query.as_of };
           auto context
               = query.timestamp_ms > 0
                     ? engine->ProcessTextAt (
                           query.question, "eval/query",
                           std::max (query.timestamp_ms, last_timestamp_ms),
-                          cortext::Retention::Ephemeral, opts.evidence_budget)
+                          cortext::Retention::Ephemeral, opts.evidence_budget,
+                          retrieval_time)
                     : engine->ProcessText (query.question, "eval/query",
                                            cortext::Retention::Ephemeral,
-                                           opts.evidence_budget);
+                                           opts.evidence_budget,
+                                           retrieval_time);
           const auto end = std::chrono::steady_clock::now ();
           const double query_ms =
               std::chrono::duration<double, std::milli> (end - start).count ();
@@ -1529,8 +1551,7 @@ int Run (const Options &opts)
           AddCounts (by_type[query.question_type], query, answer_hit,
                      evidence_hit, retrieval_empty);
 
-          rows_out
-              << nlohmann::json{
+          nlohmann::json row = nlohmann::json{
                      {"benchmark",
                       query.benchmark.empty () ? opts.benchmark
                                                : query.benchmark},
@@ -1556,7 +1577,14 @@ int Run (const Options &opts)
                      {"retrieved", retrieved},
                      {"standing", standing},
                      {"working", working},
-                 }.dump ()
+                 };
+          // Rows of queries without a reference time keep their prior shape.
+          if (query.reference_ms)
+            {
+              row["reference_ms"] = *query.reference_ms;
+              row["as_of"] = query.as_of;
+            }
+          rows_out << row.dump ()
               << "\n";
         }
 

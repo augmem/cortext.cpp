@@ -317,6 +317,45 @@ GetProcessJSONOptions (napi_env env, napi_value value,
       return false;
     }
   out.evidence_budget_bytes = static_cast<size_t> (evidence_budget);
+
+  // referenceMs: query reference time, a whole number of ms since the Unix
+  // epoch; absent, null or undefined = unset. asOf: hide memories that start
+  // after it (cortext::RetrievalTime).
+  bool has_reference = false;
+  if (napi_has_named_property (env, value, "referenceMs", &has_reference)
+      != napi_ok)
+    {
+      return false;
+    }
+  if (has_reference)
+    {
+      napi_value reference_value = nullptr;
+      if (napi_get_named_property (env, value, "referenceMs",
+                                   &reference_value)
+          != napi_ok)
+        {
+          return false;
+        }
+      if (!IsNullOrUndefined (env, reference_value))
+        {
+          double reference_ms = 0.0;
+          if (napi_get_value_double (env, reference_value, &reference_ms)
+                  != napi_ok
+              || !(reference_ms >= 0.0 && reference_ms <= 9007199254740991.0)
+              || std::floor (reference_ms) != reference_ms)
+            {
+              return false;
+            }
+          out.has_reference_ms = 1;
+          out.reference_ms = static_cast<uint64_t> (reference_ms);
+        }
+    }
+  int as_of = 0;
+  if (!GetOptionalBoolProperty (env, value, "asOf", as_of))
+    {
+      return false;
+    }
+  out.as_of = as_of;
   return true;
 }
 

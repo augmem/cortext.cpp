@@ -202,6 +202,23 @@ evidence_budget_from_options (const cortext_process_json_options *options)
   return static_cast<std::size_t> (options->evidence_budget_bytes);
 }
 
+cortext::Cortext::RetrievalTime
+retrieval_time_from_options (const cortext_process_json_options *options)
+{
+  cortext::Cortext::RetrievalTime time;
+  if (!options
+      || options->struct_size
+             < offsetof (cortext_process_json_options, reference_ms)
+                   + sizeof (options->reference_ms)
+      || options->has_reference_ms == 0)
+    {
+      return time;
+    }
+  time.reference_ms = static_cast<std::uint64_t> (options->reference_ms);
+  time.as_of = options->as_of != 0;
+  return time;
+}
+
 std::any
 value_to_any (const cortext_db_value &value)
 {
@@ -1314,8 +1331,11 @@ extern "C"
         = offsetof (cortext_process_json_options, retention);
     constexpr std::size_t kRetentionOptionsSize
         = offsetof (cortext_process_json_options, evidence_budget_bytes);
+    constexpr std::size_t kBudgetOptionsSize
+        = offsetof (cortext_process_json_options, has_reference_ms);
     const std::size_t available
         = options->struct_size >= sizeof (*options) ? sizeof (*options)
+          : options->struct_size >= kBudgetOptionsSize ? kBudgetOptionsSize
           : options->struct_size >= kRetentionOptionsSize
               ? kRetentionOptionsSize
               : kLegacyOptionsSize;
@@ -1326,9 +1346,15 @@ extern "C"
         options->retention = CORTEXT_RETENTION_NATURAL;
         options->reserved = 0;
       }
-    if (available == sizeof (*options))
+    if (available >= kBudgetOptionsSize)
       {
         options->evidence_budget_bytes = 0;
+      }
+    if (available == sizeof (*options))
+      {
+        options->has_reference_ms = 0;
+        options->as_of = 0;
+        options->reference_ms = 0;
       }
   }
 
@@ -1727,7 +1753,7 @@ extern "C"
   {
     const cortext_process_json_options options {
       sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0,
-      0
+      0, 0, 0, 0
     };
     return cortext_process_text_json_with_options (h, text, source_id,
                                                    &options);
@@ -1747,10 +1773,11 @@ extern "C"
 
     const auto retention = retention_from_options (options);
     const auto evidence_budget = evidence_budget_from_options (options);
+    const auto retrieval_time = retrieval_time_from_options (options);
     return invoke_json (
         [&] {
           return p->ProcessText (std::string (text), std::string (source_id),
-                                 retention, evidence_budget);
+                                 retention, evidence_budget, retrieval_time);
         },
         include_embedding_from_options (options));
   }
@@ -1762,7 +1789,7 @@ extern "C"
   {
     const cortext_process_json_options options {
       sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0,
-      0
+      0, 0, 0, 0
     };
     return cortext_process_text_with_media_json_with_options (
         h, text, source_id, media, &options);
@@ -1787,11 +1814,12 @@ extern "C"
 
     const auto retention = retention_from_options (options);
     const auto evidence_budget = evidence_budget_from_options (options);
+    const auto retrieval_time = retrieval_time_from_options (options);
     return invoke_json (
         [&] {
           return p->ProcessText (std::string (text), std::string (source_id),
                                  media_from_c (media), retention,
-                                 evidence_budget);
+                                 evidence_budget, retrieval_time);
         },
         include_embedding_from_options (options));
   }
@@ -1802,7 +1830,7 @@ extern "C"
   {
     const cortext_process_json_options options {
       sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0,
-      0
+      0, 0, 0, 0
     };
     return cortext_process_audio_json_with_options (h, pcm, num_samples,
                                                     source_id, &options);
@@ -1822,10 +1850,11 @@ extern "C"
 
     const auto retention = retention_from_options (options);
     const auto evidence_budget = evidence_budget_from_options (options);
+    const auto retrieval_time = retrieval_time_from_options (options);
     return invoke_json (
         [&] {
           return p->ProcessAudio (pcm, num_samples, std::string (source_id),
-                                  retention, evidence_budget);
+                                  retention, evidence_budget, retrieval_time);
         },
         include_embedding_from_options (options));
   }
@@ -1838,7 +1867,7 @@ extern "C"
   {
     const cortext_process_json_options options {
       sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0,
-      0
+      0, 0, 0, 0
     };
     return cortext_process_audio_with_media_json_with_options (
         h, pcm, num_samples, source_id, media, &options);
@@ -1863,10 +1892,11 @@ extern "C"
 
     const auto retention = retention_from_options (options);
     const auto evidence_budget = evidence_budget_from_options (options);
+    const auto retrieval_time = retrieval_time_from_options (options);
     return invoke_json ([&] {
       return p->ProcessAudio (pcm, num_samples, std::string (source_id),
                               media_from_c (media), retention,
-                              evidence_budget);
+                              evidence_budget, retrieval_time);
     },
                         include_embedding_from_options (options));
   }
@@ -1878,7 +1908,7 @@ extern "C"
   {
     const cortext_process_json_options options {
       sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0,
-      0
+      0, 0, 0, 0
     };
     return cortext_process_image_json_with_options (
         h, data, width, height, channels, source_id, &options);
@@ -1899,10 +1929,11 @@ extern "C"
 
     const auto retention = retention_from_options (options);
     const auto evidence_budget = evidence_budget_from_options (options);
+    const auto retrieval_time = retrieval_time_from_options (options);
     return invoke_json ([&] {
       return p->ProcessImage (data, width, height, channels,
                               std::string (source_id), retention,
-                              evidence_budget);
+                              evidence_budget, retrieval_time);
     },
                         include_embedding_from_options (options));
   }
@@ -1916,7 +1947,7 @@ extern "C"
   {
     const cortext_process_json_options options {
       sizeof (cortext_process_json_options), 1, CORTEXT_RETENTION_DURABLE, 0,
-      0
+      0, 0, 0, 0
     };
     return cortext_process_image_with_media_json_with_options (
         h, data, width, height, channels, source_id, media, &options);
@@ -1941,10 +1972,11 @@ extern "C"
 
     const auto retention = retention_from_options (options);
     const auto evidence_budget = evidence_budget_from_options (options);
+    const auto retrieval_time = retrieval_time_from_options (options);
     return invoke_json ([&] {
       return p->ProcessImage (data, width, height, channels,
                               std::string (source_id), media_from_c (media),
-                              retention, evidence_budget);
+                              retention, evidence_budget, retrieval_time);
     },
                         include_embedding_from_options (options));
   }

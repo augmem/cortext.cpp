@@ -66,6 +66,13 @@ struct Signal
   // Engine-computed reranker vectors (see LateInteractionSet).
   LateInteractionSet late_interaction;
 
+  // Query reference time (ms since epoch, Cortext::RetrievalTime): time
+  // metadata compared with stored memory times, read only by Ephemeral
+  // retrieval. Unset leaves retrieval unchanged. reference_as_of excludes
+  // memories that start after reference_ts.
+  std::optional<uint64_t> reference_ts;
+  bool reference_as_of = false;
+
 };
 
 } // namespace cortext
