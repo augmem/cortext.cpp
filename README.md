@@ -656,7 +656,9 @@ build-wasm/dist/wasm` smoke-tests the same bundle in Node (CI runs it).
 
 The browser build has no threads and no shared-memory file locking, so file
 databases use SQLite's rollback journal (not WAL), object payloads live in the
-Emscripten filesystem beside the database (the `vfs` objstore backend), and C
+Emscripten filesystem beside the database (the `vfs` objstore backend;
+`CORTEXT_*` environment knobs such as `CORTEXT_SQLITE_JOURNAL_MODE` can be set
+from JavaScript on `Module.ENV` in a `preRun` callback), and C
 API errors come back through `cortext_last_error()` (native WebAssembly
 exceptions, `-fwasm-exceptions`). Audio is compiled out of the browser preset.
 
