@@ -26,6 +26,14 @@ Links: [Releases](https://github.com/augmem/cortext.cpp/releases) /
 
 ## Recent Changes
 
+- Unreleased (engine v5): per-call evidence budget on every process call,
+  `standing_memory` returned outside the retrieved ranking, `"mixed"` memories
+  that return every signal's payload with its own `mimetype` and `timestamp`,
+  text with caller media, and query reference time (`reference_ms` / `as_of`).
+  `cortext_config.procedural_enabled` and the Soft Anchor fields are removed
+  (C struct layout change), whole memories are returned unless a budget is
+  set, and the late-interaction reranker `AIST-87M-LI.gguf` is required with
+  the AIST model.
 - `v1.2.0`: Retention is now `Natural` (default), `Durable`, `Boundary`, and
   `Ephemeral`. Omitted retention is Natural: `force_boundary=false` and
   `force_write=false` so episode algorithms decide. `Durable` keeps force
@@ -117,10 +125,22 @@ Other CLI commands:
 ./build/tools/cli/cortext_cli --db memory.db repl
 ./build/tools/cli/cortext_cli --db memory.db remember - < facts.txt
 ./build/tools/cli/cortext_cli --db memory.db consolidate
+
+# Store a photo with its caption: the caption is embedded, the photo stored.
+./build/tools/cli/cortext_cli --db memory.db --media bailey.jpg \
+  --mime image/jpeg remember "Bailey at the beach"
+
+# Fit recalled evidence in 2,000 bytes; recall as of a past moment.
+./build/tools/cli/cortext_cli --db memory.db --evidence-budget 2000 \
+  recall "what does Bailey like?"
+./build/tools/cli/cortext_cli --db memory.db --reference-ms 1783463360158 \
+  --as-of recall "when is the vet appointment?"
 ```
 
 `recall` is ephemeral by default. Pass `--durable` if you also want the recall
-query stored under the `cli/recall` source.
+query stored under the `cli/recall` source. `--reference-ms` and `--as-of`
+apply to ephemeral recall only. Non-text payloads print as
+`[mimetype, N bytes]`.
 
 ## Description
 
@@ -267,10 +287,13 @@ Core calls:
 
 - `ProcessText`, `ProcessAudio`, `ProcessImage`: process a signal (default
   retention is Natural — no forced turn edge; storage via write gate).
-- Media overloads keep the canonical input for embedding and processing.
-  Non-empty caller media replaces the stored payload and MIME type. Empty Media
-  omits the stored payload for all media overloads; legacy calls without Media
-  retain their canonical payload behavior.
+- Media overloads (`ProcessText`, `ProcessAudio`, `ProcessImage` with
+  `Cortext::Media`; C `cortext_process_{text,audio,image}_with_media*`) keep
+  the canonical input for embedding and processing. Non-empty caller media
+  replaces the stored payload and MIME type; empty media stores the canonical
+  input, exactly like the calls without media. A payload is used as text
+  (keyword index, standing memories, packet text) only when its MIME type is
+  `text/*`.
 - `Retention::Durable`: force turn boundary + force write (chat convenience).
 - `Retention::Boundary`: force turn boundary only; write gate still applies.
 - `Retention::Ephemeral`: process and retrieve without storing the input.
@@ -323,7 +346,11 @@ ones.
 - `encode_ms`, `process_ms`, `hydrate_ms`, `total_ms`: latency breakdown.
 
 Each memory entry includes provenance, modality, stored content, retrieval
-scores, and usage counts:
+scores, and usage counts. `modality` is the signals' shared modality, or
+`"mixed"` when one memory holds signals of different modalities (a turn's
+text and its photo); a mixed memory returns every signal's payload. Each
+`content[]` entry carries its own `mimetype`, and the memory's `mimetype` is
+the MIME type of its first signal:
 
 ```json
 {
@@ -348,8 +375,9 @@ scores, and usage counts:
 }
 ```
 
-For C++ callers, `Memory::content` is already raw bytes. For JSON callers,
-decode `content[].base64` according to `content[].mimetype`.
+For C++ callers, `Memory::content` is already raw bytes, with
+`Memory::content_mimetypes` in the same order. For JSON callers, decode
+`content[].base64` according to `content[].mimetype`.
 
 A retrieved memory can carry blobs from other memories (adjacent turns, the
 older version of a fact it superseded, the newer version that superseded it),
@@ -380,8 +408,10 @@ Native C++ and CLI users should keep the model under `models/` or set
 
 ### Git-friendly AIST model shards (for language bindings)
 
-This repo owns the AIST q8_0 GGUF **shards**. Binding packages (`cortext.go`,
-plugins, …) should **copy** the tree — they must not re-implement sharding.
+This repo owns the AIST q8_0 GGUF **shards** and the shards of its
+late-interaction reranker (`AIST-87M-LI.gguf`, required with the model).
+Binding packages (`cortext.go`, plugins, …) should **copy** the tree — they
+must not re-implement sharding.
 
 ```bash
 # After download_aist_model / a local full GGUF under models/:
@@ -393,6 +423,7 @@ Tracked layout (full `.gguf` stays gitignored):
 ```text
 models/manifest.json
 models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
+models/AIST-87M-GGUF/chunks/AIST-87M-LI.gguf.part-*
 models/mdbr-leaf-ir/vocab.txt
 ```
 
@@ -406,8 +437,10 @@ data/surnames/country_codes.csv
 data/surnames/LICENSE.txt
 ```
 
-Bindings reassemble parts on first use (verify per-chunk and whole-file SHA-256
-from `models/manifest.json`), then set `CORTEXT_AIST_MODEL_PATH`. Example vendor
+Bindings reassemble every manifest asset on first use (verify per-chunk and
+whole-file SHA-256 from `models/manifest.json`), place `AIST-87M-LI.gguf`
+beside `AIST-87M_q8_0.gguf`, then set `CORTEXT_AIST_MODEL_PATH` (and
+`CORTEXT_LI_MODEL_PATH` when the reranker lives elsewhere). Example vendor
 step for a sibling checkout:
 
 ```bash
@@ -451,12 +484,13 @@ native/windows-x86_64/cortext.dll
 native/windows-aarch64/cortext.dll
 models/manifest.json
 models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-*
+models/AIST-87M-GGUF/chunks/AIST-87M-LI.gguf.part-*
 models/mdbr-leaf-ir/vocab.txt
 ```
 
 Install assets for a binding package. There is **no** core `CORTEXT_ASSETS_DIR`
 env var — use the paths the runtime and bindings already read
-(`CORTEXT_LIBRARY_PATH`, `CORTEXT_AIST_MODEL_PATH`):
+(`CORTEXT_LIBRARY_PATH`, `CORTEXT_AIST_MODEL_PATH`, `CORTEXT_LI_MODEL_PATH`):
 
 ```bash
 ASSETS_VERSION=1.3.3   # or the release you want
@@ -475,6 +509,10 @@ export CORTEXT_LIBRARY_PATH="$ASSETS/native/linux-x86_64/libcortext.so"
 mkdir -p "$ASSETS/models/AIST-87M-GGUF"
 cat "$ASSETS"/models/AIST-87M-GGUF/chunks/AIST-87M_q8_0.gguf.part-* \
   > "$ASSETS/models/AIST-87M-GGUF/AIST-87M_q8_0.gguf"
+# The late-interaction reranker is required with the model; beside it, it
+# resolves without CORTEXT_LI_MODEL_PATH.
+cat "$ASSETS"/models/AIST-87M-GGUF/chunks/AIST-87M-LI.gguf.part-* \
+  > "$ASSETS/models/AIST-87M-GGUF/AIST-87M-LI.gguf"
 export CORTEXT_AIST_MODEL_PATH="$ASSETS/models/AIST-87M-GGUF/AIST-87M_q8_0.gguf"
 ```
 
@@ -502,6 +540,12 @@ Resolution order:
 Disable with `-DCORTEXT_EMBED_AIST_MODEL=OFF` / `-Dembed-aist-model=false` if you
 intentionally want an external model only.
 
+The late-interaction reranker `AIST-87M-LI.gguf` (0.4 MB) is required whenever
+the AIST model is used; engine creation fails without it. It resolves from
+`CORTEXT_LI_MODEL_PATH`, else `AIST-87M-LI.gguf` beside the resolved AIST
+model, else its shards linked into the library. `scripts/download_aist_model.py`
+assembles it beside the downloaded model.
+
 AIST maps text, audio, and images into one retrieval space. Audio inputs are
 16 kHz mono float32 PCM. Image inputs are row-major RGB/RGBA bytes with
 explicit width, height, and channel count.
@@ -513,6 +557,7 @@ silently comparing vectors from different spaces.
 Useful environment variables:
 
 - `CORTEXT_AIST_MODEL_PATH`: explicit model file.
+- `CORTEXT_LI_MODEL_PATH`: explicit late-interaction reranker file.
 - `CORTEXT_AIST_THREADS`: native runtime thread count.
 - `CORTEXT_AIST_N_GPU_LAYERS`: GPU offload layer hint.
 - `CORTEXT_AIST_CONTEXT_LENGTH`: tokenizer/runtime context length.
@@ -590,15 +635,30 @@ The browser build uses Emscripten and emits an ES module plus `.wasm` payload:
 ```
 
 Browser package and wrapper: [augmem/cortext.wasm](https://github.com/augmem/cortext.wasm).
-The in-repo browser demo lives in `examples/web/`. For demos, either select the
-AIST model file in the UI or preload it:
+The in-repo browser demo lives in `examples/web/`; it remembers text (with an
+optional media file) and recalls with an evidence budget and a reference time.
+For demos, either select both model files in the UI (`AIST-87M_q8_0.gguf` and
+`AIST-87M-LI.gguf`) or preload them:
 
 ```bash
-./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR="$PWD/models"
+python3 scripts/download_aist_model.py --output-dir models --quant q8_0
+# Preload only the runtime files (not the Git chunks).
+mkdir -p wasm-models/AIST-87M-GGUF wasm-models/mdbr-leaf-ir
+cp models/AIST-87M-GGUF/AIST-87M_q8_0.gguf models/AIST-87M-GGUF/AIST-87M-LI.gguf \
+  wasm-models/AIST-87M-GGUF/
+cp models/mdbr-leaf-ir/vocab.txt wasm-models/mdbr-leaf-ir/
+./build-wasm.sh -DCORTEXT_WASM_PRELOAD_MODEL_ASSETS_DIR="$PWD/wasm-models"
 python3 -m http.server 8000
 ```
 
-Then open `http://localhost:8000/examples/web/`.
+Then open `http://localhost:8000/examples/web/`. `node tests/wasm/smoke.mjs
+build-wasm/dist/wasm` smoke-tests the same bundle in Node (CI runs it).
+
+The browser build has no threads and no shared-memory file locking, so file
+databases use SQLite's rollback journal (not WAL), object payloads live in the
+Emscripten filesystem beside the database (the `vfs` objstore backend), and C
+API errors come back through `cortext_last_error()` (native WebAssembly
+exceptions, `-fwasm-exceptions`). Audio is compiled out of the browser preset.
 
 ## Tradeoffs
 
