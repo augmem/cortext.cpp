@@ -1,20 +1,121 @@
 # Experimental Results {#sec-experimental}
 
-This section records the evidence for the current hard-cut Cortext branch. Older
-adapter-era and internal-decoder experiments are preserved in git history, not
-in the current manuscript, because those systems are no longer part of the
-runtime being evaluated.
+This section records the evidence for the current engine, newest first. It
+opens with the October 2026 v5 benchmarks, then the 2026-10 engine ablation
+(summarized in @sec-negative), then the earlier hard-cut, release and
+research-branch records. Older adapter-era and internal-decoder experiments
+are preserved in git history, not in the current manuscript, because those
+systems are no longer part of the runtime being evaluated. Results older than
+October 2026 were measured on engines that still contained mechanisms
+@sec-negative later removed; each such subsection says so.
 
 ## Current Evaluation Scope
 
-The evaluated system is the embedding-first runtime described in
-@sec-implementation and @sec-consolidation. It contains:
+The evaluated system is the v5 engine described in @sec-overview. It contains:
 
-* online memory storage, boundary detection, graph construction, retrieval,
-  reconsolidation, and working memory;
+* online boundary segmentation, storage of every closed unit, working memory
+  and `supersedes` edges;
+* multi-granularity hybrid retrieval with late-interaction reranking
+  (@sec-retrieval);
+* hydration and evidence fitting (@sec-hydration);
 * explicit maintenance (sparse-route seal and recenter); and
-* C, C++, Python, Go, Dart, JavaScript, and WebAssembly entry points that expose only the
-  retained processing, retrieval, consolidation, reset, and embedding APIs.
+* C and C++ entry points in this repository, with Python, Go, Dart,
+  JavaScript and WebAssembly packages in sibling repositories, exposing only
+  the retained processing, retrieval, consolidation, reset and embedding APIs.
+
+## v5 End-to-End Benchmarks {#sec-v5-benchmarks}
+
+These results are copied from the README Benchmarks section and the v5 pull
+request (PR #28). They were measured in October 2026 on the v5 engine, macOS
+arm64.
+
+**Protocol.** Each benchmark's conversations were replayed into the engine as
+they happened: live ingest, Natural retention, and consolidation when the
+engine recommended it. Each question was then asked against the final store.
+The retrieved context went to an answer model and a judge, using each
+benchmark's own published QA prompts. The answer model and judge were both
+`gpt-6.1-sol` at low reasoning effort, and packets were capped at a
+34,800-byte evidence budget (about 8k tokens). No LLM call was made to store
+or recall.
+
+### Reranker Training Overlap
+
+The late-interaction reranker (@sec-retrieval) was trained on pools from some
+of these benchmarks. Scores on those benchmarks are not zero-shot. The table
+separates them. Held-out splits are 20% of LongMemEval and MemLens questions,
+30% of BEAM 1M and Eval 1 conversations, and one DolphinBench persona. The
+108-question MemLens image evaluation set was excluded entirely.
+
+| Benchmark | Reranker training overlap | Zero-shot evidence |
+|---|---|---|
+| LoCoMo (1,540 q) | none: excluded from training (CC-BY-NC) | whole benchmark |
+| BEAM 100K and 10M | none: never trained on | whole benchmark |
+| BEAM 1M | 70% of conversations trained on | held-out 30% only |
+| LongMemEval-S (500 q) | trained on; 20% of LongMemEval questions held out | 115 unseen questions |
+| LongMemEval-M (100 q) | same LongMemEval questions as S | not separately reported |
+| DolphinBench (600 tests) | trained on, one persona held out | not separately reported |
+| MemLens agent subset (195 q) | trained on; 20% of MemLens questions held out | 56 unseen questions |
+| Eval 1 (internal, 250 q) | LongMemEval conversations, 70% trained on; LoCoMo conversations never | held-out conversations |
+
+### Zero-Shot Results
+
+| Benchmark | Cortext | Comparison |
+|---|---:|---|
+| LoCoMo, same pipeline (1,540 q) | 86.2% (87.9% on corrected keys) | Mem0 OSS 2.2.1 89.0%, Graphiti 0.31.1 81.0% under the same answerer, judge and budget |
+| BEAM 100K / 10M, ExaBase protocol | 83.8 / 70.8 | published: past.dev 92.1 / 85.0, Exabase M-1 76.9 / 68.0 |
+| BEAM 100K / 10M, AMB protocol | 72.2 / 53.6 | published: Hindsight 73.4 / 64.1, Honcho 63.0 / 40.6 |
+| LongMemEval-S, unseen 115 q | 96.5% | n/a |
+| MemLens, unseen 56 q | 78.6% | n/a |
+
+### Results on Benchmarks That Overlap Reranker Training
+
+| Benchmark | Cortext | Published (own protocols, not re-run) |
+|---|---:|---|
+| LongMemEval-S (500 q) | 93.8% | Mem0 94.4, Hindsight 91.4, EmergenceMem 86.0, Supermemory 85.2, Zep 71.2 |
+| LongMemEval-M (100 q) | 78.0% | n/a |
+| BEAM 1M, ExaBase / AMB protocol | 80.0 / 70.4 | past.dev 90.7, Exabase M-1 75.0 / Hindsight 73.9, Honcho 63.1, Mem0 64.1 |
+| DolphinBench (600 tests, agent with memory tools) | 87.0% | Mem0 + Hermes 70.7, Hindsight + Hermes 69.5, Honcho + Hermes 68.5 (published rows used a `gpt-5.6-luna` agent) |
+| MemLens agent subset (195 q, 32k, images) | 72.3% | Mem0 43.2 (text captions), MemOS 36.5, MemAgent-7B 32.8 |
+
+The competitor numbers in the last column of both tables are the vendors' or
+papers' own, each with its own answer model, judge and protocol. Only the
+LoCoMo comparison was run under one shared pipeline, so read the other gaps
+as directional.
+
+On LoCoMo, Mem0's 2.8-point lead comes almost entirely from multi-hop
+(91.8% against 83.3%) and temporal questions (89.1% against 85.1%). There
+its write-time LLM writes consolidated, dated facts. Cortext made no write-time
+model call, against 544 calls and 5.7M tokens for Mem0 and 4,151 calls and
+14.4M tokens for Graphiti. It recalled at 9.7 / 13.7 ms p50 / p95, against
+167 / 250 ms and 143 / 157 ms. Cortext led on open-domain questions (64.6%
+against 62.5% and 61.5%).
+
+### Stage Measurements
+
+PR #28 measured each v5 change against its own predecessor, with both arms
+graded by one judge. Comparisons are per stage, not one end-to-end
+base-against-final run, and the judges changed across the program (Haiku,
+then `gpt-5.6-luna`, then `gpt-6.1-sol` low). Packet gold-turn recall is
+judge-free.
+
+| Stage | Evaluation | Result |
+|---|---|---|
+| FTS5 keyword channel | Eval 1 (250 q) | recall 0.597 → 0.809; sufficiency train +0.149 ± 0.063, test +0.218 ± 0.059 (Haiku) |
+| FTS5 keyword channel | LongMemEval-S (48) / M (48 haystacks) | recall 0.642 → 0.840 / 0.407 → 0.679; sufficiency +0.185 ± 0.104 / +0.292 ± 0.111 |
+| store every closed unit | Eval 1 | sufficiency +0.047 ± 0.025 (Natural vs Durable) |
+| multimodal R1–R4 | MemLens (108 q, image evidence) | 0.558 → 0.744 (ceiling 0.867); misleading 0.028 → 0.009 |
+| v5 engine vs base | BEAM e2e 100K / 1M / 10M | 0.773 / 0.702 / 0.617 → 0.816 / 0.778 / 0.667 |
+| late-interaction rerank | BEAM e2e 100K / 1M / 10M | 0.816 / 0.778 / 0.667 → 0.843 / 0.799 / 0.699; 100K and 10M never trained on |
+| late-interaction rerank | Eval 1 judged | 0.955 → 0.973 (+0.018 ± 0.018); reranker-unseen 0.937 → 0.968 |
+| clock fix | DolphinBench (600) | 78.8% → 84.0% (+5.2 ± 3.4 pp); 31–365-day slice 0.514 → 0.844 |
+| late-interaction rerank (pre-clock-fix base) | DolphinBench (600) | 78.8% → 81.2% |
+
+The DolphinBench reranker run predates the clock fix. Final `main`, which
+has both the clock fix and the reranker, was not rerun on the full 600 for
+PR #28; the 87.0% above comes from the later README scoreboard run. The
+FTS5 rows compare the v2 engine with the pruned engine at 47c18ec9, so they
+include the other v2 changes; @sec-implementation reports the channel-only
+effect (Eval 1 recall 0.60 → 0.79).
 
 The evaluated system does not contain internal text-generation backends,
 adapter registries, decoder-backed semantic batch operations, static taxonomy
@@ -417,7 +518,12 @@ paper artifact bundle. The checked-in manuscript therefore treats these smoke
 numbers as a historical harness record rather than independently auditable raw
 evidence.
 
-## Retrieval Behavior After Removal
+## Retrieval Behavior After the v1 Hard Cut (Historical)
+
+This subsection describes the v1 hard-cut engine of June 2026, before the
+2026-10 ablation removed association seeding, graph expansion and
+retrieval-time reconstruction. Current retrieval is specified in
+@sec-retrieval.
 
 The highest-risk behavioral regression was graph retrieval. Removing semantic
 summaries, fact rows, label-bank expansion, and temporal-retrieval helpers left
@@ -830,8 +936,11 @@ recovered. The aggregate artifact is
 | stm_ltm_graph_label_handoff removed | 19/93 | 2.81 | 3.06 / 2.79 / 2.57 | 1.53 | 223 | -0.29 | -0.35 / -0.26 / -0.26 | 0.05 | measured harm; retained |
 | synaptic_tag_ttl removed | 22/93 | 2.86 | 2.94 / 2.61 / 3.04 | 1.66 | 220 | -0.24 | -0.47 / -0.44 / +0.20 | 0.38 | retained by default; no cut |
 
-The long-horizon run closes the deferred cut question for v1: no removal
-improves the stack, so no additional mechanism earns a hard cut. The table
+The long-horizon run closed the deferred cut question for v1 at the time: no
+removal improved the stack, so no additional mechanism earned a hard cut. The
+2026-10 ablation later reversed this on the current engine (@sec-negative).
+Its packet diffs showed that several of these mechanisms never reached a
+packet. The table
 therefore uses two verdict tiers rather than treating all negative mean deltas
 as equally resolved. The emotion/mood threshold cascade and STM/LTM graph-label
 handoff are retained on measured harm. Emotion/mood loses on all three paired
@@ -874,7 +983,10 @@ long-horizon re-test. These rejected scoring gates are distinct from the
 ACT-R-inspired activation ledger that the current retrieval trace retains;
 the ledger is observability, not a scoring gate.
 
-### Negative Results Summary
+### Research-Branch Negative Results Summary (Superseded)
+
+This summary records the June–July 2026 research-branch verdicts. The 2026-10
+ablation on the current engine supersedes them (@sec-negative).
 
 The removal record separates four outcomes. The ACT-R gate-promotion branch
 still rejects the activation-gating direction for the current v1 runtime: all
@@ -1047,23 +1159,27 @@ better, 1 worse), 0.103 → 0.118 (BEAM); Haiku-judged sufficiency +0.060 ±
 
 ## Experimental Interpretation
 
-The hard-cut branch changes the research question. Earlier results asked how
-much quality came from online memory, graph retrieval, semantic extraction,
-daily decoder-backed consolidation, and external blind judging. The current
-branch asks a narrower product question:
+The research question changed twice. The v1 hard cut asked how much
+long-horizon utility remains when Cortext is restricted to embedding-space
+memory, graph structure, shallow replay and bounded reconstruction. The
+2026-10 ablation answered that the lifecycle mechanisms contributed nothing
+measurable on long horizons (@sec-negative). v5 then asks a different
+question:
 
-> How much long-horizon utility remains when Cortext is restricted to
-> embedding-space memory, graph structure, shallow replay, and bounded
-> reconstruction?
+> How far can LLM-free segmentation, hybrid multi-granularity retrieval and
+> a small late-interaction reranker go against systems that spend LLM calls
+> at write time?
 
-The answer is not fully settled by unit tests. The current evidence proves that
-the v1 runtime compiles, passes its retained behavioral suite, no longer depends
-on deleted decoder paths, structurally matches the preserved replay binary, and
-recovers the historical roughly-15/31 blind-judge level on frozen one-year
-sparse probes while using substantially fewer context tokens. Broader quality
-claims still require replicated harnesses against frozen probes, with evaluator
-state isolated from the production library and with the repository treated as the
-production engine under test.
+On the one benchmark run under a shared pipeline (LoCoMo), Cortext is within
+2.8 points of Mem0 and ahead of Graphiti, with no write-time model calls and
+recall about 17× faster. On the zero-shot BEAM scales, it is ahead of
+Exabase M-1 and behind past.dev under the ExaBase protocol. Most other gaps
+come from vendors' own protocols and are directional only. Several of the
+strongest numbers (LongMemEval-S, DolphinBench, MemLens) are on benchmarks
+that overlap the reranker's training pools. The held-out slices of those
+benchmarks are the fair comparison. Broader claims still need replicated
+harnesses against frozen probes, with evaluator state outside the production
+library.
 
 ## Reproducibility Notes
 
