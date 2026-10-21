@@ -39,16 +39,14 @@ memory.modality ← primary modality ('text', 'audio', 'image')
 memory.blob_ids ← [blob_1, blob_2, ..., blob_n]  # blob refs
 memory.embedding ← e_rep  # representative embedding (@sec-rep-embedding)
 memory.signals ← [x_1, x_2, ..., x_n]  # ordered signal embeddings
-memory.context ← c_t  # temporal context state (@sec-temporal-context); PRUNE: persisted copy dropped by migration 56
-memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}  # PRUNE: reliability, contradiction_count, last_verified_ts dropped by migration 56
+memory.source_origin ← "source"  # constant class; provenance stays in source_id
 memory.evidence_packets ← ordered immutable signal rows
 memory.current_view ← latest reconstruction blob if present, else concatenated signal blobs
 memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
                    s_emotion_max, s_arousal_avg}
 ```
 
-The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation. Their consumer, Emotional Consolidation, was removed (@sec-emotional-consolidation).
-<!-- PRUNE: if chore/prune-write-only drops these write-only metadata fields, remove them from the structure above and delete this sentence. -->
+The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation. Their original consumer, Emotional Consolidation, was removed (@sec-emotional-consolidation). The `salience` and `arousal` fields of returned working-memory items still carry the slot's peak score and mean arousal. The temporal context `c_t` is not stored with the memory; migration 56 dropped that column, and `c_t` lives in the accumulator only.
 
 ## Temporal Context State (Time-Cells Analogue) {#sec-temporal-context}
 
@@ -60,12 +58,13 @@ c_t ← l2_normalize((1 − α_c(S,T)) × c_{t−1} + α_c(S,T) × μ_acc)
 ```
 
 At neutral Sensitivity, `α_c` follows `lerp(0.06, 0.01, T)`; the production
-policy applies a bounded Sensitivity adjustment. Each memory stores
-`(e_rep, c_t)`. The current runtime uses `c_t` as the topic-shift anchor in
-boundary detection and persists it with the memory. Production graph retrieval
-does not currently add a separate `cos(c_t, m.context)` score or reinstate
+policy applies a bounded Sensitivity adjustment. The runtime uses `c_t` as
+the topic-shift anchor in boundary detection. It no longer persists `c_t`
+with each memory: nothing read the stored copy, and migration 56 dropped it.
+Production retrieval does not add a `cos(c_t, m.context)` score or reinstate
 `c_t` from a retrieved memory; it queries from the current accumulator and
-recent-context surfaces instead. The following context-score/reinstatement rule
+recent-context surfaces instead. Because the per-memory context is no longer stored, the following
+context-score/reinstatement rule would need it restored. The rule
 is therefore a proposed extension, not shipped behavior:
 
 ```
@@ -286,36 +285,12 @@ read through their latest reconstruction.
 
 ## Stored Source Metadata and Supersession
 
-<!-- PRUNE: migration 56 on chore/prune-write-only drops source_reliability, source_contradiction_count and source_last_verified_ts; replace the next two paragraphs and the proposed confidence rule with a removal note, and drop the contradiction_count line from the supersession rule. -->
-Each memory stores opaque `source_id` provenance plus `source_origin`,
-`source_reliability`, and `source_contradiction_count`. The current writer uses
-the constant origin class `"source"`; the actual application provenance remains
-in `source_id`. Reliability receives an F/S/T-derived prior and supersession can
-increment contradiction history. These fields are retained metadata, but the
-public hydrated memory surface does not currently expose a computed source
-confidence and production graph retrieval does not gate or rank on it.
-
-The following confidence rule is a proposed consumption policy, not shipped
-behavior:
-
-```
-source_model = {origin, reliability, contradiction_count, last_verified_ts}
-source_prior(F, S, T) = SourceReliabilityPrior(F,S,T)
-freshness_weight = RetrievalSourceFreshnessWeight(F,S,T)
-freshness(m) = exp(−age(m) / RetrievalSourceFreshnessTauSeconds(F,S,T))
-source_confidence(m) ← clamp(source_prior(m.origin,F,S,T) ×
-                             (1 − contradiction_penalty(F,S,T) × contradiction_count) ×
-                             ((1 − freshness_weight) + freshness_weight × freshness(m)),
-                             0, 1)
-```
-
-If implemented, contradiction history would reduce computed confidence and the
-threshold would gate injection into active context:
-
-```
-if source_confidence(m) < lerp(0.15, 0.45, T):
-    downrank_or_hold(m)
-```
+Each memory stores opaque `source_id` provenance and the constant origin class
+`source_origin = "source"`; the application's provenance stays in `source_id`.
+Earlier builds also stored a knob-derived `source_reliability` prior, a
+`source_contradiction_count` that supersession incremented, and
+`source_last_verified_ts`. They were meant for a proposed source-confidence
+gate that never shipped, and nothing read them. Migration 56 dropped all three.
 
 The shipped belief-revision path is graph-native and modality-agnostic. On a durable memory
 write, the stored embedding is compared with a knob-bounded nearest-neighbor
@@ -330,7 +305,6 @@ memory to the older memory:
 if θ_topic ≤ cos(e_new, e_old) < θ_dup:
     associations.add(e_new → e_old, type = "supersedes",
                      weight = SupersessionEdgeWeight(cos,F,S,T))
-    contradiction_count(e_old) += 1
 ```
 
 Retrieval treats `supersedes` as a directional family relation rather than a

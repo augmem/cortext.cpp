@@ -29,11 +29,11 @@ signal (any modality)
 1. **Segmentation decides what a memory is** (@sec-thresholding). Each source
    stream keeps an open unit. A calibrated boundary posterior over surprisal,
    drift, within-unit coherence, topic shift and inter-arrival gaps closes the
-   unit at a natural event boundary. A capacity ceiling, a pressure ratio, a
-   salience spike, an inactivity boost or an explicit `Flush()` can also close
-   it.
+   unit at a natural event boundary. A capacity ceiling, a pressure ratio, an
+   inactivity boost or an explicit `Flush()` can also close it.
 2. **Every closed unit is stored.** The write rule is
-   `write_memory = force_write ∨ should_flush`. An earlier score threshold
+   `write_memory = force_write ∨ should_flush`, where `force_write` is set by
+   Durable retention. An earlier score threshold
    discarded finished units and cost 7–11% of gold evidence turns
    (@sec-write-pacing). Retention policies choose who closes units: `Natural`
    leaves it to the segmenter, `Durable` closes one per call, `Boundary`
@@ -82,7 +82,7 @@ behavior through closed-form maps:
 | Stage | Knob-derived quantities |
 |---|---|
 | segmentation | boundary hazard, change-point threshold `b_thresh(F,S)`, capacity ceiling `max_signals(F,S,T)`, pressure ratio, inactivity policy |
-| spike bypass | margin over θ_dynamic; θ_dynamic itself comes from the composite-score controller (@sec-core-adaptation, @sec-structural-metrics) |
+| composite score | the 12 metric maps and the RLS bootstrap coefficients and forgetting factor (@sec-structural-metrics) |
 | working memory | capacity 15–27 slots (21 at neutral), admission weights, chunk budget |
 | retrieval breadth | seed count (37 at neutral), seed search breadth (345), output size (11) |
 | supersession | similarity band, duplicate threshold, edge cap |
@@ -100,11 +100,25 @@ ablation and hill-climbing on long-horizon evaluations:
 
 A reader should not expect turning a knob to retune them.
 
-The composite-score stack (12 metrics, recursive-least-squares blending,
-emotion and mood deltas, the homeostatic controller) still runs per signal.
-Its outputs now have three consumers: the spike-bypass threshold, the window
-score that ranks units for working-memory admission, and the score variance
-inside the uncertainty estimate. None of them gates whether a unit is stored.
+The composite-score stack still runs per signal and still changes packets.
+It comprises the emotion projection, 12 metrics and recursive-least-squares
+blending. With the RLS blender off, 1,980 of 1,986 LoCoMo retrieved sets
+differ (Jaccard 0.29). With the composite score off, all 1,986 differ
+(Jaccard 0.08). The score has three consumers, and none of them gates
+whether a unit is stored:
+
+* **The stored embedding.** The accumulator centroid at the unit's highest
+  score, `e_peak`, is blended into the representative embedding
+  (@sec-rep-embedding). It is also the fallback topic anchor for boundary
+  detection.
+* **Working-memory admission.** The window score `S_window` ranks closed
+  units for admission (@sec-wm-gating).
+* **Uncertainty.** The recent-score variance is a term of the uncertainty
+  estimate, which sets adaptation rates (@sec-math).
+
+The homeostatic threshold controller, the mood integrator and the spike
+bypass that once sat on top of this stack were removed. None of them
+reached a packet.
 
 ## What Was Removed
 
@@ -126,6 +140,17 @@ architecture's core:
 * Soft Anchors;
 * serial-position effects;
 * the focus, sensitivity, stability and influence feedback loops.
+
+A follow-up prune removed what had become unread once every closed unit was
+stored. Every removal left packets byte-identical:
+
+* the dynamic threshold controller, its hysteresis and 19 knobs;
+* the spike bypass;
+* the 6D mood integrator;
+* the stored source-reliability metadata and the per-memory context column;
+* the dead `affect_retrieval`, `reinforcement_enabled` and
+  `sequential_edges_enabled` configuration flags;
+* ten always-default `Context::Memory` metric fields.
 
 Each was either inert at the default knobs, leaving packets byte-identical, or
 measurably harmful once made to fire. Later sections keep a short record of

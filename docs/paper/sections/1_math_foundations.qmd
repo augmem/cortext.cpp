@@ -52,11 +52,11 @@ to_s(ts_ms) = ts_ms / 1000       # ms → seconds conversion
 
 **Stored timestamps:** All stored timestamps are milliseconds since Unix epoch.
 
-**Naming contract (canonical):** Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, drift_acc, eta_acc, coherence_prev, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check. Global variables: signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, retention_ema, consolidation_rate_floor, consolidation_rate_peak, last_embedding, x_pred_ema. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.
+**Naming contract (canonical):** Use the variable names below consistently throughout this document. Units: stored timestamps are integers in milliseconds (commonly suffixed *_ts, and also appearing as timestamp/created_at/last_rate_timestamp); derived time intervals in seconds use the *_s suffix. Accumulator variables: t_start, last_signal_ts, drift_acc, eta_acc, coherence_prev, emo_max, arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check. Global variables: signals_processed, u_uncertainty, m_rate, dt_ema, last_rate_timestamp, last_retrieval_ts, retention_ema, consolidation_rate_floor, consolidation_rate_peak, last_embedding, x_pred_ema. Weight naming rule: weight_* and *_weight variables (e.g., weight_relevance, mismatch_weight, weight_surprise) are control parameters; w_* variables (e.g., w_relevance, w_mismatch, … w_arousal) are composite-score blender weights.
 
 **Drift naming note:** `drift_step_t` (also called *drift_increment*) is the instantaneous cosine distance between consecutive accumulator centroids μ_acc(t) and μ_acc(t−1). `drift_acc` accumulates drift_step_t within the current memory unit for boundary decisions; `drift_accum` tracks cumulative centroid drift used for interrupt refractory pressure. Treat these as distinct signals.
 
-**Time-index convention:** Per-step computed values use a `_t` suffix (e.g., score_t, theta_dynamic_t). Retained state uses the bare name (e.g., theta_dynamic). When a step proposes a new value, compute the `_t` variant and assign the bare name at end of step (see Appendix D).
+**Time-index convention:** Per-step computed values use a `_t` suffix (e.g., score_t, u_t). Retained state uses the bare name (e.g., u_uncertainty). When a step proposes a new value, compute the `_t` variant and assign the bare name at end of step (see Appendix D).
 
 **Time deltas:** All Δt values, elapsed times (mem_elapsed, signal_gap, idle_for), and time comparisons operate in seconds:
 
@@ -110,8 +110,8 @@ stretch of conversation (@sec-hydration). Engine time never runs behind the
 signals the store holds: if a supplied clock is behind, the implicit "now" is
 the newest stored signal plus one millisecond. The accumulator's
 temporal-context vector serves boundary topic-shift detection only; as noted
-in @sec-temporal-context, it is not a retrieval-score term.
-<!-- PRUNE: migration 56 on chore/prune-write-only drops the persisted per-memory context BLOB; c_t stays in memory. -->
+in @sec-temporal-context, it is not a retrieval-score term. It lives in
+memory only; migration 56 dropped the per-memory context column.
 
 ```
 t_retrieve(q, m_i) = q.timestamp - t_event(m_i)
@@ -152,12 +152,12 @@ lowering the unit capacity ceiling, enlarges working memory, and tightens
 duplicate suppression.
 
 **Sensitivity (S ∈ [0, 1]):** reactivity. Higher Sensitivity raises the
-boundary hazard (shorter units), lowers the spike-bypass margin, shrinks
-working memory (faster turnover), and makes streaming retrieval checks more
+boundary hazard (shorter units), raises affect gain in the emotion
+projection and the interrupt gate, shrinks working memory (faster turnover), and makes streaming retrieval checks more
 frequent.
 
-**Stability (T ∈ [0, 1]):** inertia. Higher Stability widens context windows
-and hysteresis, slows the adaptive score statistics, enlarges the unit
+**Stability (T ∈ [0, 1]):** inertia. Higher Stability widens context windows,
+slows the adaptive score statistics and the RLS blender, enlarges the unit
 capacity ceiling and the sparse-route capacities, and requires a deeper
 throughput trough before recommending maintenance.
 
@@ -168,7 +168,7 @@ and eviction. Those were removed (@sec-negative).
 
 ### Midpoint-Biased Knob Mapping
 
-To make **F = S = T = 0.5** a neutral, all‑arounder operating point, we apply a midpoint bias to Focus and Sensitivity before deriving parameters. Endpoints remain fixed:
+To make **F = S = T = 0.5** a neutral, all‑arounder operating point, a midpoint bias is applied to Focus and Sensitivity before parameters are derived. `BiasMid` is a clamped quadratic remap, $x' = \mathrm{clamp}(x - 4b\,x(1-x), 0, 1)$. It fixes both endpoints and moves the midpoint by $-b$. It is applied at about 300 call sites. It is not an affine shift, so no change of a formula's intercept reproduces it, and it was not folded into the constants:
 
 ```
 F̃ = clamp(F − β_F × 4F(1 − F), 0, 1)
@@ -176,7 +176,7 @@ S̃ = clamp(S − β_S × 4S(1 − S), 0, 1)
 β_F = β_S = 0.10
 ```
 
-Unless explicitly stated otherwise, knob‑derived formulas in the paper use **F̃** and **S̃** in place of the raw UI knobs. Stability (T) is not biased. A small number of legacy/cold-start implementation priors still consume raw UI knobs directly and are called out where they matter.
+Unless explicitly stated otherwise, knob‑derived formulas in the paper use **F̃** and **S̃** in place of the raw UI knobs. Stability (T) is not biased by this remap. Two further families use the same remap with other biases. Affective gain uses a lighter Sensitivity bias. Retrieval policy uses `RetrievalFocusBias` ($b = -0.175$), `RetrievalSensitivityBias` ($b = 0.325$) and `RetrievalStabilityBias` ($b = -0.25$). A small number of legacy/cold-start implementation priors still consume raw UI knobs directly and are called out where they matter.
 
 ## Knob-Derived Parameters
 
@@ -190,24 +190,17 @@ win_score(T) = round(lerp(20, 120, T))
 win_rate_s(T) = round(lerp(60, 300, T))
 ```
 
-The context window n_ctx determines how many recent items inform relevance computation. The scoring window win_score controls the lookback for variance estimation and percentile calculation. The rate window win_rate_s specifies the temporal horizon (in seconds) for write-rate measurement.
+The context window n_ctx determines how many recent items inform relevance computation. The scoring window win_score controls the lookback for the score variance in uncertainty. The rate window win_rate_s is the update factor of the maintenance throughput floor (@sec-consolidation).
 
-### Hysteresis and Rate Targets
+### Hysteresis and Rate Targets (Removed)
 
-```
-band_min = 0.02; band_max = 0.25
-base_band(T) = lerp(band_min, band_max, T)
-r_min = 0.2; r_max = 5.0  (writes per minute)
-base_rate(S) = lerp(r_min, r_max, S)
-```
-
-The hysteresis band prevents oscillation in threshold-crossing decisions. Write-rate targets establish homeostatic setpoints for the threshold controller.
-
-These ranges feed the spike-bypass threshold controller (@sec-spike-threshold),
-which no longer gates storage. Fixed values also appear as schema invariants,
-vector dimensions, parser guardrails, numeric epsilons, migration defaults,
-benchmark protocol settings and the v5 recall constants listed above. None of
-these is an additional user-facing knob.
+Earlier builds derived a hysteresis band `lerp(0.02, 0.25, T)` and a write-rate
+target `lerp(0.2, 5.0, S)` writes per minute for the dynamic threshold
+controller. Both were removed with the controller (@sec-spike-threshold).
+Other fixed values appear as schema invariants, vector dimensions, parser
+guardrails, numeric epsilons, migration defaults, benchmark protocol
+settings and the v5 recall constants listed above. None of these is an
+additional user-facing knob.
 
 ### Retrieval Breadth
 
@@ -263,46 +256,27 @@ Earlier builds added a bounded graph bonus from one-hop association expansion.
 It was removed with clustering consolidation (@sec-experimental), because no
 traversable edges remained.
 
-<!-- PRUNE: migration 56 on chore/prune-write-only drops source_reliability and source_contradiction_count; replace the next paragraph and formula with a one-line removal note. -->
-New source-backed memories also receive a knob-derived source reliability prior
-instead of relying on a fixed storage default:
-
-```
-source_reliability_0(F,S,T)
-  = clamp(0.70 + 0.06(F' - F'_0.5)
-               - 0.05(S' - S'_0.5)
-               + 0.08(T - 0.5), 0.50, 0.90)
-```
-
 This split lets low Focus explore many durable-memory seeds while keeping the
 application prompt bounded by a compact final surface. The intermediate seed
 search breadth (345 at neutral) is likewise derived from Focus, Sensitivity,
 and Stability rather than exposed as an additional user setting. Neither `source_id` nor modality participates in candidate discovery,
-family collapse, scoring, or final selection. The stored `source_reliability` and
-`source_contradiction_count` fields are not currently consumed by production
-ranking; @sec-advanced distinguishes that metadata from the proposed confidence
-gate.
+family collapse, scoring, or final selection. Earlier builds also stored a
+knob-derived source-reliability prior and a contradiction count per memory.
+Nothing read them, and migration 56 dropped both.
 
 ### Experiential Mass and Maturity
 
-The system tracks accumulated experience through a maturity function that governs the annealing of safety bounds:
+The system tracks accumulated experience through a maturity function:
 
 ```
 τ_m(T) = lerp(10.0, 200.0, T)
 maturity(t) = 1 − exp(−count / τ_m(T))
 ```
 
-where count is the total number of signals processed. This produces asymptotic approach to unit maturity, with higher Stability slowing the progression to reflect greater conservatism.
-
-Safety bounds on the dynamic threshold anneal with maturity:
-
-```
-T_min(t) = lerp(0.01, 0.05, maturity(t))
-T_max(t) = lerp(0.99, 0.95, maturity(t))
-max_ΔT_per_min(t) = lerp(0.30, 0.10, maturity(t))
-```
-
-Early operation permits wide threshold excursions; mature operation constrains movement to a narrower band.
+where count is the total number of signals processed. Higher Stability slows
+the approach to maturity. Maturity is now the cold-start fallback for
+uncertainty (below). It also used to anneal the safety bounds of the removed
+dynamic threshold.
 
 ## Uncertainty Estimation
 

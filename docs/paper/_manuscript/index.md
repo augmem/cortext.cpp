@@ -244,18 +244,24 @@ consolidation and an emotional cascade over graph neighbours. Both were
 removed after leaving every packet byte-identical
 (<a href="#sec-negative" class="quarto-xref">Section 14</a>). The
 per-signal emotion projection onto a dimensional valence-arousal model
-(Russell 1980) remains in the control stack. Its only effect is a small
-move of the spike-bypass threshold
-(<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>).
+(Russell 1980) remains in the control stack. Its valence and arousal
+feed the composite score and the streaming interrupt gate
+(<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>). The
+emotion threshold delta and the mood integrator were removed with the
+dynamic threshold.
 
 ## Adaptive Control
 
-The homeostatic threshold controller follows proportional-integral
-setpoint control (Åström and Murray 2008). Its effective-sample-size
-reliability estimate borrows from sequential Monte Carlo (Liu and Chen
-1998). In v5 the controller no longer gates persistence. It sets only
-the margin a salience spike must clear to close a unit early
+Earlier versions steered a write threshold with a homeostatic
+controller, following proportional-integral setpoint control (Åström and
+Murray 2008), with an effective-sample-size reliability estimate from
+sequential Monte Carlo (Liu and Chen 1998). Once every closed unit was
+stored, the controller had no consumer, and it was removed
 (<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>).
+The adaptive pieces that remain are EWMA rate and cadence estimates, an
+uncertainty estimate that sets learning rates, and
+recursive-least-squares blending of the composite score
+(<a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>).
 
 # System Overview
 
@@ -290,12 +296,12 @@ signal (any modality)
     Each source stream keeps an open unit. A calibrated boundary
     posterior over surprisal, drift, within-unit coherence, topic shift
     and inter-arrival gaps closes the unit at a natural event boundary.
-    A capacity ceiling, a pressure ratio, a salience spike, an
-    inactivity boost or an explicit `Flush()` can also close it.
+    A capacity ceiling, a pressure ratio, an inactivity boost or an
+    explicit `Flush()` can also close it.
 2.  **Every closed unit is stored.** The write rule is
-    `write_memory = force_write ∨ should_flush`. An earlier score
-    threshold discarded finished units and cost 7–11% of gold evidence
-    turns
+    `write_memory = force_write ∨ should_flush`, where `force_write` is
+    set by Durable retention. An earlier score threshold discarded
+    finished units and cost 7–11% of gold evidence turns
     (<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>).
     Retention policies choose who closes units: `Natural` leaves it to
     the segmenter, `Durable` closes one per call, `Boundary` forces the
@@ -362,10 +368,9 @@ capacity ceiling <code>max_signals(F,S,T)</code>, pressure ratio,
 inactivity policy</td>
 </tr>
 <tr>
-<td>spike bypass</td>
-<td>margin over θ_dynamic; θ_dynamic itself comes from the
-composite-score controller (<a href="#sec-core-adaptation"
-class="quarto-xref">Section 8</a>, <a href="#sec-structural-metrics"
+<td>composite score</td>
+<td>the 12 metric maps and the RLS bootstrap coefficients and forgetting
+factor (<a href="#sec-structural-metrics"
 class="quarto-xref">Section 9</a>)</td>
 </tr>
 <tr>
@@ -412,12 +417,28 @@ ablation and hill-climbing on long-horizon evaluations:
 
 A reader should not expect turning a knob to retune them.
 
-The composite-score stack (12 metrics, recursive-least-squares blending,
-emotion and mood deltas, the homeostatic controller) still runs per
-signal. Its outputs now have three consumers: the spike-bypass
-threshold, the window score that ranks units for working-memory
-admission, and the score variance inside the uncertainty estimate. None
-of them gates whether a unit is stored.
+The composite-score stack still runs per signal and still changes
+packets. It comprises the emotion projection, 12 metrics and
+recursive-least-squares blending. With the RLS blender off, 1,980 of
+1,986 LoCoMo retrieved sets differ (Jaccard 0.29). With the composite
+score off, all 1,986 differ (Jaccard 0.08). The score has three
+consumers, and none of them gates whether a unit is stored:
+
+-   **The stored embedding.** The accumulator centroid at the unit’s
+    highest score, `e_peak`, is blended into the representative
+    embedding
+    (<a href="#sec-rep-embedding" class="quarto-xref">Section 5.1.7</a>).
+    It is also the fallback topic anchor for boundary detection.
+-   **Working-memory admission.** The window score `S_window` ranks
+    closed units for admission
+    (<a href="#sec-wm-gating" class="quarto-xref">Section 10.2.2</a>).
+-   **Uncertainty.** The recent-score variance is a term of the
+    uncertainty estimate, which sets adaptation rates
+    (<a href="#sec-math" class="quarto-xref">Section 4</a>).
+
+The homeostatic threshold controller, the mood integrator and the spike
+bypass that once sat on top of this stack were removed. None of them
+reached a packet.
 
 ## What Was Removed
 
@@ -441,6 +462,18 @@ presented as the architecture’s core:
 -   Soft Anchors;
 -   serial-position effects;
 -   the focus, sensitivity, stability and influence feedback loops.
+
+A follow-up prune removed what had become unread once every closed unit
+was stored. Every removal left packets byte-identical:
+
+-   the dynamic threshold controller, its hysteresis and 19 knobs;
+-   the spike bypass;
+-   the 6D mood integrator;
+-   the stored source-reliability metadata and the per-memory context
+    column;
+-   the dead `affect_retrieval`, `reinforcement_enabled` and
+    `sequential_edges_enabled` configuration flags;
+-   ten always-default `Context::Memory` metric fields.
 
 Each was either inert at the default knobs, leaving packets
 byte-identical, or measurably harmful once made to fire. Later sections
@@ -516,9 +549,7 @@ seconds use the **s suffix. Accumulator variables: t_start,
 last_signal_ts, drift_acc, eta_acc, coherence_prev, emo_max,
 arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing,
 x_last_check. Global variables: signals_processed, u_uncertainty,
-mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis,
-m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability,
-last_rate_timestamp, last_retrieval_ts, retention_ema,
+m_rate, dt_ema, last_rate_timestamp, last_retrieval_ts, retention_ema,
 consolidation_rate_floor, consolidation_rate_peak, last_embedding,
 x_pred_ema. Weight naming rule: weight** and **weight variables (e.g.,
 weight_relevance, mismatch_weight, weight_surprise) are control
@@ -533,9 +564,9 @@ tracks cumulative centroid drift used for interrupt refractory pressure.
 Treat these as distinct signals.
 
 **Time-index convention:** Per-step computed values use a `_t` suffix
-(e.g., score_t, theta_dynamic_t). Retained state uses the bare name
-(e.g., theta_dynamic). When a step proposes a new value, compute the
-`_t` variant and assign the bare name at end of step (see Appendix D).
+(e.g., score_t, u_t). Retained state uses the bare name (e.g.,
+u_uncertainty). When a step proposes a new value, compute the `_t`
+variant and assign the bare name at end of step (see Appendix D).
 
 **Time deltas:** All Δt values, elapsed times (mem_elapsed, signal_gap,
 idle_for), and time comparisons operate in seconds:
@@ -596,8 +627,8 @@ is behind, the implicit “now” is the newest stored signal plus one
 millisecond. The accumulator’s temporal-context vector serves boundary
 topic-shift detection only; as noted in
 <a href="#sec-temporal-context" class="quarto-xref">Section 10.2</a>, it
-is not a retrieval-score term.
-<!-- PRUNE: migration 56 on chore/prune-write-only drops the persisted per-memory context BLOB; c_t stays in memory. -->
+is not a retrieval-score term. It lives in memory only; migration 56
+dropped the per-memory context column.
 
     t_retrieve(q, m_i) = q.timestamp - t_event(m_i)
 
@@ -643,14 +674,14 @@ threshold while lowering the unit capacity ceiling, enlarges working
 memory, and tightens duplicate suppression.
 
 **Sensitivity (S ∈ \[0, 1\]):** reactivity. Higher Sensitivity raises
-the boundary hazard (shorter units), lowers the spike-bypass margin,
-shrinks working memory (faster turnover), and makes streaming retrieval
-checks more frequent.
+the boundary hazard (shorter units), raises affect gain in the emotion
+projection and the interrupt gate, shrinks working memory (faster
+turnover), and makes streaming retrieval checks more frequent.
 
 **Stability (T ∈ \[0, 1\]):** inertia. Higher Stability widens context
-windows and hysteresis, slows the adaptive score statistics, enlarges
-the unit capacity ceiling and the sparse-route capacities, and requires
-a deeper throughput trough before recommending maintenance.
+windows, slows the adaptive score statistics and the RLS blender,
+enlarges the unit capacity ceiling and the sparse-route capacities, and
+requires a deeper throughput trough before recommending maintenance.
 
 The design principle that knobs set rates rather than modes still holds.
 Behavior changes continuously with the knobs, and there are no discrete
@@ -660,9 +691,13 @@ half-lives and eviction. Those were removed
 
 ### Midpoint-Biased Knob Mapping
 
-To make **F = S = T = 0.5** a neutral, all‑arounder operating point, we
-apply a midpoint bias to Focus and Sensitivity before deriving
-parameters. Endpoints remain fixed:
+To make **F = S = T = 0.5** a neutral, all‑arounder operating point, a
+midpoint bias is applied to Focus and Sensitivity before parameters are
+derived. `BiasMid` is a clamped quadratic remap,
+*x*′ = clamp(*x* − 4*b* *x*(1 − *x*), 0, 1). It fixes both endpoints and
+moves the midpoint by −*b*. It is applied at about 300 call sites. It is
+not an affine shift, so no change of a formula’s intercept reproduces
+it, and it was not folded into the constants:
 
     F̃ = clamp(F − β_F × 4F(1 − F), 0, 1)
     S̃ = clamp(S − β_S × 4S(1 − S), 0, 1)
@@ -670,8 +705,12 @@ parameters. Endpoints remain fixed:
 
 Unless explicitly stated otherwise, knob‑derived formulas in the paper
 use **F̃** and **S̃** in place of the raw UI knobs. Stability (T) is not
-biased. A small number of legacy/cold-start implementation priors still
-consume raw UI knobs directly and are called out where they matter.
+biased by this remap. Two further families use the same remap with other
+biases. Affective gain uses a lighter Sensitivity bias. Retrieval policy
+uses `RetrievalFocusBias` (*b* = −0.175), `RetrievalSensitivityBias`
+(*b* = 0.325) and `RetrievalStabilityBias` (*b* = −0.25). A small number
+of legacy/cold-start implementation priors still consume raw UI knobs
+directly and are called out where they matter.
 
 ## Knob-Derived Parameters
 
@@ -687,27 +726,20 @@ their respective sections.
 
 The context window n_ctx determines how many recent items inform
 relevance computation. The scoring window win_score controls the
-lookback for variance estimation and percentile calculation. The rate
-window win_rate_s specifies the temporal horizon (in seconds) for
-write-rate measurement.
+lookback for the score variance in uncertainty. The rate window
+win_rate_s is the update factor of the maintenance throughput floor
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>).
 
-### Hysteresis and Rate Targets
+### Hysteresis and Rate Targets (Removed)
 
-    band_min = 0.02; band_max = 0.25
-    base_band(T) = lerp(band_min, band_max, T)
-    r_min = 0.2; r_max = 5.0  (writes per minute)
-    base_rate(S) = lerp(r_min, r_max, S)
-
-The hysteresis band prevents oscillation in threshold-crossing
-decisions. Write-rate targets establish homeostatic setpoints for the
-threshold controller.
-
-These ranges feed the spike-bypass threshold controller
-(<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>),
-which no longer gates storage. Fixed values also appear as schema
-invariants, vector dimensions, parser guardrails, numeric epsilons,
-migration defaults, benchmark protocol settings and the v5 recall
-constants listed above. None of these is an additional user-facing knob.
+Earlier builds derived a hysteresis band `lerp(0.02, 0.25, T)` and a
+write-rate target `lerp(0.2, 5.0, S)` writes per minute for the dynamic
+threshold controller. Both were removed with the controller
+(<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>).
+Other fixed values appear as schema invariants, vector dimensions,
+parser guardrails, numeric epsilons, migration defaults, benchmark
+protocol settings and the v5 recall constants listed above. None of
+these is an additional user-facing knob.
 
 ### Retrieval Breadth
 
@@ -758,47 +790,27 @@ expansion. It was removed with clustering consolidation
 (<a href="#sec-experimental" class="quarto-xref">Section 15</a>),
 because no traversable edges remained.
 
-<!-- PRUNE: migration 56 on chore/prune-write-only drops source_reliability and source_contradiction_count; replace the next paragraph and formula with a one-line removal note. -->
-
-New source-backed memories also receive a knob-derived source
-reliability prior instead of relying on a fixed storage default:
-
-    source_reliability_0(F,S,T)
-      = clamp(0.70 + 0.06(F' - F'_0.5)
-                   - 0.05(S' - S'_0.5)
-                   + 0.08(T - 0.5), 0.50, 0.90)
-
 This split lets low Focus explore many durable-memory seeds while
 keeping the application prompt bounded by a compact final surface. The
 intermediate seed search breadth (345 at neutral) is likewise derived
 from Focus, Sensitivity, and Stability rather than exposed as an
 additional user setting. Neither `source_id` nor modality participates
 in candidate discovery, family collapse, scoring, or final selection.
-The stored `source_reliability` and `source_contradiction_count` fields
-are not currently consumed by production ranking;
-<a href="#sec-advanced" class="quarto-xref">Section 10</a> distinguishes
-that metadata from the proposed confidence gate.
+Earlier builds also stored a knob-derived source-reliability prior and a
+contradiction count per memory. Nothing read them, and migration 56
+dropped both.
 
 ### Experiential Mass and Maturity
 
-The system tracks accumulated experience through a maturity function
-that governs the annealing of safety bounds:
+The system tracks accumulated experience through a maturity function:
 
     τ_m(T) = lerp(10.0, 200.0, T)
     maturity(t) = 1 − exp(−count / τ_m(T))
 
-where count is the total number of signals processed. This produces
-asymptotic approach to unit maturity, with higher Stability slowing the
-progression to reflect greater conservatism.
-
-Safety bounds on the dynamic threshold anneal with maturity:
-
-    T_min(t) = lerp(0.01, 0.05, maturity(t))
-    T_max(t) = lerp(0.99, 0.95, maturity(t))
-    max_ΔT_per_min(t) = lerp(0.30, 0.10, maturity(t))
-
-Early operation permits wide threshold excursions; mature operation
-constrains movement to a narrower band.
+where count is the total number of signals processed. Higher Stability
+slows the approach to maturity. Maturity is now the cold-start fallback
+for uncertainty (below). It also used to anneal the safety bounds of the
+removed dynamic threshold.
 
 ## Uncertainty Estimation
 
@@ -852,9 +864,9 @@ surprisal against an EMA predictor, instantaneous drift, within-unit
 coherence, topic shift against the temporal context, and inter-arrival
 gaps.
 
-The section first specifies segmentation and the write commit. It then
-specifies the dynamic threshold θ_dynamic, which no longer gates
-persistence: its only remaining consumer is the spike-bypass margin.
+The section specifies segmentation and the write commit. It ends with a
+short record of the removed dynamic threshold θ_dynamic, which once
+gated persistence.
 
 **Knob note:** F and S here refer to midpoint‑biased values (F̃, S̃) from
 <a href="#sec-math" class="quarto-xref">Section 4</a>.
@@ -1089,35 +1101,20 @@ set `boundary_type = "capacity"` for the enclosing episode. This is a
 hard safety boundary (not a heuristic score) and is still fully
 knob-derived.
 
-### Spike Bypass (Flashbulb Flush)
+### Capacity Flush and the Removed Spike Bypass
 
-High-salience signals bypass accumulation and flush immediately,
-capturing preceding context as a coherent memory unit. The margin is
-measured above θ_dynamic
-(<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>):
+The capacity clause of `should_flush` is its own operation,
+`CheckCapacityFlush`. It never runs for `Ephemeral` queries, so a probe
+cannot turn an open Natural unit into a capacity boundary. When it fires
+it marks the boundary type `capacity` and finalizes the episode.
 
-    spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
-    mem_tau(T) = win_mem_ctx(T)
-    mem_maturity ← 1 − exp(−n / max(mem_tau(T), 1))  # n = signals in current unit
-    coherence_scale ← 1 + (1 − T) × clamp(coherence_t, 0, 1)
-    spike_margin_eff ← spike_margin(S,T) × (1 + (1 − mem_maturity)) × coherence_scale
-    spike_bypass = score_t > (θ_dynamic + spike_margin_eff)
-    force_write ← false
-
-When spike_bypass triggers:
-
-    if spike_bypass:
-        should_flush = true   # force a boundary
-        force_write = true   # spike-closed unit, profiled as forced
-
-This keeps flashbulb moments intact while preventing early or highly
-coherent windows from fragmenting into micro-memories. As the unit
-matures, spike bypass becomes easier, and low coherence reduces the
-effective margin.
-
-The implementation also uses the same force-write path when the
-accumulator reaches its maximum signal capacity. That capacity flush is
-an operational safety valve, not an additional flashbulb criterion.
+Earlier builds also had a spike bypass, a “flashbulb” flush: a signal
+whose composite score exceeded the dynamic threshold θ_dynamic by a
+knob-derived margin closed its unit at once and forced its write. On the
+parity sets the spike branch never fired, and only the capacity cap
+closed units. It was removed, with the margin and its flag, and the
+dynamic threshold went with it
+(<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>).
 
 ### Inactivity Boost
 
@@ -1159,6 +1156,7 @@ S_window ranks the closed unit for working-memory admission
 longer decides storage: every unit that closes is written.
 
     write_memory = force_write OR should_flush   # unit closed and non-Ephemeral
+    # force_write: Durable retention; should_flush includes the capacity flush
 
 Boundary detection already decides that a unit is complete. An earlier
 `S_window > θ_dynamic × M_write_refrac` threshold (with a write
@@ -1168,8 +1166,7 @@ evidence turns (stored without it: LongMemEval-S 72 → 81 of 81, Eval1
 371 → 399 of 400), and removing it raised retrieved-only packet gold
 recall by +0.086 (S) and +0.054 (Eval1) for +6% store bytes. Dropping
 only the refractory kept most of the loss (S 73 of 81, +0.012). The
-threshold and refractory are removed; θ_dynamic still sets the spike
-bypass.
+threshold and refractory are removed.
 
 The defensive rule for timestamps applies to boundary gaps and retrieval
 pacing: non-increasing timestamps produce a zero elapsed interval. They
@@ -1184,6 +1181,11 @@ Representative embedding blends accumulator mean with peak:
 
 ### Representative Embedding
 
+This is where the composite score reaches storage. `e_peak` is the
+accumulator centroid at the unit’s highest composite score, so the score
+decides which point of the unit the stored vector leans toward. `e_peak`
+also stands in as the boundary topic anchor when `c_t` is unavailable.
+
     ρ(F) = lerp(0.2, 0.6, F)  # mean vs peak blend
     e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
 
@@ -1191,189 +1193,61 @@ Representative embedding blends accumulator mean with peak:
     if |μ_acc| = 0: e_rep ← e_peak
     if |e_peak| = 0 OR dim(e_peak) ≠ dim(μ_acc): e_rep ← μ_acc
 
-<!-- PRUNE: migration 56 on chore/prune-write-only stops persisting c_t; the emotion metadata below may also be dropped. -->
-
 On write: store e_rep with metadata {n, s_max, s_avg, drift_acc,
 mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n,
-1), boundary_score}. Store `c_t` as the temporal context for the memory.
+1), boundary_score}. `c_t` stays in memory for boundary detection and is
+not persisted (migration 56 dropped the per-memory context column).
 Append e_rep to memory_stream and l2_normalize(μ_acc) to
 recent_memory_centroids. Reset accumulator for next unit.
 
-## Spike-Bypass Threshold θ_dynamic
+## Dynamic Threshold Controller (Removed)
 
-Earlier builds compared the closed unit’s window score with an adaptive
-threshold θ_dynamic, and discarded units below it. That comparison is
-gone (<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>).
-θ_dynamic is still maintained per signal from the composite score
-(<a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>),
-and its only consumer is the spike-bypass margin of
-<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>: a
-signal whose composite score exceeds θ_dynamic by the knob-derived
-margin closes its unit immediately. The controller below is therefore a
-macro-control detail. It changes where salience spikes split units. It
-does not change whether a unit is stored.
-<!-- PRUNE: chore/prune-write-only may remove the threshold controller; if it does, replace this subsection with a removal record and restate the spike-bypass margin against its replacement. -->
+Earlier builds kept an adaptive write threshold θ_dynamic. It blended a
+knob-derived prior with the 90th percentile of recent composite scores,
+weighted by uncertainty. A homeostatic correction then steered it toward
+a Sensitivity-derived write-rate target, with an effective-sample-size
+reliability estimate (Liu and Chen 1998). Sensitivity, precision,
+emotion and mood deltas moved it further, inside a Stability-derived
+hysteresis band and maturity-annealed safety bounds.
 
-### Prior-Evidence Blending
+The controller lost its consumers in two steps. First, every closed unit
+is stored
+(<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>).
+Second, the spike branch, its last reader, never fired. The threshold,
+its hysteresis, the four adjustment terms (`UpdatePrecisionDelta`,
+`InitializeStabilityPriors`), the rate target, the bias-corrected rate
+and 19 knobs were then removed, with packets byte-identical (migration
+58).
 
-The threshold prior derives from knob settings:
+`UpdateThreshold` is now `UpdateSignalHistory`. It keeps the two values
+other operations read:
 
-    θ_prior(F, S, T) = lerp(0.10, 0.30, T) × (1 − 0.3S)
+-   the recent composite-score window, which feeds the score-variance
+    term of uncertainty
+    (<a href="#sec-math" class="quarto-xref">Section 4</a>);
+-   the inter-signal time EWMA `dt_ema`, which feeds the boundary gap
+    evidence and streaming pacing.
 
-Observed evidence comes from the 90th percentile of recent scores:
+Switching `UpdateSignalHistory` off changes packets (retrieved-set
+Jaccard 0.53 on LoCoMo), so it is live.
 
-    score_history_cap(T) = round(lerp(512, 1536, T))
-    score_stream ← tail(score_stream, max(win_score(T), score_history_cap(T)))
-    recent_scores ← tail(score_stream, win_score(T))
-    if |recent_scores| == 0:
-        observed_p90 ← θ_prior  # no evidence yet
-    else:
-        observed_p90 ← percentile(recent_scores, 90)
+### Signal Cadence and Write Rate
 
-Prior and evidence masses weight the blend:
+The two surviving rate estimates are:
 
-    ρ_prior ← prior_mass(T) = round(lerp(2, 32, T))
-    ρ_obs ← u(t) × |recent_scores|
-
-The target threshold blends prior and evidence:
-
-    θ_target ← (ρ_prior × θ_prior + ρ_obs × observed_p90) /
-                max(ε, ρ_prior + ρ_obs)
-
-High Stability increases prior mass, making the system more resistant to
-observed deviations. High uncertainty increases evidence mass, allowing
-faster adaptation to volatile conditions.
-
-### Homeostatic Rate Control
-
-The controller maintains write rates near the target setpoint through
-continuous-time estimation with effective sample size (ESS) reliability
-weighting.
-
-#### Rate Estimation
-
-    Δt ← now_s() − to_s(last_rate_timestamp)
-    dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
-    Δt ← max(Δt, dt_min(T))
+    Δt ← max(now_s() − to_s(last_rate_timestamp), dt_min(T))   # 1 s before any
+    dt_min(T) = 10^(−4 + 2T)
     τ_dt(T) = lerp(0.5, 2.0, T)
-    α_dt ← 1 − exp(−Δt / τ_dt(T))
-    dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
-    dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
-    dt_base ← max(dt_ema, dt_floor(T))
+    dt_ema ← EWMA(dt_ema, Δt, α = 1 − exp(−Δt / τ_dt(T)))      # UpdateSignalHistory
 
-The rate time constant scales with Stability:
+    dt_base ← max(dt_ema, dt_floor(T)),  dt_floor(T) = lerp(0.1, 0.5, T)
+    τ_rate ← max(2^(3T) × dt_base, dt_floor(T))
+    m_rate ← EWMA(m_rate, 60 × write_t / Δt, α = 1 − exp(−Δt / τ_rate))  # UpdateRateState
 
-    rate_tau_exponent(T) = 3T
-    τ_rate ← max(2^rate_tau_exponent(T) × dt_base, dt_floor(T))
-    α ← 1 − exp(−Δt / τ_rate)
-
-Instantaneous rate estimation with bias correction. Δwrites is the
-binary indicator (0 or 1) of whether a write occurred during the current
-timestep:
-
-    Δwrites ← 1 if write_memory else 0  # binary write event
-
-Normative note (MUST): Δwrites is computed from the current step’s
-write_memory decision. Rate state updates occur after the write decision
-and affect subsequent timesteps.
-
-    ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
-    m_rate_t ← (1 − α) × m_rate + α × ρ_inst
-    denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
-    ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
-    m_rate ← m_rate_t
-    rho_hat_prev ← ρ_hat_t
-    rate_ticks ← rate_ticks + 1
-    last_rate_timestamp ← now_ms()  # update after rate computation
-
-#### Effective Sample Size
-
-ESS estimates the effective number of independent samples in the EMA,
-using a heuristic inspired by Liu and Chen (1998):
-
-    β ← max(0, 1 − α)
-    ESS_cap(T) = lerp(30, 120, T)
-    ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
-    reliability ← 1 − exp(−ESS × (1 − T))
-
-High Stability dampens reliability, preventing aggressive corrections in
-conservative regimes.
-
-#### Homeostatic Correction
-
-The rate error drives threshold adjustment. The κ\_\* gains are derived
-from the knobs to avoid fixed behavioral constants:
-
-Normative note (MUST): rho_hat_prev is stored state entering the
-timestep. After the write decision, the rate-state update computes
-ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step
-(see Appendix D).
-
-    rate_error ← tanh((rho_hat_prev − rate_target) /
-                      max(rate_target, ε))
-    κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
-    cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
-    Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
-                      (1 − maturity(t)) × rate_error,
-                      −cap_homeo(F,S,T), +cap_homeo(F,S,T))
-
-The correction scales with reliability and is attenuated by both
-Stability and maturity, ensuring conservative, mature systems make
-minimal homeostatic adjustments.
-
-#### Sensitivity-Based Threshold Adjustment
-
-Sensitivity modulates threshold based on recent score volatility:
-
-    recent_scores ← tail(score_stream, win_score(T))
-    if |recent_scores| < 2:
-        σ_scores ← 0
-    else:
-        σ_scores ← std(recent_scores)
-    κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
-    cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
-    σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
-    Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
-                    −cap_sens(F,S,T), +cap_sens(F,S,T))
-
-High score variance with high Sensitivity lowers threshold, capturing
-more volatile signals.
-
-#### Precision-Based Threshold Adjustment
-
-Focus-driven precision tightens threshold when structural coherence is
-high:
-
-    κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
-    cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
-    Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
-                    −cap_prec(F,S,T), +cap_prec(F,S,T))
-
-High structural coherence with high Focus raises threshold, enforcing
-stricter relevance filtering.
-
-### Threshold Integration
-
-All threshold deltas combine and pass through safety limiting. The
-emotion and mood deltas from
-<a href="#sec-emotional-threshold" class="quarto-xref">Section 8.2.3</a>
-and <a href="#sec-mood" class="quarto-xref">Section 8.2.4</a> are
-denoted Δθ_emo = ΔThreshold_emotion_t and Δθ_mood = ΔThreshold_mood_t:
-
-    Δθ_total ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
-    cap_total ← max_ΔT_per_min(t) × (Δt / 60.0)
-    Δθ_limited ← clamp(Δθ_total, −cap_total, +cap_total)
-    θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
-                            α = α_T(t)) + Δθ_limited,
-                        T_min(t), T_max(t))
-    theta_dynamic ← θ_dynamic_t
-
-Hysteresis evolves toward the stability-derived base:
-
-    hysteresis_t ← clamp(EWMA(hysteresis,
-                         base_band(T), α = α_T(t)),
-                    band_min, band_max)
-    hysteresis ← hysteresis_t
+Here `dt_ema` normalizes the gap evidence of boundary detection and the
+adjacent-retrieval window of streaming pacing. `m_rate` is the observed
+write rate that the maintenance throughput classifier reads
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>).
 
 # Multi-Granularity Hybrid Retrieval
 
@@ -1936,27 +1810,34 @@ This section and
 <a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>
 specify the per-signal control stack that earlier versions of this paper
 presented as the core of the system. It still runs on every signal, in
-the engine’s `CoreStage`. Its reach is now narrow:
+the engine’s `CoreStage`. It changes packets: switching off the RLS
+blender changes 1,980 of 1,986 LoCoMo retrieved sets (Jaccard 0.29),
+switching off the composite score changes all of them (Jaccard 0.08),
+and switching off the emotion projection changes 171 (Jaccard 0.975). It
+reaches behavior through four paths:
 
--   The composite score and θ_dynamic set the spike-bypass margin
-    (<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>).
--   The window score ranks closed units for working-memory admission
+-   **The stored embedding.** The composite score picks `e_peak`, the
+    accumulator centroid at the unit’s highest score, which is blended
+    into the representative embedding
+    (<a href="#sec-rep-embedding" class="quarto-xref">Section 5.1.7</a>).
+-   **Working-memory admission.** The window score ranks closed units
+    for admission
     (<a href="#sec-wm-gating" class="quarto-xref">Section 10.2.2</a>).
--   Score variance enters the uncertainty estimate, which feeds back
-    into the learning rates below.
--   The ACh-like encode/retrieve bias paces streaming retrieval checks
-    between boundaries
+-   **Uncertainty.** Score variance enters the uncertainty estimate,
+    which feeds back into the learning rates below.
+-   **Streaming.** The ACh-like encode/retrieve bias paces streaming
+    retrieval checks between boundaries, and valence, arousal and
+    emotion intensity feed the interrupt gate’s affect drive
     (<a href="#sec-interrupt" class="quarto-xref">Section 11</a>).
 
-Nothing in this section decides whether a unit is stored, or how a query
-ranks memories. Segmentation
-(<a href="#sec-thresholding" class="quarto-xref">Section 5</a>) and
-retrieval (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>)
-carry the v5 results.
+Nothing in this section is a write gate: every closed unit is stored
+(<a href="#sec-thresholding" class="quarto-xref">Section 5</a>). Nothing
+here enters query ranking either. Retrieval
+(<a href="#sec-retrieval" class="quarto-xref">Section 6</a>) carries the
+v5 recall results.
 
 Each algorithm consists of a prior computation (executed at
 initialization) and a dynamic update (executed per signal).
-<!-- PRUNE: chore/prune-write-only may remove mood, the threshold controller and CoreStage metrics; trim the bullets above and the subsections below to the final removal list. -->
 
 ## Focus-Driven Selectivity
 
@@ -2014,7 +1895,6 @@ novelty capture.
 Given Sensitivity knob S ∈ \[0, 1\], initialize Sensitivity control
 variables:
 
-    rate_target = base_rate(S)  # writes/min
     weight_novelty = 0.3 + 0.7S
     weight_surprise = 0.2 + 0.8S
     weight_valence = 0.4 + 0.6S
@@ -2039,7 +1919,7 @@ The projection procedure:
 
     raw_cos_c ← cos(μ_acc, centroids[c]) for each c ∈ C
     if all raw_cos_c ≤ 0:
-        p_c ← uniform(1/6)  # ensures downstream mood update is well-defined
+        p_c ← uniform(1/6)
         emotion_intensity_t ← 0; valence_t ← 0.5; arousal_t ← 0
     else:
         logits_c ← max(0, raw_cos_c)
@@ -2058,52 +1938,34 @@ confidence through a Sensitivity-dependent power transform of their
 product. It is high only when a category dominates and the distribution
 has high confidence.
 
-### Threshold Modulation from Emotion
+### Emotion Threshold Delta and Mood Integration (Removed)
 
-Emotional activation loosens write thresholds to capture salient
-moments:
+The emotion projection above stays. Its valence, arousal and intensity
+feed the valence and arousal metrics of the composite score
+(<a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>)
+and the interrupt gate’s affect drive
+(<a href="#sec-interrupt" class="quarto-xref">Section 11</a>).
 
-    κ_emo ← κ_base × S  # where κ_base = 0.10
-    ΔThreshold_emotion_t ← −κ_emo × emotion_intensity_t ×
-                            (0.5 + 0.5 × arousal_t)
+Earlier builds also used it in two other ways. First, a threshold delta,
+`−0.10 S × emotion_intensity × (0.5 + 0.5 × arousal)`, loosened the
+dynamic threshold on salient signals, following McGaugh (2004). Second,
+a 6D mood vector *M*<sub>*t*</sub> integrated the centred category
+probabilities with a Sensitivity-derived reactivity
+`lerp(0.01, 0.20, S)` and a Stability-derived half-life
+`lerp(30, 600, T)` seconds. It added a second threshold delta
+proportional to the norm of *M*<sub>*t*</sub> divided by √6. Mood’s only
+effect was that delta.
 
-The emotional state acts as a modulator for memory
-encoding/consolidation, following McGaugh (2004). High emotion intensity
-and arousal increase the likelihood of threshold crossings; valence is
-recorded as a separate metric but does not enter this threshold delta
-directly.
+Both deltas, the mood state and `memories.ambient_mood` were removed
+with the dynamic threshold controller
+(<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>),
+with packets byte-identical (migrations 57 and 58).
 
-### Mood Integration
+## Stability-Driven Persistence (Removed)
 
-Distinct from instantaneous emotion, the mood state M_t ∈ ℝ⁶ maintains a
-persistent background affective tone as a 6-dimensional vector (one
-component per emotion category from <a href="#sec-emotional-projection"
-class="quarto-xref">Section 8.2.2</a>):
-
-    α_mood(S) = lerp(0.01, 0.20, S)  # reactivity
-    half_life_mood(T) = lerp(30, 600, T)  # seconds
-    Δt_mood ← now_s() − to_s(last_mood_ts)
-    λ_mood(Δt_mood, T) ← exp(−ln(2) × Δt_mood / max(half_life_mood(T), ε))
-    e_t ← p_c − (1/6)  # centered 6D vector (can be negative)
-    M_t = λ_mood(Δt_mood, T) × M_{t−1} + α_mood(S) × e_t
-    M_t ← clamp_elementwise(M_t, −1.0, 1.0)  # per-component
-    last_mood_ts ← now_ms()  # update timestamp after mood update (ms)
-
-Note: when all raw_cos_c ≤ 0, p_c is uniform and e_t = 0, so mood only
-decays. Because e_t is centered around zero, M_t can have both positive
-and negative components, reflecting sustained elevation or suppression
-relative to baseline. The mood state provides a separate threshold bias
-via its normalized magnitude:
-
-    κ_mood ← κ_base × S
-    m_norm ← ‖M_t‖ / √6  # max norm when all components at 1
-    ΔThreshold_mood_t ← −κ_mood × clamp(m_norm, 0, 1)
-
-## Stability-Driven Persistence
-
-Stability sets the hysteresis band of the write threshold:
-
-    hysteresis = lerp(0.02, 0.25, T)
+Earlier builds derived the hysteresis band of the write threshold from
+Stability (`InitializeStabilityPriors`). It was removed with the
+threshold.
 
 ### Half-Life Adaptation (Removed)
 
@@ -2207,12 +2069,16 @@ prediction error) feed boundary segmentation
 (<a href="#sec-thresholding" class="quarto-xref">Section 5</a>) and the
 streaming gate
 (<a href="#sec-interrupt" class="quarto-xref">Section 11</a>). The
-composite score built from the 12 metrics below has the narrower
-consumers listed in
-<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>: the
-spike-bypass threshold, working-memory admission and the uncertainty
-estimate. It no longer gates storage.
-<!-- PRUNE: chore/prune-write-only may remove the RLS blender and some CoreStage metrics; the composite-score part of this section is the spot to cut. -->
+composite score built from the 12 metrics below is live: it changes
+every LoCoMo retrieved set when switched off (Jaccard 0.08), and the RLS
+blender that weights it changes 1,980 of 1,986 (Jaccard 0.29). It is not
+a write gate. Its consumers are the ones listed in
+<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>:
+
+-   the peak embedding `e_peak`, which shapes each stored representative
+    embedding;
+-   the window score for working-memory admission;
+-   the score variance in the uncertainty estimate.
 
 Context definitions (used throughout Table 1 and structural metrics):
 
@@ -2424,8 +2290,8 @@ direction of influence.*
 
 Metric weights adapt online using recursive least squares (RLS) to
 minimize prediction error between composite scores and **downstream
-utility outcomes**. This avoids circular fitting to relevance and turns
-the blender into an adaptive cognitive policy. Initial weights derive
+utility outcomes**. This avoids circular fitting to relevance. In
+production the explicit user term `o_user` is 0. Initial weights derive
 from bootstrap coefficients:
 
 Blender weights are maintained as variables w\_\* (do not confuse these
@@ -2676,18 +2542,20 @@ metadata:
     memory.blob_ids ← [blob_1, blob_2, ..., blob_n]  # blob refs
     memory.embedding ← e_rep  # representative embedding (@sec-rep-embedding)
     memory.signals ← [x_1, x_2, ..., x_n]  # ordered signal embeddings
-    memory.context ← c_t  # temporal context state (@sec-temporal-context); PRUNE: persisted copy dropped by migration 56
-    memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}  # PRUNE: reliability, contradiction_count, last_verified_ts dropped by migration 56
+    memory.source_origin ← "source"  # constant class; provenance stays in source_id
     memory.evidence_packets ← ordered immutable signal rows
     memory.current_view ← latest reconstruction blob if present, else concatenated signal blobs
     memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
                        s_emotion_max, s_arousal_avg}
 
 The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated
-during memory formation. Their consumer, Emotional Consolidation, was
-removed (<a href="#sec-emotional-consolidation"
-class="quarto-xref">Section 10.12</a>).
-<!-- PRUNE: if chore/prune-write-only drops these write-only metadata fields, remove them from the structure above and delete this sentence. -->
+during memory formation. Their original consumer, Emotional
+Consolidation, was removed (<a href="#sec-emotional-consolidation"
+class="quarto-xref">Section 10.12</a>). The `salience` and `arousal`
+fields of returned working-memory items still carry the slot’s peak
+score and mean arousal. The temporal context `c_t` is not stored with
+the memory; migration 56 dropped that column, and `c_t` lives in the
+accumulator only.
 
 ## Temporal Context State (Time-Cells Analogue)
 
@@ -2702,14 +2570,15 @@ proposed extension, described below; it is not shipped.
     c_t ← l2_normalize((1 − α_c(S,T)) × c_{t−1} + α_c(S,T) × μ_acc)
 
 At neutral Sensitivity, `α_c` follows `lerp(0.06, 0.01, T)`; the
-production policy applies a bounded Sensitivity adjustment. Each memory
-stores `(e_rep, c_t)`. The current runtime uses `c_t` as the topic-shift
-anchor in boundary detection and persists it with the memory. Production
-graph retrieval does not currently add a separate `cos(c_t, m.context)`
-score or reinstate `c_t` from a retrieved memory; it queries from the
-current accumulator and recent-context surfaces instead. The following
-context-score/reinstatement rule is therefore a proposed extension, not
-shipped behavior:
+production policy applies a bounded Sensitivity adjustment. The runtime
+uses `c_t` as the topic-shift anchor in boundary detection. It no longer
+persists `c_t` with each memory: nothing read the stored copy, and
+migration 56 dropped it. Production retrieval does not add a
+`cos(c_t, m.context)` score or reinstate `c_t` from a retrieved memory;
+it queries from the current accumulator and recent-context surfaces
+instead. Because the per-memory context is no longer stored, the
+following context-score/reinstatement rule would need it restored. The
+rule is therefore a proposed extension, not shipped behavior:
 
     w_ctx(F,S,T) = lerp(0.15, 0.45, F) × lerp(1.0, 0.85, S)
     association_boost(F,S,T) = lerp(0.015, 0.06, S) × lerp(1.0, 0.7, F) × lerp(1.0, 0.9, T)
@@ -2960,34 +2829,13 @@ still read through their latest reconstruction.
 
 ## Stored Source Metadata and Supersession
 
-<!-- PRUNE: migration 56 on chore/prune-write-only drops source_reliability, source_contradiction_count and source_last_verified_ts; replace the next two paragraphs and the proposed confidence rule with a removal note, and drop the contradiction_count line from the supersession rule. -->
-
-Each memory stores opaque `source_id` provenance plus `source_origin`,
-`source_reliability`, and `source_contradiction_count`. The current
-writer uses the constant origin class `"source"`; the actual application
-provenance remains in `source_id`. Reliability receives an F/S/T-derived
-prior and supersession can increment contradiction history. These fields
-are retained metadata, but the public hydrated memory surface does not
-currently expose a computed source confidence and production graph
-retrieval does not gate or rank on it.
-
-The following confidence rule is a proposed consumption policy, not
-shipped behavior:
-
-    source_model = {origin, reliability, contradiction_count, last_verified_ts}
-    source_prior(F, S, T) = SourceReliabilityPrior(F,S,T)
-    freshness_weight = RetrievalSourceFreshnessWeight(F,S,T)
-    freshness(m) = exp(−age(m) / RetrievalSourceFreshnessTauSeconds(F,S,T))
-    source_confidence(m) ← clamp(source_prior(m.origin,F,S,T) ×
-                                 (1 − contradiction_penalty(F,S,T) × contradiction_count) ×
-                                 ((1 − freshness_weight) + freshness_weight × freshness(m)),
-                                 0, 1)
-
-If implemented, contradiction history would reduce computed confidence
-and the threshold would gate injection into active context:
-
-    if source_confidence(m) < lerp(0.15, 0.45, T):
-        downrank_or_hold(m)
+Each memory stores opaque `source_id` provenance and the constant origin
+class `source_origin = "source"`; the application’s provenance stays in
+`source_id`. Earlier builds also stored a knob-derived
+`source_reliability` prior, a `source_contradiction_count` that
+supersession incremented, and `source_last_verified_ts`. They were meant
+for a proposed source-confidence gate that never shipped, and nothing
+read them. Migration 56 dropped all three.
 
 The shipped belief-revision path is graph-native and modality-agnostic.
 On a durable memory write, the stored embedding is compared with a
@@ -3001,7 +2849,6 @@ directed `supersedes` edge from the new memory to the older memory:
     if θ_topic ≤ cos(e_new, e_old) < θ_dup:
         associations.add(e_new → e_old, type = "supersedes",
                          weight = SupersessionEdgeWeight(cos,F,S,T))
-        contradiction_count(e_old) += 1
 
 Retrieval treats `supersedes` as a directional family relation rather
 than a traversable activation edge. Packet hydration uses it in both
@@ -3334,18 +3181,18 @@ interrupts at natural transition points.
 
 ## Interrupt-triggered Accumulator Abort
 
-When the interrupt gate allows a retrieval outside a flush/spike event,
-we mark a **pending abort** for the current accumulator to avoid
-persisting partial thoughts. On the next signal, we compare similarity
-to the selected memory versus the current accumulator centroid. If the
-new signal aligns more with the selected memory, we treat the interrupt
-as **accepted** and drop the partial unit; otherwise we **resume** the
+When the interrupt gate allows a retrieval outside a flush event, we
+mark a **pending abort** for the current accumulator to avoid persisting
+partial thoughts. On the next signal, we compare similarity to the
+selected memory versus the current accumulator centroid. If the new
+signal aligns more with the selected memory, we treat the interrupt as
+**accepted** and drop the partial unit; otherwise we **resume** the
 accumulator. This prevents “half‑utterances” from being stored when a
 memory whisper redirects attention, while still allowing the speaker to
 ignore the interrupt and continue seamlessly. This uses only embeddings
 already present in the system (no new constants).
 
-    if allow_interrupt AND NOT should_flush AND NOT spike_bypass:
+    if allow_interrupt AND NOT should_flush:
         pending_abort ← true
         pending_mem ← selected_candidate_embedding
 
@@ -3679,7 +3526,6 @@ first.
 Contextual gain was the per-retrieval signal of the removed feedback
 loops below. Usage detection still computes it, but no operation reads
 it:
-<!-- PRUNE: contextual_gain is computed in DetectMemoryUsage with no reader; drop this subsection if chore/prune-write-only removes it. -->
 
     contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and used (range [−1, 1])
     contextual_gain_t(m) ← undefined                # otherwise
@@ -4043,14 +3889,22 @@ current engine</td>
 <td>inert at defaults; −0.012 / −0.010 recall when forced</td>
 <td>the current engine never fired it</td>
 </tr>
+<tr>
+<td>emotion/mood threshold cascade</td>
+<td>measured harm: −0.43, loses on all three paired repetitions
+(long-horizon sweep)</td>
+<td>emotion and mood threshold deltas removed with the dynamic
+threshold, packets byte-identical</td>
+<td>measured while the threshold still gated writes</td>
+</tr>
 </tbody>
 </table>
 
 A sufficiency delta cannot come from identical packets. The July
-oscillator delta was therefore judge variance, which the July
-confirmation itself put at up to 0.32 between repetitions. The other
-rows were measured on a research-branch engine whose mechanisms
-interacted differently.
+oscillator delta, measured on the same protocol, was therefore judge
+variance, which the July confirmation itself put at up to 0.32 between
+repetitions. The other rows were measured on a research-branch engine
+whose mechanisms interacted differently.
 
 We now apply two rules:
 
@@ -4167,13 +4021,31 @@ narrower things:
 A bounded store still needs a forgetting policy. Any future one should
 be gated on packet recall over month-scale timestamps before it ships.
 
+A follow-up prune then removed what the write-path change had orphaned:
+
+-   the dynamic threshold controller and its 19 knobs;
+-   the spike bypass, which never fired on the parity sets;
+-   the 6D mood integrator, whose only effect was a threshold delta;
+-   stored source-reliability metadata and the per-memory context
+    column;
+-   three dead configuration flags.
+
+Every removal left packets byte-identical
+(<a href="#sec-overview" class="quarto-xref">Section 3</a>).
+
 Two per-signal pieces of the original affect and neuromodulation design
-remain in the scoring stack. They are the ACh-like encode/retrieve bias,
-which paces streaming retrieval checks, and the emotion and mood
-threshold deltas, which move the spike-bypass threshold
-(<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>). This
-study did not remove them. Neither gates storage or ranks recall.
-<!-- PRUNE: chore/prune-write-only may remove mood and the threshold controller; adjust this paragraph to the final removal list. -->
+remain, and both are live:
+
+-   the ACh-like encode/retrieve bias, which paces streaming retrieval
+    checks;
+-   the emotion projection, whose valence and arousal feed the composite
+    score and the interrupt gate
+    (<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>).
+    Switching it off changes 171 of 1,986 LoCoMo retrieved sets.
+
+The composite score itself is live too
+(<a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>).
+It is not a write gate.
 
 # Experimental Results
 
@@ -6344,7 +6216,10 @@ gate.
 
 This summary records the June–July 2026 research-branch verdicts. The
 2026-10 ablation on the current engine supersedes them
-(<a href="#sec-negative" class="quarto-xref">Section 14</a>).
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>). In
+particular, the emotion and mood threshold deltas that this summary
+retains “on measured harm” were later removed with the dynamic
+threshold, and packets stayed byte-identical.
 
 The removal record separates four outcomes. The ACT-R gate-promotion
 branch still rejects the activation-gating direction for the current v1
@@ -7606,9 +7481,12 @@ The production operation chain is:
 
 ``` text
 CoreStage:
-  embedded centroid init, priors, coherence, accumulation, drift,
-  uncertainty, focus/sensitivity/mood, metrics, neuromodulators,
-  adaptive metric weights, thresholding, recent context, boundary/write gate
+  embedded centroid init, focus and sensitivity priors, coherence,
+  accumulation, drift, focus spread, prediction error, uncertainty,
+  focus/sensitivity (emotion projection), effective focus, metrics,
+  neuromodulators (ACh), RLS metric weights, composite score,
+  accumulator scores, signal history (score window, dt_ema),
+  recent context, boundary, capacity flush, write gate
 
 StorageStage:
   memory storage, signal metrics
@@ -7621,10 +7499,12 @@ FeedbackStage:
   memory usage counters, working memory, accumulator reset
 ```
 
-<!-- PRUNE: update the CoreStage list above (metrics, neuromodulators, adaptive metric weights, mood, thresholding) to the final removal list. -->
-
-Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so
-replay probes can inspect retrieval without mutating the durable store.
+`UpdateMood`, `UpdatePrecisionDelta`, `InitializeStabilityPriors` and
+the threshold half of `UpdateThreshold` were removed (migrations 57 and
+58). `CheckSpikeBypass` became `CheckCapacityFlush`
+(<a href="#sec-thresholding" class="quarto-xref">Section 5</a>). Probe
+mode intentionally runs only `CoreStage` and `RetrievalStage` so replay
+probes can inspect retrieval without mutating the durable store.
 
 ## Consolidation Implementation
 
@@ -8677,14 +8557,12 @@ On cold start (no persisted state), initialize retained state as follows
 (unless otherwise specified by knob priors):
 
 -   **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`,
-    `mood_vector = 0_vector`, `last_mood_ts = now_ms()`,
-    `theta_dynamic = theta_target = θ_prior(F,S,T)`,
-    `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`,
-    `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`,
-    `reliability = 1`, `last_rate_timestamp = now_ms()`,
-    `last_retrieval_ts = 0`, `last_embedding = unset`,
-    `x_pred_ema = unset`. (The oscillator phase `φ_t` was removed with
-    the encode/retrieve oscillator.)
+    `m_rate = 0`, `dt_ema = 0`, `recent_scores = []`,
+    `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`,
+    `last_embedding = unset`, `x_pred_ema = unset`. (The oscillator
+    phase `φ_t`, the mood vector, θ_dynamic, θ_target, hysteresis, the
+    bias-corrected rate and the rate-reliability state were removed with
+    their mechanisms; migrations 44, 57 and 58.)
 
 -   **Accumulator defaults (per stream):** `μ_acc = 0_vector`,
     `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`,
@@ -8697,16 +8575,15 @@ On cold start (no persisted state), initialize retained state as follows
 -   **Per-memory defaults (on insert):**
     `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`,
     `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`,
-    `context = 0_vector`,
-    `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`.
-    Lability, suppression and synaptic-tag fields were dropped by
-    migrations 39, 45 and 46.
-    <!-- PRUNE: migration 56 drops context and the reliability/contradiction/last-verified fields; trim this list to the final removal list. -->
-    Application provenance remains in the separate opaque `source_id`.
-    SQLite defaults remain migration/backstop values for legacy rows.
-    Evidence packets live in ordered `signals` rows, and the
-    constructive-recall ledger starts empty until the initial
-    reconstruction row is appended in `memory_reconstructions`.
+    `source_origin = "source"`. Lability, suppression and synaptic-tag
+    fields were dropped by migrations 39, 45 and 46; the per-memory
+    context and the source reliability, contradiction and last-verified
+    fields by migration 56; `ambient_mood` by migration 57. Application
+    provenance remains in the separate opaque `source_id`. SQLite
+    defaults remain migration/backstop values for legacy rows. Evidence
+    packets live in ordered `signals` rows, and the constructive-recall
+    ledger starts empty until the initial reconstruction row is appended
+    in `memory_reconstructions`.
 
 -   **RLS defaults:** `w_* = w_bootstrap`, `P = diag(P_init(T))` with
     `P_init(T) = lerp(500, 2000, 1 − T)`, `blender_ready = false`,
@@ -8715,8 +8592,7 @@ On cold start (no persisted state), initialize retained state as follows
 -   **Knob-derived control parameters (initialized from priors):**
     `weight_relevance`, `attention_width`, `coverage_gain_floor`,
     `mismatch_weight`, `weight_novelty`, `weight_surprise`,
-    `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`,
-    `rate_target`.
+    `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`.
 
 -   **Buffers:** `signal_stream` (μ_acc stream), `score_stream`,
     `memory_stream`, `recent_memory_centroids` start empty.
@@ -8730,7 +8606,7 @@ On cold start (no persisted state), initialize retained state as follows
 
 -   **Global state (retained across timesteps):**
 
-    -   `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, blender_ready, blender_update_count, blender_P}`
+    -   `{signals_processed, u_uncertainty, m_rate, dt_ema, recent_scores, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, blender_ready, blender_update_count, blender_P}`
 
 -   **Buffers (retained across timesteps; bounded by window rules):**
 
@@ -8742,7 +8618,7 @@ On cold start (no persisted state), initialize retained state as follows
 
 -   **Recorded global fields:**
 
-    -   `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
+    -   `{u(t) → STATE.u_uncertainty}`
 
 -   **Per-step derived scalars/vectors (ephemeral; recomputed each
     step):**
@@ -8830,8 +8706,8 @@ causality and avoid undefined metrics.
 -   **recent_context empty:** apply fallbacks defined in Appendix B
     (e.g., `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`,
     `μ_ctx = 0_vector` so `map01(cos)=0.5`).
--   **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold
-    updates.
+-   **recent_scores empty:** set `var_recent_norm ← 0` in uncertainty
+    (<a href="#sec-math" class="quarto-xref">Section 4</a>).
 
 # Appendix D. Main Loop Execution Order and Normative Invariants
 
@@ -8854,15 +8730,15 @@ Canonical single-step pseudocode (timestep t):
     focus_spread_t ← compute_focus_spread()
     prediction_error_t ← update_embedding_prediction_error()
     u_t ← update_uncertainty(...)
-    update_focus_sensitivity_mood_and_effective_focus()
+    update_focus_sensitivity_and_effective_focus()   # emotion projection
     metrics_t ← compute_structural_and_affective_metrics()
     update_neuromodulators_and_metric_weights()
     score_t ← compute_composite_score(metrics_t)
     update_accumulator_scores(score_t, μ_acc)
-    update_precision_delta_and_threshold()
+    update_signal_history(score_t)   # score window, dt_ema
     recent_context ← append_recent_context(μ_acc)
     boundary_score, should_flush ← detect_boundary(capacity_pressure, inactivity_boost)
-    spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
+    capacity_flush ← check_capacity_flush(n, max_signals, boundary_score)
     write_memory ← force_write OR should_flush   # every closed unit is stored
     Δwrites ← 1 if write_memory else 0
 
@@ -8888,7 +8764,7 @@ The normative execution order for a single timestep t:
 1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
 2.  **Run CoreStage:** initialize priors, update accumulator/drift,
     compute uncertainty, adaptation, metrics, neuromodulators, composite
-    score, threshold, boundary, spike bypass, and write gate.
+    score, signal history, boundary, capacity flush, and write gate.
 3.  **Run StorageStage:** write the closed memory unit (every closed
     unit is stored), then persist signal metrics from the stored memory
     id.
@@ -8909,8 +8785,8 @@ Timing notes:
 
 -   `now_s()` is captured at step 1 and reused for all Δt computations
     in this timestep.
--   Threshold updates in `CoreStage` use the score computed earlier in
-    the same stage.
+-   The signal-history update in `CoreStage` uses the score computed
+    earlier in the same stage.
 -   Rate updates in `RetrievalStage` use Δwrites from the current step’s
     `write_memory` decision.
 -   Accumulator resets happen in `FeedbackStage`, after storage,

@@ -3289,6 +3289,30 @@ public:
   }
 
 private:
+  // Byte classes are the "C" locale ones, fixed here rather than read from
+  // <cctype>: isalnum/isspace/tolower follow the process locale, and a
+  // binding that runs under a UTF-8 locale would otherwise tokenize (and
+  // embed) bytes >= 0x80 differently from one that stays in "C".
+  static bool
+  IsAsciiAlnum (unsigned char ch)
+  {
+    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z')
+           || (ch >= 'A' && ch <= 'Z');
+  }
+
+  static bool
+  IsAsciiSpace (unsigned char ch)
+  {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\v' || ch == '\f'
+           || ch == '\r';
+  }
+
+  static char
+  AsciiLower (unsigned char ch)
+  {
+    return static_cast<char> (ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
+  }
+
   static std::vector<std::string>
   BasicTokens (const std::string &text)
   {
@@ -3303,12 +3327,11 @@ private:
     };
     for (unsigned char ch : text)
       {
-        if (std::isalnum (ch) != 0)
+        if (IsAsciiAlnum (ch))
           {
-            current.push_back (
-                static_cast<char> (std::tolower (static_cast<int> (ch))));
+            current.push_back (AsciiLower (ch));
           }
-        else if (std::isspace (ch) != 0)
+        else if (IsAsciiSpace (ch))
           {
             flush ();
           }

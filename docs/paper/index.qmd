@@ -214,16 +214,21 @@ through amygdala-mediated effects on hippocampal encoding
 consolidation and an emotional cascade over graph neighbours. Both were
 removed after leaving every packet byte-identical (@sec-negative). The
 per-signal emotion projection onto a dimensional valence-arousal model
-[@russell1980circumplex] remains in the control stack. Its only effect is a
-small move of the spike-bypass threshold (@sec-core-adaptation).
+[@russell1980circumplex] remains in the control stack. Its valence and
+arousal feed the composite score and the streaming interrupt gate
+(@sec-core-adaptation). The emotion threshold delta and the mood integrator
+were removed with the dynamic threshold.
 
 ## Adaptive Control
 
-The homeostatic threshold controller follows proportional-integral setpoint
-control [@astrom2008feedback]. Its effective-sample-size reliability estimate
-borrows from sequential Monte Carlo [@liu1998sequential]. In v5 the
-controller no longer gates persistence. It sets only the margin a salience
-spike must clear to close a unit early (@sec-spike-threshold).
+Earlier versions steered a write threshold with a homeostatic controller,
+following proportional-integral setpoint control [@astrom2008feedback], with
+an effective-sample-size reliability estimate from sequential Monte Carlo
+[@liu1998sequential]. Once every closed unit was stored, the controller had
+no consumer, and it was removed (@sec-spike-threshold). The adaptive pieces
+that remain are EWMA rate and cadence estimates, an uncertainty estimate that
+sets learning rates, and recursive-least-squares blending of the composite
+score (@sec-structural-metrics).
 
 {{< include sections/overview.qmd >}}
 

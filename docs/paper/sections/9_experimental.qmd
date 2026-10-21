@@ -986,7 +986,9 @@ the ledger is observability, not a scoring gate.
 ### Research-Branch Negative Results Summary (Superseded)
 
 This summary records the June–July 2026 research-branch verdicts. The 2026-10
-ablation on the current engine supersedes them (@sec-negative).
+ablation on the current engine supersedes them (@sec-negative). In particular, the emotion and mood threshold deltas that this summary
+retains "on measured harm" were later removed with the dynamic threshold, and
+packets stayed byte-identical.
 
 The removal record separates four outcomes. The ACT-R gate-promotion branch
 still rejects the activation-gating direction for the current v1 runtime: all

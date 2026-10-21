@@ -6,11 +6,11 @@ This appendix enumerates the state variables used by the specification and separ
 
 On cold start (no persisted state), initialize retained state as follows (unless otherwise specified by knob priors):
 
-* **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `x_pred_ema = unset`. (The oscillator phase `φ_t` was removed with the encode/retrieve oscillator.)
+* **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `m_rate = 0`, `dt_ema = 0`, `recent_scores = []`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `x_pred_ema = unset`. (The oscillator phase `φ_t`, the mood vector, θ_dynamic, θ_target, hysteresis, the bias-corrected rate and the rate-reliability state were removed with their mechanisms; migrations 44, 57 and 58.)
 * **Accumulator defaults (per stream):** `μ_acc = 0_vector`, `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`, `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`, `drift_accum = 0`, `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc), `prev_x = unset` (μ_acc).
-* **Per-memory defaults (on insert):** `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `context = 0_vector`, `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`. Lability, suppression and synaptic-tag fields were dropped by migrations 39, 45 and 46. <!-- PRUNE: migration 56 drops context and the reliability/contradiction/last-verified fields; trim this list to the final removal list. --> Application provenance remains in the separate opaque `source_id`. SQLite defaults remain migration/backstop values for legacy rows. Evidence packets live in ordered `signals` rows, and the constructive-recall ledger starts empty until the initial reconstruction row is appended in `memory_reconstructions`.
+* **Per-memory defaults (on insert):** `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `source_origin = "source"`. Lability, suppression and synaptic-tag fields were dropped by migrations 39, 45 and 46; the per-memory context and the source reliability, contradiction and last-verified fields by migration 56; `ambient_mood` by migration 57. Application provenance remains in the separate opaque `source_id`. SQLite defaults remain migration/backstop values for legacy rows. Evidence packets live in ordered `signals` rows, and the constructive-recall ledger starts empty until the initial reconstruction row is appended in `memory_reconstructions`.
 * **RLS defaults:** `w_* = w_bootstrap`, `P = diag(P_init(T))` with `P_init(T) = lerp(500, 2000, 1 − T)`, `blender_ready = false`, `blender_update_count = 0`.
-* **Knob-derived control parameters (initialized from priors):** `weight_relevance`, `attention_width`, `coverage_gain_floor`, `mismatch_weight`, `weight_novelty`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`, `rate_target`.
+* **Knob-derived control parameters (initialized from priors):** `weight_relevance`, `attention_width`, `coverage_gain_floor`, `mismatch_weight`, `weight_novelty`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`.
 * **Buffers:** `signal_stream` (μ_acc stream), `score_stream`, `memory_stream`, `recent_memory_centroids` start empty.
 * **Retention history:** `retention_history` starts empty (populated after the first signal step).
 
@@ -18,7 +18,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
   * `{μ_acc, c_t, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
 
 * **Global state (retained across timesteps):**
-  * `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, blender_ready, blender_update_count, blender_P}`
+  * `{signals_processed, u_uncertainty, m_rate, dt_ema, recent_scores, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, blender_ready, blender_update_count, blender_P}`
 
 * **Buffers (retained across timesteps; bounded by window rules):**
   * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, retention_history}`
@@ -27,7 +27,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
   * `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`
 
 * **Recorded global fields:**
-  * `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
+  * `{u(t) → STATE.u_uncertainty}`
 
 * **Per-step derived scalars/vectors (ephemeral; recomputed each step):**
   * `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t}` (NE_t and DA_t were removed with their modulators)
@@ -97,7 +97,7 @@ These rules resolve empty-store and small-store cases to preserve causality and 
 * **memory_stream small:** use `k_eff = min(k_neighbors(T), |memory_stream|)`. If `k_eff < 2`, set `focus_spread_t = 0`.
 * **graph absent or empty:** skip graph traversal; use vector search only.
 * **recent_context empty:** apply fallbacks defined in Appendix B (e.g., `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`, `μ_ctx = 0_vector` so `map01(cos)=0.5`).
-* **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold updates.
+* **recent_scores empty:** set `var_recent_norm ← 0` in uncertainty (@sec-math).
 
 # Appendix D. Main Loop Execution Order and Normative Invariants {#sec-app-loop .unnumbered}
 
@@ -117,15 +117,15 @@ drift_accum ← update_cumulative_drift(x_t)
 focus_spread_t ← compute_focus_spread()
 prediction_error_t ← update_embedding_prediction_error()
 u_t ← update_uncertainty(...)
-update_focus_sensitivity_mood_and_effective_focus()
+update_focus_sensitivity_and_effective_focus()   # emotion projection
 metrics_t ← compute_structural_and_affective_metrics()
 update_neuromodulators_and_metric_weights()
 score_t ← compute_composite_score(metrics_t)
 update_accumulator_scores(score_t, μ_acc)
-update_precision_delta_and_threshold()
+update_signal_history(score_t)   # score window, dt_ema
 recent_context ← append_recent_context(μ_acc)
 boundary_score, should_flush ← detect_boundary(capacity_pressure, inactivity_boost)
-spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
+capacity_flush ← check_capacity_flush(n, max_signals, boundary_score)
 write_memory ← force_write OR should_flush   # every closed unit is stored
 Δwrites ← 1 if write_memory else 0
 
@@ -150,7 +150,7 @@ reset_accumulator_after_flush_or_interrupt()
 The normative execution order for a single timestep t:
 
 1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
-2.  **Run CoreStage:** initialize priors, update accumulator/drift, compute uncertainty, adaptation, metrics, neuromodulators, composite score, threshold, boundary, spike bypass, and write gate.
+2.  **Run CoreStage:** initialize priors, update accumulator/drift, compute uncertainty, adaptation, metrics, neuromodulators, composite score, signal history, boundary, capacity flush, and write gate.
 3.  **Run StorageStage:** write the closed memory unit (every closed unit is stored), then persist signal metrics from the stored memory id.
 4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any reset, run streaming pacing and graph retrieval, update rate state from the current write decision, compute the MNI gate, and record memory usage.
 5.  **Run FeedbackStage:** apply usage counters, working memory, and accumulator reset. A `force_consolidation` maintenance signal runs none of these stages; the processor only seals and recenters the sparse route.
@@ -159,7 +159,7 @@ The normative execution order for a single timestep t:
 Timing notes:
 
 *   `now_s()` is captured at step 1 and reused for all Δt computations in this timestep.
-*   Threshold updates in `CoreStage` use the score computed earlier in the same stage.
+*   The signal-history update in `CoreStage` uses the score computed earlier in the same stage.
 *   Rate updates in `RetrievalStage` use Δwrites from the current step's `write_memory` decision.
 *   Accumulator resets happen in `FeedbackStage`, after storage, retrieval, MNI, memory-usage detection, and working-memory updates have consumed the current-unit query.
 
