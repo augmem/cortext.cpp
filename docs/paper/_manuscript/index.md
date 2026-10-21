@@ -1,161 +1,452 @@
-# Cortext: A Three-Knob Adaptive Memory Architecture
+# Cortext: LLM-Free Long-Horizon Memory
 Gabriel Willen
-2026-07-01
+2026-10-01
 
 # Abstract
 
-We present Cortext, a biologically-inspired adaptive memory system
-governed by three continuous control parameters: Focus (F), Sensitivity
-(S), and Stability (T). Unlike traditional memory architectures that
-employ discrete operational modes, Cortext achieves developmental
-progression through parameter-derived rate modulation, allowing behavior
-to emerge continuously from the interaction of knob settings and
-experiential mass. The architecture integrates established cognitive
-science principles—including Cowan’s working memory constraints and
-Nader’s reconsolidation dynamics—into a unified computational framework.
-We derive most system parameters from the three primary knobs through
-principled mathematical transformations, while explicitly labeling the
-small set of fixed invariants (e.g., controller gains), reducing
-reliance on hard-coded constants. The production system is an
-embedding-first graph memory engine: it does not ship an internal
-decoder path, adapter registry, fact table, static taxonomy loader, or
-processor-local shadow STM graph. The system demonstrates
-self-calibrating priors that blend with evidence using
-uncertainty-weighted Bayesian averaging, homeostatic threshold control
-with effective sample size estimation, and graph-augmented retrieval
-combining embedding similarity with durable association expansion.
-Experimental analysis indicates the architecture maintains stable
-operation across developmental phases while adapting write rates, decay
-dynamics, and retrieval precision to environmental demands. This work
-contributes a formally specified cognitive memory model suitable for
-implementation in streaming AI systems requiring persistent,
-context-aware memory.
+We present Cortext, a local multimodal memory engine that stores and
+recalls long conversational and sensory streams without calling a
+language model on either path.
 
-**Keywords:** cognitive architecture, adaptive memory, working memory,
-episodic memory, semantic memory, soft anchors, knowledge graphs,
-homeostatic control
+*Write path.* An online Bayesian change-point segmenter over embedding
+statistics closes each source stream into coherent units, and every
+closed unit is stored. A stored unit is indexed at three granularities:
+a pooled unit vector, one shared-space vector per member signal, and 16
+int8 late-interaction codes per text or image payload, up to 16. Its
+text also enters an FTS5 keyword index.
+
+*Read path.* A query builds a dense seed list over pooled unit vectors,
+into which best-member hits are merged. When auxiliary channels return
+hits, it fuses that list by reciprocal-rank fusion with BM25 keyword
+seeds, one gap-corrected list per other stored modality, and an optional
+reference-time list. A 0.1M-parameter late-interaction MaxSim reranker
+over frozen AIST-87M position features then reorders the top 64.
+Hydration attaches adjacent turns, superseded predecessors and
+superseding successors, each with its own timestamp, and fits the packet
+to a caller-supplied byte budget.
+
+*Results.* Under one shared answer model, judge and 34,800-byte budget
+on LoCoMo, Cortext scores 86.2%, against 89.0% for Mem0 and 81.0% for
+Graphiti. It makes zero write-time model calls and recalls in 9.7 ms at
+the median.
+
+*Negative result.* A leave-one-out ablation on evaluations of up to 111k
+turns tested the bio-inspired lifecycle mechanisms of earlier versions:
+strength decay and eviction, reconsolidation, clustering consolidation,
+retrieval-induced forgetting, synaptic tagging and neuromodulation. Each
+was inert at its defaults or hurt recall once it fired. Eviction alone
+cut packet recall from 0.630 to 0.086. We report which benchmarks
+overlap the reranker’s training data. The original three-knob control
+design (Focus, Sensitivity, Stability) remains as a macro-control
+surface over a calibrated default profile.
+
+**Keywords:** long-term memory, event segmentation, hybrid retrieval,
+reciprocal-rank fusion, late interaction, multimodal retrieval, negative
+results
 
 # Introduction
 
-Memory systems in artificial intelligence face a fundamental tension
-between plasticity and stability. Systems that learn rapidly risk
-catastrophic interference, while those that maintain stable
-representations may fail to capture novel patterns (McCloskey and Cohen
-1989). Biological memory systems resolve this tension through
-sophisticated regulatory mechanisms that modulate learning rates, decay
-dynamics, and retrieval thresholds in response to environmental demands
-and internal state (McClelland, McNaughton, and O’Reilly 1995).
+An assistant that runs for months accumulates more history than any
+context window holds. The common answer is to spend language-model calls
+at write time: extract facts, summarize sessions, maintain a knowledge
+graph, and retrieve from those products later (Packer et al. 2023;
+Chhikara et al. 2025; Rasmussen et al. 2025). This works, but it makes
+memory as expensive and as slow as the model. It rewrites what was said
+into what a model inferred, and it cannot run on a device without one.
 
-This paper introduces Cortext, a cognitive memory architecture that
-addresses this stability-plasticity dilemma through three continuous
-control parameters that govern all system behavior. Rather than
-implementing discrete operational modes or hard-coded phase transitions,
-Cortext achieves developmental progression through the continuous
-interaction of parameter settings with accumulated experience. The
-architecture draws on established findings from cognitive psychology and
-neuroscience, including working memory capacity limits (Cowan 2001),
-memory reconsolidation (Nader, Schafe, and Le Doux 2000), serial
-position effects (Murdock Jr 1962), and emotional modulation of memory
-(McGaugh 2004).
+Cortext takes the other path. It stores what was observed, as segmented
+units of the original signals, and puts the work into retrieval and
+hydration. Neither path calls a language model. The only learned
+components are a frozen multimodal encoder (AIST-87M) and a
+0.1M-parameter late-interaction reranker over its per-position features.
 
-The core contribution of this work is a formally specified memory
-architecture in which:
+This paper is a rewrite of the earlier Cortext specification, which
+presented a three-knob (F, S, T) cognitive architecture: twelve metrics
+blended by recursive least squares, mood and affect, a homeostatic write
+threshold, and a family of bio-inspired lifecycle mechanisms.
+Long-horizon ablation showed the lifecycle mechanisms did not earn their
+place (<a href="#sec-negative" class="quarto-xref">Section 14</a>), and
+removing the write threshold raised recall. What drives recall in the
+current (v5) engine is a different set of mechanisms. The paper is
+organized around them.
 
-1.  Most tuneable parameters derive from three primary knobs (Focus,
-    Sensitivity, Stability) through explicit mathematical
-    transformations, while fixed invariants (e.g., controller gains) are
-    labeled and justified.
-2.  System priors self-calibrate through uncertainty-weighted Bayesian
-    blending with observed evidence.
-3.  Developmental phases emerge from annealed safety bounds and
-    experiential mass accumulation, not explicit mode switching.
-4.  A knowledge graph layer enables shallow embedding consolidation and
-    graph-augmented retrieval.
-5.  Ingress-time Soft Anchor state preserves uncertain subject/entity
-    continuity without forcing immediate hard binding.
+The contributions are:
 
-The remainder of this paper is organized as follows. Section 2 reviews
-relevant literature. Section 3 presents the mathematical foundations
-including notation, helper functions, and knob-derived parameters.
-Section 4 details the core algorithms for Focus, Sensitivity, and
-Stability adaptation. Section 5 describes structural metrics and
-composite scoring. Section 6 covers dynamic thresholding and homeostatic
-control. Section 7 presents the reinforcement and decay dynamics.
-Section 8 describes advanced cognitive processes including working
-memory, Soft Anchor formation, pattern-separation/procedural sparse
-keys, synaptic tagging, and emotional consolidation. Section 9 details
-the consolidation and graph integration system. Section 10 presents the
-interrupt gate for streaming integration. Section 11 reports
-experimental results. Section 12 discusses implementation considerations
-and computational complexity. Section 13 documents the performance
-profiling and optimization of the reference implementation. Section 14
-concludes with limitations and future directions. In the source tree
-these correspond to `sections/1_...` through `sections/11_...`; the
-rendered manuscript section numbering includes the introduction and
-related-work sections before those files.
+1.  **LLM-free online segmentation, storing every closed unit**
+    (<a href="#sec-thresholding" class="quarto-xref">Section 5</a>). A
+    calibrated change-point posterior over surprisal, drift, coherence,
+    topic shift and inter-arrival gaps decides unit boundaries per
+    source stream. The write rule is
+    `write_memory = force_write ∨ should_flush`.
+2.  **Multi-granularity hybrid retrieval**
+    (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>). Dense
+    seeds score pooled unit vectors, and best-member hits raise or join
+    them in the same list. Reciprocal-rank fusion (k = 60) then combines
+    that list with FTS5 BM25, one z-gated list per other stored
+    modality, and a reference-time list, whenever any of those returns
+    hits.
+3.  **A modality-agnostic late-interaction reranker**
+    (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>). Each
+    stored member keeps up to 16 int8 spherical k-means codes of its
+    encoder positions, at most about 1 KB. Queries rerank the top 64 by
+    gated MaxSim with a learned first-stage rank prior, in 0.4 to 3 ms.
+4.  **Hydration and evidence fitting**
+    (<a href="#sec-hydration" class="quarto-xref">Section 7</a>):
+    -   contiguity with adjacent turns;
+    -   superseded-predecessor and superseding-successor attachment
+        through `supersedes` edges;
+    -   standing directives outside the ranked list;
+    -   per-blob content timestamps;
+    -   a per-call evidence budget that trims grouped units to their
+        best members before dropping whole memories.
+5.  **Negative results**
+    (<a href="#sec-negative" class="quarto-xref">Section 14</a>). A
+    leave-one-out study removed:
+    -   forgetting through strength decay and eviction;
+    -   reconsolidation;
+    -   clustering consolidation;
+    -   retrieval-induced forgetting;
+    -   synaptic tagging;
+    -   the NE-like and DA-like neuromodulators;
+    -   meta-learned priors and several feedback loops.
+
+    It also found that short-horizon blind-judge screens had reported
+    harm from removing mechanisms whose packets were byte-identical.
+6.  **Realtime systems design**
+    (<a href="#sec-optimization" class="quarto-xref">Section 17</a>):
+    -   a content-addressed embedding arena;
+    -   a sparse in-memory route;
+    -   off-thread WAL checkpointing;
+    -   sound family-collapse bounds;
+    -   a top-k BM25 collector.
+
+    Together these keep query p95 at 44.5 ms on a 443k-turn store.
+
+<a href="#sec-overview" class="quarto-xref">Section 3</a> gives the
+whole pipeline and says exactly what the three knobs still influence.
+<a href="#sec-math" class="quarto-xref">Section 4</a> fixes notation and
+the knob maps. Then come segmentation and the write path
+(<a href="#sec-thresholding" class="quarto-xref">Section 5</a>),
+retrieval (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>)
+and hydration
+(<a href="#sec-hydration" class="quarto-xref">Section 7</a>), which form
+the main line. The per-signal control stack follows
+(<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>,
+<a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>),
+with working memory and supersession
+(<a href="#sec-advanced" class="quarto-xref">Section 10</a>), the
+streaming interrupt gate
+(<a href="#sec-interrupt" class="quarto-xref">Section 11</a>),
+maintenance
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>), and
+the record of removed reinforcement and decay
+(<a href="#sec-reinforcement" class="quarto-xref">Section 13</a>).
+<a href="#sec-negative" class="quarto-xref">Section 14</a> presents the
+ablation, <a href="#sec-experimental" class="quarto-xref">Section 15</a>
+the full experimental record with reranker-overlap separation,
+<a href="#sec-implementation" class="quarto-xref">Section 16</a>
+implementation detail, and
+<a href="#sec-optimization" class="quarto-xref">Section 17</a> the
+systems architecture. The historical optimization ledger is preserved in
+Appendix E (`docs/paper/appendix/optimization_ledger.qmd`).
 
 # Related Work
 
+## LLM Memory Systems and Benchmarks
+
+MemGPT (Packer et al. 2023) pages context in and out of a model’s window
+under model control. Mem0 (Chhikara et al. 2025) extracts and
+consolidates facts with a model at write time, and Zep (Rasmussen et al.
+2025) (with its open-source engine Graphiti) maintains a temporal
+knowledge graph built by model calls. Cortext differs in kind: it makes
+no model call on either path, and it stores observed signals rather than
+model-written facts.
+<a href="#sec-v5-benchmarks" class="quarto-xref">Section 15.2</a>
+compares it with Mem0 and Graphiti under one shared pipeline on LoCoMo
+(Maharana et al. 2024), and with published results on LongMemEval (Wu et
+al. 2024), BEAM, DolphinBench and MemLens.
+
+## Event Segmentation
+
+Cortext’s unit of memory comes from event segmentation theory (Zacks and
+Swallow 2007): people segment continuous experience at points of
+prediction error, and those boundaries structure later recall. EM-LLM
+(Fountas et al. 2024) segments token streams into episodic events by
+surprise, refined by graph-theoretic cohesion. Cortext adapts the idea
+to any embedding stream. EMA prediction error supplies surprise,
+within-unit cosine coherence supplies cohesion, and drift, topic shift
+and inter-arrival gaps supply further evidence for a calibrated
+change-point posterior
+(<a href="#sec-thresholding" class="quarto-xref">Section 5</a>). Because
+it operates on embeddings, the same segmenter serves text turns, audio
+chunks and images.
+
+## Hybrid and Late-Interaction Retrieval
+
+BM25 (Robertson and Zaragoza 2009) remains a strong lexical baseline,
+and fusing lexical and dense rankings by reciprocal rank (Cormack,
+Clarke, and Buettcher 2009) is a robust, training-free way to combine
+them. Cortext uses RRF with the standard k = 60 over the dense list
+(with member hits merged in), the keyword list, the per-modality
+cross-modal lists and the temporal list. Late-interaction retrieval
+(Khattab and Zaharia 2020) scores a query against a document’s per-token
+vectors by MaxSim. Cortext applies it as a reranker over frozen encoder
+positions of any modality. Each stored member compresses its positions
+to at most 16 int8 spherical k-means codes, which keeps storage near 1
+KB per payload without a shared codebook. The sparse candidate route
+follows the HNSW construction (Malkov and Yashunin 2018).
+
 ## Working Memory Models
 
-The working memory component of Cortext draws conceptually on Cowan
-(2001) embedded-processes model, which posits a capacity limit of
-approximately 4±1 chunks for the focus of attention. This contrasts with
-Miller (1956) earlier estimate of 7±2 items, which subsequent research
-has shown conflates chunking with raw capacity (Cowan 2010). Cortext’s
-production slots are larger, application-level memory units rather than
-a direct cognitive-chunk implementation: the shipped F/S-derived
-capacity is 15–27 slots, with 21 at neutral knobs, selected from the
-product evaluation reported in
-<a href="#sec-experimental" class="quarto-xref">Section 11</a>. The
-biological result motivates boundedness and competition, not a claim
-that the software reproduces human span numerically.
+The working memory component draws conceptually on Cowan (2001)
+embedded-processes model, which posits a capacity limit of about 4±1
+chunks for the focus of attention. That figure contrasts with Miller
+(1956) earlier estimate of 7±2 items, which later research showed
+conflates chunking with raw capacity (Cowan 2010). Cortext’s production
+slots are larger application-level memory units rather than cognitive
+chunks. The shipped F/S-derived capacity is 15–27 slots, 21 at neutral
+knobs, selected from the product evaluation in
+<a href="#sec-experimental" class="quarto-xref">Section 15</a>. The
+biological result motivates a bounded set, not a claim that the software
+reproduces human span. The episodic buffer of Baddeley (2000) aligns
+with binding information across modalities through one shared vector
+space.
 
-Baddeley (2000) multicomponent model informs our treatment of
-maintenance and rehearsal processes, though we adopt a more unified
-representational substrate based on distributed embeddings rather than
-separate phonological and visuospatial stores. The episodic buffer
-concept (Baddeley 2000) aligns with our approach to binding information
-across modalities through shared vector spaces.
+## Consolidation, Reconsolidation and Forgetting
 
-## Memory Consolidation
+Complementary learning systems (McClelland, McNaughton, and O’Reilly
+1995) motivate a fast episodic store beside slower structure, and
+reconsolidation theory (Nader, Schafe, and Le Doux 2000; Nader 2003)
+holds that retrieved memories become labile and can be modified before
+restabilizing. Earlier Cortext versions implemented the following, each
+with knob-derived rates:
 
-The consolidation mechanisms in Cortext reflect findings from the memory
-reconsolidation literature (Nader, Schafe, and Le Doux 2000; Nader
-2003). Reconsolidation theory posits that retrieved memories enter a
-labile state during which they can be modified before restabilization.
-Our architecture implements this through time-bounded lability windows
-governed by the Stability parameter, with reconsolidation gain modulated
-by both Sensitivity and contextual relevance.
+-   reconsolidation drift during a lability window;
+-   clustering consolidation into abstraction nodes;
+-   multi-timescale strength decay with eviction;
+-   retrieval-induced forgetting (Anderson, Bjork, and Bjork 1994).
 
-The distinction between episodic and semantic memory (Tulving 1972)
-motivates our two-tier storage approach: a streaming episodic buffer for
-immediate experiences and a durable graph over consolidated embedding
-structure. The current consolidation process transforms high-redundancy
-episodic clusters into association centroid nodes linked to their
-sources by durable graph edges; it does not synthesize payload summaries
-or extract free-form semantic relations.
+All four were evaluated and removed
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>).
+Reconsolidation was neutral to harmful, and consolidation never fired at
+its defaults and did not help when forced. Eviction deleted 92–99.7% of
+stores once its gate opened. The engine now keeps the episodic substrate
+(Tulving 1972) and no consolidated semantic tier. Its only
+consolidation-like step is maintenance of the retrieval route
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>).
 
 ## Emotional Influences on Memory
 
-McGaugh (2004) extensive work on emotional modulation of memory
-consolidation informs our treatment of affect-gated encoding. The
-architecture implements emotional intensity as a threshold modifier,
-consistent with findings that arousal enhances memory through
-amygdala-mediated modulation of hippocampal encoding (LaBar and Cabeza
-2006). We adopt a dimensional model of emotion (Russell 1980) with
-valence and arousal as primary axes, projected from categorical emotion
-embeddings.
+McGaugh (2004) showed that arousal modulates memory consolidation
+through amygdala-mediated effects on hippocampal encoding (LaBar and
+Cabeza 2006). Earlier Cortext versions implemented emotional
+consolidation and an emotional cascade over graph neighbours. Both were
+removed after leaving every packet byte-identical
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>). The
+per-signal emotion projection onto a dimensional valence-arousal model
+(Russell 1980) remains in the control stack. Its only effect is a small
+move of the spike-bypass threshold
+(<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>).
 
-## Adaptive Control Systems
+## Adaptive Control
 
-The homeostatic threshold controller draws on classical control theory,
-specifically proportional-integral approaches to setpoint maintenance
-(Åström and Murray 2008). The use of exponentially-weighted moving
-averages for rate estimation follows standard practice in adaptive
-systems, while our effective sample size calculation for reliability
-estimation extends techniques from sequential Monte Carlo methods (Liu
-and Chen 1998).
+The homeostatic threshold controller follows proportional-integral
+setpoint control (Åström and Murray 2008). Its effective-sample-size
+reliability estimate borrows from sequential Monte Carlo (Liu and Chen
+1998). In v5 the controller no longer gates persistence. It sets only
+the margin a salience spike must clear to close a unit early
+(<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>).
+
+# System Overview
+
+Cortext turns a stream of signals (text turns, audio chunks, images)
+into a SQLite store, and turns a later query into a small, budgeted
+packet of evidence. No language model runs on either path. The only
+learned components are the frozen AIST-87M multimodal encoder and a
+0.1M-parameter late-interaction reranker over the encoder’s per-position
+features. This section gives the whole pipeline in one place. The
+sections after it specify each stage.
+
+## Write Path
+
+``` text
+signal (any modality)
+  -> AIST embedding (256-d shared space) + per-position features
+  -> per-source accumulator: running centroid, drift, coherence, surprisal
+  -> online boundary segmentation (Bayesian change-point posterior)
+  -> on a boundary: store the closed unit
+       memories row (representative embedding e_rep)
+       signals rows + object-store payloads (BLAKE3 content ids)
+       memory_signal_vectors: one shared-space vector per stored payload
+       memory_signal_li_codes: up to 16 int8 late-interaction codes per text or image payload
+       memory_text_fts: FTS5 keyword index over long-term text
+       standing_signals: lasting directives
+       supersedes edges to similar older memories
+  -> working-memory admission (bounded slot set)
+```
+
+1.  **Segmentation decides what a memory is**
+    (<a href="#sec-thresholding" class="quarto-xref">Section 5</a>).
+    Each source stream keeps an open unit. A calibrated boundary
+    posterior over surprisal, drift, within-unit coherence, topic shift
+    and inter-arrival gaps closes the unit at a natural event boundary.
+    A capacity ceiling, a pressure ratio, a salience spike, an
+    inactivity boost or an explicit `Flush()` can also close it.
+2.  **Every closed unit is stored.** The write rule is
+    `write_memory = force_write ∨ should_flush`. An earlier score
+    threshold discarded finished units and cost 7–11% of gold evidence
+    turns
+    (<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>).
+    Retention policies choose who closes units: `Natural` leaves it to
+    the segmenter, `Durable` closes one per call, `Boundary` forces the
+    edge only, and `Ephemeral` stores nothing.
+3.  **A stored unit is indexed at three granularities.** The unit has
+    one pooled vector. Each of its member signals keeps its own
+    shared-space vector. Each member payload also keeps late-interaction
+    codes. Its text enters the keyword index.
+
+## Read Path
+
+``` text
+Ephemeral query (any modality; optional reference time T, as_of)
+  -> dense unit seeds        (sparse route or exact; family collapse)
+  -> member seeds            (best member cosine, max with unit cosine)
+  -> keyword seeds           (FTS5 BM25, text queries)
+  -> cross-modal seeds       (per-modality z-gated lists)
+  -> temporal seeds          (nearest to T, when T is set)
+  -> reciprocal-rank fusion  (k = 60)
+  -> neighbour deferral
+  -> late-interaction MaxSim rerank of the top 64
+  -> cut to the output size (11 at neutral knobs)
+  -> hydration: contiguity, superseded predecessors, superseding successors,
+                standing block, per-blob timestamps
+  -> evidence fitting to the caller's byte budget
+```
+
+Retrieval (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>)
+is multi-granularity and hybrid. Dense seeds score whole units. Member
+seeds rescue a unit whose pooled vector sits between its members. BM25
+catches rare names and numbers. Cross-modal lists correct for the
+modality gap, and the temporal channel answers “around then” queries.
+Hydration (<a href="#sec-hydration" class="quarto-xref">Section 7</a>)
+then rebuilds what a person would recall around each hit: the adjacent
+turns, the earlier version of an updated fact, the newer restatement,
+and the standing directives. Finally it fits the packet to the reader’s
+budget.
+
+## Where the Three Knobs Still Act
+
+Focus, Sensitivity and Stability (F, S, T) began as the core of the
+architecture. Every rate, threshold and decay was derived from them, and
+a homeostatic threshold controller gated persistence. In v5 they are a
+macro-control surface over a calibrated default profile. The defaults (F
+= S = T = 0.5) are the evaluated operating point. The knobs still change
+behavior through closed-form maps:
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Knob-derived quantities</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>segmentation</td>
+<td>boundary hazard, change-point threshold <code>b_thresh(F,S)</code>,
+capacity ceiling <code>max_signals(F,S,T)</code>, pressure ratio,
+inactivity policy</td>
+</tr>
+<tr>
+<td>spike bypass</td>
+<td>margin over θ_dynamic; θ_dynamic itself comes from the
+composite-score controller (<a href="#sec-core-adaptation"
+class="quarto-xref">Section 8</a>, <a href="#sec-structural-metrics"
+class="quarto-xref">Section 9</a>)</td>
+</tr>
+<tr>
+<td>working memory</td>
+<td>capacity 15–27 slots (21 at neutral), admission weights, chunk
+budget</td>
+</tr>
+<tr>
+<td>retrieval breadth</td>
+<td>seed count (37 at neutral), seed search breadth (345), output size
+(11)</td>
+</tr>
+<tr>
+<td>supersession</td>
+<td>similarity band, duplicate threshold, edge cap</td>
+</tr>
+<tr>
+<td>streaming gate</td>
+<td>pacing thresholds and interrupt-gate thresholds (<a
+href="#sec-interrupt" class="quarto-xref">Section 11</a>)</td>
+</tr>
+<tr>
+<td>sparse route</td>
+<td>capacities <span class="math inline"><em>C</em></span>, <span
+class="math inline"><em>B</em></span>, <span
+class="math inline"><em>A</em></span> (<a href="#sec-optimization"
+class="quarto-xref">Section 17</a>)</td>
+</tr>
+<tr>
+<td>maintenance hints</td>
+<td>throughput trough fraction and escalation (<a
+href="#sec-consolidation" class="quarto-xref">Section 12</a>)</td>
+</tr>
+</tbody>
+</table>
+
+The v5 recall machinery is not knob-derived. Its constants were set by
+ablation and hill-climbing on long-horizon evaluations:
+
+-   RRF k = 60 and the channel limits;
+-   the late-interaction depth of 64;
+-   the contiguity, supersession and standing budgets;
+-   the 480-byte media charge.
+
+A reader should not expect turning a knob to retune them.
+
+The composite-score stack (12 metrics, recursive-least-squares blending,
+emotion and mood deltas, the homeostatic controller) still runs per
+signal. Its outputs now have three consumers: the spike-bypass
+threshold, the window score that ranks units for working-memory
+admission, and the score variance inside the uncertainty estimate. None
+of them gates whether a unit is stored.
+
+## What Was Removed
+
+The 2026-10 leave-one-out ablation
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>) removed the
+bio-inspired lifecycle mechanisms that earlier versions of this paper
+presented as the architecture’s core:
+
+-   multi-timescale strength traces, decay and strength-based eviction;
+-   reconsolidation drift and retrieval-time reconstruction;
+-   retrieval-induced forgetting (lateral inhibition);
+-   clustering consolidation into `ASSOCIATION` centroids, and graph
+    expansion;
+-   synaptic tagging and capture;
+-   emotional consolidation and the emotional cascade;
+-   the NE-like and DA-like neuromodulators, effect scales and the
+    encode/retrieve oscillator;
+-   meta-learned knob priors;
+-   predictive pre-activation;
+-   pattern-separation sparse keys and the procedural lane;
+-   Soft Anchors;
+-   serial-position effects;
+-   the focus, sensitivity, stability and influence feedback loops.
+
+Each was either inert at the default knobs, leaving packets
+byte-identical, or measurably harmful once made to fire. Later sections
+keep a short record of each removed mechanism where it used to live, so
+a reader can see what was tried. None of them describes current
+behavior.
 
 # Mathematical Foundations
 
@@ -222,11 +513,11 @@ consistently throughout this document. Units: stored timestamps are
 integers in milliseconds (commonly suffixed \*\_ts, and also appearing
 as timestamp/created_at/last_rate_timestamp); derived time intervals in
 seconds use the **s suffix. Accumulator variables: t_start,
-last_signal_ts, last_write_ts, drift_acc, eta_acc, coherence_prev,
-emo_max, arousal_sum, drift_accum, drift_at_last_interrupt,
-drift_acc_pacing, x_last_check. Global variables: signals_processed,
-u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target,
-hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability,
+last_signal_ts, drift_acc, eta_acc, coherence_prev, emo_max,
+arousal_sum, drift_accum, drift_at_last_interrupt, drift_acc_pacing,
+x_last_check. Global variables: signals_processed, u_uncertainty,
+mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis,
+m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability,
 last_rate_timestamp, last_retrieval_ts, retention_ema,
 consolidation_rate_floor, consolidation_rate_peak, last_embedding,
 x_pred_ema. Weight naming rule: weight** and **weight variables (e.g.,
@@ -257,34 +548,56 @@ idle_for), and time comparisons operate in seconds:
 explicit units (e.g., τ_min(T) in seconds). Gap scaling returns values
 in seconds (gap_scale multiplies dt_ema to form gap_ref_s).
 
-### No Fixed Behavioral Constants
+### Knob-Derived and Fixed Constants
 
-Most behavioral thresholds, gains, and caps are derived from the three
-knobs (F, S, T) and/or state. Fixed numeric values are permitted for
-numerical stability floors (e.g., ε(F, S, T)), unit conversions, and
-explicitly labeled resource/safety invariants such as storage-pressure
-floors. This keeps the system’s qualitative behavior governed by the
-three knobs while still allowing bounded implementation guards.
+The segmentation, working-memory, retrieval-breadth, supersession,
+streaming and route-capacity parameters are closed-form functions of the
+three knobs (F, S, T) and of stream state. The v5 recall and hydration
+mechanisms are not. Their constants were fixed by ablation and
+hill-climbing on long-horizon evaluations
+(<a href="#sec-retrieval" class="quarto-xref">Section 6</a>,
+<a href="#sec-hydration" class="quarto-xref">Section 7</a>):
+
+-   RRF k = 60 and the per-channel limits;
+-   the late-interaction depth of 64;
+-   the contiguity, supersession and standing budgets;
+-   the 480-byte media charge.
+
+Numerical floors such as ε(F, S, T), unit conversions and schema
+invariants are fixed as well. Earlier versions of this paper claimed
+that no behavioral constant was fixed; that is no longer true, and the
+fixed constants are labeled where they appear.
 
 ## Temporal Semantics
 
 Cortext treats durable memories as **event-time observations**: a memory
-is written when a coherent unit is detected, and its stored timestamp
-records when that unit was observed. The engine no longer maintains a
-separate structured fact layer with valid-time and transaction-time
-intervals; temporal reasoning therefore operates over memory and signal
-timestamps directly.
+is written when a coherent unit is detected, and its stored span
+`[start_ts, end_ts]` records when that unit was observed. Each stored
+signal keeps its own timestamp, and retrieved memories return one
+timestamp per content blob
+(<a href="#sec-hydration" class="quarto-xref">Section 7</a>). The engine
+maintains no separate structured fact layer with valid-time and
+transaction-time intervals. Temporal reasoning therefore operates over
+memory and signal timestamps directly.
 
 For an episodic memory `m_i`, the event timestamp is:
 
     t_event(m_i) = created_at(m_i)
 
-Retrieval and consolidation consume this event time through recency
-windows, association ordering, and explicit replay timestamps. The
-accumulator’s temporal-context vector is used separately for
-boundary/topic-shift state and is persisted with memories; as noted in
-<a href="#sec-temporal-context" class="quarto-xref">Section 8.2</a>, it
-is not yet a production retrieval-score term.
+Retrieval consumes event time in three places: the write-exclusion bound
+(a query never retrieves its own open unit), the temporal seed channel
+and `as_of` cutoff for queries that carry a reference time
+(<a href="#sec-retrieval" class="quarto-xref">Section 6</a>), and the
+contiguity gap that decides which adjacent turns belong to the same
+stretch of conversation
+(<a href="#sec-hydration" class="quarto-xref">Section 7</a>). Engine
+time never runs behind the signals the store holds: if a supplied clock
+is behind, the implicit “now” is the newest stored signal plus one
+millisecond. The accumulator’s temporal-context vector serves boundary
+topic-shift detection only; as noted in
+<a href="#sec-temporal-context" class="quarto-xref">Section 10.2</a>, it
+is not a retrieval-score term.
+<!-- PRUNE: migration 56 on chore/prune-write-only drops the persisted per-memory context BLOB; c_t stays in memory. -->
 
     t_retrieve(q, m_i) = q.timestamp - t_event(m_i)
 
@@ -318,31 +631,32 @@ for completed units) used for retrieval and focus-spread computations.
 
 ## The Three-Knob Philosophy
 
-Cortext is governed by three continuous control parameters, each
-representing a distinct dimension of cognitive regulation:
+Cortext exposes three continuous control parameters. In v5 they are a
+macro-control surface over a calibrated default profile (F = S = T =
+0.5, the evaluated operating point), not the mechanism that decides what
+is stored or recalled
+(<a href="#sec-overview" class="quarto-xref">Section 3</a>).
 
-**Focus (F ∈ \[0, 1\]):** Perceptual selectivity and precision. Higher
-Focus narrows attention, increases relevance weighting, and reduces
-retrieval breadth. Focus modulates the trade-off between exploitation of
-known-relevant information and exploration of potentially useful
-context.
+**Focus (F ∈ \[0, 1\]):** selectivity. Higher Focus narrows retrieval
+breadth (fewer seeds, a smaller output), raises the change-point
+threshold while lowering the unit capacity ceiling, enlarges working
+memory, and tightens duplicate suppression.
 
-**Sensitivity (S ∈ \[0, 1\]):** Plasticity and affective gain. Higher
-Sensitivity accelerates learning, increases emotional and novelty
-responsiveness, and raises write-rate targets. Sensitivity governs how
-readily the system captures novel information and responds to salient
-stimuli.
+**Sensitivity (S ∈ \[0, 1\]):** reactivity. Higher Sensitivity raises
+the boundary hazard (shorter units), lowers the spike-bypass margin,
+shrinks working memory (faster turnover), and makes streaming retrieval
+checks more frequent.
 
-**Stability (T ∈ \[0, 1\]):** Temporal persistence and inertia. Higher
-Stability lengthens memory half-lives, widens hysteresis bands, slows
-adaptive updates, and tightens safety bounds over time. Stability
-controls the resistance to change and the preservation of established
-knowledge.
+**Stability (T ∈ \[0, 1\]):** inertia. Higher Stability widens context
+windows and hysteresis, slows the adaptive score statistics, enlarges
+the unit capacity ceiling and the sparse-route capacities, and requires
+a deeper throughput trough before recommending maintenance.
 
-A central design principle is that knobs set rates rather than modes.
-Behavioral differences emerge continuously from parameter interactions;
-there are no hard-coded phase transitions or discrete operational
-states.
+The design principle that knobs set rates rather than modes still holds.
+Behavior changes continuously with the knobs, and there are no discrete
+operational modes. Earlier versions also tied Stability to memory
+half-lives and eviction. Those were removed
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>).
 
 ### Midpoint-Biased Knob Mapping
 
@@ -377,19 +691,6 @@ lookback for variance estimation and percentile calculation. The rate
 window win_rate_s specifies the temporal horizon (in seconds) for
 write-rate measurement.
 
-### Half-Life and Decay
-
-Memory half-life follows a log-scale mapping to span multiple orders of
-magnitude:
-
-    τ_min = 120.0 seconds (2 minutes)
-    τ_max = 43200.0 seconds (12 hours)
-    base_half_life(T) = exp(ln(τ_min) + T × ln(τ_max / τ_min))
-
-This exponential mapping ensures that low Stability yields half-lives
-near 2 minutes while high Stability approaches 12 hours, with smooth
-interpolation across the range.
-
 ### Hysteresis and Rate Targets
 
     band_min = 0.02; band_max = 0.25
@@ -401,26 +702,30 @@ The hysteresis band prevents oscillation in threshold-crossing
 decisions. Write-rate targets establish homeostatic setpoints for the
 threshold controller.
 
-These ranges are canonical knob maps for memory behavior: admission
-thresholds, retrieval weights, graph expansion breadth, lifecycle
-scoring, and consolidation policy are derived from F/S/T. Fixed values
-may still appear as schema invariants, vector dimensions, parser
-guardrails, numeric epsilons, migration defaults, and benchmark protocol
-settings, but they are not additional user-facing memory knobs.
+These ranges feed the spike-bypass threshold controller
+(<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>),
+which no longer gates storage. Fixed values also appear as schema
+invariants, vector dimensions, parser guardrails, numeric epsilons,
+migration defaults, benchmark protocol settings and the v5 recall
+constants listed above. None of these is an additional user-facing knob.
 
 ### Retrieval Breadth
 
 Retrieval uses two F/S/T-derived breadths rather than one global top-k.
 The candidate discovery pass stays broad so durable memories remain
-reachable:
+reachable. Retrieval uses its own midpoint biases (`RetrievalFocusBias`,
+and likewise for S and T), shifted so that neutral knobs land on the
+operating point a judged sweep selected:
 
-    seed_k(F) = round(lerp(96, 8, FocusBias(F)))
+    seed_k(F) = round(lerp(96, 8, RetrievalFocusBias(F)))   # 37 at neutral
 
-Before the vector-seed cap is applied, superseded targets and
-near-duplicate embedding families are collapsed to one current
-representative. Family lookup normalizes each embedding and partitions
-its coordinates into 32 deterministic blocks. For a candidate `x` and
-representative `y`, Cauchy–Schwarz gives the recall-safe upper bound
+Before the vector-seed cap is applied, near-duplicate embedding families
+are collapsed to one current representative. Superseded targets stay
+eligible: excluding them was removed after the engine ablation
+(<a href="#sec-experimental" class="quarto-xref">Section 15</a>). Family
+lookup normalizes each embedding and partitions its coordinates into 32
+deterministic blocks. For a candidate `x` and representative `y`,
+Cauchy–Schwarz gives the recall-safe upper bound
 
     cos(x, y) <= sum_b ||x_b||_2 ||y_b||_2
 
@@ -431,16 +736,29 @@ false-negative partition while avoiding broad exact comparisons on
 diverse vectors. The prompt-facing output is then narrowed after vector
 relevance and bounded graph expansion:
 
-    selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
+    selected_k(F,T) = round(lerp(20, 8, RetrievalFocusBias(F))
+                            * lerp(1.08, 0.92, RetrievalStabilityBias(T)))   # 11 at neutral
 
-Vector relevance is the primary rank. Event-time recency is restricted
-to a bounded tie-break so an old semantic match cannot be displaced by a
-recent but unrelated memory. Graph evidence contributes only a bounded
-residual bonus:
+Dense vector relevance is the first-stage score:
 
-    semantic(m) = map01(cos(q, embedding(m)))
-    base(m) = semantic(m) + (1 - semantic(m)) * 10^-6 * temporal_rank(m)
-    score(m) = base(m) + (1 - base(m)) * min(0.08, w_graph * graph(m))
+    score(m) = map01(cos(q, embedding(m)))
+
+For queries, member, keyword, cross-modal and temporal channels then
+join this list by reciprocal-rank fusion, and a late-interaction model
+reranks the head of the pool
+(<a href="#sec-retrieval" class="quarto-xref">Section 6</a>).
+
+Earlier builds added an event-time recency tie-break,
+`(1 − semantic) × 10^-6 × temporal_rank(m)`. The round-3 ablation
+(2026-10) dropped it with every packet byte-identical (LongMemEval-S
+0/48, Eval 1 0/250, BEAM-10M conversation 7 0/20), so it was removed.
+
+Earlier builds added a bounded graph bonus from one-hop association
+expansion. It was removed with clustering consolidation
+(<a href="#sec-experimental" class="quarto-xref">Section 15</a>),
+because no traversable edges remained.
+
+<!-- PRUNE: migration 56 on chore/prune-write-only drops source_reliability and source_contradiction_count; replace the next paragraph and formula with a one-line removal note. -->
 
 New source-backed memories also receive a knob-derived source
 reliability prior instead of relying on a fixed storage default:
@@ -452,14 +770,13 @@ reliability prior instead of relying on a fixed storage default:
 
 This split lets low Focus explore many durable-memory seeds while
 keeping the application prompt bounded by a compact final surface. The
-intermediate graph breadth and score weights are likewise derived from
-Focus, Sensitivity, and Stability in the implementation rather than
-exposed as additional user settings. Neither `source_id` nor modality
-participates in candidate discovery, family collapse, scoring, graph
-expansion, or final selection. The stored `source_reliability` and
-`source_contradiction_count` fields are not currently consumed by
-production ranking;
-<a href="#sec-advanced" class="quarto-xref">Section 8</a> distinguishes
+intermediate seed search breadth (345 at neutral) is likewise derived
+from Focus, Sensitivity, and Stability rather than exposed as an
+additional user setting. Neither `source_id` nor modality participates
+in candidate discovery, family collapse, scoring, or final selection.
+The stored `source_reliability` and `source_contradiction_count` fields
+are not currently consumed by production ranking;
+<a href="#sec-advanced" class="quarto-xref">Section 10</a> distinguishes
 that metadata from the proposed confidence gate.
 
 ### Experiential Mass and Maturity
@@ -507,7 +824,7 @@ weights:
 
 Normative note (MUST): focus_spread_t is the per-step derived
 focus-spread metric from
-<a href="#sec-focus-spread" class="quarto-xref">Section 5.1.2</a> and is
+<a href="#sec-focus-spread" class="quarto-xref">Section 9.1.2</a> and is
 available each step when computing u(t).
 
     weights_u = normalize([S, F, 1 − T, S × (1 − T)])
@@ -523,12 +840,1123 @@ Smoothed uncertainty applies EWMA with a stability-dependent rate:
 When structural metrics are unavailable, the fallback is u_raw(t) = 1 −
 maturity(t), ensuring high uncertainty during early operation.
 
-# Core Adaptation Algorithms
+# Online Segmentation and the Write Path
 
-This section presents the algorithms governing adaptation along each of
-the three primary dimensions. Each algorithm consists of a prior
-computation (executed at initialization) and a dynamic update (executed
-per signal).
+The write path decides what a memory is. Each source stream keeps one
+open unit. A calibrated change-point posterior closes the unit at a
+natural event boundary, and every closed unit is stored. No language
+model segments, summarizes or filters the stream. The inputs are
+embedding statistics defined in
+<a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>:
+surprisal against an EMA predictor, instantaneous drift, within-unit
+coherence, topic shift against the temporal context, and inter-arrival
+gaps.
+
+The section first specifies segmentation and the write commit. It then
+specifies the dynamic threshold θ_dynamic, which no longer gates
+persistence: its only remaining consumer is the spike-bypass margin.
+
+**Knob note:** F and S here refer to midpoint‑biased values (F̃, S̃) from
+<a href="#sec-math" class="quarto-xref">Section 4</a>.
+
+## Memory Accumulation and Event Segmentation
+
+The write gate operates per step, but coherent “thoughts” often span
+multiple signals. Composite scoring is computed on the current
+accumulator centroid (μ_acc), so write decisions are driven by the
+accumulated group rather than any single raw signal. This section
+introduces memory-level accumulation that groups signals into natural
+units before storage decisions, inspired by Event Segmentation Theory
+(Zacks and Swallow 2007).
+
+This approach draws from EM-LLM (Fountas et al. 2024), which segments
+token sequences into episodic events using surprise-based boundary
+detection refined by graph-theoretic cohesion metrics. Their work shows
+that combining prediction error signals with within-segment coherence
+produces boundaries correlated with human event perception. Our
+adaptation uses EMA prediction error (`surprisal_t`) for surprise and
+cosine similarity for cohesion, while drift provides auxiliary boundary
+pressure, enabling modality-agnostic operation across text tokens, audio
+chunks, video frames, or any signal stream.
+
+### Memory Accumulator State
+
+Each source stream maintains accumulator state:
+
+    μ_acc ← 256d running mean embedding
+    c_t ← temporal context vector (slow drift; @sec-temporal-context)
+    drift_acc ← accumulated drift within memory
+    s_sum ← sum of accumulator scores in memory
+    s_max ← max accumulator score in memory
+    n ← count of signals in memory
+    e_peak ← accumulator centroid at highest score
+    emo_max ← 0  # max emotion_intensity_t within the unit
+    arousal_sum ← 0  # sum of arousal_t within the unit (for avg)
+    t_start ← now_ms()  # timestamp of accumulation start (ms since epoch)
+    last_signal_ts ← now_ms()  # timestamp of previous signal (ms, for gap detection)
+    eta_acc ← 0  # drift EWMA state
+    coherence_prev ← 0  # previous coherence (initialize to 0)
+    acc_signals_window ← []  # ring buffer of recent embeddings for coherence
+
+Accumulator state is live runtime staging state, not durable memory.
+`Flush()` closes every open unit as at a boundary; if the process
+restarts before a boundary or flush commits a unit, the unfinished
+accumulator window is lost. Committed memories, signal rows, and working
+memory remain the durability boundary.
+
+Reset behavior: reset_accumulator() clears μ_acc, drift_acc, s_sum,
+s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, and
+sets acc_signals_window ← \[\] (and refreshes t_start/last_signal_ts for
+the next unit).
+
+    reset_accumulator(): acc_signals_window ← []  # MUST clear coherence window at boundaries
+
+On each signal, update running statistics (note: n is the count before
+this signal):
+
+    signal_gap_s ← now_s() − to_s(last_signal_ts)  # compute BEFORE updating last_signal_ts
+
+    win_coh(T) = round(lerp(8, 32, T))  # coherence window size
+    acc_signals_window ← tail(acc_signals_window, win_coh(T))
+
+    μ_acc ← (n × μ_acc + x_t) / (n + 1)
+    n ← n + 1
+    drift_gain(S,T) = clamp(0.5 × scale(S,T), 0.35, 0.65)
+    drift_acc ← drift_acc + drift_mag_t × drift_gain(S,T)
+    emo_max ← max(emo_max, emotion_intensity_t)
+    arousal_sum ← arousal_sum + arousal_t
+    last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
+
+    # After composite scoring on μ_acc:
+    s_sum ← s_sum + score_t
+    if score_t > s_max:
+        s_max ← score_t; e_peak ← μ_acc
+
+### Hybrid Drift and Coherence Tracking
+
+Boundary detection combines instantaneous drift with within-memory
+coherence tied to the evolving centroid μ_acc:
+
+    ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
+    # Use instantaneous drift_step_t for boundary velocity
+    d_step ← max(drift_step_t − ε_noise(T), 0)
+    eta_prev ← eta_acc  # baseline before updating EWMA
+
+Memory coherence tracks similarity within the current memory
+accumulation window (range \[−1, 1\] from mean cosine):
+
+    mu_curr ← μ_acc  # current accumulator centroid
+    current_window ← acc_signals_window  # embeddings from the current unit before mu_curr
+    if |current_window| == 0:
+        coherence_curr ← 1.0  # empty-window fallback
+    else:
+        coherence_curr ← mean([cos(mu_curr, x_i) for x_i in current_window])
+    # After computing coherence_curr, append mu_curr for the next step
+    acc_signals_window.append(mu_curr); acc_signals_window ← tail(acc_signals_window, win_coh(T))
+    # coherence_prev is the stored coherence value from the previous step
+
+Note: coherence_mem is distinct from coherence_struct
+(<a href="#sec-struct-coherence" class="quarto-xref">Section 9.1.1</a>).
+The former tracks within-memory similarity using raw mean cosine, while
+the latter measures variance-based integration with broader context.
+This dual-signal approach mirrors EM-LLM’s boundary detection mechanism.
+In their formulation, boundaries occur where surprise (token-level
+prediction error) exceeds a threshold and segment cohesion drops. In
+Cortext, surprisal_t provides the prediction-error signal, while drift
+spike provides auxiliary boundary pressure and coherence_mem drop
+captures within-memory similarity degradation.
+
+### Natural Boundary Detection (Bayesian Change-Point)
+
+Segmentation is framed as online change-point inference. We compute a
+**calibrated boundary probability** rather than a hand-tuned score. The
+hazard is knob-controlled; the likelihood is driven by surprisal,
+cohesion drop, drift, and temporal gaps, with a coherence/topic
+**support gate** to downweight isolated spikes.
+
+    # Hazard (prior boundary probability, calibrated to target rate)
+    h_base(F,S,T) = lerp(0.03, 0.18, S) × lerp(1.2, 0.8, T)
+    h_t_base ← clamp(h_base × (0.8 + 0.2(1 − F)), 0, 0.5)
+    target_rate(F,S,T) = clamp(lerp(0.12, 0.35, S) × lerp(1.1, 0.7, F) × lerp(1.0, 0.7, T), 0.05, 0.45)
+    rate_gain(S,T) = clamp(lerp(0.4, 1.0, S) × lerp(1.1, 0.8, T), 0.2, 1.2)
+    rate_mult ← clamp(1 + rate_gain × (target_rate − boundary_rate_ema), 0.5, 1.5)
+    # support uses normalized coherence/topic signals (defined below)
+    h_t ← clamp(h_t_base × rate_mult × lerp(0.8, 1.3, support), 0, 0.5)
+
+    # Drift spike (same signal, now used for likelihood)
+    ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
+    if eta_prev < ε0(T):
+        drift_spike ← 0
+    else:
+        drift_spike ← (d_step − eta_prev) / max(eta_prev, ε)
+    eta_acc ← EWMA(eta_prev, d_step, α = lerp(0.3, 0.1, T))
+    coh_drop01 ← clamp((coherence_prev − coherence_curr) / 2, 0, 1)
+    coherence_prev ← coherence_curr  # update for next step
+
+    # Adaptive gap signal (dynamic, not a hard trigger)
+    dt_ref ← max(dt_ema, dt_floor(T))  # EWMA of inter-arrival Δt in seconds (robust to jitter)
+    gap_scale(T) = lerp(3.0, 8.0, T)  # expected pause multiplier
+    gap_ref_s ← gap_scale(T) × dt_ref
+    gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
+    gap_score ← sigmoid(gap_z)
+
+    # Local normalization (within-episode, contrast-boosted)
+    var_floor(S,T) = BoundaryVarianceFloor(S,T)
+    warmup_signals(S,T) = BoundaryWarmupSignals(S,T)
+    ema_mean_x ← EWMA(ema_mean_x, x, α_local(T))
+    ema_var_x  ← EWMA(ema_var_x, (x − ema_mean_x)^2, α_local(T))
+    norm_gain(S,T) = clamp(lerp(1.6, 3.0, S) × lerp(1.05, 0.95, T), 1.0, 3.2)
+    x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(max(ema_var_x, var_floor) + ε))
+    # warm-up uses raw x until warmup_signals(S,T)
+
+    # Topic shift (embedding-only, temporal context anchor)
+    topic_shift ← 1 − map01(cos(e_t, c_t))
+
+    # Likelihood of a boundary given observations
+    support_policy ← BoundarySupportPolicyForKnobs(F,S,T, coĥ, topiĉ)
+    support ← support_policy.support
+    support_gate ← support_policy.support_gate   # downweight isolated spikes
+    gap_gate ← support_policy.gap_gate
+    support_boost ← support_policy.support_boost  # emphasize coherent/topic shifts
+    w_g(F,S,T) = clamp(0.01 × lerp(1.10, 0.90, F)
+                             × lerp(0.90, 1.10, S)
+                             × lerp(0.90, 1.10, T), 0.004, 0.020)
+    [w_s, w_d, w_c, w_t, w_g] ← [0.34 + 0.14S, 0.18 + 0.05(1 − T),
+                                0.36 + 0.16F, 0.30 + 0.22S, w_g(F,S,T)]
+    [w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
+                                          w_c×support_boost, w_t×support_boost, w_g×gap_gate])
+    z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
+    change_point_policy ← BoundaryChangePointPolicyForKnobs(S,T,support)
+    z_center_eff ← change_point_policy.z_center_eff
+    z_t ← w_s×(surprisal̂ − z_center_eff) +
+          w_d×(drift̂ − z_center_eff) +
+          w_c×(coĥ − z_center_eff) +
+          w_t×(topiĉ − z_center_eff) +
+          w_g×(gap_score − z_center_eff)
+    k_cp_eff ← change_point_policy.k
+    lik_boundary ← sigmoid(k_cp_eff × z_t)
+
+    # Bayesian update for boundary posterior
+    boundary_score ← (h_t × lik_boundary) /
+                      max(ε, h_t × lik_boundary + (1 − h_t) × (1 − lik_boundary))
+    boundary_score ← clamp(boundary_score, 0, 1)
+
+Boundary threshold and limits:
+
+    b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
+    max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
+
+Pressure-capacity ratio (continuous flush trigger derived from knobs):
+
+    capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
+    [capacity, pressure] ← BoundaryPressurePolicyForKnobs(S,T, drift_acc)
+    saturation_ratio ← pressure / max(capacity, ε)
+    k_flush(S,T) = k_surprise(S,T)
+    pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
+
+Hard capacity ceiling (max signals per memory; knob-derived):
+
+    base = lerp(4.0, 12.0, T)
+    f_scale = lerp(1.00, 0.35, F)
+    s_scale = lerp(1.00, 0.55, S)
+    floor = round(lerp(2, 3, T))
+    max_signals(F,S,T) = max(floor, round(base × f_scale × s_scale))
+
+Adaptive cadence (gap normalization only; no timeouts):
+
+    dt_ref ← max(dt_ema, dt_floor(T))
+    gap_ref_s ← gap_scale(T) × dt_ref
+
+Fallback boundary floor (applies to capacity/pressure only):
+
+    boundary_floor(F,S,T) = clamp(lerp(0.05, 0.15, S) × lerp(1.2, 0.8, F) × lerp(1.1, 0.9, T),
+                                  0.02, 0.25)
+
+Trigger memory flush when:
+
+    mem_elapsed ← now_s() − to_s(t_start)
+    should_flush = (boundary_score > b_thresh(F, S)) OR
+                   (pressure_score > b_thresh(F, S) AND boundary_score ≥ boundary_floor(F,S,T)) OR
+                   (n ≥ max_signals(F,S,T) AND boundary_score ≥ boundary_floor(F,S,T))
+
+where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the
+start of signal processing (before last_signal_ts is updated). Gap
+timing influences boundary_score via gap_score only; there is no
+time-based flush.
+
+**Boundary type note:** When the max-signals ceiling triggers a flush,
+set `boundary_type = "capacity"` for the enclosing episode. This is a
+hard safety boundary (not a heuristic score) and is still fully
+knob-derived.
+
+### Spike Bypass (Flashbulb Flush)
+
+High-salience signals bypass accumulation and flush immediately,
+capturing preceding context as a coherent memory unit. The margin is
+measured above θ_dynamic
+(<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>):
+
+    spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
+    mem_tau(T) = win_mem_ctx(T)
+    mem_maturity ← 1 − exp(−n / max(mem_tau(T), 1))  # n = signals in current unit
+    coherence_scale ← 1 + (1 − T) × clamp(coherence_t, 0, 1)
+    spike_margin_eff ← spike_margin(S,T) × (1 + (1 − mem_maturity)) × coherence_scale
+    spike_bypass = score_t > (θ_dynamic + spike_margin_eff)
+    force_write ← false
+
+When spike_bypass triggers:
+
+    if spike_bypass:
+        should_flush = true   # force a boundary
+        force_write = true   # spike-closed unit, profiled as forced
+
+This keeps flashbulb moments intact while preventing early or highly
+coherent windows from fragmenting into micro-memories. As the unit
+matures, spike bypass becomes easier, and low coherence reduces the
+effective margin.
+
+The implementation also uses the same force-write path when the
+accumulator reaches its maximum signal capacity. That capacity flush is
+an operational safety valve, not an additional flashbulb criterion.
+
+### Inactivity Boost
+
+We avoid hard timeouts for episode boundaries. Instead, when the stream
+becomes quiet and natural indicators are weak, inactivity softly boosts
+the boundary score:
+
+    inactivity_policy ← BoundaryInactivityPolicyForKnobs(S,T)
+    support_relax = exp(−inactivity_policy.support_relax_rate × gap_z⁺)
+    gap_ratio = signal_gap_s / max(dt_ema, ε)
+    gap_z_inact = log1p(max(gap_ratio − 1, 0))
+    gap_score_inact = sigmoid(inactivity_policy.gap_score_scale × gap_z_inact)
+    inactivity = gap_score_inact × (1 − support × support_relax)
+    gap_z⁺ = max(0, gap_z_inact)
+    inactivity_scale = exp(inactivity_policy.inactivity_exp_rate × gap_z⁺)
+    boundary_score ← boundary_score + inactivity_policy.inactivity_weight × inactivity × inactivity_scale
+    gap_force = sigmoid(inactivity_policy.gap_force_k ×
+                       (gap_z_inact − inactivity_policy.gap_force_center))
+    boundary_score ← max(boundary_score, gap_force)
+
+This closes episodes after prolonged inactivity without forcing
+premature flushes during coherent streams. The signal gap is measured
+relative to the observed cadence (dt_ema), so inactivity remains dynamic
+and adapts to the current conversational pace rather than a fixed
+timeout.
+
+### Window Score and Write Commit
+
+Memory-level score combines peak and average with coverage bonus:
+
+    s_avg ← s_sum / max(n, 1)
+    α(F) = lerp(0.3, 0.7, F)  # peak vs avg weight
+    coverage ← min(n / n_ctx(T), 1.0)  # memory completeness
+    β(S) = lerp(0.05, 0.15, S)  # coverage weight
+    S_window ← α(F) × s_max + (1 − α(F)) × s_avg + β(S) × coverage
+
+S_window ranks the closed unit for working-memory admission
+(<a href="#sec-wm-gating" class="quarto-xref">Section 10.2.2</a>). It no
+longer decides storage: every unit that closes is written.
+
+    write_memory = force_write OR should_flush   # unit closed and non-Ephemeral
+
+Boundary detection already decides that a unit is complete. An earlier
+`S_window > θ_dynamic × M_write_refrac` threshold (with a write
+refractory `M_write_refrac = 1 + k exp(−Δt_write/τ)`) discarded finished
+units: under per-conversation Natural ingest it dropped 7–11% of gold
+evidence turns (stored without it: LongMemEval-S 72 → 81 of 81, Eval1
+371 → 399 of 400), and removing it raised retrieved-only packet gold
+recall by +0.086 (S) and +0.054 (Eval1) for +6% store bytes. Dropping
+only the refractory kept most of the loss (S 73 of 81, +0.012). The
+threshold and refractory are removed; θ_dynamic still sets the spike
+bypass.
+
+The defensive rule for timestamps applies to boundary gaps and retrieval
+pacing: non-increasing timestamps produce a zero elapsed interval. They
+cannot create an unsigned wraparound boundary or bypass the
+adjacent-retrieval limiter.
+
+Normative rule (MUST): if should_flush is true, the current unit is
+finalized, written, and reset_accumulator() runs. This prevents
+perpetual should_flush states (time cap / drift cap / gap cap).
+
+Representative embedding blends accumulator mean with peak:
+
+### Representative Embedding
+
+    ρ(F) = lerp(0.2, 0.6, F)  # mean vs peak blend
+    e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
+
+    # Edge-case guard
+    if |μ_acc| = 0: e_rep ← e_peak
+    if |e_peak| = 0 OR dim(e_peak) ≠ dim(μ_acc): e_rep ← μ_acc
+
+<!-- PRUNE: migration 56 on chore/prune-write-only stops persisting c_t; the emotion metadata below may also be dropped. -->
+
+On write: store e_rep with metadata {n, s_max, s_avg, drift_acc,
+mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n,
+1), boundary_score}. Store `c_t` as the temporal context for the memory.
+Append e_rep to memory_stream and l2_normalize(μ_acc) to
+recent_memory_centroids. Reset accumulator for next unit.
+
+## Spike-Bypass Threshold θ_dynamic
+
+Earlier builds compared the closed unit’s window score with an adaptive
+threshold θ_dynamic, and discarded units below it. That comparison is
+gone (<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>).
+θ_dynamic is still maintained per signal from the composite score
+(<a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>),
+and its only consumer is the spike-bypass margin of
+<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>: a
+signal whose composite score exceeds θ_dynamic by the knob-derived
+margin closes its unit immediately. The controller below is therefore a
+macro-control detail. It changes where salience spikes split units. It
+does not change whether a unit is stored.
+<!-- PRUNE: chore/prune-write-only may remove the threshold controller; if it does, replace this subsection with a removal record and restate the spike-bypass margin against its replacement. -->
+
+### Prior-Evidence Blending
+
+The threshold prior derives from knob settings:
+
+    θ_prior(F, S, T) = lerp(0.10, 0.30, T) × (1 − 0.3S)
+
+Observed evidence comes from the 90th percentile of recent scores:
+
+    score_history_cap(T) = round(lerp(512, 1536, T))
+    score_stream ← tail(score_stream, max(win_score(T), score_history_cap(T)))
+    recent_scores ← tail(score_stream, win_score(T))
+    if |recent_scores| == 0:
+        observed_p90 ← θ_prior  # no evidence yet
+    else:
+        observed_p90 ← percentile(recent_scores, 90)
+
+Prior and evidence masses weight the blend:
+
+    ρ_prior ← prior_mass(T) = round(lerp(2, 32, T))
+    ρ_obs ← u(t) × |recent_scores|
+
+The target threshold blends prior and evidence:
+
+    θ_target ← (ρ_prior × θ_prior + ρ_obs × observed_p90) /
+                max(ε, ρ_prior + ρ_obs)
+
+High Stability increases prior mass, making the system more resistant to
+observed deviations. High uncertainty increases evidence mass, allowing
+faster adaptation to volatile conditions.
+
+### Homeostatic Rate Control
+
+The controller maintains write rates near the target setpoint through
+continuous-time estimation with effective sample size (ESS) reliability
+weighting.
+
+#### Rate Estimation
+
+    Δt ← now_s() − to_s(last_rate_timestamp)
+    dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
+    Δt ← max(Δt, dt_min(T))
+    τ_dt(T) = lerp(0.5, 2.0, T)
+    α_dt ← 1 − exp(−Δt / τ_dt(T))
+    dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
+    dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
+    dt_base ← max(dt_ema, dt_floor(T))
+
+The rate time constant scales with Stability:
+
+    rate_tau_exponent(T) = 3T
+    τ_rate ← max(2^rate_tau_exponent(T) × dt_base, dt_floor(T))
+    α ← 1 − exp(−Δt / τ_rate)
+
+Instantaneous rate estimation with bias correction. Δwrites is the
+binary indicator (0 or 1) of whether a write occurred during the current
+timestep:
+
+    Δwrites ← 1 if write_memory else 0  # binary write event
+
+Normative note (MUST): Δwrites is computed from the current step’s
+write_memory decision. Rate state updates occur after the write decision
+and affect subsequent timesteps.
+
+    ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
+    m_rate_t ← (1 − α) × m_rate + α × ρ_inst
+    denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
+    ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
+    m_rate ← m_rate_t
+    rho_hat_prev ← ρ_hat_t
+    rate_ticks ← rate_ticks + 1
+    last_rate_timestamp ← now_ms()  # update after rate computation
+
+#### Effective Sample Size
+
+ESS estimates the effective number of independent samples in the EMA,
+using a heuristic inspired by Liu and Chen (1998):
+
+    β ← max(0, 1 − α)
+    ESS_cap(T) = lerp(30, 120, T)
+    ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
+    reliability ← 1 − exp(−ESS × (1 − T))
+
+High Stability dampens reliability, preventing aggressive corrections in
+conservative regimes.
+
+#### Homeostatic Correction
+
+The rate error drives threshold adjustment. The κ\_\* gains are derived
+from the knobs to avoid fixed behavioral constants:
+
+Normative note (MUST): rho_hat_prev is stored state entering the
+timestep. After the write decision, the rate-state update computes
+ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step
+(see Appendix D).
+
+    rate_error ← tanh((rho_hat_prev − rate_target) /
+                      max(rate_target, ε))
+    κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
+    cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
+    Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
+                      (1 − maturity(t)) × rate_error,
+                      −cap_homeo(F,S,T), +cap_homeo(F,S,T))
+
+The correction scales with reliability and is attenuated by both
+Stability and maturity, ensuring conservative, mature systems make
+minimal homeostatic adjustments.
+
+#### Sensitivity-Based Threshold Adjustment
+
+Sensitivity modulates threshold based on recent score volatility:
+
+    recent_scores ← tail(score_stream, win_score(T))
+    if |recent_scores| < 2:
+        σ_scores ← 0
+    else:
+        σ_scores ← std(recent_scores)
+    κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
+    cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
+    σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
+    Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
+                    −cap_sens(F,S,T), +cap_sens(F,S,T))
+
+High score variance with high Sensitivity lowers threshold, capturing
+more volatile signals.
+
+#### Precision-Based Threshold Adjustment
+
+Focus-driven precision tightens threshold when structural coherence is
+high:
+
+    κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
+    cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
+    Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
+                    −cap_prec(F,S,T), +cap_prec(F,S,T))
+
+High structural coherence with high Focus raises threshold, enforcing
+stricter relevance filtering.
+
+### Threshold Integration
+
+All threshold deltas combine and pass through safety limiting. The
+emotion and mood deltas from
+<a href="#sec-emotional-threshold" class="quarto-xref">Section 8.2.3</a>
+and <a href="#sec-mood" class="quarto-xref">Section 8.2.4</a> are
+denoted Δθ_emo = ΔThreshold_emotion_t and Δθ_mood = ΔThreshold_mood_t:
+
+    Δθ_total ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
+    cap_total ← max_ΔT_per_min(t) × (Δt / 60.0)
+    Δθ_limited ← clamp(Δθ_total, −cap_total, +cap_total)
+    θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
+                            α = α_T(t)) + Δθ_limited,
+                        T_min(t), T_max(t))
+    theta_dynamic ← θ_dynamic_t
+
+Hysteresis evolves toward the stability-derived base:
+
+    hysteresis_t ← clamp(EWMA(hysteresis,
+                         base_band(T), α = α_T(t)),
+                    band_min, band_max)
+    hysteresis ← hysteresis_t
+
+# Multi-Granularity Hybrid Retrieval
+
+A query is an `Ephemeral` signal of any modality. It is embedded like
+any other signal, runs inside a transaction that is rolled back, and
+leaves no trace in the store. This section specifies how its candidate
+pool is built, fused and reranked.
+<a href="#sec-hydration" class="quarto-xref">Section 7</a> specifies
+what is attached to the selected memories afterwards.
+
+Ingest-time retrieval, which feeds the streaming interrupt gate
+(<a href="#sec-interrupt" class="quarto-xref">Section 11</a>), uses only
+the dense unit channel. Lexical seeds were measured at ingest too: they
+cost per-turn time without improving recall.
+
+## Notation
+
+-   *q*: the query, with unit embedding
+    *e*<sub>*q*</sub> ∈ ℝ<sup>256</sup>, modality *μ*<sub>*q*</sub>,
+    text payload (if any), and optional reference time *T*<sub>*q*</sub>
+    with flag `as_of`.
+-   ℳ: the long-term memories. Memory *m* has a pooled representative
+    *e*<sub>*m*</sub>
+    (<a href="#sec-rep-embedding" class="quarto-xref">Section 5.1.7</a>),
+    a time span \[start<sub>*m*</sub>, end<sub>*m*</sub>\], and member
+    signals *s* ∈ *m*.
+-   Member *s* has a stored shared-space vector *v*<sub>*s*</sub>
+    (`memory_signal_vectors`, migration 50, keyed by the payload’s
+    content id) and a late-interaction code set *Z*<sub>*s*</sub>
+    (`memory_signal_li_codes`, migration 54).
+-   *τ*<sub>*x*</sub>: the exclusion time. It is the start of the
+    query’s still-open write unit, so a query never retrieves itself.
+    With `as_of` set,
+    *τ*<sub>*x*</sub> ← min (*τ*<sub>*x*</sub>, *T*<sub>*q*</sub> + 1)
+    on every channel.
+-   map01 (*c*) = (*c* + 1)/2.
+
+A memory is *seed-eligible* when it is `LONG_TERM`, has a vector surface
+and started before *τ*<sub>*x*</sub>. Every channel resolves its hits
+through the same eligibility test.
+
+## Dense Unit Seeds
+
+The base channel ranks memories by
+map01 (cos (*e*<sub>*q*</sub>, *e*<sub>*m*</sub>)) over the current
+long-term surface. Above a knob-derived population, candidates come from
+the sparse route, and the exact SQL path runs whenever the route cannot
+certify a full seed set
+(<a href="#sec-optimization" class="quarto-xref">Section 17</a>).
+
+Before the seed cap, near-duplicate embedding families collapse to one
+representative. The sound block-norm screens of
+<a href="#sec-optimization" class="quarto-xref">Section 17</a> keep this
+from costing quadratic work. Superseded memories stay eligible:
+excluding them was measured as harmful
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>).
+
+The seed count is round (lerp (96, 8, *f*)), where *f* is the retrieval
+Focus bias, and the seed search breadth expands it further. At neutral
+knobs the engine seeds 37 memories from a search breadth of 345 and
+returns 11.
+
+## Member Seeds
+
+A unit grouped from several signals has one pooled vector. That vector
+sits between its members and is close to none of them. A query about one
+member therefore ranks the unit far below where that member alone would
+rank. The member channel scores each multi-signal memory by its best
+member:
+
+seed(*m*) = max (map01 (cos (*e*<sub>*q*</sub>, *e*<sub>*m*</sub>)), max<sub>*s* ∈ *m*</sub>map01 (cos (*e*<sub>*q*</sub>, *v*<sub>*s*</sub>))).
+
+The 20 memories with the best members join the seed set, or raise the
+seed score of a memory already in it. The seed list is then re-sorted.
+Member vectors stay resident as int8 codes with one scale per vector
+(dimension + 4 bytes per member). Single-signal memories are never held,
+because their member vector is their memory vector. Each hit is resolved
+to its current memory through the store before use.
+
+Member scoring was measured as the third of three stages against the
+Natural baseline. The first was query focus, which keeps a grouped
+memory’s query-nearest members and was the precursor of evidence fitting
+(<a href="#sec-hydration" class="quarto-xref">Section 7</a>). The second
+was the per-signal standing set. On BEAM, the three stages together
+raised the gold-turn share of the 8,000-token packet from 0.385 / 0.195
+/ 0.125 to 0.617 / 0.420 / 0.272 at 100K / 1M / 10M. The
+past.dev-protocol score, answered and judged by gpt-5.6-luna, rose from
+0.793 / 0.750 / 0.651 to 0.847 / 0.813 / 0.718 (+0.054 \[0.019, 0.095\],
++0.062 \[0.044, 0.081\], +0.067 \[0.029, 0.100\]). Measured on its own,
+member scoring moved the score by +0.018 \[+0.002, +0.034\] at 100K and
++0.013 \[−0.003, +0.032\] at 1M, and raised 1M gold share by +0.036
+\[+0.022, +0.050\] (hill-climb record;
+<a href="#sec-implementation" class="quarto-xref">Section 16</a>).
+
+## Keyword Seeds: FTS5 BM25
+
+Every stored long-term text memory is indexed in a contentless SQLite
+FTS5 table, `memory_text_fts` (migration 49). Its rowid is the memory
+id, its tokens are porter-stemmed `unicode61`, and the text itself stays
+in the object store. The index row is written in the savepoint that
+writes the memory, so it commits, rolls back and is deleted with it.
+
+A text query ORs at most 16 of its non-stopword words, each as a quoted
+FTS5 string. It drops any word whose index term occurs in more than
+max (64, 0.05*N*) of the *N* memories. Such terms carry little BM25
+weight, and their posting lists dominated query time. The 20 best
+eligible hits by `bm25()` (Robertson and Zaragoza 2009) form the keyword
+list, collected without sorting every match
+(<a href="#sec-optimization" class="quarto-xref">Section 17</a>).
+
+The channel targets turns that share a query’s rare words (names,
+numbers) but sit far down the vector ranking. The shipped channel (FTS5
+with the document-frequency cut, commit ec30c69f) was measured against
+the pruned vector-only engine (47c18ec9), with Haiku judging (rubric
+v2):
+
+-   Eval 1, 250 cases: packet gold-turn recall rose from 0.597 to 0.787
+    (70 cases better, 6 worse). Judged sufficiency rose by +0.132 ±
+    0.065 (train) and +0.222 ± 0.060 (test).
+-   LongMemEval-M, 48 haystacks of about 4.9k turns: packet recall rose
+    from 0.407 to 0.667, and judged sufficiency from 0.530 to 0.821
+    (+0.292 ± 0.112). Query p95 and ingest time stayed within 2%.
+
+PR #28 reports the larger v2-against-47c18ec9 comparison (Eval 1 recall
+0.597 → 0.809, sufficiency +0.149 ± 0.063 / +0.218 ± 0.059). That
+comparison includes the other v2 changes as well as the keyword channel.
+
+## Cross-Modal Seeds
+
+AIST maps text, audio and images into one space, but cosines across
+modalities sit far below cosines within one. A matching image scores
+about as high as unrelated text. Raw cosine would therefore never let an
+image answer a text query. The cross-modal channel ranks each stored
+modality *μ* ≠ *μ*<sub>*q*</sub> in its own list and gap-corrects it
+with a per-query z-score over that modality’s whole long-term population
+*P*<sub>*μ*</sub> of signal vectors:
+
+*z*<sub>*s*</sub> = (cos (*e*<sub>*q*</sub>, *v*<sub>*s*</sub>) − *c̄*<sub>*μ*</sub>)/*σ*<sub>*μ*</sub>,
+
+where *c̄*<sub>*μ*</sub> and *σ*<sub>*μ*</sub> are the mean and standard
+deviation of cos (*e*<sub>*q*</sub>, *v*<sub>*s*</sub>) over
+*s* ∈ *P*<sub>*μ*</sub>. A memory takes its best member’s *z*. It is
+kept when *z* ≥ 1.5 and |*P*<sub>*μ*</sub>| ≥ 3, and each modality
+contributes at most 3 memories. Same-modality recall stays with the
+dense channel. Populations stay resident per modality and advance
+incrementally
+(<a href="#sec-optimization" class="quarto-xref">Section 17</a>).
+
+This channel shipped with the other multimodal changes: per-stream
+signal filtering, mixed-modality memories that keep every payload, and a
+vectorized image tower. Together they raised MemLens image-evidence
+recall from 0.558 to 0.744 against an oracle ceiling of 0.867, and
+lowered the misleading rate from 0.028 to 0.009, with text packets
+unchanged (PR #28).
+
+## Temporal Seeds
+
+A query may carry a reference time *T*<sub>*q*</sub>, in the past or the
+future (`Cortext::RetrievalTime`). The engine treats it as signal
+metadata compared with stored times, never as text, so it works the same
+for every modality. The temporal channel returns the *K* = 10 eligible
+memories nearest *T*<sub>*q*</sub> by interval distance:
+
+*d*(*m*, *T*<sub>*q*</sub>) = max (0, start<sub>*m*</sub> − *T*<sub>*q*</sub>, *T*<sub>*q*</sub> − end<sub>*m*</sub>),
+
+which is 0 when *T*<sub>*q*</sub> falls inside
+\[start<sub>*m*</sub>, end<sub>*m*</sub>\] and otherwise the distance to
+the nearer edge.
+
+One statement with three range scans, over partial indexes on long-term
+`start_ts` and `end_ts` (migration 55), each limited to 2*K* + 4 rows,
+finds them in *O*(log *N* + *K*). A test asserts the query plan has no
+`SCAN memories`. The channel only adds candidates and rank mass, with
+weight 0.5, so a memory found only by time scores 0.5/61 at best. That
+ranks it after every dense seed while the dense list has at most 62
+entries (1/(60 + *r*) \> 0.5/61 for *r* ≤ 62). The dense seed cap can
+reach 96 at low Focus, and the late-interaction rerank after fusion can
+still promote such a memory. With `as_of`, the cutoff
+*τ*<sub>*x*</sub> ≤ *T*<sub>*q*</sub> + 1 also applies to attached later
+turns and restatements. Unset, retrieval is byte-identical to the engine
+without the channel (LoCoMo clock replay, 497 queries).
+
+An oracle probe set *T*<sub>*q*</sub> to each LoCoMo question’s earliest
+gold turn. Packet evidence hits rose from 1,767 to 1,783 of 1,979
+questions (17 gained, 1 lost), and to 0.906 at weight 1.0. Query p50
+rose by 0.07 to 0.17 ms (PR #31). This bounds the mechanism; it is not a
+benchmark score.
+
+Earlier builds also added an event-time recency tie-break to the dense
+score. The round-3 ablation left every packet byte-identical without it,
+so it was removed
+(<a href="#sec-math" class="quarto-xref">Section 4</a>).
+
+## Reciprocal-Rank Fusion
+
+When any of the lexical, cross-modal or temporal channels returns hits,
+the pool is ordered by reciprocal-rank fusion (Cormack, Clarke, and
+Buettcher 2009):
+
+RRF(*m*) = ∑<sub>ℓ</sub>*w*<sub>ℓ</sub> / (*k* + *r*<sub>ℓ</sub>(*m*)),   *k* = 60,
+
+where *r*<sub>ℓ</sub>(*m*) is *m*’s 1-based rank in list ℓ. The dense
+seed list (after member re-sorting) counts once with *w* = 1. The
+keyword list and each per-modality cross-modal list count with *w* = 1,
+and the temporal list with *w* = 0.5. Ties fall back to the semantic
+score and then to memory id. Only the order changes; every candidate
+keeps its semantic score. *k* = 60 is the constant of Cormack, Clarke,
+and Buettcher (2009); experiment-hook builds can override it, release
+builds cannot. Without any auxiliary hits, the pool stays in dense
+order.
+
+## Neighbour Deferral
+
+Hydration attaches each anchor’s adjacent turns
+(<a href="#sec-hydration" class="quarto-xref">Section 7</a>). A
+candidate that is such a neighbour of a higher-ranked pick would spend
+an anchor slot on content the packet already carries. Examples are a
+reply next to its question, or the other half of an exchange. Within the
+output size, such candidates are moved behind the picks, in order, so a
+short list still fills. This costs one primary-key range lookup per
+pick.
+
+## Late-Interaction MaxSim Rerank
+
+After deferral, the head of the pool is reranked by a learned
+late-interaction model (Khattab and Zaharia 2020) over the frozen AIST
+encoder (`AIST-87M-LI.gguf`, `src/models/aist_late_interaction.cpp`).
+The constants below are read from the shipped model file.
+
+**Representation.** Every item becomes a set of unit vectors in one
+*D* = 64-dimensional space. Items here are queries and stored members,
+in any modality. The set has two sources.
+
+-   *Position features* through a per-tower linear map: text token
+    hidden states (384-d, at most 256 positions) and image patch
+    features (12 × 12 × 960-d). Audio has no trained map yet.
+-   The item’s 256-d shared-space vector through one map shared by every
+    modality.
+
+**Memory side.** A stored payload’s raw encoder positions (384-d text,
+960-d image) are clustered into *K* = 16 spherical k-means centroids (8
+Lloyd iterations, deterministic linspace initialization). Only then are
+the centroids mapped into the 64-d space, normalized and quantized to
+int8. A payload with 16 or fewer positions keeps all of its rows, so a
+blob holds up to 16 codes: at most 1,028 bytes, a 4-byte header plus
+16 × 64 codes. Codes are per member, computed at write time; there is no
+shared codebook. Its stored global vector is mapped and int8-rounded at
+query time the same way.
+
+**Query side.** The query keeps every mapped position, plus its mapped
+global vector. Text queries are capped at 128 positions; image queries
+keep all 144 patches. Each vector *q*<sub>*r*</sub> gets a softmax gate
+weight *w*<sub>*r*</sub> from a learned linear gate.
+
+**Scoring.** For member *s* with vector set
+*V*<sub>*s*</sub> = *Z*<sub>*s*</sub> ∪ {*g*<sub>*s*</sub>},
+
+*σ*(*s*) = ∑<sub>*r*</sub>*w*<sub>*r*</sub>max<sub>*v* ∈ *V*<sub>*s*</sub></sub>⟨*q*<sub>*r*</sub>, *v*⟩.
+
+Memory *m* at first-stage pool position *ρ*<sub>*m*</sub> (0-based)
+scores a soft maximum over its first 8 members plus a rank prior:
+
+LI(*m*) = *α* ⋅ *τ*log ∑<sub>*s* ∈ *m*</sub>*e*<sup>*σ*(*s*)/*τ*</sup> + *β* ⋅ log (1 + *ρ*<sub>*m*</sub>)/log 101.
+
+The shipped constants are *α* = 20.46,
+*τ* = *e*<sup>−3.456</sup> ≈ 0.032 and *β* = −0.308. The rank prior is
+how the rerank blends with the first stage. At position 63 it subtracts
+0.28, which is worth about 0.014 of MaxSim similarity after the *α*
+scale: a small learned preference for the fused order, not a veto.
+
+**Depth and slots.** The rerank covers the top 64 candidates. Depth 64
+keeps its cost at 0.4 to 3 ms per query. A memory none of whose members
+has codes keeps its slot, and the coded memories reorder among the
+remaining slots. Uncoded memories come from towers without a trained map
+(audio) and from signals stored before migration 54. One global vector
+cannot compete with a code set, so moving these memories would bias
+against their modality. A query without position vectors keeps the
+engine order.
+
+The rerank runs after neighbour deferral on purpose. Deferring the
+neighbours of the reranked picks instead lowered Eval 1 packet recall
+from 0.938 to 0.892.
+
+**Training.** The model has 102,469 float32 weights (410 KB). It is
+distilled from the `ms-marco-MiniLM-L6-v2` cross-encoder with listwise
+KL at temperature 2, plus a multi-positive listwise loss on gold
+memories. Image members get soft labels through their BLIP captions and
+hard labels through MemLens gold. Training pools come from
+LongMemEval-S, the LongMemEval conversations of Eval 1, DolphinBench,
+MemLens and the BEAM 1M train conversations. Held-out splits are 30% of
+Eval 1 and BEAM 1M conversations, one DolphinBench persona, 20% of
+LongMemEval and MemLens questions, and the whole 108-question MemLens
+image evaluation set. LoCoMo is never trained on.
+<a href="#sec-experimental" class="quarto-xref">Section 15</a> separates
+trained-on and zero-shot benchmarks accordingly.
+
+**Effect.** Packet gold-turn recall rose on every set (PR #28,
+<a href="#sec-implementation" class="quarto-xref">Section 16</a>):
+
+-   Eval 1: 0.846 to 0.938, and 0.878 to 0.955 on its conversations held
+    out from training.
+-   LongMemEval-S: 0.808 to 0.992 (14 unseen questions 0.857 to 1.000).
+-   LongMemEval-M: 0.770 to 0.894.
+-   MemLens: text gold 0.415 to 0.575, image gold 0.344 to 0.396.
+-   BEAM at a 34,800-byte budget: 0.615 / 0.413 / 0.274 to 0.696 / 0.518
+    / 0.369 at 100K / 1M / 10M. 100K and 10M were never trained on.
+
+End-to-end BEAM scores (gpt-6.1-sol low answer and judge) rose from
+0.816 / 0.778 / 0.667 to 0.843 / 0.799 / 0.699 (+0.027 \[+0.006,
++0.049\], +0.021 \[+0.005, +0.036\], +0.033 \[+0.003, +0.063\]). Query
+p95 stayed within ×1.00 to ×1.14 of the engine without the rerank, from
+10k to 443k memories. The codes added 11% to Eval 1 store size.
+
+## Standing Memories
+
+Some statements must shape answers long after they leave query
+similarity: “Always include version numbers when I ask about libraries”,
+“From now on, answer in French”. The engine keeps them in a small set
+ranked on its own.
+
+-   **Membership.** Membership belongs to the stored signal, not its
+    memory (`standing_signals`, migration 53, replacing the memory-level
+    set of migration 51). Under Natural retention a directive is one
+    turn of a grouped memory several kilobytes long, which a
+    memory-level check never admits.
+-   **Detector.** A pattern check over the signal’s text, at most 480
+    bytes: a clause opening with *always*, *never*, *from now on*,
+    *going forward*, *whenever I*, *I prefer* and similar, optionally
+    after *please*. This is today’s only detector.
+-   **Capacity.** The set keeps the newest 256 members.
+-   **Query.** Every query ranks the members written before
+    *τ*<sub>*x*</sub> by RRF (*k* = 60) of two lists. One is the cosine
+    of *e*<sub>*q*</sub> to the member’s own stored vector. The other is
+    BM25 (*k*<sub>1</sub> = 1.2, *b* = 0.75) over the member’s 6-byte
+    word stems, with document frequencies from the set itself.
+    Store-wide frequencies would discount the topic words that tell
+    directives apart.
+-   **Block.** The best 5, within 2 KiB, form a standing block
+    (`Context::standing_memory`) ahead of the retrieved memories. Each
+    entry holds only the directive signals of one memory.
+
+The block takes no retrieved slot. A consumer that cuts the retrieved
+list at *k* keeps the same *k* retrieved memories. When standing items
+took ranked slots instead, LongMemEval-M gold recall at *k* = 11 fell by
+0.087.
+
+On BEAM, PR #28 reports the share of instruction-following gold turns
+(the instruction and its acknowledgement) for the standing block
+(b5447e25) against the engine without it. The share rose from 0.44 /
+0.26 / 0.00 to 0.86 / 0.81 / 0.44 at 100K / 1M / 10M.
+<a href="#sec-implementation" class="quarto-xref">Section 16</a>
+reports, for the same channel, an overall gold-turn share gain of 0.070
+/ 0.075 / 0.053, no other category losing more than 0.01, and query p95
+within 0.98 / 0.96 / 1.14 of the engine without it.
+
+## Ranking Invariants
+
+-   `source_id` and modality are never ranking inputs. Modality selects
+    only which tower map and which cross-modal populations apply.
+-   Only the open write unit, and with `as_of` everything that starts
+    after *T*<sub>*q*</sub>, is excluded. `as_of` does not filter
+    working memory, or the content of a retrieved memory that spans
+    *T*<sub>*q*</sub> (PR #31).
+-   Every auxiliary channel adds candidates and rank mass and removes
+    none.
+-   Every stage ends in a deterministic tie order (score, then memory
+    id).
+
+# Hydration and Evidence Fitting
+
+Retrieval (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>)
+selects a ranked set of memories, 11 at neutral knobs. Hydration then
+turns each selection into evidence. It loads the memory’s payloads and
+attaches the context a person would recall around the hit. Finally it
+fits the whole packet to the caller’s budget. Hydration never changes
+the ranking, the pool, or the number of retrieved memories, and it runs
+only after selection, so its cost follows the packet rather than the
+store.
+
+## Packet Structure
+
+A query’s `Context` carries three blocks:
+
+-   `standing_memory`: the standing block
+    (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>). It
+    holds at most 5 directive signals within 2 KiB and is not counted in
+    the retrieved top-k.
+-   `retrieved_memory`: the ranked memories. Each has its own payloads
+    plus attached blobs (adjacent turns, superseded predecessors,
+    superseding successors).
+-   `working_memory`: the active slots in insertion order
+    (<a href="#sec-advanced" class="quarto-xref">Section 10</a>).
+
+Every retrieved memory exposes `content` (one entry per blob),
+`content_mimetypes` and `content_timestamps`, index-aligned. A memory
+that holds signals of several modalities has modality `"mixed"` and
+returns every payload with its own MIME type. Earlier builds took a
+majority vote, which dropped minority-modality payloads.
+
+## Contiguity Hydration
+
+Recalling one moment of a conversation brings back what was said around
+it. This is the temporal-contiguity effect of episodic recall, and it
+fades with distance. A retrieved turn is rarely self-contained: a
+question’s answer, the statement an acknowledgement refers to, or the
+user message a reply was written for usually sits one or two turns away.
+For each of the top 11 anchors, the engine attaches adjacent turns as
+extra blobs of the anchor:
+
+``` text
+neighbours(anchor) = adjacent LONG_TERM rows in write order
+                     within 16 ids and 30 minutes of the anchor,
+                     same source stream, any modality,
+                     not hidden by a correction from the same stretch
+pass 1 (lag 1): for anchors in rank order: successor, then predecessor
+pass 2 (lag 2): with what budget is left, the turns two steps away
+charge: text clipped to 480 B; other media 480 B each
+budget: 12 KiB per context
+```
+
+Forward association is stronger than backward, so the successor (usually
+the reply) is attached first.
+
+-   **Clip window.** Text is clipped on a UTF-8 boundary. The first 64
+    bytes (the turn header: time, speaker) stay, followed by the
+    480-byte window that covers the most distinct query terms.
+-   **Cost.** All lag-1 probes run in one statement and all lag-2 probes
+    in another. Each probe is a primary-key range lookup plus one
+    indexed supersession check.
+-   **Interaction with retrieval.** Neighbour deferral
+    (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>) keeps
+    retrieval from spending anchor slots on turns this step will attach
+    anyway.
+
+**Effect.** Contiguity is the largest single hydration effect in the
+ablation record. Switching it off costs 0.06 to 0.09 packet gold-turn
+recall (<a href="#sec-experimental" class="quarto-xref">Section 15</a>).
+The round-3 ablation found the earlier 6 KiB budget and lag-2 cap (top 6
+anchors) binding. Raising the budget to 12 KiB and giving every anchor
+lag-2 turns raised packet recall from 0.642 to 0.691 on LongMemEval-S
+and from 0.597 to 0.629 on Eval 1, with 13 cases better and none worse.
+Haiku-judged sufficiency rose by +0.048 ± 0.056 and +0.037 ± 0.019, for
++2.2 KB per Eval 1 packet. Budgets of 16 and 24 KiB gave packets
+identical to 12 KiB. Clipping neighbours to 240 bytes raised a
+clipped-text recall proxy but not judged sufficiency, so the clip stays
+at 480 bytes.
+
+## Superseded-Predecessor and Superseding-Successor Hydration
+
+At write time each new memory gets directed `supersedes` edges to the
+few older memories whose embeddings fall in a knob-derived similarity
+band, and the edge weight grows with similarity
+(<a href="#sec-advanced" class="quarto-xref">Section 10</a>). These
+edges are topical, not only corrections. Retrieval does not demote
+either endpoint. Hydration uses the edges in both directions:
+
+-   **Predecessors.** For each of the top 11 anchors, the at most 2
+    older memories it supersedes (strongest edges first) are attached
+    *before* the anchor’s own content. Each is clipped to 512 bytes,
+    under 4 KiB per packet. People do not lose the earlier version of a
+    fact when they learn the newer one. Recalling the update brings back
+    the episode it updated, and in these conversations the “obsolete”
+    turn is often exactly what the question asks about.
+-   **Successors.** For each of the top 11 anchors, the newest memory
+    that supersedes it is attached *after* its content. It is clipped to
+    512 bytes, under 4 KiB per packet, with one indexed lookup on the
+    edge target for all anchors. A question phrased like a fact’s first
+    statement retrieves that older version, while the latest restatement
+    ranks below it.
+
+With both attachments, each anchor’s evidence reads oldest to newest.
+
+**Effect.** Switching off supersession edges and predecessor hydration
+together changed 47/48 LongMemEval-S and 249/250 Eval 1 packets and cost
+0.037, 0.025 and 0.015 packet recall (S, Eval 1, BEAM). Haiku-judged
+sufficiency moved −0.036 ± 0.052 (S) and −0.016 ± 0.013 (Eval 1)
+(<a href="#sec-experimental" class="quarto-xref">Section 15</a>).
+Predecessor hydration used to skip a target from the anchor’s own source
+stream within 30 minutes. Removing that skip raised BEAM-10M
+conversation 7 recall from 0.103 to 0.118 for 0.5 KB more packet
+(<a href="#sec-advanced" class="quarto-xref">Section 10</a>). Successor
+hydration added 0.005 gold-turn share at each BEAM scale and +0.023
+\[0.010, 0.036\] to the Haiku-answered 10M score
+(<a href="#sec-implementation" class="quarto-xref">Section 16</a>).
+
+With `as_of`, both attachments and contiguity skip memories that start
+after *T*<sub>*q*</sub>.
+
+## Per-Blob Content Timestamps
+
+Attached blobs can come from weeks earlier (predecessors), from later
+(successors), or from adjacent turns. The anchor’s single `timestamp`
+does not date them. Every retrieved memory therefore carries one stored
+signal time per content blob, in content order, with 0 meaning unknown
+(PR #30).
+
+-   **Invariant.** Whenever `content` is non-empty,
+    `content_timestamps.size() == content.size()`.
+-   **Coverage.** Every path that builds or reshapes content carries the
+    source signal’s time: signal and memory blob hydration,
+    working-memory hydration, contiguity, predecessor and successor
+    attachment, standing joins, and evidence fitting.
+-   **Modality.** Time stays signal metadata, never content.
+
+**Known limit.** A multi-signal blob, such as a Natural unit’s joined
+text, reports the time of its first signal.
+
+**Parity.** No ranking, selection, hydration choice or budget changed.
+Full LoCoMo (1,986 queries) returned byte-identical text with 80,422
+parts, none with timestamp 0.
+
+## Evidence Budget
+
+The engine cannot know a reader’s context budget, so the caller may pass
+one per query in bytes (`EvidenceBudget`, on every `Process*` call and
+in the C API). Text is charged by its bytes and every other payload by
+`kMediaEvidenceBytes` = 480. Unset, memories come back whole. Earlier
+builds applied a fixed 3 KiB cap per memory, which cost judged Eval 1
+sufficiency −0.016 ± 0.016 when the reader could see the whole packet.
+
+Set, the fit runs once the packet is complete. It covers the standing
+block, the retrieved memories and their attachments:
+
+``` text
+budget' = budget - bytes(standing block)
+for m in retrieved, in rank order:
+    floor(m) = for a grouped memory whose members all have stored vectors:
+                 its best member per modality by cos(e_q, v_s);
+               otherwise: the whole memory
+    join m at floor(m) with its attached blobs if they fit,
+    else at floor(m) alone, else leave m out
+member_cap = largest c (binary search) such that the packet fits when
+             every grouped memory keeps its floor plus its other members,
+             best first, while their bytes stay within c
+kept members return in their original order, between the attachments
+```
+
+The best member is chosen per modality because cosines are not
+comparable across modalities: a text query sits closer to every text
+member than to any image. The fit keeps more distinct memories trimmed
+before it drops lower-ranked ones. It costs one indexed signal read plus
+member payload reads, and only for packets over budget.
+
+**Effect.** Under Natural retention with one source per conversation,
+BEAM stores units of three to five turns, about 10 KB each with
+attachments. An 8,000-token budget then held three or four whole
+memories. With the BEAM reader’s budget passed (34,800 bytes), the
+gold-turn share of its context matched the old 3 KiB cap (−0.002 /
++0.001 / +0.002 at 100K / 1M / 10M). The end-to-end score was 0.842 /
+0.806 / 0.715 against 0.844 / 0.811 / 0.695. Unset, the whole memories
+overflow that reader, and gold share falls by 0.144 / 0.115 / 0.093
+(<a href="#sec-implementation" class="quarto-xref">Section 16</a>).
+Every v5 benchmark in
+<a href="#sec-experimental" class="quarto-xref">Section 15</a> runs at
+the 34,800-byte budget.
+
+# The Macro-Control Surface: Knob Priors and Affect
+
+This section and
+<a href="#sec-structural-metrics" class="quarto-xref">Section 9</a>
+specify the per-signal control stack that earlier versions of this paper
+presented as the core of the system. It still runs on every signal, in
+the engine’s `CoreStage`. Its reach is now narrow:
+
+-   The composite score and θ_dynamic set the spike-bypass margin
+    (<a href="#sec-spike-threshold" class="quarto-xref">Section 5.2</a>).
+-   The window score ranks closed units for working-memory admission
+    (<a href="#sec-wm-gating" class="quarto-xref">Section 10.2.2</a>).
+-   Score variance enters the uncertainty estimate, which feeds back
+    into the learning rates below.
+-   The ACh-like encode/retrieve bias paces streaming retrieval checks
+    between boundaries
+    (<a href="#sec-interrupt" class="quarto-xref">Section 11</a>).
+
+Nothing in this section decides whether a unit is stored, or how a query
+ranks memories. Segmentation
+(<a href="#sec-thresholding" class="quarto-xref">Section 5</a>) and
+retrieval (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>)
+carry the v5 results.
+
+Each algorithm consists of a prior computation (executed at
+initialization) and a dynamic update (executed per signal).
+<!-- PRUNE: chore/prune-write-only may remove mood, the threshold controller and CoreStage metrics; trim the bullets above and the subsections below to the final removal list. -->
 
 ## Focus-Driven Selectivity
 
@@ -650,7 +2078,7 @@ directly.
 Distinct from instantaneous emotion, the mood state M_t ∈ ℝ⁶ maintains a
 persistent background affective tone as a 6-dimensional vector (one
 component per emotion category from <a href="#sec-emotional-projection"
-class="quarto-xref">Section 4.2.2</a>):
+class="quarto-xref">Section 8.2.2</a>):
 
     α_mood(S) = lerp(0.01, 0.20, S)  # reactivity
     half_life_mood(T) = lerp(30, 600, T)  # seconds
@@ -673,64 +2101,25 @@ via its normalized magnitude:
 
 ## Stability-Driven Persistence
 
-Stability governs temporal dynamics through half-life, decay rates, and
-hysteresis.
-
-### Stability Priors
-
-Given Stability knob T ∈ \[0, 1\], initialize Stability control
-variables:
+Stability sets the hysteresis band of the write threshold:
 
     hysteresis = lerp(0.02, 0.25, T)
-    half_life = base_half_life(T)
-    rate_decay = lerp(0.60, 0.98, T)
-    periphery_half_life = clamp(0.5 × half_life,
-                                       τ_min, τ_max)
-    drift_weight = 0.5 × (1 − T)
 
-### Dynamic Stability Update
+### Half-Life Adaptation (Removed)
 
-The stability update uses uncertainty-modulated learning rate and a
-stability-derived retention window:
-
-    α_min_T = 0.02; α_span_T = 0.18
-    α_T(t) = α_min_T + (1 − T) × α_span_T × u(t)
-    win_ret(T) = round(lerp(10, 50, T))  # retention history window size
-
-At each signal event, compute retention statistics and adjust half-life:
-
-    active_memories ← {m | strength(m) ≥ periphery_cutoff(T)}
-    observed_retention ← mean_age(active_memories)
-    retention_ema_t ← EWMA(retention_ema_{t−1},
-                           observed_retention, α = α_T(t))
-
-    retention_ema ← retention_ema_t
-
-Definitions:
-
-    age_s(m) ← now_s() − to_s(m.created_at)  # fallback: use start_ts if created_at unset
-    mean_age(active_memories) ← mean_{m ∈ active_memories} age_s(m); if empty, return 0
-    retention_history ← append(observed_retention); keep last win_ret(T) values
-
-Compute z-score relative to recent retention history:
-
-    last_win_ret ← tail(retention_history, win_ret(T))
-    μ_ret ← mean(last_win_ret)
-    σ_ret ← max(std(last_win_ret), 1.0)
-    zscore_ret ← clamp((observed_retention − μ_ret) / σ_ret, −3, +3)
-
-The target half-life incorporates feedback adjustment from the stability
-feedback mechanism
-(<a href="#sec-feedback" class="quarto-xref">Section 7.5</a>):
-
-    stability_adj ← ΔHalfLife_adj_t if provided else 0
-    target_half_life_t ← clamp(base_half_life(T) ×
-                              (1 + 0.25 × zscore_ret + stability_adj),
-                              τ_min, τ_max)
-    half_life_t ← EWMA(half_life_{t−1}, target_half_life_t,
-                       α = α_T(t))
-
-    half_life ← half_life_t
+Earlier builds also kept an adaptive memory half-life. It started at
+`base_half_life(T)` and moved each signal by an EWMA toward
+`base_half_life(T) × (1 + 0.25 × zscore_ret + ΔHalfLife_adj)`. Here
+`zscore_ret` was the z-scored mean age of memories whose strength stayed
+above `PeripheryCutoff(T)`, and `ΔHalfLife_adj` came from stability
+feedback (<a href="#sec-feedback" class="quarto-xref">Section 13.4</a>).
+Derived state included `rate_decay`, `periphery_half_life`,
+`salience_half_life`, `drift_weight` and `retention_ema`.
+Memory-strength decay was the only consumer of the half-life. The engine
+ablation study (2026-10) removed memory strength
+(<a href="#sec-reinforcement" class="quarto-xref">Section 13</a>), and
+then this adaptation and its persisted state, which no operation read
+any more.
 
 ## Neuromodulator Layer (Internal Mapping)
 
@@ -740,119 +2129,90 @@ neuromodulator-like variables. These are **not** additional user knobs;
 they are latent control signals derived from F/S/T and real-time stream
 statistics.
 
-We define three modulators:
+One modulator remains:
 
 -   **ACh-like (acetylcholine):** encode vs retrieve bias.
--   **NE-like (norepinephrine):** arousal + interrupt urgency.
--   **DA-like (dopamine):** reward prediction error + value learning.
 
-Baseline levels come from knobs; phasic bursts come from current
-signals:
+Its baseline comes from the knobs and its phasic part from the current
+signal:
 
     ACh_base(F,S,T) = clamp(0.15 + 0.55S + 0.25(1 − T) − 0.15F, 0, 1)
-    NE_base(F,S,T)  = clamp(0.10 + 0.60S + 0.20(1 − T), 0, 1)
-    DA_base(F,S,T)  = clamp(0.10 + 0.40F + 0.30T, 0, 1)
-
     ACh_t ← clamp(ACh_base + 0.35 × novelty_t − 0.20 × retrieval_pressure, 0, 1)
-    NE_t  ← clamp(NE_base  + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)
-    DA_t  ← clamp(DA_base  + max(0, δ_reward_t), 0, 1)
-
-Where `retrieval_pressure` is the normalized retrieval queue-depth
-input, and `δ_reward_t` is a reward prediction error derived from
-downstream outcome signals (see
-<a href="#sec-structural-metrics" class="quarto-xref">Section 5</a>).
-The production operation context does not currently populate queue
-depth, so this term is zero in the shipped full pipeline; tests and
-experiment hooks can supply it. The other phasic terms are live. These
-modulators drive internal gates without introducing new user-facing
-parameters:
-
     encode_bias ← ACh_t × (0.7 + 0.3S)
     retrieve_bias ← 1 − encode_bias
-    write_threshold_scale ← 1 − 0.3 × NE_t
-    reconsolidation_scale ← 1 + 0.4 × ACh_t
-    retrieval_competition_scale ← 1 + 0.5 × NE_t
-    value_update_gain ← 0.5 + 0.5 × DA_t
 
-In the current implementation, these latent scales are applied at four
-concrete downstream sites rather than introduced as separate runtime
-controls:
+Where `retrieval_pressure` is the normalized retrieval queue-depth
+input. The production operation context does not currently populate
+queue depth, so this term is zero in the shipped full pipeline.
+`retrieve_bias` gates streaming retrieval checks between boundaries
+(<a href="#sec-interrupt" class="quarto-xref">Section 11</a>).
 
--   `write_threshold_scale` multiplies the accumulator write-gate
-    threshold, so high `NE_t` lowers the barrier for committing a
-    boundary candidate.
--   `reconsolidation_scale` multiplies reconsolidation drift magnitude,
-    so high `ACh_t` strengthens context-driven reconstruction updates.
--   `retrieval_competition_scale` multiplies lateral inhibition during
-    retrieval competition, so high `NE_t` sharpens suppression among
-    near-duplicate candidates.
--   `value_update_gain` scales procedural-store reward updates, so high
-    `DA_t` increases reinforcement of recently used routines.
+Earlier builds also kept an NE-like modulator,
+`NE_t = clamp(NE_base + 0.50 × surprisal_t + 0.30 × arousal_t, 0, 1)`,
+and “effect scales” that multiplied the write-gate threshold by
+`1 − 0.3 × NE_t`, reconsolidation drift by `1 + 0.4 × ACh_t` and
+retrieval competition by `1 + 0.5 × NE_t`. Competition and
+reconsolidation were removed by the engine ablation study (2026-10).
+Switching all effect scales off changed 5/48 LongMemEval-S, 32/250 Eval
+1 and 7/20 BEAM-10M conversation 7 packets, left gold-turn recall within
+one case, and moved Haiku-judged sufficiency by 0.000, −0.001 ± 0.006
+and +0.028 ± 0.054; the MSC replay changed 7/39 probe packets, five only
+in order. The write scale and NE were then removed (migration 47).
 
-## Oscillatory Gating (No Discrete Modes)
+Earlier builds also kept a DA-like modulator,
+`DA_t = clamp(DA_base + max(0, δ_reward_t), 0, 1)`, driven by a reward
+prediction error `δ_reward_t = outcome_t − EWMA(outcome_t)` from the
+metric blender. Its only consumer was `value_update_gain` for the
+procedural value table
+(<a href="#sec-pattern-separation" class="quarto-xref">Section 10.14</a>).
+The engine ablation study (2026-10) removed that table, then the DA
+modulator, the reward prediction error and their persisted state, with
+no packet change.
 
-To reduce interference without introducing hard modes, Cortext adds a
-continuous oscillatory gate that gently alternates encode- vs
-retrieve-bias over time.
+## Oscillatory Gating (Removed)
 
-    ω(F,S,T) = lerp(0.03, 0.12, S) × lerp(1.2, 0.8, T)  # rad/s
-    φ_t ← (φ_{t−1} + ω × Δt) mod 2π
-    osc_t ← 0.5 + 0.5 × sin(φ_t)
+Earlier builds multiplied `encode_bias` by a slow oscillator,
+`0.6 + 0.4 × (0.5 + 0.5 × sin φ_t)` with `φ_t` advancing at
+`ω(S,T) = lerp(0.03, 0.12, S) × lerp(1.2, 0.8, T)` rad/s. Its only
+effect was on `retrieve_bias`, which the streaming pacer consults only
+between boundaries; accepted boundaries, forced checks and queries
+bypass it. The 2026-10 MSC rerun on the current engine (25 validation
+dialogs, 1,190 turns, 39 probes, capacity 21) left every probe packet
+byte-identical with the oscillator off, under both Durable and Natural
+retention, so the engine ablation study removed it and its persisted
+phase (<a href="#sec-experimental" class="quarto-xref">Section 15</a>).
 
-    encode_bias_t ← encode_bias × (0.6 + 0.4 × osc_t)
-    retrieve_bias_t ← 1 − encode_bias_t
-
-The oscillator is continuous and **never** switches modes; it merely
-biases thresholds and competition in a time-varying, biologically
-plausible manner.
-
-## Meta-Learning Knob-to-Parameter Maps
+## Knob-to-Parameter Priors (Meta-Learning Removed)
 
 All knob-derived ranges and coefficient tables (e.g., bootstrap
-coefficients for RLS, lerp endpoints, base rates) are treated as
-**species priors**. They remain the **only** user-visible controls, but
-are made learnable at deployment or per-user:
+coefficients for RLS, lerp endpoints, base rates) are fixed **species
+priors**: closed-form functions of F/S/T. `attention_width_prior` is
+`lerp(W_min, W_max, 1 − F)`, `base_rate_prior` is `BaseRatePrior(S)`,
+and `hysteresis_band_prior` is `BaseBandPrior(T)`.
 
-    p(F,S,T) = lerp(a, b, κ(F,S,T))
-    κ(F,S,T) = sigmoid(α_F F + α_S S + α_T T + β)
-
-The coefficients `{α_F, α_S, α_T, β, a, b}` are updated from observed
-outcomes (acceptance, uncertainty reduction, task reward), while the UI
-still exposes only F/S/T. This preserves simplicity while allowing the
-system to adapt its parameterization over time.
-
-In the current branch, this generic learner is instantiated for three
-live priors that already shape runtime behavior:
-
--   `attention_width_prior` (Focus family)
--   `rate_target_prior` / `base_rate_prior` (Sensitivity family)
--   `hysteresis_band_prior` (Stability family)
-
-The implementation keeps the historical closed-form priors as the exact
-cold-start species priors. When no learned row exists, Cortext uses the
-legacy formulas directly. Once informative outcomes arrive, it seeds a
-narrow learnable band around that legacy value in an internal
-`meta_learning_coeffs` table and then updates:
-
-    success_t = 0.30 × write_accept_t
-              + 0.30 × retrieval_use_t
-              + 0.25 × (1 − u_t)
-              + 0.15 × clamp(0.5 + 0.5δ_reward_t, 0, 1)
-    direction_t = 2 × success_t − 1
-
-Only informative turns (`write_accept_t`, `retrieval_use_t`, or non-zero
-reward error) trigger updates. The learner then nudges
-`{α_F, α_S, α_T, β, a, b}` toward or away from the currently successful
-dynamic state:
-
--   Focus observes the current `attention_width_t`
--   Sensitivity observes the realized write-rate estimate `ρ̂_t`
--   Stability observes the current hysteresis band
-
-This makes the meta-learning claim operational without adding any new
-public controls or changing the public API surface.
+Earlier builds made three of these priors learnable
+(`p = lerp(a, b, sigmoid(α_F F + α_S S + α_T T + β))`, updated from
+write acceptance, retrieval use, uncertainty and reward, and stored in a
+`meta_learning_coeffs` table). The engine ablation study (2026-10)
+removed it. Skipping the learner and using the closed-form priors left
+every retrieval packet byte-identical on Eval 1 (0/250), LongMemEval-S
+(0/48) and two full-length BEAM-10M conversations (0/40, 42.6k turns),
+with no measurable cost change. Migration 35 drops the table.
 
 # Structural Metrics and Composite Scoring
+
+Two groups of signals are defined here. The embedding-derived signals
+(structural coherence, focus spread, instantaneous drift and EMA
+prediction error) feed boundary segmentation
+(<a href="#sec-thresholding" class="quarto-xref">Section 5</a>) and the
+streaming gate
+(<a href="#sec-interrupt" class="quarto-xref">Section 11</a>). The
+composite score built from the 12 metrics below has the narrower
+consumers listed in
+<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>: the
+spike-bypass threshold, working-memory admission and the uncertainty
+estimate. It no longer gates storage.
+<!-- PRUNE: chore/prune-write-only may remove the RLS blender and some CoreStage metrics; the composite-score part of this section is the spot to cut. -->
 
 Context definitions (used throughout Table 1 and structural metrics):
 
@@ -869,7 +2229,7 @@ Context definitions (used throughout Table 1 and structural metrics):
 Structural coherence (coherence_struct) measures integration of the
 current accumulator centroid with the broader context window. This
 metric is distinct from memory coherence (coherence_mem, defined in
-<a href="#sec-drift-coherence" class="quarto-xref">Section 6.4.2</a>)
+<a href="#sec-drift-coherence" class="quarto-xref">Section 5.1.2</a>)
 which tracks within-memory similarity:
 
     coh_neutral(T) = lerp(0.45, 0.55, T)
@@ -886,8 +2246,9 @@ coherence_struct_t).
 
 **Effective Focus usage:** F_eff is a diagnostic modulation of Focus.
 Unless a formula explicitly references F_eff, the specification uses the
-midpoint‑biased knobs F̃ and S̃ (see Section 1) for all knob‑derived
-controls and Table 1 metric formulas.
+midpoint‑biased knobs F̃ and S̃ (see
+<a href="#sec-math" class="quarto-xref">Section 4</a>) for all
+knob‑derived controls and Table 1 metric formulas.
 
 ### Focus Spread
 
@@ -937,7 +2298,7 @@ informational drift-boundary signal:
 Normative note (MUST): drift_boundary_t is informational and MUST NOT
 trigger a memory flush on its own. Memory flush decisions are defined by
 should_flush in
-<a href="#sec-boundary" class="quarto-xref">Section 6.4.3</a>.
+<a href="#sec-boundary" class="quarto-xref">Section 5.1.3</a>.
 
 The instantaneous drift_step_t also informs boundary pressure and
 focus-width feedback. All other composite metrics in this section use
@@ -1219,10 +2580,6 @@ Outcome definition (utility target; normalized to \[0,1\]):
     [w_use, w_pred, w_unc, w_user] ← normalize([0.4 + 0.2F, 0.3 + 0.2S, 0.2 + 0.2T, 0.1])
     outcome_t ← clamp(w_use×o_use + w_pred×o_pred + w_unc×o_unc + w_user×o_user, 0, 1)
 
-    α_out(T) = lerp(0.12, 0.03, T)
-    outcome_pred_t ← EWMA(outcome_pred_{t−1}, outcome_t, α_out(T))
-    δ_reward_t ← outcome_t − outcome_pred_t  # reward prediction error for DA-like modulation
-
 Update cadence and forgetting:
 
     k_update = round(lerp(1, 8, T))  # update every k_update signals
@@ -1275,825 +2632,21 @@ Weight normalization is critical: with 12 metrics and raw weights
 averaging ~0.6, the sum approaches 7.2. Without normalization, weighted
 sums would saturate and collapse variance.
 
-# Dynamic Thresholding and Homeostatic Control
-
-The write gate compares composite scores against an adaptive threshold
-θ_dynamic (written as theta_dynamic when referring to the recorded
-variable). This section details the threshold evolution algorithm
-incorporating Bayesian prior-evidence blending and homeostatic rate
-control.
-
-**Knob note:** F and S here refer to midpoint‑biased values (F̃, S̃) from
-Section 1.
-
-## Prior-Evidence Blending
-
-The threshold prior derives from knob settings:
-
-    θ_prior(F, S, T) = lerp(0.10, 0.30, T) × (1 − 0.3S)
-
-Observed evidence comes from the 90th percentile of recent scores:
-
-    score_history_cap(T) = round(lerp(512, 1536, T))
-    score_stream ← tail(score_stream, max(win_score(T), score_history_cap(T)))
-    recent_scores ← tail(score_stream, win_score(T))
-    if |recent_scores| == 0:
-        observed_p90 ← θ_prior  # no evidence yet
-    else:
-        observed_p90 ← percentile(recent_scores, 90)
-
-Prior and evidence masses weight the blend:
-
-    ρ_prior ← prior_mass(T) = round(lerp(2, 32, T))
-    ρ_obs ← u(t) × |recent_scores|
-
-The target threshold blends prior and evidence:
-
-    θ_target ← (ρ_prior × θ_prior + ρ_obs × observed_p90) /
-                max(ε, ρ_prior + ρ_obs)
-
-High Stability increases prior mass, making the system more resistant to
-observed deviations. High uncertainty increases evidence mass, allowing
-faster adaptation to volatile conditions.
-
-## Homeostatic Rate Control
-
-The controller maintains write rates near the target setpoint through
-continuous-time estimation with effective sample size (ESS) reliability
-weighting.
-
-### Rate Estimation
-
-    Δt ← now_s() − to_s(last_rate_timestamp)
-    dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
-    Δt ← max(Δt, dt_min(T))
-    τ_dt(T) = lerp(0.5, 2.0, T)
-    α_dt ← 1 − exp(−Δt / τ_dt(T))
-    dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
-    dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
-    dt_base ← max(dt_ema, dt_floor(T))
-
-The rate time constant scales with Stability:
-
-    rate_tau_exponent(T) = 3T
-    τ_rate ← max(2^rate_tau_exponent(T) × dt_base, dt_floor(T))
-    α ← 1 − exp(−Δt / τ_rate)
-
-Instantaneous rate estimation with bias correction. Δwrites is the
-binary indicator (0 or 1) of whether a write occurred during the current
-timestep:
-
-    Δwrites ← 1 if write_memory else 0  # binary write event
-
-Normative note (MUST): Δwrites is computed from the current step’s
-write_memory decision. Rate state updates occur after the write decision
-and affect subsequent timesteps.
-
-    ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
-    m_rate_t ← (1 − α) × m_rate + α × ρ_inst
-    denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
-    ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
-    m_rate ← m_rate_t
-    rho_hat_prev ← ρ_hat_t
-    rate_ticks ← rate_ticks + 1
-    last_rate_timestamp ← now_ms()  # update after rate computation
-
-### Effective Sample Size
-
-ESS estimates the effective number of independent samples in the EMA,
-using a heuristic inspired by Liu and Chen (1998):
-
-    β ← max(0, 1 − α)
-    ESS_cap(T) = lerp(30, 120, T)
-    ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
-    reliability ← 1 − exp(−ESS × (1 − T))
-
-High Stability dampens reliability, preventing aggressive corrections in
-conservative regimes.
-
-### Homeostatic Correction
-
-The rate error drives threshold adjustment. The κ\_\* gains are derived
-from the knobs to avoid fixed behavioral constants:
-
-Normative note (MUST): rho_hat_prev is stored state entering the
-timestep. After the write decision, the rate-state update computes
-ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step
-(see Appendix D).
-
-    rate_error ← tanh((rho_hat_prev − rate_target) /
-                      max(rate_target, ε))
-    κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
-    cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
-    Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
-                      (1 − maturity(t)) × rate_error,
-                      −cap_homeo(F,S,T), +cap_homeo(F,S,T))
-
-The correction scales with reliability and is attenuated by both
-Stability and maturity, ensuring conservative, mature systems make
-minimal homeostatic adjustments.
-
-### Sensitivity-Based Threshold Adjustment
-
-Sensitivity modulates threshold based on recent score volatility:
-
-    recent_scores ← tail(score_stream, win_score(T))
-    if |recent_scores| < 2:
-        σ_scores ← 0
-    else:
-        σ_scores ← std(recent_scores)
-    κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
-    cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
-    σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
-    Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
-                    −cap_sens(F,S,T), +cap_sens(F,S,T))
-
-High score variance with high Sensitivity lowers threshold, capturing
-more volatile signals.
-
-### Precision-Based Threshold Adjustment
-
-Focus-driven precision tightens threshold when structural coherence is
-high:
-
-    κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
-    cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
-    Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
-                    −cap_prec(F,S,T), +cap_prec(F,S,T))
-
-High structural coherence with high Focus raises threshold, enforcing
-stricter relevance filtering.
-
-## Threshold Integration
-
-All threshold deltas combine and pass through safety limiting. The
-emotion and mood deltas from
-<a href="#sec-emotional-threshold" class="quarto-xref">Section 4.2.3</a>
-and <a href="#sec-mood" class="quarto-xref">Section 4.2.4</a> are
-denoted Δθ_emo = ΔThreshold_emotion_t and Δθ_mood = ΔThreshold_mood_t:
-
-    Δθ_total ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
-    cap_total ← max_ΔT_per_min(t) × (Δt / 60.0)
-    Δθ_limited ← clamp(Δθ_total, −cap_total, +cap_total)
-    θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
-                            α = α_T(t)) + Δθ_limited,
-                        T_min(t), T_max(t))
-    theta_dynamic ← θ_dynamic_t
-
-Hysteresis evolves toward the stability-derived base:
-
-    hysteresis_t ← clamp(EWMA(hysteresis,
-                         base_band(T), α = α_T(t)),
-                    band_min, band_max)
-    hysteresis ← hysteresis_t
-
-## Write Pacing and Memory Accumulation
-
-The write gate operates per step, but coherent “thoughts” often span
-multiple signals. Composite scoring is computed on the current
-accumulator centroid (μ_acc), so write decisions are driven by the
-accumulated group rather than any single raw signal. This section
-introduces memory-level accumulation that groups signals into natural
-units before storage decisions, inspired by Event Segmentation Theory
-(Zacks and Swallow 2007).
-
-This approach draws from EM-LLM (Fountas et al. 2024), which segments
-token sequences into episodic events using surprise-based boundary
-detection refined by graph-theoretic cohesion metrics. Their work shows
-that combining prediction error signals with within-segment coherence
-produces boundaries correlated with human event perception. Our
-adaptation uses EMA prediction error (`surprisal_t`) for surprise and
-cosine similarity for cohesion, while drift provides auxiliary boundary
-pressure, enabling modality-agnostic operation across text tokens, audio
-chunks, video frames, or any signal stream.
-
-### Memory Accumulator State
-
-Each source stream maintains accumulator state:
-
-    μ_acc ← 256d running mean embedding
-    c_t ← temporal context vector (slow drift; @sec-temporal-context)
-    drift_acc ← accumulated drift within memory
-    s_sum ← sum of accumulator scores in memory
-    s_max ← max accumulator score in memory
-    n ← count of signals in memory
-    e_peak ← accumulator centroid at highest score
-    emo_max ← 0  # max emotion_intensity_t within the unit
-    arousal_sum ← 0  # sum of arousal_t within the unit (for avg)
-    t_start ← now_ms()  # timestamp of accumulation start (ms since epoch)
-    last_signal_ts ← now_ms()  # timestamp of previous signal (ms, for gap detection)
-    last_write_ts ← 0  # ms; 0 means "no prior write" for refractory
-    eta_acc ← 0  # drift EWMA state
-    coherence_prev ← 0  # previous coherence (initialize to 0)
-    acc_signals_window ← []  # ring buffer of recent embeddings for coherence
-
-Accumulator state is live runtime staging state, not durable memory. If
-the process restarts before a write boundary commits a unit, the
-unfinished accumulator window may be lost; committed memories, signal
-rows, and working memory remain the durability boundary.
-
-Reset behavior: reset_accumulator() clears μ_acc, drift_acc, s_sum,
-s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, and
-sets acc_signals_window ← \[\] (and refreshes t_start/last_signal_ts for
-the next unit), but retains last_write_ts so the refractory term remains
-well-defined across boundaries.
-
-    reset_accumulator(): acc_signals_window ← []  # MUST clear coherence window at boundaries
-
-On each signal, update running statistics (note: n is the count before
-this signal):
-
-    signal_gap_s ← now_s() − to_s(last_signal_ts)  # compute BEFORE updating last_signal_ts
-
-    win_coh(T) = round(lerp(8, 32, T))  # coherence window size
-    acc_signals_window ← tail(acc_signals_window, win_coh(T))
-
-    μ_acc ← (n × μ_acc + x_t) / (n + 1)
-    n ← n + 1
-    drift_gain(S,T) = clamp(0.5 × scale(S,T), 0.35, 0.65)
-    drift_acc ← drift_acc + drift_mag_t × drift_gain(S,T)
-    emo_max ← max(emo_max, emotion_intensity_t)
-    arousal_sum ← arousal_sum + arousal_t
-    last_signal_ts ← now_ms()  # update timestamp for next gap calculation (ms)
-
-    # After composite scoring on μ_acc:
-    s_sum ← s_sum + score_t
-    if score_t > s_max:
-        s_max ← score_t; e_peak ← μ_acc
-
-### Hybrid Drift and Coherence Tracking
-
-Boundary detection combines instantaneous drift with within-memory
-coherence tied to the evolving centroid μ_acc:
-
-    ε_noise(T) = lerp(0.01, 0.05, 1 − T)  # stability-derived noise floor
-    # Use instantaneous drift_step_t for boundary velocity
-    d_step ← max(drift_step_t − ε_noise(T), 0)
-    eta_prev ← eta_acc  # baseline before updating EWMA
-
-Memory coherence tracks similarity within the current memory
-accumulation window (range \[−1, 1\] from mean cosine):
-
-    mu_curr ← μ_acc  # current accumulator centroid
-    current_window ← acc_signals_window  # embeddings from the current unit before mu_curr
-    if |current_window| == 0:
-        coherence_curr ← 1.0  # empty-window fallback
-    else:
-        coherence_curr ← mean([cos(mu_curr, x_i) for x_i in current_window])
-    # After computing coherence_curr, append mu_curr for the next step
-    acc_signals_window.append(mu_curr); acc_signals_window ← tail(acc_signals_window, win_coh(T))
-    # coherence_prev is the stored coherence value from the previous step
-
-Note: coherence_mem is distinct from coherence_struct
-(<a href="#sec-struct-coherence" class="quarto-xref">Section 5.1.1</a>).
-The former tracks within-memory similarity using raw mean cosine, while
-the latter measures variance-based integration with broader context.
-This dual-signal approach mirrors EM-LLM’s boundary detection mechanism.
-In their formulation, boundaries occur where surprise (token-level
-prediction error) exceeds a threshold and segment cohesion drops. In
-Cortext, surprisal_t provides the prediction-error signal, while drift
-spike provides auxiliary boundary pressure and coherence_mem drop
-captures within-memory similarity degradation.
-
-### Natural Boundary Detection (Bayesian Change-Point)
-
-Segmentation is framed as online change-point inference. We compute a
-**calibrated boundary probability** rather than a hand-tuned score. The
-hazard is knob-controlled; the likelihood is driven by surprisal,
-cohesion drop, drift, and temporal gaps, with a coherence/topic
-**support gate** to downweight isolated spikes.
-
-    # Hazard (prior boundary probability, calibrated to target rate)
-    h_base(F,S,T) = lerp(0.03, 0.18, S) × lerp(1.2, 0.8, T)
-    h_t_base ← clamp(h_base × (0.8 + 0.2(1 − F)), 0, 0.5)
-    target_rate(F,S,T) = clamp(lerp(0.12, 0.35, S) × lerp(1.1, 0.7, F) × lerp(1.0, 0.7, T), 0.05, 0.45)
-    rate_gain(S,T) = clamp(lerp(0.4, 1.0, S) × lerp(1.1, 0.8, T), 0.2, 1.2)
-    rate_mult ← clamp(1 + rate_gain × (target_rate − boundary_rate_ema), 0.5, 1.5)
-    # support uses normalized coherence/topic signals (defined below)
-    h_t ← clamp(h_t_base × rate_mult × lerp(0.8, 1.3, support), 0, 0.5)
-
-    # Drift spike (same signal, now used for likelihood)
-    ε0(T) = lerp(0.005, 0.02, 1 − T)  # cold-start guard for eta_prev
-    if eta_prev < ε0(T):
-        drift_spike ← 0
-    else:
-        drift_spike ← (d_step − eta_prev) / max(eta_prev, ε)
-    eta_acc ← EWMA(eta_prev, d_step, α = lerp(0.3, 0.1, T))
-    coh_drop01 ← clamp((coherence_prev − coherence_curr) / 2, 0, 1)
-    coherence_prev ← coherence_curr  # update for next step
-
-    # Adaptive gap signal (dynamic, not a hard trigger)
-    dt_ref ← max(dt_ema, dt_floor(T))  # EWMA of inter-arrival Δt in seconds (robust to jitter)
-    gap_scale(T) = lerp(3.0, 8.0, T)  # expected pause multiplier
-    gap_ref_s ← gap_scale(T) × dt_ref
-    gap_z ← (signal_gap_s − gap_ref_s) / max(gap_ref_s, ε)
-    gap_score ← sigmoid(gap_z)
-
-    # Local normalization (within-episode, contrast-boosted)
-    var_floor(S,T) = BoundaryVarianceFloor(S,T)
-    warmup_signals(S,T) = BoundaryWarmupSignals(S,T)
-    ema_mean_x ← EWMA(ema_mean_x, x, α_local(T))
-    ema_var_x  ← EWMA(ema_var_x, (x − ema_mean_x)^2, α_local(T))
-    norm_gain(S,T) = clamp(lerp(1.6, 3.0, S) × lerp(1.05, 0.95, T), 1.0, 3.2)
-    x̂ ← sigmoid(norm_gain × (x − ema_mean_x) / sqrt(max(ema_var_x, var_floor) + ε))
-    # warm-up uses raw x until warmup_signals(S,T)
-
-    # Topic shift (embedding-only, temporal context anchor)
-    topic_shift ← 1 − map01(cos(e_t, c_t))
-
-    # Likelihood of a boundary given observations
-    support_policy ← BoundarySupportPolicyForKnobs(F,S,T, coĥ, topiĉ)
-    support ← support_policy.support
-    support_gate ← support_policy.support_gate   # downweight isolated spikes
-    gap_gate ← support_policy.gap_gate
-    support_boost ← support_policy.support_boost  # emphasize coherent/topic shifts
-    w_g(F,S,T) = clamp(0.01 × lerp(1.10, 0.90, F)
-                             × lerp(0.90, 1.10, S)
-                             × lerp(0.90, 1.10, T), 0.004, 0.020)
-    [w_s, w_d, w_c, w_t, w_g] ← [0.34 + 0.14S, 0.18 + 0.05(1 − T),
-                                0.36 + 0.16F, 0.30 + 0.22S, w_g(F,S,T)]
-    [w_s, w_d, w_c, w_t, w_g] ← normalize([w_s×support_gate, w_d×support_gate,
-                                          w_c×support_boost, w_t×support_boost, w_g×gap_gate])
-    z_center(S,T) = clamp(lerp(0.44, 0.30, S) × lerp(1.05, 0.95, T), 0.26, 0.58)
-    change_point_policy ← BoundaryChangePointPolicyForKnobs(S,T,support)
-    z_center_eff ← change_point_policy.z_center_eff
-    z_t ← w_s×(surprisal̂ − z_center_eff) +
-          w_d×(drift̂ − z_center_eff) +
-          w_c×(coĥ − z_center_eff) +
-          w_t×(topiĉ − z_center_eff) +
-          w_g×(gap_score − z_center_eff)
-    k_cp_eff ← change_point_policy.k
-    lik_boundary ← sigmoid(k_cp_eff × z_t)
-
-    # Bayesian update for boundary posterior
-    boundary_score ← (h_t × lik_boundary) /
-                      max(ε, h_t × lik_boundary + (1 − h_t) × (1 − lik_boundary))
-    boundary_score ← clamp(boundary_score, 0, 1)
-
-Boundary threshold and limits:
-
-    b_thresh(F, S) = lerp(0.48, 0.66, F) × lerp(1.1, 0.9, S)
-    max_mem_drift(S) = lerp(0.8, 2.0, S)  # cumulative drift cap
-
-Pressure-capacity ratio (continuous flush trigger derived from knobs):
-
-    capacity_scale(T) = (1 + T)^2  # higher stability = larger capacity
-    [capacity, pressure] ← BoundaryPressurePolicyForKnobs(S,T, drift_acc)
-    saturation_ratio ← pressure / max(capacity, ε)
-    k_flush(S,T) = k_surprise(S,T)
-    pressure_score ← sigmoid((saturation_ratio − 1) × k_flush(S,T))
-
-Hard capacity ceiling (max signals per memory; knob-derived):
-
-    base = lerp(4.0, 12.0, T)
-    f_scale = lerp(1.00, 0.35, F)
-    s_scale = lerp(1.00, 0.55, S)
-    floor = round(lerp(2, 3, T))
-    max_signals(F,S,T) = max(floor, round(base × f_scale × s_scale))
-
-Adaptive cadence (gap normalization only; no timeouts):
-
-    dt_ref ← max(dt_ema, dt_floor(T))
-    gap_ref_s ← gap_scale(T) × dt_ref
-
-Fallback boundary floor (applies to capacity/pressure only):
-
-    boundary_floor(F,S,T) = clamp(lerp(0.05, 0.15, S) × lerp(1.2, 0.8, F) × lerp(1.1, 0.9, T),
-                                  0.02, 0.25)
-
-Trigger memory flush when:
-
-    mem_elapsed ← now_s() − to_s(t_start)
-    should_flush = (boundary_score > b_thresh(F, S)) OR
-                   (pressure_score > b_thresh(F, S) AND boundary_score ≥ boundary_floor(F,S,T)) OR
-                   (n ≥ max_signals(F,S,T) AND boundary_score ≥ boundary_floor(F,S,T))
-
-where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the
-start of signal processing (before last_signal_ts is updated). Gap
-timing influences boundary_score via gap_score only; there is no
-time-based flush.
-
-**Boundary type note:** When the max-signals ceiling triggers a flush,
-set `boundary_type = "capacity"` for the enclosing episode. This is a
-hard safety boundary (not a heuristic score) and is still fully
-knob-derived.
-
-### Spike Bypass (Flashbulb Flush)
-
-High-salience signals bypass accumulation and flush immediately,
-capturing preceding context as a coherent memory unit:
-
-    spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
-    mem_tau(T) = win_mem_ctx(T)
-    mem_maturity ← 1 − exp(−n / max(mem_tau(T), 1))  # n = signals in current unit
-    coherence_scale ← 1 + (1 − T) × clamp(coherence_t, 0, 1)
-    spike_margin_eff ← spike_margin(S,T) × (1 + (1 − mem_maturity)) × coherence_scale
-    spike_bypass = score_t > (θ_dynamic + spike_margin_eff)
-    force_write ← false
-
-When spike_bypass triggers:
-
-    if spike_bypass:
-        should_flush = true   # force a boundary
-        force_write = true   # bypass S_window > θ_memory
-
-This keeps flashbulb moments intact while preventing early or highly
-coherent windows from fragmenting into micro-memories. As the unit
-matures, spike bypass becomes easier, and low coherence reduces the
-effective margin.
-
-The implementation also uses the same force-write path when the
-accumulator reaches its maximum signal capacity. That capacity flush is
-an operational safety valve, not an additional flashbulb criterion.
-
-### Inactivity Boost
-
-We avoid hard timeouts for episode boundaries. Instead, when the stream
-becomes quiet and natural indicators are weak, inactivity softly boosts
-the boundary score:
-
-    inactivity_policy ← BoundaryInactivityPolicyForKnobs(S,T)
-    support_relax = exp(−inactivity_policy.support_relax_rate × gap_z⁺)
-    gap_ratio = signal_gap_s / max(dt_ema, ε)
-    gap_z_inact = log1p(max(gap_ratio − 1, 0))
-    gap_score_inact = sigmoid(inactivity_policy.gap_score_scale × gap_z_inact)
-    inactivity = gap_score_inact × (1 − support × support_relax)
-    gap_z⁺ = max(0, gap_z_inact)
-    inactivity_scale = exp(inactivity_policy.inactivity_exp_rate × gap_z⁺)
-    boundary_score ← boundary_score + inactivity_policy.inactivity_weight × inactivity × inactivity_scale
-    gap_force = sigmoid(inactivity_policy.gap_force_k ×
-                       (gap_z_inact − inactivity_policy.gap_force_center))
-    boundary_score ← max(boundary_score, gap_force)
-
-This closes episodes after prolonged inactivity without forcing
-premature flushes during coherent streams. The signal gap is measured
-relative to the observed cadence (dt_ema), so inactivity remains dynamic
-and adapts to the current conversational pace rather than a fixed
-timeout.
-
-### Window Score and Refractory
-
-Memory-level score combines peak and average with coverage bonus:
-
-    s_avg ← s_sum / max(n, 1)
-    α(F) = lerp(0.3, 0.7, F)  # peak vs avg weight
-    coverage ← min(n / n_ctx(T), 1.0)  # memory completeness
-    β(S) = lerp(0.05, 0.15, S)  # coverage weight
-    S_window ← α(F) × s_max + (1 − α(F)) × s_avg + β(S) × coverage
-
-Write refractory suppresses rapid successive writes:
-
-    τ_write_refrac(T) = lerp(5, 30, T)  # seconds
-    k_write_refrac = lerp(0.3, 0.1, T)
-    Δt_write ← now_s() − to_s(last_write_ts)
-    M_write_refrac ← 1.0 + k_write_refrac × exp(−Δt_write / τ_write_refrac(T))
-
-Implementation note: `Δt_write` is treated as a signed elapsed duration
-and clamped at zero. Backward event timestamps therefore receive the
-maximum refractory multiplier instead of underflowing into an
-effectively infinite elapsed interval.
-
-The same defensive rule applies to boundary gaps and retrieval pacing:
-non-increasing timestamps produce a zero elapsed interval. They cannot
-create an unsigned wraparound boundary or bypass the adjacent-retrieval
-limiter.
-
-Final write decision:
-
-    θ_memory ← θ_dynamic × M_write_refrac
-    write_memory = force_write OR (should_flush AND (S_window > θ_memory))
-    if write_memory: last_write_ts ← now_ms()  # update refractory timestamp (ms)
-
-Normative rule (MUST): if should_flush is true, the current unit must be
-finalized. If write_memory is false, discard the unit and
-reset_accumulator() anyway (do not update last_write_ts). This prevents
-perpetual should_flush states (time cap / drift cap / gap cap) while
-never resetting.
-
-Trace note: if a run trace reports both write_decision and stored,
-interpret write_decision as the boolean gate outcome at the boundary
-(the write_memory predicate above). Interpret stored as the eventual
-recording outcome (after any final safety checks).
-
-Representative embedding blends accumulator mean with peak:
-
-### Representative Embedding
-
-    ρ(F) = lerp(0.2, 0.6, F)  # mean vs peak blend
-    e_rep ← l2_normalize(ρ(F) × μ_acc + (1 − ρ(F)) × e_peak)
-
-    # Edge-case guard
-    if |μ_acc| = 0: e_rep ← e_peak
-    if |e_peak| = 0 OR dim(e_peak) ≠ dim(μ_acc): e_rep ← μ_acc
-
-On write: store e_rep with metadata {n, s_max, s_avg, drift_acc,
-mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n,
-1), boundary_score}. Store `c_t` as the temporal context for the memory.
-Append e_rep to memory_stream and l2_normalize(μ_acc) to
-recent_memory_centroids. Update `index_store` with the sparse key
-(<a href="#sec-pattern-separation" class="quarto-xref">Section 8.14</a>).
-Reset accumulator for next unit.
-
-# Reinforcement and Decay Dynamics
-
-## Memory Strength Model
-
-Each memory maintains **multi-timescale traces** rather than a single
-leaky bucket. A mixture of fast/medium/slow/ultra-slow traces yields a
-power-law forgetting curve while preserving plasticity.
-
-Let `f = FocusBias(F)`, `s = SensitivityBias(S)`, and let `f0` and `s0`
-be their values at the neutral knobs. The active trace count is:
-
-    N_traces(F,S,T) = clamp(round((2 + 2T) ×
-                             (1 + 0.08(f-f0) + 0.06(s-s0))), 1, 4)
-
-The familiar `0.10/0.50/2.00/8.00` half-life multipliers are the neutral
-baseline, not universal constants. Production applies bounded F/S/T
-policy scales:
-
-    reactive = 1 + 0.14(s-s0) - 0.08(f-f0) + 0.06(T-0.5)
-    stable   = 1 + 0.24(T-0.5) - 0.06(s-s0)
-    τ_fast  = clamp(0.10 × reactive, 0.05, 0.20) × half_life
-    τ_med   = clamp(0.50 × (1 + 0.12(T-0.5) - 0.06(f-f0)), 0.30, 0.80) × half_life
-    τ_slow  = clamp(2.00 × stable, 1.20, 3.20) × half_life
-    τ_ultra = clamp(8.00 × stable × (1 + 0.10(f-f0)), 4.00, 12.00) × half_life
-    τ_list = [τ_fast, τ_med, τ_slow, τ_ultra]
-
-    α_min_S = 0.05; α_span_S = 0.35
-    α_S(t) = α_min_S + SensitivityBias(S) × α_span_S × u(t)
-    used_flag(m) = 1 if m was retrieved and used in current step, else 0
-
-Trace updates combine exponential decay, EWMA learning, and knob-scaled
-reinforcement (for i in 1..N_traces):
-
-    λ_i ← ln(2) / τ_list[i]
-    reinforcement ← clamp((S_eff × used_flag(m) +
-                           F_eff × clamp(influence_factor, 0, 1))
-                           × serial_position_mult, 0, 1)
-    increment_i ← (α_S(t) × used_flag(m) + reinforcement) / N_traces
-    trace_i ← clamp(trace_i × exp(−λ_i × Δt) + increment_i, 0, 1)
-
-The reinforcement term distributes S- and F-scaled retrieval feedback
-uniformly across all active traces. This avoids front-loading
-reinforcement into the fast trace (which decays quickly) and instead
-strengthens the entire trace ensemble when a memory is retrieved and
-used.
-
-Trace coupling encourages long-lived knowledge without freezing
-plasticity:
-
-    coupling = clamp((0.05 + 0.10T) ×
-                     (1 - 0.10(f-f0) + 0.12(s-s0)), 0.02, 0.20)
-    trace_{i+1} ← clamp(trace_{i+1} + coupling × trace_i, 0, 1)
-
-Combined strength uses a knob-shaped mixture that favors slow traces as
-Stability increases:
-
-    w_fast  = clamp((0.40 - 0.25T) ×
-                    (1 - 0.08(f-f0) - 0.10(s-s0)), 0.05, 0.50)
-    w_med   = clamp(0.25 × (1 - 0.04(f-f0) - 0.04(T-0.5)), 0.12, 0.35)
-    w_slow  = clamp((0.20 + 0.15T) ×
-                    (1 + 0.08(f-f0) + 0.06(s-s0)), 0.12, 0.45)
-    w_ultra = clamp((0.15 + 0.10T) ×
-                    (1 + 0.10(f-f0) + 0.06(s-s0)), 0.08, 0.35)
-    w_raw ← [w_fast, w_med, w_slow, w_ultra]
-    w ← normalize(w_raw[1..N_traces])
-    strength_t ← clamp(Σ_i w_i × trace_i, 0, 1)
-
-Δt is measured per memory using its last access timestamp:
-
-    Δt(m) ← now_s() − to_s(m.last_access); if last_access is unset, use created_at
-
-Memories falling below the periphery cutoff are candidates for eviction.
-**Only LONG_TERM memories are evicted**; association and other
-graph-scaffold rows are not evicted by the per-memory decay pass and are
-pruned during explicit consolidation.
-
-    periphery_cutoff(T) = lerp(0.03, 0.20, T)
-    storage_budget_floor = max(
-      min_db_bytes,
-      db_avail_fraction × available_disk_bytes
-    )
-
-    if m.kind == LONG_TERM
-       AND db_used_bytes ≥ storage_budget_floor
-       AND strength_t < periphery_cutoff(T)
-       AND m.created_at < last_consolidation_ts:
-         evict(m)
-
-Eviction removes the memory’s signal rows, reconstruction rows, graph
-edges, and object payloads in the same transaction. The cleanup
-candidate set includes the representative embedding and every embedding
-owned by its signals and reconstructions; an embedding is deleted only
-when no surviving row references it. This makes storage-pressure
-eviction reclaim the dominant vector payloads without a later global
-orphan sweep.
-
-The v1 hard cut removed the structured fact-evidence floor. Retention
-now depends on the trace strength, the storage-pressure gate, and the
-consolidation watermark. Source provenance remains attached to episodic
-rows, but it no longer creates a separate eviction exemption through
-fact tables.
-
-**Current implementation note:** the runtime now includes a storage gate
-ahead of the usual strength-based eviction test. For file-backed stores,
-eviction is skipped entirely until the on-disk database footprint
-reaches a configurable floor. The default fixed floor is `500 MB`, and
-an internal percentage-of-available-space floor can also be applied; the
-active threshold is the maximum of the two. This keeps long chat
-sessions from prematurely evicting weak but still useful traces simply
-because they have decayed below `periphery_cutoff(T)` while the database
-is still tiny. Deterministic file-backed sweeps in
-<a href="#sec-experimental" class="quarto-xref">Section 11</a> showed
-three useful regimes. Under the raw storage-growth sweep, budgets up to
-`256 MB` still behaved like ordinary decay, `500 MB` was the first
-tested budget that materially delayed eviction, and `1 GB` extended that
-delay further. Under the synthetic human-sleep clock, that translated
-into an interpretable retention boundary: `256 MB` was enough for
-infant/toddler/preschool-style frequent consolidation, but it still
-missed school-age, teen, adult, and older-adult nightly consolidation.
-`500 MB` was the first tested floor that reliably preserved labels for
-once-per-day adult-style consolidation, while `1 GB` added safety margin
-rather than a new qualitative retention regime. In-memory stores keep
-the historical behavior unless the gate is explicitly forced on for
-studies.
-
-Ablation studies in
-<a href="#sec-experimental" class="quarto-xref">Section 11</a> confirm
-that the retained components of this model contribute to selective
-eviction behavior. Disabling coupling or reducing to a single trace
-collapses the power-law forgetting curve into rapid indiscriminate
-eviction, flashbulb bonuses provide the expected protective effect, the
-storage gate prevents premature pruning of small databases, and uniform
-reinforcement distribution makes S and F visibly effective in the
-eviction dynamics.
-
-## Contextual Gain and Per-Memory Stability (Definitions)
-
-Contextual gain is a per-retrieval signal used by multiple feedback
-loops:
-
-    contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and used (range [−1, 1])
-    contextual_gain_t(m) ← undefined                # otherwise
-
-When undefined, treat contextual_gain_t(m) as 0 in downstream updates.
-Persisted per-memory gain is tracked as a smoothed value:
-
-    L_cg = round(lerp(8, 32, T))
-    α_cg = 2 / (L_cg + 1)
-    contextual_gain(m) ← EWMA(contextual_gain(m), contextual_gain_t(m), α_cg)
-
-Per-memory stability initializes at creation and is bounded:
-
-    strength(m)_init = memory_initial_strength(F,S,T)
-    stability(m)_init = memory_initial_stability(F,S,T)
-    stability(m) ← clamp(stability(m), 0.0, 2.0)
-
-Retrieved vs used:
-
-    retrieved(m) = memory returned by retrieval (vector or graph expansion)
-    used(m) = retrieved(m) AND injected into active context after gate decisions
-
-Contextual gain is only measured for used memories.
-
-## Influence-Weighted Updates
-
-When contextual gain signals are available, influence factors enter the
-reinforcement term that is distributed uniformly across traces (see
-trace update above):
-
-    influence_factor ← (used_count / max(retrieved_count, 1)) ×
-                        clamp(contextual_gain(m), −1, +1)
-    reinforcement ← clamp(S_eff × used_flag(m) +
-                           F_eff × clamp(influence_factor, 0, 1), 0, 1)
-                    × serial_position_mult
-
-This replaces the earlier front-loaded boost that applied 60%/30%/10% to
-fast/med/slow traces. Ablation studies showed the front-loaded
-distribution had no measurable effect on eviction dynamics because its
-contribution was absorbed by trace clamping. Uniform distribution
-ensures all active traces receive meaningful reinforcement, improving
-long-term retention for used memories.
-
-## Reinforcement Graph Maintenance
-
-The normal interrupt gate injects at most one selected memory into
-active context per dispatch. Production retrieval therefore does not
-synthesize a pairwise *reinforces* edge from its broader retrieved
-packet: packet co-occurrence is not evidence that two memories were used
-together. This also prevents repeated noisy packets from turning
-boilerplate into durable graph hubs.
-
-Existing *reinforces* edges remain valid association inputs for stores
-and explicit graph workflows that already contain them. They are decayed
-and pruned only during explicit consolidation cycles (triggered
-externally via `Consolidate()` or `cortext_consolidate`), matching the
-system’s idle-time consolidation policy. At retrieval time their weight
-is degree-normalized before the bounded graph bonus is applied,
-preventing high-degree hubs from dominating candidate rank.
-
-## Causal Feedback Loop
-
-The system tracks causal influence of retrieved memories on generation
-quality through contextual gain—the semantic alignment (cosine
-similarity) between the current signal embedding and the retrieved
-memory embedding.
-
-### Focus Feedback
-
-    αF_base = 0.10; βF_base = 0.05
-    weight_relevance_t ← weight_relevance
-    attention_width_t ← attention_width
-    for each used memory m:
-        if contextual_gain(m) > 0:
-            weight_relevance_t += αF_base × contextual_gain(m)
-            attention_width_t *= (1 − βF_base)
-        else:
-            attention_width_t *= (1 + βF_base)
-    # Drift-responsive dilation + restorative pull to prior
-    dilation_force ← S × (1 − T) × drift_step_t
-    restoring_force ← F × (attention_width_prior − attention_width_t)
-    attention_width_t ← attention_width_t + dilation_force + restoring_force
-    weight_relevance ← clamp(weight_relevance_t, 0, 1)
-    attention_width_t ← clamp(attention_width_t,
-                              attention_width_min, attention_width_max)
-    attention_width ← attention_width_t
-
-Positive contextual gain narrows attention and boosts relevance
-weighting; negative gain widens attention to explore alternatives. The
-drift_step_t term is the instantaneous drift signal from
-<a href="#sec-structural-metrics" class="quarto-xref">Section 5</a>.
-
-### Sensitivity Feedback
-
-    η_base = 0.10
-    weight_novelty_t ← weight_novelty
-    for each used memory m:
-        novelty_reward ← 1 − sim(m.embedding, recent_context)
-        weight_novelty_t += η_base × (novelty_reward ×
-                             contextual_gain(m) −
-                             redundancy(m, recent_context))
-    weight_novelty_t ← clamp(weight_novelty_t, 0, 1)
-    weight_novelty ← weight_novelty_t
-
-This rewards novelty that proves useful while penalizing redundant
-retrievals.
-
-### Stability Feedback
-
-    γT_base = 0.05
-    for each used memory m:
-        if contextual_gain(m) > 0:
-            stability_t(m) ← stability(m) + γT_base
-        else:
-            stability_t(m) ← stability(m) × (1 − γT_base)
-        stability(m) ← clamp(stability_t(m), 0.0, 2.0)
-
-The mean stability of used memories provides adjustment to the half-life
-target:
-
-    adj ← clamp(mean(stability(m_used)) − 1.0, −0.25, +0.25)
-    ΔHalfLife_adj_t ← adj
-
-This factor is consumed by the Stability update
-(<a href="#sec-stability-update" class="quarto-xref">Section 4.3.2</a>),
-avoiding conflicting adjustments between feedback mechanisms.
-
-## Generation Influence Tracking
-
-When generation embeddings are wired into the runtime, influence can
-incorporate output trajectory. The current implementation keeps
-generation-similarity and generation-drift terms neutral unless such
-embeddings are available:
-
-    Δḡ ← l2_normalize(ḡ_t) − l2_normalize(ḡ_{t−1})
-    drift_mag_gen ← ‖Δḡ‖
-    drift_contribution(m) ← (drift_mag_gen / 2) ×
-                             max(0, cos(m.embedding, l2_normalize(Δḡ)))
-
-The intended full influence blend is:
-
-    λ₁ = 0.5; λ₂ = 0.4; λ₃ = 0.3
-    influence(m) ← λ₁ × contextual_gain(m) +
-                    λ₂ × cos(m.embedding, ḡ_t) −
-                    λ₃ × drift_contribution(m)
-
-Sustained influence accumulates over a stability-dependent horizon:
-
-    L_sustain(T) = round(lerp(3, 5, T))
-    sustained_influence ← EWMA(sustained_influence,
-                               influence(m),
-                               α = 2 / (L_sustain(T) + 1))
-
-# Advanced Cognitive Processes
-
-This section presents algorithms modeling higher-order cognitive
-phenomena: working memory maintenance, soft anchor formation, retrieval
-uncertainty, reconsolidation dynamics, and serial position effects.
+# Working Memory, Supersession and Removed Cognitive Mechanisms
+
+This section specifies the surviving cognitively motivated components:
+bounded working memory, the temporal context vector, and graph-native
+belief revision through `supersedes` edges. It also keeps a short record
+of the higher-order mechanisms the 2026-10 ablation removed, with their
+measured effects. The removed mechanisms are reconsolidation, retrieval
+competition, predictive pre-activation, serial-position effects,
+emotional consolidation, synaptic tagging, Soft Anchors, and pattern
+separation with its procedural lane
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>).
 
 **Knob note:** Unless explicitly stated otherwise, F and S in this
-section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
+section refer to midpoint‑biased values (F̃, S̃) defined in
+<a href="#sec-math" class="quarto-xref">Section 4</a>.
 
 ## Working Memory Gates
 
@@ -2101,7 +2654,7 @@ Motivated by bounded working-memory models such as Cowan (2001), Cortext
 maintains a limited number of active application-level memory units.
 These slots are not asserted to be human cognitive chunks. Working
 memory holds coherent memories as defined in
-<a href="#sec-write-pacing" class="quarto-xref">Section 6.4</a>,
+<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>,
 preserving the full content and signal sequence:
 
     base_capacity = round(3 × (lerp(8, 6, S̃) + lerp(−1, 1, F̃)))
@@ -2109,7 +2662,7 @@ preserving the full content and signal sequence:
 This yields 15–27 slots and 21 at neutral knobs. High Sensitivity
 reduces capacity (faster turnover), while high Focus increases the slot
 budget. The operating point comes from the capacity study in
-<a href="#sec-experimental" class="quarto-xref">Section 11</a> rather
+<a href="#sec-experimental" class="quarto-xref">Section 15</a> rather
 than from a direct numerical fit to human span.
 
 ### Active Memory Structure
@@ -2123,23 +2676,27 @@ metadata:
     memory.blob_ids ← [blob_1, blob_2, ..., blob_n]  # blob refs
     memory.embedding ← e_rep  # representative embedding (@sec-rep-embedding)
     memory.signals ← [x_1, x_2, ..., x_n]  # ordered signal embeddings
-    memory.context ← c_t  # temporal context state (@sec-temporal-context)
-    memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}
+    memory.context ← c_t  # temporal context state (@sec-temporal-context); PRUNE: persisted copy dropped by migration 56
+    memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}  # PRUNE: reliability, contradiction_count, last_verified_ts dropped by migration 56
     memory.evidence_packets ← ordered immutable signal rows
     memory.current_view ← latest reconstruction blob if present, else concatenated signal blobs
     memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
                        s_emotion_max, s_arousal_avg}
 
 The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated
-during memory formation for use by Emotional Consolidation
-(<a href="#sec-emotional-consolidation"
-class="quarto-xref">Section 8.12</a>).
+during memory formation. Their consumer, Emotional Consolidation, was
+removed (<a href="#sec-emotional-consolidation"
+class="quarto-xref">Section 10.12</a>).
+<!-- PRUNE: if chore/prune-write-only drops these write-only metadata fields, remove them from the structure above and delete this sentence. -->
 
 ## Temporal Context State (Time-Cells Analogue)
 
 Beyond the accumulator centroid μ_acc, Cortext maintains a slowly
-drifting temporal context vector `c_t`. This provides ordered recall and
-reduces topic-collision errors by enabling **context reinstatement**.
+drifting temporal context vector `c_t`. It anchors the topic-shift term
+of boundary detection
+(<a href="#sec-boundary" class="quarto-xref">Section 5.1.3</a>). Using
+it for ordered recall through **context reinstatement** remains a
+proposed extension, described below; it is not shipped.
 
     α_c(S,T) = AccumulatorTemporalContextAlpha(S,T)
     c_t ← l2_normalize((1 − α_c(S,T)) × c_{t−1} + α_c(S,T) × μ_acc)
@@ -2185,7 +2742,7 @@ recently accessed:
       strength ← max(strength_floor(F,S,T),
                      strength − maintenance_cost_per_memory × Δt_decay)
       strength_ts ← now_s()
-    # last_ts changes only on chunking, rehearsal, or insertion
+    # last_ts changes only on chunking or insertion
 
 The active floor is applied only while charging positive elapsed time. A
 same-time or out-of-order signal therefore cannot recharge a slot that
@@ -2207,12 +2764,11 @@ Gating thresholds determine entry and chunking:
 
     chunking_threshold = lerp(0.7, 0.9, F)
     gate_threshold = lerp(0.1, 0.4, F)
-    rehearsal_rate = lerp(0.5, 2.0, S)
     memory_dedication_strength = lerp(0.3, 0.9, T)
 
 Working memory gating evaluates coherent memories at accumulation
 boundaries
-(<a href="#sec-boundary" class="quarto-xref">Section 6.4.3</a>), not
+(<a href="#sec-boundary" class="quarto-xref">Section 5.1.3</a>), not
 individual signals. The WM update occurs **before** accumulator reset so
 each slot preserves ordered signal blobs for content hydration:
 
@@ -2254,8 +2810,31 @@ same source:
 
     similar_memories ← {m ∈ active_memories | cos(m.embedding, memory.e_rep) > chunking_threshold AND
                                   m.source_id == memory.source_id}
-    if |similar_memories| > 0:
-        merge_into_chunk(similar_memories, memory)
+    chunk_max(T) = round(lerp(8, 24, T))  # signals per slot (16 at T = 0.5)
+    best ← argmax cos over similar_memories
+    if best exists AND best.n_signals + memory.n_signals ≤ chunk_max(T):
+        merge_into_chunk(best, memory)
+    else:
+        insert_new_slot(memory)  # capacity eviction as for any insert
+
+The chunk budget bounds what one slot carries into every packet. Without
+it, per-conversation Natural ingest let a slot absorb a whole stream: on
+BEAM (22,652 turns) three slots held 21,793 signals, each query packet
+carried ~0.9 MB of working-memory text, and consolidation p95 reached 10
+s. With `chunk_max` = 16 the same stream keeps gold recall (.110
+retrieved), halves the working-memory text, cuts ingest instructions
+62%, and brings consolidation p95 to 0.31 s. Durable ingest never chunks
+(each turn keeps its own trace).
+
+Earlier builds also rehearsed slots: an incoming unit within
+`lerp(0.5, 0.7, F)` cosine of a slot, or a retrieved memory within the
+chunking threshold, raised that slot’s strength by
+`lerp(0.5, 2.0, S) × base_delta`. The round-3 ablation (2026-10) found
+rehearsal changed 12/48 LongMemEval-S and 33/250 Eval 1 packets
+(working-memory order only) and none on BEAM-10M conversation 7, with
+gold-turn recall unchanged and Haiku-judged sufficiency +0.000 (S) and
++0.002 ± 0.003 (Eval 1); removing it saved 3–4% of instructions, so it
+was removed.
 
 **Implementation note:** durable ingress inputs preserve an ordered
 working-memory trace independent of the literal `source_id` string.
@@ -2264,296 +2843,71 @@ grouping, but Cortext does not parse roles such as user, assistant,
 speaker, or device from it. Internal maintenance work follows the same
 rule: explicit consolidation is driven by a force flag on the signal,
 not by a magic `source_id` value. Prompt hydration orders active slots
-by insertion/start time rather than `last_access`; otherwise rehearsal
-or retrieval touches can scramble the visible recent context even when
-the underlying memories are correct.
-
-## Two-Layer Graph Memory Surface
-
-Cortext now separates live memory state into two graph-compatible
-layers. The layers differ by latency and commitment rather than by
-modality:
-
-1.  **Working memory (WM):** the bounded active slot set used for
-    immediate prompt reconstruction, overlap suppression, and
-    recent-turn continuity. WM stores coherent memories and preserves
-    their ordered evidence packets. It is the most volatile layer and is
-    optimized for exact recent context rather than broad semantic
-    search.
-2.  **Long-term graph memory (LTM):** the persisted graph of long-term
-    memories, association centroids, optional label nodes, and durable
-    association edges. Durable memory nodes live in the `memories` table
-    and durable edges live in `associations`. There is no
-    processor-local STM shadow graph and no separate fact assertion
-    store.
-
-The intended control flow is:
-
-    signal embedding
-      -> WM active-slot update
-      -> LTM retrieval from memories and association centroids
-      -> explicit consolidation
-      -> shallow association centroid insert/update
-      -> durable LTM graph edge insert/update
-
-This keeps the online loop fast and modality-agnostic. Consolidation is
-a shallow, embedding-only commitment step: it clusters mature long-term
-memories, creates association centroids, connects member memories with
-`derived_from`, and optionally attaches already-existing label nodes by
-embedding similarity.
-
-## Soft Anchor Formation
-
-Soft Anchor is an ingress-time uncertainty layer for subject, entity,
-object, and event continuity. It is not a hard referent resolver and it
-is not a retrieval-time reranker. At memory ingestion time, Cortext
-compares the current memory signal against already-established
-working-memory (WM), short-term memory (STM), and long-term memory (LTM)
-anchor state. The output is a ranked, uncertainty-preserving set of
-possible continuities. Retrieval may later consume these links as
-context, but retrieval candidates do not create anchors.
-
-The input signal model emits view vectors:
-
-    x_sem  ← semantic_key(m)
-    x_ent  ← entity_key(m)
-    x_full ← full_key(m)
-
-For an ES-AIST-style signal model these are the corrected slices:
-
-    semantic_key = z[0:768]
-    entity_key   = z[768:1536]
-    full_key     = z[0:1536]
-
-Production note: the shipped runtime first uses a dedicated
-`soft_anchor_embedding` when the encoder exposes at least 1536
-dimensions. When only the 256-dimensional retrieval embedding is
-available, it uses a single-view fallback: semantic, entity, and full
-centroids all reference the normalized available embedding, and entity
-quality is lowered by an F/S/T-derived prior. ES-AIST slices are
-therefore supported, but they are not required for the production path.
-
-Each active soft anchor state stores separate centroids and support
-statistics:
-
-    SoftAnchorState {
-      anchor_id
-      status ∈ {provisional, active, durable, decayed, rejected}
-      semantic_centroid, entity_centroid, full_centroid
-      semantic_radius, entity_radius, full_radius
-      memory_tier_mask
-      source_histogram
-      first_step, last_step, last_boundary_id
-      anchor_strength
-      support_count, contradiction_count
-      recent_memory_ids
-    }
-
-Each memory may retain multiple possible links:
-
-    SoftAnchorLink {
-      memory_id
-      anchor_id
-      anchor_strength ∈ [0, 1]
-      anchor_label ∈ {none, tentative, ambiguous, durable, decayed, rejected}
-      evidence_kind
-      memory_tier ∈ {WM, STM, LTM}
-      score
-      margin
-      entropy
-      support_count
-      contradiction_count
-      created_step
-      updated_step
-    }
-
-### Candidate Set
-
-The candidate set is built only from prior soft anchor state. The
-current runtime iterates the bounded set of non-rejected
-`SoftAnchorState` objects loaded into processor state; the WM/STM/LTM
-split below describes the intended tiered candidate policy and the
-metadata labels assigned to retained links, not a separate production
-retrieval over three anchor indexes yet.
-
-    C_WM  = active WM anchors
-    C_STM = top STM anchors by state similarity, capped
-    C_LTM = durable/provisional LTM anchors only when entity/full evidence is non-weak
-    C     = bounded_union(C_WM, C_STM, C_LTM)
-
-The caps are knob-derived:
-
-    K_STM_pre = round(lerp(24, 8, F) × (0.75 + 0.50S))
-    K_LTM_pre = round(lerp(16, 4, F) × (0.70 + 0.30S) × (0.80 + 0.20T))
-    K_pre     = min(64, |C_WM| + K_STM_pre + K_LTM_pre)
-
-No future labels, retrieved memories, target flags, candidate classes,
-or gold actions enter the runtime candidate set.
-
-### View Evidence
-
-For each candidate anchor `a`, compute:
-
-    s_sem(a)  = map01(cos(x_sem,  a.semantic_centroid))
-    s_ent(a)  = map01(cos(x_ent,  a.entity_centroid))
-    s_full(a) = map01(cos(x_full, a.full_centroid))
-
-The view weights use the three knobs. Focus increases entity
-specificity, Sensitivity preserves weak semantic continuity, and
-Stability increases context/full-vector influence:
-
-    w_sem_raw  = (0.45 - 0.15F + 0.10S) × q_sem
-    w_ent_raw  = (0.25 + 0.35F) × q_ent
-    w_full_raw = (0.20 + 0.25T + 0.05F) × q_full
-    [w_sem, w_ent, w_full] = normalize([w_sem_raw, w_ent_raw, w_full_raw])
-
-    view(a) = w_sem s_sem(a) + w_ent s_ent(a) + w_full s_full(a)
-
-When quality estimates are unavailable, use `q_sem = q_full = 1` and an
-F/S/T-derived weak entity-quality prior. At the neutral midpoint this
-equals `q_ent = 0.5`. If the entity vector is missing or known-diffuse,
-set `q_ent = 0`.
-
-### Engine Evidence
-
-Soft Anchor is an engine policy over signal evidence plus ingress state.
-The real-anchor score combines view evidence with source continuity,
-tier-adjusted recency, support history, boundary pressure, and
-contradiction pressure. Generic or low-information suppression is
-applied in the null/new hypothesis competition and hard-retention gates
-rather than subtracted from every real anchor score:
-
-    R(a) =
-      w_view    view(a)
-    + w_source  source_continuity(m, a)
-    + w_recency recency_tier(m, a, T)
-    + w_support support_prior(a, T)
-    - w_boundary boundary_shift(m, a, F, T)
-    - w_contra   contradiction_penalty(a, S)
-
-The blend weights are normalized:
-
-    [w_view, w_source, w_recency, w_support, w_boundary, w_contra] =
-    normalize([
-      0.55 + 0.20F,
-      0.20 + 0.20F + 0.10T,
-      0.20 + 0.20S + 0.10T,
-      0.15 + 0.45T,
-      0.25 + 0.35F + 0.15T,
-      0.20 + 0.30S + 0.20F
-    ])
-
-Generic or low-information memories must not create durable continuity.
-The generic suppressor is modality-general: it uses null centroids, low
-entity mass, low information content, and diffuse candidate entropy.
-Text shortcuts such as “ok”, “yeah”, “bye”, and filler are optional
-extra evidence, not the anchor mechanism.
-
-### Null and New Hypotheses
-
-Soft Anchor competes every real anchor against two special hypotheses:
-
-    H_none = no continuity; emit no retained link
-    H_new  = start a new provisional anchor
-
-Compute:
-
-    best_real = max_a R(a), or 0 when C is empty
-    H_real    = normalized_entropy({R(a)})
-    info(m)   = clamp((q_sem + q_ent + q_full) / 3, 0, 1) × (1 - generic(m))
-
-    score_none = SoftAnchorNoneScore(F,S,T,generic,H_real,
-                                     1 - best_real, top_contra)
-
-    score_new  = SoftAnchorNewScore(F,S,T,info,boundary_score,
-                                    best_real,generic)
-
-Then:
-
-    β_anchor(F) = lerp(4.0, 14.0, F)
-    P = softmaxβ([R(a_1), ..., R(a_n), score_none, score_new])
-
-If `H_none` wins, the memory receives no active continuity link. If
-`H_new` wins and the signal is informative, Cortext creates a
-provisional soft anchor.
-
-### Labels and Retention
-
-Soft Anchor does not collapse uncertainty to top-1. It retains up to:
-
-    K_keep(F,S,T) = clamp(round(lerp(8, 3, F) × lerp(1.10, 0.85, T) + 2S), 2, 10)
-
-for real anchors satisfying posterior and score thresholds. The label is
-a policy state, not a truth claim:
-
-    none       H_none wins or no candidate passes retention
-    tentative  one anchor has usable evidence but insufficient support
-    ambiguous  multiple anchors survive with low margin or high entropy
-    durable    repeated non-generic support or exceptional evidence passes
-    decayed    prior link has weakened below active threshold
-    rejected   contradiction, generic suppression, or correction invalidates link
-
-Ambiguous links may be surfaced as possible continuity, not as a fact.
-Durable assertions must not be formed from ambiguous links.
-
-### Durable Promotion and Decay
-
-Durable promotion is deliberately conservative:
-
-    support_required(F,T) = clamp(ceil(2 + 1.5F + 2.0T), 2, 6)
-
-A support event counts only if it is non-generic, boundary-compatible,
-low-entropy, has sufficient margin, and is not a near duplicate of the
-previous support event. Current durable promotion requires repeated
-support plus low-entropy, high-margin evidence; one-shot exceptional
-durable promotion remains a possible future policy rather than the
-active runtime behavior.
-
-Link strength decays independently from the anchor:
-
-    strength_t = strength_0 × exp(-ln(2) × Δt / τ_link_tier(T))
-
-with WM shortest, STM intermediate, and LTM longest. Higher Stability
-increases half-life and support window length; it must not by itself
-override boundary pressure or force cross-boundary durable binds.
-Non-durable anchor states decay after a bounded active-TTL grace period
-whose multiplier is also F/S/T-derived and remains `2x` at the neutral
-midpoint.
-
-### Knob Semantics
-
-The expected monotonic behavior is:
-
-    Focus ↑:
-      fewer weak retained links
-      higher margin requirement
-      stronger entity/split pressure
-      lower tentative recall acceptable
-
-    Sensitivity ↑:
-      more tentative links
-      higher target-in-top-k recall
-      more ambiguous context acceptable
-      durable precision should not materially drop
-
-    Stability ↑:
-      slower decay
-      longer support accumulation windows
-      fewer label flips
-      no cross-boundary durable overreach
-
-Current checked-in evidence is limited to deterministic formation,
-ambiguity, promotion, persistence, and hydration tests;
-<a href="#sec-experimental" class="quarto-xref">Section 11</a> does not
-report a human-subject anchoring benchmark. `UpdateSoftAnchor` runs at
-ingress after memory storage and writes soft-anchor state and links by
-default. Production retrieval does not rank from these links yet, and
-application surfacing is limited to hydrated memory metadata and
-experiment/benchmark utilities. The next open question is consumption:
-formed anchors may become useful uncertain context only after replay and
-manual-review experiments show that possible-continuity hints help more
-often than they harm, without converting tentative or ambiguous evidence
-into durable assertions.
+by insertion/start time rather than `last_access`; otherwise slot
+updates can scramble the visible recent context even when the underlying
+memories are correct.
+
+## Two-Layer Memory Surface
+
+Cortext separates live memory state into two layers. They differ by
+latency and commitment, not by modality.
+
+1.  **Working memory (WM)** is the bounded active slot set used for
+    recent-turn continuity, overlap suppression and the `working_memory`
+    block of a packet. It stores coherent units with their ordered
+    evidence. It is the most volatile layer and serves exact recent
+    context rather than broad semantic search.
+2.  **Long-term memory (LTM)** is the durable store. Each closed unit is
+    a `LONG_TERM` row in `memories`, with its pooled representative
+    embedding. Its signals are `signals` rows with object-store
+    payloads, addressed by BLAKE3 content id. Four per-payload or
+    per-memory indexes serve retrieval
+    (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>):
+    -   `memory_signal_vectors`: one shared-space vector per payload;
+    -   `memory_signal_li_codes`: late-interaction codes per payload;
+    -   `memory_text_fts`: FTS5 keyword index over long-term text;
+    -   `standing_signals`: the standing set.
+
+    The only edges are directed `supersedes` edges in `associations`.
+
+There is no processor-local short-term shadow graph and no fact
+assertion store. Clustering consolidation no longer writes `ASSOCIATION`
+centroids, `derived_from` edges or typed graph edges
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>). Older
+stores may still hold such rows, and the runtime neither writes nor
+traverses them.
+
+The control flow is:
+
+``` text
+signal embedding
+  -> accumulator update and boundary segmentation
+  -> on a boundary: LTM unit write (+ indexes, + supersedes edges)
+  -> WM admission of the closed unit
+query embedding
+  -> hybrid retrieval over LTM (@sec-retrieval)
+  -> hydration and evidence fitting (@sec-hydration)
+Consolidate()
+  -> seal and recenter the sparse retrieval route (@sec-optimization)
+```
+
+Every step is embedding-only or metadata-only and modality-agnostic, and
+no step calls a language model.
+
+## Soft Anchor Formation (Removed)
+
+Earlier builds ran an ingress-time Soft Anchor operation after memory
+storage. It kept provisional subject/entity continuity states (semantic,
+entity and full centroids with support and contradiction counts) and
+linked each stored memory to up to three of them in `soft_anchors` and
+`soft_anchor_links`; hydration exposed the links as
+`Context::Memory::soft_anchors`. Retrieval never ranked on them. The
+engine ablation study (2026-10) found packets byte-identical without the
+operation on LongMemEval-S 0/48, Eval 1 0/250 and BEAM-10M conv 7 0/20,
+at a 0.5-1% ingest instruction cost, and removed the operation, its
+knobs, the public `Context::Memory::soft_anchors` / output diagnostics,
+the C API JSON fields and the 1536-dimensional `soft_anchor_embedding`
+signal slot. Migration 48 drops both tables.
 
 ## Retrieval Uncertainty
 
@@ -2565,31 +2919,48 @@ metadata:
     rank_margin(q) = score_1(q) - score_2(q)
     retrieval_uncertainty(q) = 1 - clamp(rank_margin(q) / margin_ref(F,S,T), 0, 1)
 
-This keeps uncertainty local to the retrieval event. Callers can use the
-ranked candidate packet and evidence surfaces to decide whether to
-answer, ask for clarification, or expose multiple possible memories
-without the engine carrying a separate persistent confidence machine.
+The engine does not compute this quantity; it is a reading the caller
+can take from the returned scores. This keeps uncertainty local to the
+retrieval event. Callers can use the ranked candidate packet and
+evidence surfaces to decide whether to answer, ask for clarification, or
+expose multiple possible memories without the engine carrying a separate
+persistent confidence machine.
 
-## Memory Reconsolidation
+## Memory Reconsolidation and Retrieval Reconstruction (Removed)
 
-Following Nader, Schafe, and Le Doux (2000), retrieved memories enter a
-labile state permitting modification:
+Earlier builds moved stored embeddings after use. Following Nader,
+Schafe, and Le Doux (2000), a retrieved memory became labile
+(`τ_labile = lerp(30, 300, T)`, susceptibility
+`(1 − T) × (0.5 + 0.5 × S)`) and drifted toward the current context by
+`(1 − T) × S × lability × contextual_relevance × lerp(0.2, 0.02, T)`,
+scaled by `1 + 0.4 × ACh_t`. Retrieval itself also re-encoded its top
+candidates as a bounded blend of the stored embedding and the query
+(`blend ∈ [lerp(0.04, 0.07, S), …]`, at most
+`RetrievalReconstructionUpdateCount` updates per signal). Both appended
+versions to `memory_reconstructions` and moved the current retrieval
+surface. An earlier ripple over association edges was removed first
+because nothing wrote those edges.
 
-    τ_labile = lerp(30, 300, T)  # seconds
-    reconsolidation_gain = lerp(0.2, 0.02, T)
-    lability_susceptibility = (1 − T) × (0.5 + 0.5 × S)
-
-During the lability window, memories can drift toward current context:
-
-    drift_magnitude = (1 − T) × S × lability ×
-                       contextual_relevance
-
-Reconsolidation effects propagate to semantically related memories with
-decay:
-
-    ripple_decay = lerp(0.5, 0.1, T)  # per semantic hop
+The round-3 leave-one-out (2026-10) switched both off together on the
+full-length evaluations. LongMemEval-S packet gold-turn recall was
+unchanged (0.642) and Haiku-judged sufficiency moved 0.000; Eval 1
+recall rose 0.597 → 0.611 (6 cases better, 1 worse), judged +0.010 ±
+0.016; BEAM-10M conversation 7 rose 0.103 → 0.110, judged +0.014 ±
+0.027; an eight-episode LongMemEval-M subset (39k turns) kept recall at
+0.462, judged 0.000. Instructions fell 5–11% and stores shrank 12–23%.
+Each source alone was also neutral. The earlier phase-1 “embedding
+movement” arm that measured harm also switched off the constructive
+reconstruction representation, so its delta came from that
+representation change rather than from movement. The engine ablation
+study (2026-10) therefore removed both movement sources, their knobs,
+the ACh reconsolidation scale and the per-memory lability columns
+(migration 46). Stored memories keep the reconstruction ledger written
+at storage time, so existing stores that already hold moved versions are
+still read through their latest reconstruction.
 
 ## Stored Source Metadata and Supersession
+
+<!-- PRUNE: migration 56 on chore/prune-write-only drops source_reliability, source_contradiction_count and source_last_verified_ts; replace the next two paragraphs and the proposed confidence rule with a removal note, and drop the contradiction_count line from the supersession rule. -->
 
 Each memory stores opaque `source_id` provenance plus `source_origin`,
 `source_reliability`, and `source_contradiction_count`. The current
@@ -2633,15 +3004,31 @@ directed `supersedes` edge from the new memory to the older memory:
         contradiction_count(e_old) += 1
 
 Retrieval treats `supersedes` as a directional family relation rather
-than a traversable activation edge. Superseded targets are removed
-before the vector seed cap, leaving the replacement eligible as the
-family representative and preventing obsolete members from consuming
-prompt slots. The number of written supersession edges is capped by
-`SupersessionMaxEdges(F,S,T)`.
+than a traversable activation edge. Packet hydration uses it in both
+directions: a retrieved replacement gets its superseded predecessors,
+and a retrieved older version gets its newest superseding successor
+(<a href="#sec-hydration" class="quarto-xref">Section 7</a>). Earlier
+builds also removed superseded targets before the vector seed cap. The
+engine ablation study (2026-10) measured that exclusion as harmful and
+removed it. Keeping superseded targets eligible raised the share of gold
+turns among the seed anchors by +0.16 on Eval 1, +0.14 on LongMemEval-S,
++0.16 on LongMemEval-M and +0.05 on BEAM-10M. Packet recall rose by
++0.017, +0.025, +0.000 and +0.039. In these conversations an “obsolete”
+turn is often the evidence a question asks about. The number of written
+supersession edges is capped by `SupersessionMaxEdges(F,S,T)`.
 
-## Constructive Recall and Controlled Distortion
+Predecessor hydration used to skip a target from the anchor’s own source
+stream within 30 minutes, treating it as an in-conversation correction.
+The round-3 leave-one-out (2026-10) found the skip changed no packet on
+LongMemEval-S (0/48) or Eval 1 (0/250), because contiguity hydration
+already attaches such nearby turns, while on BEAM-10M conversation 7
+dropping it raised packet gold-turn recall from 0.103 to 0.118 (2 cases
+better, none worse) for 0.5 KB more packet. The skip was removed.
 
-Constructive recall is now implemented as a two-layer memory view:
+## Reconstruction Ledger
+
+Each memory keeps a two-layer view, a remnant of the removed
+constructive-recall design:
 
 -   **Evidence packets** remain the immutable ordered `signals` rows
     attached to a memory.
@@ -2658,467 +3045,122 @@ Constructive recall is now implemented as a two-layer memory view:
                 uncertainty = 0,
                 trigger = 'initial'})
 
-During retrieval:
-
-    current_embedding ← latest(reconstruction.embedding, fallback = memory.embedding)
-    score_retrieval(current_embedding, current_context)
-    recon ← bounded_blend(current_embedding, query, temporal_context)
-    append(memory_reconstructions,
-           {embedding_id = recon.embedding,
-            blob_id = current_blob,
-            ts = now,
-            uncertainty = inferred_retrieval_uncertainty,
-            trigger = 'retrieval'})
+During retrieval the current embedding is the latest reconstruction (or
+the base embedding when none exists). Since the 2026-10 ablation nothing
+appends further versions, so for new stores it equals the stored
+embedding.
 
 Hydration resolves `memory.current_view` from the latest reconstruction
 blob when one exists; otherwise it falls back to the immutable evidence
-packets. Reconsolidation follows the same audit-trail rule: it appends a
-new `trigger='reconsolidation'` reconstruction instead of overwriting
-the evidence embedding stored on the base memory row. This gives the
-current branch the controlled-distortion property the earlier draft
-claimed, while preserving the original evidence vector for inspection
-and replay.
-
-## Retrieval Competition
-
-Retrieved memories compete through lateral inhibition, modeling
-retrieval-induced forgetting (Anderson, Bjork, and Bjork 1994):
-
-    inhibition_radius = lerp(0.5, 0.85, F)
-    winners_k = round(lerp(7, 3, F))
-    suppression_per_retrieval = lerp(0.1, 0.01, T) ×
-                                 (1 − winning_activation)
-    recovery_time_RIF = lerp(300, 1800, T)  # seconds
-
-High Focus produces narrow winner-take-all dynamics; low Focus permits
-broader activation.
-
-## Predictive Pre-activation
-
-The system pre-activates memories predicted to be relevant based on the
-EMA expectation state (`x_pred_ema`) and recent context:
-
-    prediction_horizon = round(lerp(2, 8, F))
-    pre_activation_decay = lerp(0.7, 0.3, T)
-    prediction_conf_threshold = lerp(0.3, 0.7, F)
-    surprise_sensitivity = S × lerp(2.0, 0.5, T)
-
-When predictions fail (high surprise), the system increases the refresh
-rate of pre-activation:
-
-    update_rate_on_surprise = lerp(0.2, 0.02, T) × S
-
-Current implementation note: the shipped pipeline updates and decays the
-persisted `pre_activation` field, but production graph retrieval does
-not read that field. The following bounded retrieval prior describes the
-experimental ranking variant, not current runtime behavior:
-
-    predictive_weight(F,T) = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T)
-    predictive_bonus = predictive_weight × pre_activation
-
-In the current runtime, high-surprise updates refresh latent predictive
-state without changing the next retrieval score. The historical ablation
-in <a href="#sec-experimental" class="quarto-xref">Section 11</a>
-evaluates the earlier research variant and must not be read as a
-measurement of this hard-cutover implementation.
-
-## Serial Position Effects
-
-The architecture models primacy, recency, and distinctiveness effects
-observed in human memory (Murdock Jr 1962):
-
-    primacy_window = round(lerp(5, 2, F))
-    primacy_bonus = lerp(1.2, 2.0, S)
-    recency_window = round(lerp(7, 3, F))
-    rehearsal_curve_depth = lerp(0.2, 0.6, S)
-
-The von Restorff (isolation) effect enhances memory for distinctive
-items (Hunt 1995):
-
-    distinctiveness_threshold = lerp(0.6, 0.8, F)
-    von_restorff_multiplier = lerp(1.5, 3.0, S)
-
-Items in the middle region suffer interference:
-
-    interference_zone = positions[primacy_window+1 : −recency_window]
-    middle_suppression = lerp(0.8, 0.5, S) × (1 − F)
-
-## Emotional Consolidation
-
-High-emotion events trigger enhanced consolidation, following McGaugh
-(2004) findings. As detailed in
-<a href="#sec-consolidation" class="quarto-xref">Section 9</a>,
-consolidation operates on stored memory metadata:
-
-    θ_intensity = lerp(0.6, 0.8, 1 − S)
-    θ_arousal = lerp(0.4, 0.2, S)
-    # Consolidation uses stored memory emotional metadata
-    trigger = (m.metadata.s_emotion_max ≥ θ_intensity) AND
-               (m.metadata.s_arousal_avg ≥ θ_arousal)
-
-Flashbulb memories receive extended half-life bonuses based on the
-memory’s peak emotional intensity:
-
-    flashbulb_threshold = lerp(0.97, 0.65, S)
-    flashbulb_threshold_eff = flashbulb_threshold × (1 − 0.5 × s_emotion_max)
-                               × (1 − 0.3 × s_arousal_avg)
-    # Rate stabilizer only suppresses over-frequent flashbulbs; it does not lower
-    # thresholds when the recent flashbulb rate is already below target.
-    flashbulb_target = lerp(0.02, 0.06, S)
-    flashbulb_rate_ewma ← EWMA(flashbulb, α = lerp(0.02, 0.12, S))
-    rate_adjust = clamp(1 + lerp(1.0, 0.6, S) × max(0, flashbulb_rate_ewma − flashbulb_target),
-                        1.0, 1.2)
-    # Contextual percentile gate (embedding‑only, knob‑derived)
-    emo_window = round(lerp(24, 96, S) × lerp(0.8, 1.2, T))
-    percentile = lerp(0.95, 0.80, S)
-    flashbulb_gain = lerp(1.0, 1.1, S)
-    flashbulb_threshold_adj = max(flashbulb_threshold_eff × rate_adjust,
-                                  Pctl_{percentile}(recent_emotion_intensity, emo_window))
-    flashbulb_arousal = lerp(0.7, 0.5, S)
-    flashbulb = ((s_arousal_avg ≥ flashbulb_arousal) AND
-                 ((flashbulb_gain × s_emotion_max) ≥ flashbulb_threshold_adj))
-    # Half-life bonus uses stored memory emotional peak
-    emotional_half_life_bonus = exp(lerp(0, ln(3), S)) ×
-                                 (1 + m.metadata.s_emotion_max)
-
-The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated
-during memory formation and stored with the memory
-(<a href="#sec-accumulator" class="quarto-xref">Section 6.4.1</a>).
-
-    cascade_radius = round(lerp(1, 5, S))
-    cascade_decay = lerp(0.7, 0.3, S)
-    cascade_source_window_ms = 1000 × consolidation_interval_seconds(T)
-
-Only flashbulb sources created within `cascade_source_window_ms` of the
-current signal participate. The explicit conversion preserves the
-intended five- to sixty-minute window while stored timestamps remain
-milliseconds since epoch.
-
-## Synaptic Tagging and Capture
-
-Flashbulb events are extended with **synaptic tagging**: high surprise
-or arousal tags nearby memories for preferential consolidation later,
-even if they scored low at the time.
-
-    tag_trigger ← (surprisal_t > lerp(0.6, 0.4, S)) OR (arousal_t > lerp(0.7, 0.5, S))
-    tag_window = round(lerp(2, 8, S))  # memories before/after current time
-    tag_decay_s = lerp(300, 3600, T)   # tag lifetime (seconds)
-
-    if tag_trigger:
-        for m in temporal_neighbors(now_s(), tag_window):
-            m.tagged ← true
-            m.tag_strength ← 1.0
-            m.tag_expires_at ← now_s() + tag_decay_s
-
-Tagged memories receive a consolidation bonus:
-
-    if m.tagged and now_s() < m.tag_expires_at:
-        score_consolidate(m) += lerp(0.10, 0.25, S) × m.tag_strength
-
-## Pattern Separation Sparse Index
-
-Pattern separation is a lightweight sparse-key side channel maintained
-for experimental indexing and procedural-value updates without adding a
-decoder, taxonomy, or fact layer. For an accumulator or stored memory
-embedding `x`, Cortext selects the `k` largest-magnitude dimensions,
-preserves each selected dimension’s sign, sorts the selected indices,
-and serializes the result as a stable sparse key:
-
-    k_sparse(F,S,T) = RetrievalSparseKeySize(F,S,T)
-    top_k(x) = indices of the k_sparse largest |x_i|
-    sparse_key(x) = join(sort({ i || sign(x_i) : i in top_k(x) }))
-
-The write path stores each committed memory id under
-`index_store[sparse_key(e_rep)]`. The procedural update lane reuses the
-same keying function but stores values rather than membership lists:
-
-    index_store[sparse_key(e_rep)] += memory_id
-    procedural_store[sparse_key(μ_acc)][memory_id] = Q(proc_key, memory_id)
-
-Thus `index_store` is a processor-local sparse content-addressed bucket,
-while `procedural_store` is a processor-local sparse context-to-memory
-value table. Empty embeddings or non-positive key sizes produce no key
-and therefore do not update either store. Neither map is currently
-persisted, and production graph retrieval does not consume
-`index_store`; dense SQLite/vector discovery remains the active seed
-path.
-
-## Procedural Memory Lane (Habit/Skill Memory)
-
-In addition to declarative memory, Cortext maintains experimental
-procedural values for which previously successful routine memory could
-be surfaced in a context, learned from repeated successful use.
-
-    proc_key ← sparse_key(μ_acc)  # same sparsification as @sec-pattern-separation
-    Q(proc_key, memory_id) ← routine value
-
-Updates occur when a retrieved memory is used successfully and
-downstream outcome signals are positive:
-
-    Q ← Q + value_update_gain × δ_reward_t × (1 − Q)
-
-The current implementation updates this processor-local table but does
-not read it in production graph retrieval, so it does not yet add
-proactive seeds or surface action tokens. The historical
-`procedural_proactive` ablation in
-<a href="#sec-experimental" class="quarto-xref">Section 11</a> evaluated
-an earlier research-branch path and was an exact null; it is not
-evidence that proactive procedural retrieval ships today.
-
-# Consolidation and Graph Integration
-
-Consolidation now means explicit embedding replay over stored memories.
-It uses a maintenance-only transaction path beside the normal signal
-pipeline, not a semantic batch processor or a synthetic input signal.
-The current hard-cut implementation removes the previous internal
-generative consolidation stack and keeps only shallow graph
-consolidation.
-
-## Complementary Learning Systems Split
-
-Cortext keeps the Complementary Learning Systems split at the level that
-matters for the product:
-
--   **Fast episodic write path:** coherent memories are written
-    immediately with source payloads, embeddings, timestamps, and graph
-    metadata.
--   **Bounded live state:** working memory and soft-anchor state support
-    immediate continuity without scanning the whole store.
--   **Slow durable graph:** explicit consolidation clusters older
-    long-term memories during observed throughput troughs and writes
-    stable graph structure.
-
-The split is functional rather than model-based. No decoder is required
-to transfer state from the fast path to the durable graph.
-
-## Consolidation Triggers
-
-Consolidation is external-only. The runtime never schedules it by
-itself. Callers invoke `Consolidate()` or process a maintenance signal
-with `Signal::force_consolidation=true`. This keeps production
-scheduling under the application’s control while still letting the
-engine derive an ordered urgency state from the three knobs.
-
-Ordinary retained and ephemeral signals use the normal operation chain.
-A forced request dispatches only `EvaluateConsolidation`, its score
-gate, the clusterer, shallow replay, and graph construction. Maintenance
-therefore does not create an episode, signal, working-memory row,
-long-term memory, blob, or searchable embedding, and it does not update
-normal throughput observations. The single `consolidation_state` output
-is an ordered hint for the caller; it does not schedule maintenance work
-by itself. In addition to the throughput classifier below, the private
-active-epoch store raises `Required` when its event, mutation, or
-allocated-byte safety ceiling is reached. That boundary is source- and
-modality-independent, remains asserted if ignored, and is cleared only
-after a successful forced-maintenance commit publishes a fresh epoch.
-
-A caller can use the engine hints as the external scheduling rule. Since
-the last committed forced request, including a coherent no-op with no
-persisted cluster, the engine maintains the observed write-rate floor
-*r*<sub>*f**l**o**o**r*</sub> and peak *r*<sub>*p**e**a**k*</sub>. The
-peak is monotonic within that interval. A new lower observation lowers
-the floor immediately; otherwise the floor moves upward with an update
-factor 1/*W*<sub>*r**a**t**e*\_*s**e**c**o**n**d**s*</sub>(*T*). Before
-a nonzero range has been observed, the throughput hint remains off. A
-persisted initialization bit distinguishes a real zero-rate observation
-from an uninitialized range, so a later positive sample updates from the
-observed zero instead of overwriting it as bootstrap. Pre-migration rows
-leave that bit false even when legacy rate-control ticks are positive,
-because those ticks do not prove that a throughput range was observed;
-the first post-migration sample establishes the floor and peak.
-
-The knob-derived fraction is:
-
-``` text
-p(F,S,T) = clamp(
-  0.5
-  × lerp(1.10, 0.75, focus_bias(F))
-  × lerp(0.80, 1.20, sensitivity_bias(S))
-  × lerp(1.10, 0.80, T),
-  0.20,
-  0.70)
-```
-
-Higher focus and stability require a deeper trough; higher sensitivity
-permits an earlier recommendation. The normalized throughput position
-and ordered state are:
-
-``` text
-range = r_peak - r_floor
-z = (m_rate - r_floor) / range
-p_required(F,S,T) = p(F,S,T) / consolidation_escalation(T)
-p_rearm(F,S,T) = p(F,S,T)
-                 + (1 - p(F,S,T)) * T
-p_drift(F,S,T) = 1 - p(F,S,T)
-
-throughput_state =
-  None,        if armed = false
-               OR memories_since_consolidation <= 0
-               OR range <= numeric_epsilon
-               OR z > p(F,S,T)
-  Required,    if z <= p_required(F,S,T)
-  Recommended, otherwise
-```
-
-The required branch is evaluated first. Since
-`consolidation_escalation(T)` is always greater than one, the required
-boundary is strictly below the recommendation boundary after every floor
-or peak update. Elapsed wall or event time and arbitrary durable memory
-counts do not enter the throughput decision; backlog is only a
-positive-work guard. The caller-facing state is `Required` whenever the
-bounded active epoch has reached a safety ceiling, and otherwise equals
-`throughput_state`. An explicit force request starts consolidation
-independently and its output state is `None`. A committed forced request
-acknowledges the active excursion by persisting `armed=false`, even when
-no coherent cluster exists. The acknowledgment resets the next
-event-derived range to the current rate: both floor and peak become that
-rate. This prevents a historical spike from suppressing recommendations
-after a throughput regime shift. Ordinary throughput observations
-establish a new peak and rearm the classifier only after the observed
-relative range is material:
-(*r*<sub>*p**e**a**k*</sub> − *r*<sub>*f**l**o**o**r*</sub>)/max (*r*<sub>*p**e**a**k*</sub>, *ϵ*) ≥ *p*<sub>*d**r**i**f**t*</sub>.
-Because *p* is clamped to \[0.20, 0.70\], the material drawdown remains
-between 0.30 and 0.80 across the complete knob domain, including
-*T* = 1. Once material, either recovery to
-*z* ≥ *p*<sub>*r**e**a**r**m*</sub> or sustained degradation to
-*z* ≤ *p* rearms the classifier. The lower branch prevents a gradually
-falling write rate from remaining permanently silent after
-acknowledgment, while the material-range guard keeps stable jitter from
-repeatedly rearming. Failed transactions restore the prior armed state
-and range. No count or elapsed-time horizon controls the reset. The
-floor, peak, initialization, and armed fields are stored in the
-singleton processor state row and participate in rollback, restart, and
-ephemeral-query snapshot restoration. The engine can recommend
-consolidation, but the API call is the only way to start it. `source_id`
-and modality are never hint inputs or maintenance commands.
-
-## Candidate Selection
-
-Consolidation operates on stored memory representatives, not raw
-signals. Candidates are restricted to eligible `LONG_TERM` source
-memories that have not already been assigned to the current
-consolidation cluster. The clustering threshold, minimum size, and batch
-cap derive from F/S/T:
-
-``` text
-merge_threshold = MergeThreshold(F)
-min_cluster_size = MinClusterSize(F)
-max_clusters = ConsolidationMaxClusters(F,S,T)
-```
-
-An explicit request does not broaden eligibility and does not
-manufacture a nearest-neighbor mini-cluster. If fewer than the
-knob-derived minimum form a coherent density cluster at
-`MergeThreshold(F)`, replay is a successful no-op. This makes force mean
-“evaluate now,” not “merge something regardless of evidence.”
-
-## Shallow Replay Product
-
-For each cluster, shallow consolidation writes one centroid
-`ASSOCIATION` memory and durable graph edges:
-
-``` text
-association.embedding = centroid(cluster)
-association.kind = ASSOCIATION
-association.source_id = association_<timestamp>_<counter>
-association.label = ""
-
-for source in cluster:
-  source.cluster_id = cluster.cluster_id
-  emit association --derived_from--> source
-```
-
-Centroids are averaged over embeddings that actually contribute to the
-centroid dimension. Candidates with empty or incompatible embeddings are
-excluded from cluster membership instead of diluting or reshaping the
-accepted centroid vector. Downstream label matching derives its expected
-dimension from the first non-empty centroid in the replay batch.
-
-If durable `LABEL` memories already exist, the association centroid can
-attach to the nearest labels:
-
-``` text
-max_labels = ShallowConsolidationMaxLabels(F,S,T)
-threshold = ShallowConsolidationLabelMinSimilarity(F,S,T)
-emit association --has_label--> label when cos(centroid, label) >= threshold
-```
-
-This is intentionally opportunistic. The current engine does not
-synthesize labels from a decoder, does not attach a static taxonomy
-database, and does not promote provisional shadow labels. Existing label
-nodes are treated as graph evidence only.
-
-## Graph Build
-
-After shallow replay, `BuildGraphFromConsolidation` reinforces durable
-graph structure among the cluster products and sources. The graph
-builder remains bounded by the candidate/cluster cap and knob-derived
-edge conditions and weights. The graph products are useful for later
-retrieval because graph expansion can recover clustered source memories
-through `derived_from`, co-occurrence, similarity, reinforcement, and
-causal edges. Graph construction runs only when shallow replay persisted
-a cluster and loads only the cluster identifiers created by that
-transaction. Repeating replay without newly eligible coherent memories
-therefore does not rebuild historical clusters, replace their
-timestamps, or decay reinforcement edges.
-
-Association centroids are derived navigation nodes rather than
-independent source observations. Direct semantic vector seeds are
-restricted to `LONG_TERM` memories; `ASSOCIATION` nodes remain
-retrievable through incoming or outgoing graph expansion. Retrieval
-collapses direct long-term families first and commits the knob-bounded
-direct-anchor prefix before graph-expanded families can compete for the
-remaining positions. The same family index is then seeded with those
-protected representatives, so a near-duplicate derived centroid cannot
-remove an already protected source. This preserves graph utility without
-allowing derived nodes to consume the direct-anchor budget. When a
-current embedding exists for a memory, retrieval also skips scoring its
-redundant historical base embedding; the authoritative current surface
-was already inserted first.
-
-## Reconstruction Surface Discipline
-
-Constructive reconsolidation appends reconstruction records rather than
-rewriting every historical embedding reference. When an append succeeds,
-the bounded `current_memory_embeddings` surface must advance to the
-newest reconstruction embedding. Retrieval reads that current surface
-first, falling back to the latest reconstruction only when the cached
-current row is stale.
-
-This keeps graph retrieval aligned with the live memory surface while
-preserving older signal rows, shared base embeddings, and sibling
-memories that still point at the original embedding. Non-constructive
-fallback updates still fork shared embeddings before writing in place,
-so a reconsolidated memory does not mutate unrelated memories that
-happened to share the same vector row.
-
-## What Was Removed
-
-The following systems are no longer part of the runtime:
-
--   mode-selected semantic batch replay and public mode enums,
--   internal decoder-backed semantic operations,
--   vendored decoder runtime integration,
--   remote/local decoder adapter registry,
--   static taxonomy loading,
--   STM shadow graph promotion,
--   persistent confidence-monitoring state,
--   bitemporal fact assertion/cache/evidence tables,
--   fact-aware retrieval and eviction policies.
-
-The removal is a hard cut, not a compatibility shim. New databases no
-longer create the removed tables, public bindings no longer expose the
-removed mode fields, and replay reports no longer emit the removed debug
-metrics.
-
-## Latency Discipline
-
-The consolidation target is bounded sleep-like replay. The work is
-dominated by SQLite candidate reads, vector centroid formation,
-association writes, and graph edge updates. There are no hidden decoder
-calls in the current path, so replay latency should scale with the
-number of selected memories and cluster edges, not with source text
-length or multimodal payload size.
+packets.
+
+## Retrieval Competition (Removed)
+
+Earlier builds made retrieved memories compete through lateral
+inhibition, modeling retrieval-induced forgetting (Anderson, Bjork, and
+Bjork 1994): winners within `inhibition_radius = lerp(0.5, 0.85, F)` of
+the context suppressed losers by
+`lerp(0.1, 0.01, T) × (1 − winning_activation)`, scaled by
+`1 + 0.5 × NE_t`, and suppression recovered over `lerp(300, 1800, T)`
+seconds through a lazily anchored log clock. The suppressed value
+lowered `memories.strength`, but no retrieval, hydration or gating step
+reads strength for long-term memories, so suppression never reached a
+packet. Skipping the competition operation left every packet
+byte-identical on LongMemEval-S (0/48) and Eval 1 (0/250). Its only
+other effect was operational: the active-epoch bound was the sole source
+of `Required` consolidation hints, so without it BEAM-10M conversation 7
+consolidated once instead of 44 times and the sparse route stopped
+recentering. Measured together with the in-conversation predecessor
+change described above, all 20 BEAM packets changed, gold-turn recall
+moved 0.103 → 0.110 (0.118 with the predecessor change alone) and
+Haiku-judged sufficiency by −0.014 ± 0.048 (n = 18). On a 111,527-turn
+chain of five BEAM-10M conversations the same build recalled 0.082 vs
+0.062 of gold turns (13 cases better, 4 worse), judged +0.008 ± 0.040 (n
+= 89), with 13.5% fewer instructions retired. The engine ablation study
+(2026-10) removed the operation, the lazy recovery clock, its tables and
+its active-epoch projection.
+
+## Predictive Pre-activation (Removed)
+
+Earlier builds kept a per-memory `pre_activation` value. An expectation
+state (`x_pred_ema`) and recent context raised it, it decayed at
+`lerp(0.7, 0.3, T)` per turn, and high surprise refreshed it faster.
+After the hard cutover, graph retrieval no longer read the field. The
+research ranking prior
+`predictive_bonus = lerp(0.05, 0.20, FocusBias(F)) × lerp(1.0, 0.85, T) × pre_activation`
+was never part of the production ranker. The engine ablation study
+(2026-10) removed the operation, the column and its indexes. Skipping
+the operation left every packet byte-identical: Eval 1 0/250,
+LongMemEval-S 0/48, BEAM-10M 0/40. Instructions retired changed by -1%,
++3% and -1%, which is noise.
+
+## Serial Position Effects (Removed)
+
+Earlier builds modelled primacy, recency and von Restorff
+distinctiveness (Murdock Jr 1962; Hunt 1995). They derived a per-signal
+multiplier from knob-dependent windows
+(`primacy_window = round(lerp(5, 2, F))`,
+`recency_window = round(lerp(7, 3, F))`,
+`von_restorff_multiplier = lerp(1.5, 3.0, S)` and others) and applied it
+to memory-strength reinforcement. Memory strength was removed
+(<a href="#sec-reinforcement" class="quarto-xref">Section 13</a>), so
+nothing consumed the multiplier, and the engine ablation study (2026-10)
+removed the two operations. Phase-1 ablation, as part of the
+minor-feedback group, left every packet byte-identical: Eval 1 0/250,
+LongMemEval-S 0/48, BEAM-10M 0/40.
+
+## Emotional Consolidation and Cascade (Removed)
+
+Earlier builds marked high-intensity, high-arousal memories as flashbulb
+memories, following McGaugh (2004). A flashbulb memory got a half-life
+bonus, detail suppression and gist-component settings. An emotional
+cascade then propagated decayed intensity and half-life bonus to graph
+neighbours within a knob-derived radius. The persisted outputs
+(`flashbulb`, `emotional_intensity`, `half_life_bonus`,
+`detail_suppression`, `gist_components`, `cascade_radius` and
+`cascade_decay`) fed memory-strength decay and the cascade itself.
+Retrieval never read them. The engine ablation study (2026-10) removed
+both operations, their private metadata cache and the columns. Phase-1
+ablation of the affect group left every packet byte-identical: Eval 1
+0/250, LongMemEval-S 0/48, BEAM-10M 0/40. Sensitivity’s per-signal
+emotion and mood projections, and their threshold deltas, are a separate
+mechanism and remain.
+
+## Synaptic Tagging and Capture (Removed)
+
+Earlier builds tagged the temporal neighbours of a high-surprise or
+high-arousal signal (`tag_strength`, `tag_expires_at`). A tagged memory
+got a consolidation-score bonus of `lerp(0.10, 0.25, S) × tag_strength`.
+That score was the tag’s only consumer. Clustering consolidation was
+removed
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>), and
+the engine ablation study (2026-10) removed tagging and its columns with
+it. Phase-1 ablation left every packet byte-identical: Eval 1 0/250,
+LongMemEval-S 0/48, BEAM-10M 0/40. The June research-branch result that
+tagging removal hurt
+(<a href="#sec-experimental" class="quarto-xref">Section 15</a>) was
+measured on a branch where consolidation was live, so it does not apply
+to the current engine.
+
+## Pattern Separation Sparse Index and Procedural Lane (Removed)
+
+Earlier builds kept two processor-local side tables keyed by a sparse
+signature of an embedding (the signs of its
+`RetrievalSparseKeySize(F,S,T)` largest-magnitude dimensions):
+`index_store[sparse_key(e_rep)]` listed every stored memory id, and
+`procedural_store[sparse_key(μ_acc)][memory_id]` held a routine value
+`Q ← Q + value_update_gain × δ_reward × (1 − Q)` updated when a
+retrieved memory was used. Neither table was persisted and no operation
+read either one: retrieval seeds come from the dense vector surface
+only. The tables were still journaled for rollback on every signal and
+grew by one entry per stored memory. The engine ablation study (2026-10)
+removed both tables, the sparse key and its knob with no packet change.
+The public `procedural_enabled` configuration flag (C++ `Config`, C ABI
+`cortext_config`, and the bindings) then controlled nothing and was
+removed with the unused procedural seed and candidate-blend knobs. The
+historical `procedural_proactive` ablation in
+<a href="#sec-experimental" class="quarto-xref">Section 15</a> evaluated
+an earlier research-branch path and was an exact null.
 
 # Interrupt Gate and Streaming Integration
 
@@ -3133,10 +3175,11 @@ T). Eval-only ablation diagnostics exist only in builds compiled with
 `CORTEXT_EXPERIMENT_HOOKS=ON`; default production builds ignore those
 environment controls.
 
-**Note:** As defined in Section 1, all knob symbols here use the
-midpoint‑biased values F̃ and S̃ (T is unmodified). For affective gain, we
-use a lighter bias ( \_{affect} = (S, -0.06) ) to preserve mid‑range
-affect modulation.
+**Note:** As defined in
+<a href="#sec-math" class="quarto-xref">Section 4</a>, all knob symbols
+here use the midpoint‑biased values F̃ and S̃ (T is unmodified). For
+affective gain, we use a lighter bias ( \_{affect} = (S, -0.06) ) to
+preserve mid‑range affect modulation.
 
 ## Marginal Utility Computation
 
@@ -3360,34 +3403,1077 @@ where cosine_dist(u, v) = 1 − cos(u, v).
 
 High Sensitivity produces frequent checks triggered by small content
 shifts; high Focus enforces strict drift limits. Memory boundaries
-(<a href="#sec-boundary" class="quarto-xref">Section 6.4.3</a>) also
+(<a href="#sec-boundary" class="quarto-xref">Section 5.1.3</a>) also
 trigger retrieval checks to ensure context updates align with natural
 thought transitions. Ephemeral query ingress bypasses pacing throttles
 for the current signal only; storage remains controlled by the
 retention-aware write gate.
 
+# Consolidation as Route Maintenance
+
+`Consolidate()` is now a maintenance call. It seals and recenters the
+sparse retrieval route on a maintenance-only transaction path beside the
+normal signal pipeline. Clustering consolidation is gone: shallow replay
+into `ASSOCIATION` centroids and the typed-edge graph build were removed
+in the 2026-10 engine ablation (see “Clustering Consolidation (Removed)”
+below). Earlier hard cuts had already removed the generative
+consolidation stack.
+
+## Complementary Learning Systems Split
+
+Cortext keeps the Complementary Learning Systems split at the level that
+matters for the product:
+
+-   **Fast episodic write path:** coherent memories are written
+    immediately with source payloads, embeddings, timestamps, and graph
+    metadata.
+-   **Bounded live state:** working memory supports immediate continuity
+    without scanning the whole store.
+-   **Slow maintenance:** explicit `Consolidate()` calls, made during
+    observed throughput troughs, seal the incremental sparse-route epoch
+    and recenter its activation entry.
+
+The engine no longer keeps a slow durable graph tier. Its clustering
+produced no measurable quality gain (see below).
+
+## Consolidation Triggers
+
+Consolidation is external-only. The runtime never schedules it by
+itself. Callers invoke `Consolidate()` or process a maintenance signal
+with `Signal::force_consolidation=true`. This keeps production
+scheduling under the application’s control while still letting the
+engine derive an ordered urgency state from the three knobs.
+
+Ordinary retained and ephemeral signals use the normal operation chain.
+A forced request runs no per-signal operations; the processor only seals
+and recenters the sparse retrieval route. Maintenance therefore does not
+create an episode, signal, working-memory row, long-term memory, blob,
+or searchable embedding, and it does not update normal throughput
+observations. The single `consolidation_state` output is an ordered hint
+for the caller; it does not schedule maintenance work by itself. It is
+the more urgent of two classifiers. The first reads sparse-route growth.
+Once a route is published, *C* memories written since the last
+maintenance commit recommend a pass, and *C*×
+`ConsolidationEscalationMultiplier(T)` require one, with *C* the route
+capacity of
+<a href="#sec-optimization" class="quarto-xref">Section 17</a>. A
+maintenance commit resets the count. The second is the throughput
+classifier below. Both are source- and modality-independent.
+
+Earlier builds raised `Required` from the active epoch of
+retrieval-induced forgetting. When retrieval competition was removed,
+BEAM-10M conversation 7 consolidated once in 22,652 turns and its route
+never recentered. The growth rule brought it back to 44 consolidations
+and 43 recenters.
+
+A caller can use the engine hints as the external scheduling rule. Since
+the last committed forced request, including a coherent no-op with no
+persisted cluster, the engine maintains the observed write-rate floor
+*r*<sub>*f**l**o**o**r*</sub> and peak *r*<sub>*p**e**a**k*</sub>. The
+peak is monotonic within that interval. A new lower observation lowers
+the floor immediately; otherwise the floor moves upward with an update
+factor 1/*W*<sub>*r**a**t**e*\_*s**e**c**o**n**d**s*</sub>(*T*). Before
+a nonzero range has been observed, the throughput hint remains off. A
+persisted initialization bit distinguishes a real zero-rate observation
+from an uninitialized range, so a later positive sample updates from the
+observed zero instead of overwriting it as bootstrap. Pre-migration rows
+leave that bit false even when legacy rate-control ticks are positive,
+because those ticks do not prove that a throughput range was observed;
+the first post-migration sample establishes the floor and peak.
+
+The knob-derived fraction is:
+
+``` text
+p(F,S,T) = clamp(
+  0.5
+  × lerp(1.10, 0.75, focus_bias(F))
+  × lerp(0.80, 1.20, sensitivity_bias(S))
+  × lerp(1.10, 0.80, T),
+  0.20,
+  0.70)
+```
+
+Higher focus and stability require a deeper trough; higher sensitivity
+permits an earlier recommendation. The normalized throughput position
+and ordered state are:
+
+``` text
+range = r_peak - r_floor
+z = (m_rate - r_floor) / range
+p_required(F,S,T) = p(F,S,T) / consolidation_escalation(T)
+p_rearm(F,S,T) = p(F,S,T)
+                 + (1 - p(F,S,T)) * T
+p_drift(F,S,T) = 1 - p(F,S,T)
+
+throughput_state =
+  None,        if armed = false
+               OR memories_since_consolidation <= 0
+               OR range <= numeric_epsilon
+               OR z > p(F,S,T)
+  Required,    if z <= p_required(F,S,T)
+  Recommended, otherwise
+```
+
+The required branch is evaluated first. Since
+`consolidation_escalation(T)` is always greater than one, the required
+boundary is strictly below the recommendation boundary after every floor
+or peak update. Elapsed wall or event time and arbitrary durable memory
+counts do not enter the throughput decision; backlog is only a
+positive-work guard. The caller-facing state is `Required` whenever the
+bounded active epoch has reached a safety ceiling, and otherwise equals
+`throughput_state`. An explicit force request starts consolidation
+independently and its output state is `None`. A committed forced request
+acknowledges the active excursion by persisting `armed=false`, even when
+no coherent cluster exists. The acknowledgment resets the next
+event-derived range to the current rate: both floor and peak become that
+rate. This prevents a historical spike from suppressing recommendations
+after a throughput regime shift. Ordinary throughput observations
+establish a new peak and rearm the classifier only after the observed
+relative range is material:
+(*r*<sub>*p**e**a**k*</sub> − *r*<sub>*f**l**o**o**r*</sub>)/max (*r*<sub>*p**e**a**k*</sub>, *ϵ*) ≥ *p*<sub>*d**r**i**f**t*</sub>.
+Because *p* is clamped to \[0.20, 0.70\], the material drawdown remains
+between 0.30 and 0.80 across the complete knob domain, including
+*T* = 1. Once material, either recovery to
+*z* ≥ *p*<sub>*r**e**a**r**m*</sub> or sustained degradation to
+*z* ≤ *p* rearms the classifier. The lower branch prevents a gradually
+falling write rate from remaining permanently silent after
+acknowledgment, while the material-range guard keeps stable jitter from
+repeatedly rearming. Failed transactions restore the prior armed state
+and range. No count or elapsed-time horizon controls the reset. The
+floor, peak, initialization, and armed fields are stored in the
+singleton processor state row and participate in rollback, restart, and
+ephemeral-query snapshot restoration. The engine can recommend
+consolidation, but the API call is the only way to start it. `source_id`
+and modality are never hint inputs or maintenance commands.
+
+## Clustering Consolidation (Removed)
+
+Earlier builds ran five operations on every maintenance signal:
+`EvaluateConsolidation`, `ConsolidationGate` (scoring),
+`ConsolidationCluster`, `ConsolidationShallow` and
+`BuildGraphFromConsolidation`. They scored weak long-term memories as
+`T·strength − F·redundancy + S·connectivity + T·stability + tag` against
+`PeripheryCutoff(T)`. They clustered the candidates at
+`MergeThreshold(F)`, wrote `ASSOCIATION` centroids with `derived_from`
+edges, and derived `co_occurs`, `similar_to`, `causes`, `implies` and
+episode edges.
+
+The 2026-10 engine ablation found the pipeline inert at the default
+knobs. Per-memory stability started at 1.0 and never fell, because
+stability feedback updated only used memories and their raw-cosine gain
+is practically never ≤ 0. That made `T·stability = 0.5` exceed the 0.115
+floor, so scoring kept 0 of about 1,234 inputs per pass over 85k BEAM
+turns. A fix that lowers the stability of retrieved-but-unused memories
+made the pipeline fire. On LongMemEval-S it ran 112 passes, wrote 112
+`ASSOCIATION` nodes, clustered 1,703 memories and wrote 11.1k typed
+edges. On a 22.6k-turn BEAM-10M conversation it clustered 490 memories
+into 12.8k edges. It still did not earn its keep:
+
+-   Packet gold-turn recall moved -0.012 on S and -0.010 on Eval 1, and
+    was unchanged on BEAM.
+-   Haiku judge (rubric v2) sufficiency moved +0.012 ± 0.023 on S and
+    -0.009 ± 0.023 on Eval 1. Misleading was flat.
+-   Instructions retired rose 1–2%.
+-   Firing also opened the strength-based eviction gate. With the
+    storage floor at 0, eviction removed 94% of LongMemEval-S memories
+    (22,390 of 23,868), and packet recall fell from 0.630 to 0.086
+    (<a href="#sec-reinforcement" class="quarto-xref">Section 13</a>).
+
+The pipeline, its knobs (`MergeThreshold`, `MinClusterSize`,
+`ConsolidationMaxClusters`, graph-build thresholds and others) and its
+operation-context plumbing were removed. Maintenance signals now run no
+per-signal operations. The sparse route recenters on the active-signal
+ring centroid, which was already the fallback whenever no cluster
+centroid existed. At the default knobs that was every pass.
+
+## Reconstruction Surface (Legacy Stores)
+
+Reconsolidation and retrieval-time reconstruction were removed
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>). New stores
+write one initial reconstruction per memory at storage time and never
+append another, so their current surface equals the stored embedding.
+Stores written by earlier builds may hold appended reconstructions.
+Retrieval still reads the `current_memory_embeddings` surface first and
+falls back to the latest reconstruction when a cached current row is
+stale. Older signal rows, shared base embeddings and sibling memories
+that point at an original embedding are preserved.
+
+## What Was Removed
+
+The following systems are no longer part of the runtime:
+
+-   mode-selected semantic batch replay and public mode enums,
+-   internal decoder-backed semantic operations,
+-   vendored decoder runtime integration,
+-   remote/local decoder adapter registry,
+-   static taxonomy loading,
+-   STM shadow graph promotion,
+-   persistent confidence-monitoring state,
+-   bitemporal fact assertion/cache/evidence tables,
+-   fact-aware retrieval and eviction policies,
+-   clustering consolidation (candidate scoring, clustering, shallow
+    `ASSOCIATION` replay, typed-edge graph build),
+-   the memory-lifecycle mechanisms of
+    <a href="#sec-negative" class="quarto-xref">Section 14</a>: strength
+    decay and eviction, reconsolidation, retrieval competition, synaptic
+    tagging, emotional consolidation and the NE-like and DA-like
+    modulators.
+
+The removal is a hard cut, not a compatibility shim. New databases no
+longer create the removed tables, public bindings no longer expose the
+removed mode fields, and replay reports no longer emit the removed debug
+metrics.
+
+## Latency Discipline
+
+Maintenance work is the sparse-route seal (bounded by the dirty epoch
+delta) and one recenter. It does not scale with the number of stored
+memories, source text length or multimodal payload size.
+
+# Reinforcement, Decay and Feedback (Removed)
+
+This section is a removal record. Earlier versions of the architecture
+reinforced retrieved memories, decayed and evicted weak ones, and fed
+retrieval outcomes back into the knob-derived controls. The 2026-10
+ablation removed all of it
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>). What
+remains is a usage counter that backs public fields. Nothing in this
+section ranks, gates or deletes memories in the current engine.
+
+## Memory Strength and Eviction (Removed)
+
+Earlier builds kept multi-timescale strength traces per memory (fast,
+medium, slow and ultra-slow, mixed into `strength`). Every retrieval
+reinforced or decayed them, and memories whose effective strength fell
+below `PeripheryCutoff(T)` were evicted. Eviction waited for two gates.
+The first was a consolidation watermark: a memory had to predate
+`last_consolidation_ts`. The second was a storage floor, by default 500
+MB per file-backed store.
+
+The engine ablation study (2026-10) removed the traces, the
+reinforcement and decay update, eviction, its storage-pressure gate and
+its `memory_evictions` audit log. At the default knobs eviction never
+ran. The consolidation watermark was never set, because clustering
+consolidation never produced a candidate
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>).
+Phase-1 ablation of the strength update left every packet
+byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. A fix
+that made consolidation fire also opened the eviction gate. With the
+storage floor at 0, eviction then deleted 94% of LongMemEval-S memories,
+92% of Eval 1 memories and 99.7% of a 22.6k-turn BEAM-10M conversation.
+Packet gold-turn recall fell from 0.630 to 0.086, from 0.587 to 0.084,
+and from 0.103 to 0. Turn timestamps span weeks to months, and strength
+decayed against a half-life of minutes to hours, so almost every memory
+looked “weak” once the gate opened.
+
+`strength` now holds only its knob-derived initial value; long-term
+memories never update it, and working-memory slots persist their own
+slot strength in it. A slim `RecordMemoryUsage` step keeps the retrieval
+counters that hydrated memories expose: `retrieved_count`, `used_count`,
+`last_used` and `last_access`. Store growth is unbounded again. A
+bounded store needs a forgetting policy that is measured against recall
+first.
+
+## Contextual Gain (Definitions)
+
+Contextual gain was the per-retrieval signal of the removed feedback
+loops below. Usage detection still computes it, but no operation reads
+it:
+<!-- PRUNE: contextual_gain is computed in DetectMemoryUsage with no reader; drop this subsection if chore/prune-write-only removes it. -->
+
+    contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and used (range [−1, 1])
+    contextual_gain_t(m) ← undefined                # otherwise
+
+When undefined, treat contextual_gain_t(m) as 0 in downstream updates.
+It is not persisted (the smoothed per-memory column was removed with
+memory strength).
+
+Per-memory strength initializes at creation:
+
+    strength(m)_init = memory_initial_strength(F,S,T)
+
+Retrieved vs used:
+
+    retrieved(m) = memory returned by vector retrieval
+    used(m) = retrieved(m) AND injected into active context after gate decisions
+
+Contextual gain is only measured for used memories.
+
+## Reinforcement Graph Maintenance
+
+The normal interrupt gate injects at most one selected memory into
+active context per dispatch. Production retrieval therefore does not
+synthesize a pairwise *reinforces* edge from its broader retrieved
+packet: packet co-occurrence is not evidence that two memories were used
+together. This also prevents repeated noisy packets from turning
+boilerplate into durable graph hubs.
+
+Retrieval no longer traverses association edges, so existing
+*reinforces* edges in older stores are inert.
+
+## Causal Feedback Loop
+
+The system tracks causal influence of retrieved memories on generation
+quality through contextual gain—the semantic alignment (cosine
+similarity) between the current signal embedding and the retrieved
+memory embedding.
+
+### Focus Feedback (Removed)
+
+Earlier builds adjusted `weight_relevance` and `attention_width` from
+the contextual gain of used memories. They also dilated the attention
+width with drift and pulled it back toward its prior every turn. The
+engine ablation study (2026-10) removed this step. With it switched off
+as part of the minor-feedback group, packets stayed byte-identical: Eval
+1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40. `weight_relevance` and
+`attention_width` now stay at their knob-derived priors unless
+`UpdateFocus` moves them.
+
+### Sensitivity Feedback (Removed)
+
+Earlier builds nudged `weight_novelty` by
+`η_base × (novelty_reward × contextual_gain − redundancy)` for used
+memories, and persisted a per-memory `redundancy` that fed only the
+clustering-consolidation score. The engine ablation study (2026-10)
+removed the step, the `redundancy` column, and the never-written
+`connectivity` column. With the step switched off as part of the
+minor-feedback group, packets stayed byte-identical: Eval 1 0/250,
+LongMemEval-S 0/48, BEAM-10M 0/40.
+
+### Stability Feedback (Removed)
+
+Earlier builds raised the per-memory `stability` of used memories with
+positive contextual gain (`+0.05`) and lowered it otherwise (`× 0.95`).
+The mean stability of used memories adjusted the half-life target
+(<a href="#sec-stability-update" class="quarto-xref">Section 8.3.1</a>).
+Stability had two consumers, the clustering-consolidation score and the
+half-life adaptation, and both are gone. The engine ablation study
+(2026-10) removed the step, `memories.stability` and the half-life
+state. Contextual gain is a raw cosine and practically never ≤ 0, so
+stability never fell below its initial value. As a result the
+consolidation score’s `T·stability` term alone kept every memory above
+the candidate floor
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>). With
+the step switched off as part of the minor-feedback group, packets
+stayed byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
+
+## Influence Feedback (Removed)
+
+Earlier builds ran an influence-feedback operation (Algorithm 19). It
+blended contextual gain with neutral generation-similarity and drift
+terms into per-memory `influence`, `sustained_influence` and
+`mean_influence` columns. Nothing downstream read those columns. The
+engine ablation study (2026-10) removed the operation and its columns.
+With it switched off as part of the minor-feedback group, packets stayed
+byte-identical: Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40.
+
+# Negative Results: Bio-Inspired Lifecycle Mechanisms Under Long-Horizon Ablation
+
+Earlier versions of this paper presented these memory-lifecycle
+mechanisms as the architecture’s core:
+
+-   forgetting through strength decay and eviction;
+-   reconsolidation;
+-   consolidation into abstractions;
+-   retrieval-induced forgetting;
+-   synaptic tagging;
+-   NE- and DA-like neuromodulation;
+-   emotional consolidation.
+
+Each is well motivated by the memory literature. In October 2026 we
+tested every one of them by leave-one-out on long evaluations, and none
+survived. This section reports that result. We think it is the paper’s
+most transferable finding: on long-horizon conversational recall, the
+lifecycle mechanisms either never fired at their calibrated defaults, or
+hurt recall once they did.
+
+## Protocol
+
+The study switched off one engine subsystem at a time, using a build
+with experiment hooks. The hooks are not part of the release.
+
+-   **Evaluations.**
+    -   Eval 1: 250 cases over LoCoMo and LongMemEval conversations.
+    -   LongMemEval-S: 48 cases.
+    -   LongMemEval-M: every second episode (24), or an eight-episode
+        subset of 39k turns.
+    -   BEAM-10M: full-length conversations of 19k to 24k turns each.
+    -   A 111,527-turn chain of five BEAM-10M conversations, for scale
+        effects.
+-   **Tier-1 metrics, judge-free.**
+    -   Gold-turn recall in the packet and in the seed set.
+    -   Query p95 and ingest time per turn.
+    -   Instructions retired, peak RSS and store size.
+-   **Tier-2 metrics.** A Haiku judge (rubric v2) scored only packets
+    that changed, with a 95% interval on each “switched off minus on”
+    delta.
+-   **Decision rule.** A subsystem was removed when switching it off
+    measurably helped quality, or when it left every packet
+    byte-identical with no cost benefit.
+-   **Recheck.** Each removal landed as its own commit. That commit had
+    to build, pass the full test suite, and give byte-identical packets
+    against its parent on LongMemEval-S, Eval 1 and BEAM-10M
+    conversation 7.
+
+The full tables are in
+<a href="#sec-experimental" class="quarto-xref">Section 15</a>. The
+headline effects follow.
+
+## Forgetting Was Inert, Then Catastrophic
+
+Multi-timescale strength traces decayed against half-lives of minutes to
+hours, and memories below `PeripheryCutoff(T)` were evicted
+(<a href="#sec-reinforcement" class="quarto-xref">Section 13</a>).
+Eviction waited for two gates: a consolidation watermark and a 500 MB
+storage floor. At the default knobs the watermark was never set, so
+eviction never ran, and ablating the strength update changed 0/250, 0/48
+and 0/40 packets.
+
+A fix that made consolidation fire also opened the eviction gate. With
+the storage floor at 0, eviction then deleted:
+
+<table>
+<thead>
+<tr>
+<th>Store</th>
+<th style="text-align: right;">Memories evicted</th>
+<th style="text-align: right;">Packet gold-turn recall</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LongMemEval-S</td>
+<td style="text-align: right;">94% (22,390 of 23,868)</td>
+<td style="text-align: right;">0.630 → 0.086</td>
+</tr>
+<tr>
+<td>Eval 1</td>
+<td style="text-align: right;">92%</td>
+<td style="text-align: right;">0.587 → 0.084</td>
+</tr>
+<tr>
+<td>BEAM-10M conversation 7 (22.6k turns)</td>
+<td style="text-align: right;">99.7%</td>
+<td style="text-align: right;">0.103 → 0</td>
+</tr>
+</tbody>
+</table>
+
+The cause is a mismatch of time scales. Conversation timestamps span
+weeks to months, and a half-life of minutes makes almost every memory
+look weak once the gate opens. The engine now has no forgetting policy
+and its store grows without bound. A bounded store needs a forgetting
+policy that is measured against recall first.
+
+## Consolidation Into Abstractions Never Fired, and Did Not Help When Forced
+
+Clustering consolidation scored weak memories, clustered them into
+`ASSOCIATION` centroids with `derived_from` edges, and built typed edges
+(`co_occurs`, `similar_to`, `causes`, `implies`). At the default knobs
+it was inert: per-memory stability started at 1.0 and never fell, so the
+score’s *T* ⋅ stability = 0.5 term alone exceeded the 0.115 candidate
+floor. Scoring kept 0 of about 1,234 inputs per pass over 85k BEAM
+turns.
+
+A stability fix made it fire. On LongMemEval-S it ran 112 passes, wrote
+112 `ASSOCIATION` nodes, clustered 1,703 memories and wrote 11.1k typed
+edges. On BEAM-10M conversation 7 it clustered 490 memories into 12.8k
+edges. It still did not earn its keep:
+
+-   Packet recall moved −0.012 (S), −0.010 (Eval 1) and 0 (BEAM).
+-   Judged sufficiency moved +0.012 ± 0.023 and −0.009 ± 0.023.
+-   Instructions retired rose 1–2%.
+-   Firing opened the eviction gate above.
+
+Clustering, graph expansion (whose only traversable edges it wrote) and
+linked-source hydration were removed together
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>).
+
+## Reconsolidation Was Neutral to Harmful
+
+Reconsolidation drifted a retrieved memory’s embedding toward the
+current context during a lability window, and retrieval re-encoded its
+top candidates toward the query
+(<a href="#sec-advanced" class="quarto-xref">Section 10</a>). Switching
+both off together:
+
+<table>
+<thead>
+<tr>
+<th>Evaluation</th>
+<th style="text-align: right;">Packet recall (on → off)</th>
+<th style="text-align: right;">Judged sufficiency delta</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LongMemEval-S</td>
+<td style="text-align: right;">0.642 → 0.642</td>
+<td style="text-align: right;">0.000</td>
+</tr>
+<tr>
+<td>Eval 1</td>
+<td style="text-align: right;">0.597 → 0.611 (6 better, 1 worse)</td>
+<td style="text-align: right;">+0.010 ± 0.016</td>
+</tr>
+<tr>
+<td>BEAM-10M conversation 7</td>
+<td style="text-align: right;">0.103 → 0.110</td>
+<td style="text-align: right;">+0.014 ± 0.027</td>
+</tr>
+<tr>
+<td>LongMemEval-M subset (39k turns)</td>
+<td style="text-align: right;">0.462 → 0.462</td>
+<td style="text-align: right;">0.000</td>
+</tr>
+</tbody>
+</table>
+
+Instructions fell 5–11% and stores shrank 12–23%. Each movement source
+alone was also neutral. An earlier phase-1 arm had measured harm from
+removing “embedding movement”. That arm had also switched off the
+reconstruction representation, so its delta came from the representation
+change rather than from movement.
+
+## Retrieval-Induced Forgetting Never Reached a Packet
+
+Lateral inhibition suppressed retrieval losers in `memories.strength`
+(Anderson, Bjork, and Bjork 1994). No retrieval, hydration or gating
+step reads strength for long-term memories, so suppression changed 0/48
+and 0/250 packets. Its only effect was operational: its active-epoch
+bound was the sole source of `Required` consolidation hints, which the
+engine now derives from sparse-route growth instead
+(<a href="#sec-optimization" class="quarto-xref">Section 17</a>). On the
+111,527-turn chain, the build without it recalled 0.082 of gold turns
+against 0.062 (13 cases better, 4 worse), judged +0.008 ± 0.040, with
+13.5% fewer instructions.
+
+## Filtering Out “Obsolete” Memories Hurt
+
+Belief revision used to remove superseded memories from the seed set.
+Removing that exclusion helped:
+
+-   Packet recall rose by +0.025 (S), +0.018 (Eval 1) and +0.066
+    (BEAM-10M conversation 7).
+-   The share of gold turns among the seeds rose by +0.136, +0.158 and
+    +0.081.
+
+In long conversations an earlier version of a fact is often what a
+question asks about. The `supersedes` edges stayed, and now drive
+predecessor and successor hydration instead
+(<a href="#sec-hydration" class="quarto-xref">Section 7</a>).
+
+The same pattern held for the write gate. A score threshold that
+discarded finished units dropped 7–11% of gold evidence turns under
+Natural ingest. Storing every closed unit raised retrieved-only packet
+recall by +0.086 (LongMemEval-S) and +0.054 (Eval 1) for 6% more store
+bytes (<a href="#sec-write-pacing" class="quarto-xref">Section 5.1</a>).
+
+## Most Mechanisms Were Inert at the Defaults
+
+These subsystems left every packet byte-identical when switched off
+(Eval 1 0/250, LongMemEval-S 0/48, BEAM-10M 0/40 or 0/20, and for the
+oscillator MSC 0/39). Each was removed
+(<a href="#sec-experimental" class="quarto-xref">Section 15</a>):
+
+-   meta-learned knob priors;
+-   predictive pre-activation;
+-   influence, focus, sensitivity and stability feedback;
+-   serial-position effects;
+-   synaptic tagging, whose only consumer was the consolidation score;
+-   emotional consolidation and the emotional cascade;
+-   the DA-like modulator and reward prediction error;
+-   the encode/retrieve oscillator;
+-   the temporal tie-break in scoring;
+-   Soft Anchors;
+-   the pattern-separation sparse index and procedural value table.
+
+The NE-like modulator and its effect scales changed a few packets (5/48,
+32/250, 7/20), with recall within one case and judged deltas of 0.000,
+−0.001 ± 0.006 and +0.028 ± 0.054. Working-memory rehearsal reordered
+working-memory slots in 12/48 and 33/250 packets, with recall unchanged.
+Both were removed.
+
+## Lesson: Re-Measure on the Shipped Engine, and Diff Packets Before Judging
+
+The October results overturn several earlier research-branch verdicts.
+Those verdicts came from blind-judge screens over short corpora
+(<a href="#sec-experimental" class="quarto-xref">Section 15</a>), and
+they failed for two different reasons.
+
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Earlier verdict</th>
+<th>October result</th>
+<th>Why they differ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>encode/retrieve oscillator</td>
+<td>removal hurts: −0.49 sufficiency (July, 3 reps)</td>
+<td>same MSC protocol rerun: all 39 probe packets byte-identical without
+it, under Durable and Natural</td>
+<td>judge variance</td>
+</tr>
+<tr>
+<td>synaptic tagging</td>
+<td>removal hurts: −0.20 (July, 3 reps)</td>
+<td>0/40 packets changed</td>
+<td>July branch had live consolidation, the tag’s only consumer</td>
+</tr>
+<tr>
+<td>graph expansion</td>
+<td>unresolved, leaning negative (long-horizon sweep)</td>
+<td>0/40 packets changed</td>
+<td>only non-traversable <code>supersedes</code> edges existed on the
+current engine</td>
+</tr>
+<tr>
+<td>daily consolidation</td>
+<td>retained by default (long-horizon sweep)</td>
+<td>inert at defaults; −0.012 / −0.010 recall when forced</td>
+<td>the current engine never fired it</td>
+</tr>
+</tbody>
+</table>
+
+A sufficiency delta cannot come from identical packets. The July
+oscillator delta was therefore judge variance, which the July
+confirmation itself put at up to 0.32 between repetitions. The other
+rows were measured on a research-branch engine whose mechanisms
+interacted differently.
+
+We now apply two rules:
+
+1.  Ablate on the engine that ships.
+2.  Before spending judge budget on an arm, diff its packets against the
+    control. Judge only the cases that changed, and report how many
+    changed.
+
+## What Survived
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Mechanism</th>
+<th>Evidence for keeping it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>boundary segmentation, store every closed unit</td>
+<td>write-gate removal above</td>
+</tr>
+<tr>
+<td>contiguity hydration</td>
+<td>off: −0.06 to −0.09 packet recall</td>
+</tr>
+<tr>
+<td><code>supersedes</code> edges and predecessor hydration</td>
+<td>off: −0.037 / −0.025 / −0.015 recall; judged −0.036 ± 0.052 (S)</td>
+</tr>
+<tr>
+<td>working memory</td>
+<td>off: −0.012 / −0.015 recall; MemLens image evidence −0.036 ±
+0.029</td>
+</tr>
+<tr>
+<td>SQLite sparse route</td>
+<td>off at 111k turns: +26% instructions, ingest 95 → 170 ms/turn</td>
+</tr>
+<tr>
+<td>usage counters</td>
+<td>feed the public <code>retrieved_count</code> /
+<code>used_count</code> fields</td>
+</tr>
+</tbody>
+</table>
+
+After all round-3 removals, measured against the merged pruned engine:
+
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 26%" />
+<col style="width: 26%" />
+<col style="width: 26%" />
+</colgroup>
+<thead>
+<tr>
+<th></th>
+<th style="text-align: right;">LongMemEval-S</th>
+<th style="text-align: right;">Eval 1</th>
+<th style="text-align: right;">BEAM-10M conv 7</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>packet gold-turn recall</td>
+<td style="text-align: right;">0.642 → 0.691</td>
+<td style="text-align: right;">0.597 → 0.644</td>
+<td style="text-align: right;">0.103 → 0.118</td>
+</tr>
+<tr>
+<td>judged sufficiency delta</td>
+<td style="text-align: right;">+0.060 ± 0.057</td>
+<td style="text-align: right;">+0.039 ± 0.021</td>
+<td style="text-align: right;">+0.014 ± 0.048</td>
+</tr>
+<tr>
+<td>instructions retired</td>
+<td style="text-align: right;">−12%</td>
+<td style="text-align: right;">−12%</td>
+<td style="text-align: right;">−24%</td>
+</tr>
+<tr>
+<td>peak RSS</td>
+<td style="text-align: right;">−14%</td>
+<td style="text-align: right;">−3%</td>
+<td style="text-align: right;">−17%</td>
+</tr>
+</tbody>
+</table>
+
+Engine source (`src/` and `include/`) shrank by a net 7,075 lines (PR
+#28). The v5 recall mechanisms of
+<a href="#sec-retrieval" class="quarto-xref">Section 6</a> and
+<a href="#sec-hydration" class="quarto-xref">Section 7</a> were then
+hill-climbed on this pruned base.
+
+## Scope of the Claim
+
+These are ablations of one engine on conversational long-horizon recall,
+at its calibrated default knobs. They do not show that forgetting,
+consolidation or reconsolidation are useless in general. They show three
+narrower things:
+
+-   The specific forms implemented here never fired at the defaults.
+-   When made to fire, they cost recall or cost nothing.
+-   Short-horizon judged screens were not able to tell.
+
+A bounded store still needs a forgetting policy. Any future one should
+be gated on packet recall over month-scale timestamps before it ships.
+
+Two per-signal pieces of the original affect and neuromodulation design
+remain in the scoring stack. They are the ACh-like encode/retrieve bias,
+which paces streaming retrieval checks, and the emotion and mood
+threshold deltas, which move the spike-bypass threshold
+(<a href="#sec-core-adaptation" class="quarto-xref">Section 8</a>). This
+study did not remove them. Neither gates storage or ranks recall.
+<!-- PRUNE: chore/prune-write-only may remove mood and the threshold controller; adjust this paragraph to the final removal list. -->
+
 # Experimental Results
 
-This section records the evidence for the current hard-cut Cortext
-branch. Older adapter-era and internal-decoder experiments are preserved
-in git history, not in the current manuscript, because those systems are
-no longer part of the runtime being evaluated.
+This section records the evidence for the current engine, newest first.
+It opens with the October 2026 v5 benchmarks, then the 2026-10 engine
+ablation (summarized in
+<a href="#sec-negative" class="quarto-xref">Section 14</a>), then the
+earlier hard-cut, release and research-branch records. Older adapter-era
+and internal-decoder experiments are preserved in git history, not in
+the current manuscript, because those systems are no longer part of the
+runtime being evaluated. Results older than October 2026 were measured
+on engines that still contained mechanisms
+<a href="#sec-negative" class="quarto-xref">Section 14</a> later
+removed; each such subsection says so.
 
 ## Current Evaluation Scope
 
-The evaluated system is the embedding-first runtime described in
-<a href="#sec-implementation" class="quarto-xref">Section 12</a> and
-<a href="#sec-consolidation" class="quarto-xref">Section 9</a>. It
-contains:
+The evaluated system is the v5 engine described in
+<a href="#sec-overview" class="quarto-xref">Section 3</a>. It contains:
 
--   online memory storage, boundary detection, graph construction,
-    retrieval, reconsolidation, working memory, soft anchors, and
-    eviction;
--   explicit shallow consolidation over stored embeddings and graph
-    edges; and
--   C, C++, Python, Go, Dart, JavaScript, and WebAssembly entry points
-    that expose only the retained processing, retrieval, consolidation,
-    reset, and embedding APIs.
+-   online boundary segmentation, storage of every closed unit, working
+    memory and `supersedes` edges;
+-   multi-granularity hybrid retrieval with late-interaction reranking
+    (<a href="#sec-retrieval" class="quarto-xref">Section 6</a>);
+-   hydration and evidence fitting
+    (<a href="#sec-hydration" class="quarto-xref">Section 7</a>);
+-   explicit maintenance (sparse-route seal and recenter); and
+-   C and C++ entry points in this repository, with Python, Go, Dart,
+    JavaScript and WebAssembly packages in sibling repositories,
+    exposing only the retained processing, retrieval, consolidation,
+    reset and embedding APIs.
+
+## v5 End-to-End Benchmarks
+
+These results are copied from the README Benchmarks section and the v5
+pull request (PR #28). They were measured in October 2026 on the v5
+engine, macOS arm64.
+
+**Protocol.** Each benchmark’s conversations were replayed into the
+engine as they happened: live ingest, Natural retention, and
+consolidation when the engine recommended it. Each question was then
+asked against the final store. The retrieved context went to an answer
+model and a judge, using each benchmark’s own published QA prompts. The
+answer model and judge were both `gpt-6.1-sol` at low reasoning effort,
+and packets were capped at a 34,800-byte evidence budget (about 8k
+tokens). No LLM call was made to store or recall.
+
+### Reranker Training Overlap
+
+The late-interaction reranker
+(<a href="#sec-retrieval" class="quarto-xref">Section 6</a>) was trained
+on pools from some of these benchmarks. Scores on those benchmarks are
+not zero-shot. The table separates them. Held-out splits are 20% of
+LongMemEval and MemLens questions, 30% of BEAM 1M and Eval 1
+conversations, and one DolphinBench persona. The 108-question MemLens
+image evaluation set was excluded entirely.
+
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Benchmark</th>
+<th>Reranker training overlap</th>
+<th>Zero-shot evidence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LoCoMo (1,540 q)</td>
+<td>none: excluded from training (CC-BY-NC)</td>
+<td>whole benchmark</td>
+</tr>
+<tr>
+<td>BEAM 100K and 10M</td>
+<td>none: never trained on</td>
+<td>whole benchmark</td>
+</tr>
+<tr>
+<td>BEAM 1M</td>
+<td>70% of conversations trained on</td>
+<td>held-out 30% only</td>
+</tr>
+<tr>
+<td>LongMemEval-S (500 q)</td>
+<td>trained on; 20% of LongMemEval questions held out</td>
+<td>115 unseen questions</td>
+</tr>
+<tr>
+<td>LongMemEval-M (100 q)</td>
+<td>same LongMemEval questions as S</td>
+<td>not separately reported</td>
+</tr>
+<tr>
+<td>DolphinBench (600 tests)</td>
+<td>trained on, one persona held out</td>
+<td>not separately reported</td>
+</tr>
+<tr>
+<td>MemLens agent subset (195 q)</td>
+<td>trained on; 20% of MemLens questions held out</td>
+<td>56 unseen questions</td>
+</tr>
+<tr>
+<td>Eval 1 (internal, 250 q)</td>
+<td>LongMemEval conversations, 70% trained on; LoCoMo conversations
+never</td>
+<td>held-out conversations</td>
+</tr>
+</tbody>
+</table>
+
+### Zero-Shot Results
+
+<table>
+<colgroup>
+<col style="width: 30%" />
+<col style="width: 40%" />
+<col style="width: 30%" />
+</colgroup>
+<thead>
+<tr>
+<th>Benchmark</th>
+<th style="text-align: right;">Cortext</th>
+<th>Comparison</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LoCoMo, same pipeline (1,540 q)</td>
+<td style="text-align: right;">86.2% (87.9% on corrected keys)</td>
+<td>Mem0 OSS 2.2.1 89.0%, Graphiti 0.31.1 81.0% under the same answerer,
+judge and budget</td>
+</tr>
+<tr>
+<td>BEAM 100K / 10M, ExaBase protocol</td>
+<td style="text-align: right;">83.8 / 70.8</td>
+<td>published: past.dev 92.1 / 85.0, Exabase M-1 76.9 / 68.0</td>
+</tr>
+<tr>
+<td>BEAM 100K / 10M, AMB protocol</td>
+<td style="text-align: right;">72.2 / 53.6</td>
+<td>published: Hindsight 73.4 / 64.1, Honcho 63.0 / 40.6</td>
+</tr>
+<tr>
+<td>LongMemEval-S, unseen 115 q</td>
+<td style="text-align: right;">96.5%</td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>MemLens, unseen 56 q</td>
+<td style="text-align: right;">78.6%</td>
+<td>n/a</td>
+</tr>
+</tbody>
+</table>
+
+### Results on Benchmarks That Overlap Reranker Training
+
+<table>
+<colgroup>
+<col style="width: 30%" />
+<col style="width: 40%" />
+<col style="width: 30%" />
+</colgroup>
+<thead>
+<tr>
+<th>Benchmark</th>
+<th style="text-align: right;">Cortext</th>
+<th>Published (own protocols, not re-run)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LongMemEval-S (500 q)</td>
+<td style="text-align: right;">93.8%</td>
+<td>Mem0 94.4, Hindsight 91.4, EmergenceMem 86.0, Supermemory 85.2, Zep
+71.2</td>
+</tr>
+<tr>
+<td>LongMemEval-M (100 q)</td>
+<td style="text-align: right;">78.0%</td>
+<td>n/a</td>
+</tr>
+<tr>
+<td>BEAM 1M, ExaBase / AMB protocol</td>
+<td style="text-align: right;">80.0 / 70.4</td>
+<td>past.dev 90.7, Exabase M-1 75.0 / Hindsight 73.9, Honcho 63.1, Mem0
+64.1</td>
+</tr>
+<tr>
+<td>DolphinBench (600 tests, agent with memory tools)</td>
+<td style="text-align: right;">87.0%</td>
+<td>Mem0 + Hermes 70.7, Hindsight + Hermes 69.5, Honcho + Hermes 68.5
+(published rows used a <code>gpt-5.6-luna</code> agent)</td>
+</tr>
+<tr>
+<td>MemLens agent subset (195 q, 32k, images)</td>
+<td style="text-align: right;">72.3%</td>
+<td>Mem0 43.2 (text captions), MemOS 36.5, MemAgent-7B 32.8</td>
+</tr>
+</tbody>
+</table>
+
+The competitor numbers in the last column of both tables are the
+vendors’ or papers’ own, each with its own answer model, judge and
+protocol. Only the LoCoMo comparison was run under one shared pipeline,
+so read the other gaps as directional.
+
+On LoCoMo, Mem0’s 2.8-point lead comes almost entirely from multi-hop
+(91.8% against 83.3%) and temporal questions (89.1% against 85.1%).
+There its write-time LLM writes consolidated, dated facts. Cortext made
+no write-time model call, against 544 calls and 5.7M tokens for Mem0 and
+4,151 calls and 14.4M tokens for Graphiti. It recalled at 9.7 / 13.7 ms
+p50 / p95, against 167 / 250 ms and 143 / 157 ms. Cortext led on
+open-domain questions (64.6% against 62.5% and 61.5%).
+
+### Stage Measurements
+
+PR #28 measured each v5 change against its own predecessor, with both
+arms graded by one judge. Comparisons are per stage, not one end-to-end
+base-against-final run, and the judges changed across the program
+(Haiku, then `gpt-5.6-luna`, then `gpt-6.1-sol` low). Packet gold-turn
+recall is judge-free.
+
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Evaluation</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FTS5 keyword channel</td>
+<td>Eval 1 (250 q)</td>
+<td>recall 0.597 → 0.809; sufficiency train +0.149 ± 0.063, test +0.218
+± 0.059 (Haiku)</td>
+</tr>
+<tr>
+<td>FTS5 keyword channel</td>
+<td>LongMemEval-S (48) / M (48 haystacks)</td>
+<td>recall 0.642 → 0.840 / 0.407 → 0.679; sufficiency +0.185 ± 0.104 /
++0.292 ± 0.111</td>
+</tr>
+<tr>
+<td>store every closed unit</td>
+<td>Eval 1</td>
+<td>sufficiency +0.047 ± 0.025 (Natural vs Durable)</td>
+</tr>
+<tr>
+<td>multimodal R1–R4</td>
+<td>MemLens (108 q, image evidence)</td>
+<td>0.558 → 0.744 (ceiling 0.867); misleading 0.028 → 0.009</td>
+</tr>
+<tr>
+<td>v5 engine vs base</td>
+<td>BEAM e2e 100K / 1M / 10M</td>
+<td>0.773 / 0.702 / 0.617 → 0.816 / 0.778 / 0.667</td>
+</tr>
+<tr>
+<td>late-interaction rerank</td>
+<td>BEAM e2e 100K / 1M / 10M</td>
+<td>0.816 / 0.778 / 0.667 → 0.843 / 0.799 / 0.699; 100K and 10M never
+trained on</td>
+</tr>
+<tr>
+<td>late-interaction rerank</td>
+<td>Eval 1 judged</td>
+<td>0.955 → 0.973 (+0.018 ± 0.018); reranker-unseen 0.937 → 0.968</td>
+</tr>
+<tr>
+<td>clock fix</td>
+<td>DolphinBench (600)</td>
+<td>78.8% → 84.0% (+5.2 ± 3.4 pp); 31–365-day slice 0.514 → 0.844</td>
+</tr>
+<tr>
+<td>late-interaction rerank (pre-clock-fix base)</td>
+<td>DolphinBench (600)</td>
+<td>78.8% → 81.2%</td>
+</tr>
+</tbody>
+</table>
+
+The DolphinBench reranker run predates the clock fix. Final `main`,
+which has both the clock fix and the reranker, was not rerun on the full
+600 for PR #28; the 87.0% above comes from the later README scoreboard
+run. The FTS5 rows compare the v2 engine with the pruned engine at
+47c18ec9, so they include the other v2 changes;
+<a href="#sec-implementation" class="quarto-xref">Section 16</a> reports
+the channel-only effect (Eval 1 recall 0.60 → 0.79).
 
 The evaluated system does not contain internal text-generation backends,
 adapter registries, decoder-backed semantic batch operations, static
@@ -3443,14 +4529,14 @@ gone; bindings no longer expose the removed mode fields</td>
 <td><code>Cortext::Consolidate()</code> and
 <code>Signal::force_consolidation</code> drive the one retained
 consolidation path; graph retrieval returns source-backed memory context
-from vector and graph evidence</td>
+from vector evidence</td>
 </tr>
 <tr>
 <td>paper consistency</td>
 <td>this section, <a href="#sec-consolidation"
-class="quarto-xref">Section 9</a>, <a href="#sec-implementation"
-class="quarto-xref">Section 12</a>, and <a href="#sec-optimization"
-class="quarto-xref">Section 13</a> describe the current branch rather
+class="quarto-xref">Section 12</a>, <a href="#sec-implementation"
+class="quarto-xref">Section 16</a>, and <a href="#sec-optimization"
+class="quarto-xref">Section 17</a> describe the current branch rather
 than deleted adapter-era workflows</td>
 </tr>
 </tbody>
@@ -3577,14 +4663,14 @@ bound and exact cosine family checks. The rebuild installs the recovered
 surface so subsequent requests do not repeat the full SQL scan. A failed
 rebuild installs a failure sentinel so later requests do not retry the
 two complete surface scans. Shared base vectors keep all long-term
-memory metadata alternatives behind one stored vector so a superseded
-sibling cannot hide an eligible sibling. Retrieval fallback executes
-demand-driven ordered pages over the current and historical vector
-surfaces. Every SQL page applies kind, timestamp, and supersession
-eligibility before distance ordering and a knob-derived top-k page
-limit; one C++ cosine-family index spans the pages until the ordinary
-seed budget is full or the surface is exhausted. Processor hydration
-records persisted-current currency separately from processor-surface
+memory metadata alternatives behind one stored vector so the shared
+vector surfaces through exactly one eligible sibling. Retrieval fallback
+executes demand-driven ordered pages over the current and historical
+vector surfaces. Every SQL page applies kind and timestamp eligibility
+before distance ordering and a knob-derived top-k page limit; one C++
+cosine-family index spans the pages until the ordinary seed budget is
+full or the surface is exhausted. Processor hydration records
+persisted-current currency separately from processor-surface
 completeness, and the private search cache follows the processor’s
 latest reconstruction vectors even when current-table writes are
 disabled. A valid-cache regression places a full F/S/T-derived seed
@@ -4017,7 +5103,12 @@ in the paper artifact bundle. The checked-in manuscript therefore treats
 these smoke numbers as a historical harness record rather than
 independently auditable raw evidence.
 
-## Retrieval Behavior After Removal
+## Retrieval Behavior After the v1 Hard Cut (Historical)
+
+This subsection describes the v1 hard-cut engine of June 2026, before
+the 2026-10 ablation removed association seeding, graph expansion and
+retrieval-time reconstruction. Current retrieval is specified in
+<a href="#sec-retrieval" class="quarto-xref">Section 6</a>.
 
 The highest-risk behavioral regression was graph retrieval. Removing
 semantic summaries, fact rows, label-bank expansion, and
@@ -4816,14 +5907,15 @@ current ranker</td>
 In the June research branch, temporal retrieval and predictive
 pre-activation stayed because their removal cost measurable packet
 quality or packet size. The hard-cutover production graph ranker retains
-temporal scoring but no longer reads `pre_activation`, so that
-predictive verdict does not describe current runtime behavior. Removing
-the metacognitive layer was mildly positive and had no long-horizon
-story to defer to, which supported cutting it in v1. Removing daily
-consolidation was also mildly positive at this horizon, but we deferred
-that arm because consolidation-family verdicts require long-horizon
-runs. The remaining removal arms were null or long-horizon deferred as
-labeled.
+temporal scoring but stopped reading `pre_activation`, and the 2026-10
+engine ablation removed predictive pre-activation entirely (see the
+removal table below), so that predictive verdict does not describe
+current runtime behavior. Removing the metacognitive layer was mildly
+positive and had no long-horizon story to defer to, which supported
+cutting it in v1. Removing daily consolidation was also mildly positive
+at this horizon, but we deferred that arm because consolidation-family
+verdicts require long-horizon runs. The remaining removal arms were null
+or long-horizon deferred as labeled.
 
 The July single-repetition follow-up rows below are read only against
 the July 6 measured control and are treated as a preliminary screen.
@@ -4981,18 +6073,30 @@ recovered. The aggregate artifact is
 </tbody>
 </table>
 
-The confirmation reverses the preliminary oscillator-null read. Removing
-the encode/retrieve oscillator costs 0.49 sufficiency, the largest July
-neuromodulator loss, and all three matched repetition deltas are
-negative, so that per-signal fast dynamic stays. Synaptic tagging also
-clears the 0.15 signal floor after the targeting fix with the most
-stable July delta (rep SD 0.03), and is retained on both correctness and
-short-horizon quality grounds. Neuromodulator effect scales and the
-emotion/mood threshold cascade remain directionally negative but below
-the signal floor in this confirmation; neither earns a hard cut from
-this screen. Effect scales is not worth more short-horizon spend, and
-the emotion/mood cascade remains deferred because its slow mood
-integrator has a plausible long-horizon role.
+A 2026-10 rerun of this protocol on the pruned engine (same 25
+validation dialogs, warmup 20, probe stride 30, capacity 21; 1,190
+turns, 39 probes) compared the packets themselves before judging. With
+the oscillator off, all 39 probe packets were byte-identical to the
+control under both Durable and Natural retention. With effect scales
+off, 7/39 differed: five only in order and two in which contiguous turns
+were attached. A sufficiency delta cannot come from identical packets,
+so the July oscillator delta was judge variance (the July arm’s mean
+packet tokens, 755, also matched the control). The oscillator was
+removed (artifacts: `.claude/hillclimb/ablation/ablate3/msc/`). The July
+reading follows for the record.
+
+The July confirmation reverses the preliminary oscillator-null read.
+Removing the encode/retrieve oscillator costs 0.49 sufficiency, the
+largest July neuromodulator loss, and all three matched repetition
+deltas are negative, so that per-signal fast dynamic stays. Synaptic
+tagging also clears the 0.15 signal floor after the targeting fix with
+the most stable July delta (rep SD 0.03), and is retained on both
+correctness and short-horizon quality grounds. Neuromodulator effect
+scales and the emotion/mood threshold cascade remain directionally
+negative but below the signal floor in this confirmation; neither earns
+a hard cut from this screen. Effect scales is not worth more
+short-horizon spend, and the emotion/mood cascade remains deferred
+because its slow mood integrator has a plausible long-horizon role.
 
 ### Long-Horizon Deferred-Mechanism Sweep
 
@@ -5124,13 +6228,16 @@ retried and recovered. The aggregate artifact is
 </tbody>
 </table>
 
-The long-horizon run closes the deferred cut question for v1: no removal
-improves the stack, so no additional mechanism earns a hard cut. The
-table therefore uses two verdict tiers rather than treating all negative
-mean deltas as equally resolved. The emotion/mood threshold cascade and
-STM/LTM graph-label handoff are retained on measured harm. Emotion/mood
-loses on all three paired repetitions, and handoff has the most stable
-long-horizon loss (rep SD 0.05).
+The long-horizon run closed the deferred cut question for v1 at the
+time: no removal improved the stack, so no additional mechanism earned a
+hard cut. The 2026-10 ablation later reversed this on the current engine
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>). Its packet
+diffs showed that several of these mechanisms never reached a packet.
+The table therefore uses two verdict tiers rather than treating all
+negative mean deltas as equally resolved. The emotion/mood threshold
+cascade and STM/LTM graph-label handoff are retained on measured harm.
+Emotion/mood loses on all three paired repetitions, and handoff has the
+most stable long-horizon loss (rep SD 0.05).
 
 The remaining four arms stay by default: their removals do not help, but
 their harm is not resolved by this screen once the paired repetitions
@@ -5233,7 +6340,11 @@ distinct from the ACT-R-inspired activation ledger that the current
 retrieval trace retains; the ledger is observability, not a scoring
 gate.
 
-### Negative Results Summary
+### Research-Branch Negative Results Summary (Superseded)
+
+This summary records the June–July 2026 research-branch verdicts. The
+2026-10 ablation on the current engine supersedes them
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>).
 
 The removal record separates four outcomes. The ACT-R gate-promotion
 branch still rejects the activation-gating direction for the current v1
@@ -5253,7 +6364,10 @@ tiers. Emotion/mood cascade and STM/LTM graph-label handoff are retained
 on measured harm; neuromodulator effect scales, daily consolidation,
 graph expansion, and synaptic-tag TTL are retained by default because
 removal shows no benefit and the apparent harm is below this screen’s
-paired-repetition resolution. These verdicts do not remove the
+paired-repetition resolution. The 2026-10 engine ablation later removed
+clustering consolidation, graph expansion and synaptic tagging on the
+current engine, where consolidation never fired at default knobs (see
+the removal table below). These verdicts do not remove the
 ACT-R-inspired activation ledger retained in retrieval traces; that
 ledger records ranking evidence for observability and audits, not an
 additional scoring gate.
@@ -5382,26 +6496,428 @@ with the full-history upper bound while spending roughly two orders of
 magnitude less context than chat RAG. The artifact is
 `docs/paper/artifacts/replay_v8_context_blowout/judge_gemma4_12b_local_context128_prioronly.json`.
 
+## Engine Ablation Removals (2026-10)
+
+A leave-one-out study switched off each engine subsystem in turn. It
+used a build with experiment hooks; the hooks are not part of the
+release. The evals were Eval 1 (250 cases), LongMemEval-S (48), every
+second LongMemEval-M episode (24), and full-length BEAM-10M
+conversations (19-24k turns each). Tier-1 metrics are judge-free:
+gold-turn recall in the packet and in the seed set, query p95, ingest
+per turn, instructions retired, peak RSS and store size. A subsystem was
+removed when switching it off measurably helped quality, or when it left
+every packet byte-identical with no cost benefit. Each removal was then
+rechecked on its own commit: build, the full test suite, and
+byte-identical packets against the parent commit on LongMemEval-S (48),
+Eval 1 (250) and BEAM-10M conversation 7 (about 21k turns), unless the
+entry says otherwise.
+
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Removed</th>
+<th>Ablation evidence (packets changed; recall deltas)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>meta-learned knob priors (<code>ApplyMetaLearning</code>,
+<code>meta_learning_coeffs</code>)</td>
+<td>0/250 Eval 1, 0/48 S, 0/40 BEAM; no cost change. The priors are the
+closed-form F/S/T functions again</td>
+</tr>
+<tr>
+<td>predictive pre-activation
+(<code>ApplyPredictivePreActivation</code>,
+<code>memories.pre_activation</code> and its indexes)</td>
+<td>0/250, 0/48, 0/40. No ranker read the field</td>
+</tr>
+<tr>
+<td>influence feedback (<code>ApplyInfluenceFeedback</code>,
+<code>memories.influence/sustained_influence/mean_influence</code>,
+<code>state.sustained_influence</code>)</td>
+<td>0/250, 0/48, 0/40 (as part of the minor-feedback group). The columns
+were write-only</td>
+</tr>
+<tr>
+<td>focus feedback (<code>ApplyFocusFeedback</code>)</td>
+<td>0/250, 0/48, 0/40 (as part of the minor-feedback group)</td>
+</tr>
+<tr>
+<td>supersession exclusion (seed-time filter of <code>supersedes</code>
+targets, its eligibility sidecar and the SQL <code>instr()</code>
+superseded-id filter)</td>
+<td>Not neutral: every packet changes, and recall rises. Packet
+gold-turn recall +0.025 on S, +0.018 on Eval 1, +0.066 on BEAM-10M
+conversation 7. Seed gold share +0.136, +0.158 and +0.081. Haiku judge
+(rubric v2) sufficiency -0.006 ± 0.051 on S and -0.005 ± 0.039 on Eval
+1. Misleading 0.021 → 0.021 and 0.022 → 0.016. Instructions +2.5%.
+<code>supersedes</code> edges and superseded-predecessor hydration
+stay</td>
+</tr>
+<tr>
+<td>clustering consolidation (<code>EvaluateConsolidation</code>,
+scoring gate, clusterer, shallow <code>ASSOCIATION</code> replay,
+typed-edge graph build)</td>
+<td>Inert at default knobs: 0 candidates per pass because stability
+never fell below 1.0. With a stability fix that made it fire, packet
+recall moved -0.012 on S, -0.010 on Eval 1 and 0 on BEAM. Judge
+sufficiency +0.012 ± 0.023 on S and -0.009 ± 0.023 on Eval 1.
+Instructions +1–2%. Packets are byte-identical to the inert pipeline
+after removal</td>
+</tr>
+<tr>
+<td>graph expansion (one-hop traversal of
+<code>co_occurs</code>/<code>similar_to</code>/<code>reinforces</code>/<code>causes</code>/<code>derived_from</code>/episode
+edges with a bounded graph bonus)</td>
+<td>0/250, 0/48, 0/40 in phase 1, where only <code>supersedes</code>
+edges existed. After clustering consolidation was removed, no
+traversable edge is written</td>
+</tr>
+<tr>
+<td>memory strength and eviction (<code>UpdateMemoryStrength</code>
+traces, reinforcement and decay, periphery-cutoff eviction,
+storage-pressure gate, <code>memory_evictions</code>)</td>
+<td>0/250, 0/48, 0/40. Eviction never ran at default knobs. Once a
+stability fix opened its gate (storage floor 0), it deleted 94% of S,
+92% of Eval 1 and 99.7% of BEAM conversation 7 memories, and packet
+recall fell 0.630 → 0.086, 0.587 → 0.084 and 0.103 → 0. Retrieval
+counters moved to <code>RecordMemoryUsage</code></td>
+</tr>
+<tr>
+<td>serial position effects (<code>ApplySerialPositionEffects</code>,
+<code>ApplySerialPositionMultiplier</code>)</td>
+<td>0/250, 0/48, 0/40 (minor-feedback group). The multiplier only fed
+memory-strength reinforcement</td>
+</tr>
+<tr>
+<td>synaptic tagging (<code>ApplySynapticTagging</code>,
+<code>tag_strength</code>, <code>tag_expires_at</code>)</td>
+<td>0/250, 0/48, 0/40. Its only consumer was the consolidation score.
+The June research-branch “removal hurts” verdict was measured with
+consolidation live</td>
+</tr>
+<tr>
+<td>sensitivity feedback (<code>ApplySensitivityFeedback</code>,
+<code>memories.redundancy</code>, the unwritten
+<code>connectivity</code>)</td>
+<td>0/250, 0/48, 0/40 (minor-feedback group). <code>redundancy</code>
+only fed the consolidation score</td>
+</tr>
+<tr>
+<td>stability feedback and half-life adaptation
+(<code>ApplyStabilityFeedback</code>, <code>UpdateStability</code>,
+<code>memories.stability</code>, persisted
+half-life/rate-decay/drift-weight/retention state)</td>
+<td>0/250, 0/48, 0/40 (minor-feedback group). Their only consumers were
+the consolidation score and memory-strength decay</td>
+</tr>
+<tr>
+<td>emotional consolidation and cascade
+(<code>ApplyEmotionalConsolidation</code>,
+<code>PropagateEmotionalCascade</code>, emotional-metadata cache,
+<code>flashbulb</code>/<code>emotional_intensity</code>/<code>half_life_bonus</code>/<code>detail_suppression</code>/<code>gist_components</code>/<code>cascade_*</code>
+columns)</td>
+<td>0/250, 0/48, 0/40 (affect group). Outputs fed only memory-strength
+decay and the cascade</td>
+</tr>
+<tr>
+<td>linked-source hydration (<code>LABEL</code>/<code>ASSOCIATION</code>
+routing rows resolved through
+<code>has_label</code>/<code>derived_from</code> routes, query-aware
+linked ordering, compact-item limit)</td>
+<td>0/250, 0/48, 0/40 with query-aware ordering off. With clustering
+consolidation removed, nothing writes those routes</td>
+</tr>
+</tbody>
+</table>
+
+Working-memory items with equal start timestamps were returned in
+whatever order SQLite’s chosen index produced. Dropping the strength and
+affect columns and indexes changed that plan, which reordered tied
+working-memory slots in 45/48 S and 244/250 Eval 1 packets (same items,
+same retrieved list). Hydration now breaks ties by `memory_id`, so the
+order no longer depends on the query plan.
+
+Five subsystems changed packets when switched off but did not clearly
+help or hurt on recall alone. They were judged with Haiku (rubric v2)
+against the pipeline above. S and Eval 1 used one repetition per changed
+case; BEAM-10M conversation 7 used two. Each delta is “switched off
+minus on” with a 95% interval.
+
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Subsystem</th>
+<th>Judge sufficiency delta</th>
+<th>Recall and cost</th>
+<th>Decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>embedding movement (reconsolidation drift)</td>
+<td>S -0.048 ± 0.045, Eval 1 -0.032 ± 0.029; misleading +0.012 on Eval
+1</td>
+<td>packet recall -0.025 / -0.008; instructions -18%, store 380 → 265
+MB</td>
+<td>kept in round 2; removed in round 3 (below): this arm also switched
+off the reconstruction representation, and movement alone is
+neutral</td>
+</tr>
+<tr>
+<td><code>supersedes</code> edges and superseded hydration</td>
+<td>S -0.036 ± 0.052 (sufficient -0.095 ± 0.090), Eval 1 -0.016 ±
+0.013</td>
+<td>packet recall -0.037 / -0.025; instructions -6%</td>
+<td>kept: switching it off hurts</td>
+</tr>
+<tr>
+<td>working memory</td>
+<td>S 0.000 ± 0.047 (sufficient -0.024), Eval 1 -0.014 ± 0.015
+(sufficient -0.018)</td>
+<td>packet recall -0.012 / -0.015; instructions -25%</td>
+<td>kept: every sign is negative, though only just inside the noise;
+round 3 measured its packet cost (below)</td>
+</tr>
+<tr>
+<td>neuromodulator effect scales and encode/retrieve oscillator</td>
+<td>S 0.000, Eval 1 0.000 ± 0.009, BEAM +0.028 ± 0.054</td>
+<td>packet recall -0.003 on Eval 1; no cost change</td>
+<td>both removed in round 3 (below)</td>
+</tr>
+<tr>
+<td>SQLite sparse route (BEAM only; S and Eval 1 packets are identical
+with it off)</td>
+<td>BEAM +0.042 ± 0.059 (n = 18)</td>
+<td>recall equal; instructions -22%, store 372 → 279 MB, query p95 906 →
+811 ms</td>
+<td>kept: at 111k turns it is the cheaper path (round 3, below)</td>
+</tr>
+</tbody>
+</table>
+
+### Round 3: leave-one-out inside the kept subsystems (2026-10)
+
+Round 3 recursed into the subsystems the second round kept, on the
+merged pruned engine. Each feature was switched off alone
+(experiment-only hooks) on LongMemEval-S (48 cases), Eval 1 (250),
+BEAM-10M conversation 7 (22.6k turns, 20 cases) and, where it mattered,
+an eight-episode LongMemEval-M subset (39k turns). Query-time-only
+parameters were swept by re-querying the stored baseline databases,
+which reproduced the baseline packets exactly. Every feature fired at
+full length (BEAM conversation 7: 45,290 `supersedes` edges, 4,520
+reconsolidation and 14,237 retrieval reconstructions, 15,767 labile
+memories, 18,162 suppressed memories, 5,403 used memories, 21
+working-memory slots, 2 soft anchors). Tier 1 is packet gold-turn
+recall; Haiku (rubric v2) judged only packets that changed. Instruction
+counts come from `/usr/bin/time -l` because the machine was shared.
+
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Packets changed (S / Eval 1 / BEAM)</th>
+<th>Recall and judge</th>
+<th>Cost</th>
+<th>Decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>reconsolidation ripple over association edges</td>
+<td>never fires: only <code>supersedes</code> edges exist</td>
+<td>none</td>
+<td>—</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>association fanout cache, association embedding cache, suppression
+id sets, sparse-key index and procedural table, unread retrieval-surface
+fields, superseded penalty, prediction horizon</td>
+<td>write-only or unread</td>
+<td>identical by construction, tip identity 0/48 and 0/250</td>
+<td>first query after a flush −54 ms at 20k turns; RSS −10% on BEAM</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>DA modulator and reward prediction error</td>
+<td>consumer removed</td>
+<td>identical</td>
+<td>—</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>encode/retrieve oscillator</td>
+<td>MSC 0/39 (Durable and Natural)</td>
+<td>identical</td>
+<td>—</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>temporal tie-break in retrieval scoring</td>
+<td>0/48, 0/250, 0/20</td>
+<td>identical</td>
+<td>—</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>in-conversation skip in superseded-predecessor hydration</td>
+<td>0/48, 0/250, 17/20</td>
+<td>BEAM 0.103 → 0.118 (2 better)</td>
+<td>+0.5 KB packet on BEAM</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>retrieval competition and RIF state</td>
+<td>0/48, 0/250, 0/20 with the op skipped; the epoch was the only
+<code>Required</code> consolidation hint</td>
+<td>111k chain recall 0.062 → 0.082, judge +0.008 ± 0.040</td>
+<td>−5% to −15% instructions</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>reconsolidation and retrieval-time reconstruction (together)</td>
+<td>48/48, 241/250, 20/20, 8/8</td>
+<td>S equal (judge 0.000); Eval 1 +0.014 (judge +0.010 ± 0.016); BEAM
++0.007 (+0.014 ± 0.027); M equal (0.000)</td>
+<td>−5% to −11% instructions, stores −12% to −23%</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>working-memory rehearsal</td>
+<td>12/48, 33/250, 0/20</td>
+<td>recall equal; judge 0.000 / +0.002 ± 0.003</td>
+<td>−3% to −4%</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>neuromodulator effect scales (write scale) and NE</td>
+<td>5/48, 32/250, 7/20</td>
+<td>recall within one case; judge 0.000 / −0.001 ± 0.006 / +0.028 ±
+0.054</td>
+<td>—</td>
+<td>removed</td>
+</tr>
+<tr>
+<td>contiguity budget 6 KiB → 12 KiB and lag 2 for all 11 anchors</td>
+<td>query-time sweep</td>
+<td>S 0.642 → 0.691, Eval 1 0.597 → 0.629; judge +0.048 ± 0.056 / +0.037
+± 0.019</td>
+<td>+2 KB per packet</td>
+<td>adopted</td>
+</tr>
+<tr>
+<td><code>supersedes</code> edge writing / predecessor hydration</td>
+<td>47/48, 249/250</td>
+<td>−0.037 / −0.025 / −0.015 recall</td>
+<td>−5% instructions off</td>
+<td>kept</td>
+</tr>
+<tr>
+<td>contiguity hydration</td>
+<td>all</td>
+<td>−0.06 / −0.09 recall off</td>
+<td>—</td>
+<td>kept</td>
+</tr>
+<tr>
+<td>working-memory chunking</td>
+<td>0/48, 0/250, 0/20, MSC 0/39</td>
+<td>never merged a slot</td>
+<td>—</td>
+<td>kept pending a workload where it fires</td>
+</tr>
+<tr>
+<td>family collapse in retrieval</td>
+<td>5/48, 18/250, 10/20</td>
+<td>recall within one case</td>
+<td>−1% to −5% off</td>
+<td>kept (candidate: wired through the sparse-route cache)</td>
+</tr>
+<tr>
+<td>usage detection and usage counters</td>
+<td>0/48, 0/250, 0/20</td>
+<td>identical</td>
+<td>−1% each</td>
+<td>kept: they feed the public
+<code>retrieved_count</code>/<code>used_count</code> fields</td>
+</tr>
+<tr>
+<td>soft anchors</td>
+<td>0/48, 0/250, 0/20</td>
+<td>identical</td>
+<td>−0.5% to −1%</td>
+<td>removed (public API, user-approved)</td>
+</tr>
+<tr>
+<td>working-memory packet hydration</td>
+<td>48/48, 250/250, 20/20</td>
+<td>−0.012 / −0.015 / 0 recall; judge +0.012 ± 0.053 / −0.008 ±
+0.016</td>
+<td>packets −66% / −60% / −84%</td>
+<td>kept: public API, flagged</td>
+</tr>
+<tr>
+<td>SQLite sparse route at 111,527 turns (five BEAM conversations
+chained)</td>
+<td>94/99</td>
+<td>off: recall 0.076 vs 0.062, judge +0.020 ± 0.052</td>
+<td>off: +26% instructions, ingest 170 vs 95 ms/turn past 100k, query
+median 45 vs 33 ms, RSS 7.4 vs 6.7 GB</td>
+<td>kept</td>
+</tr>
+</tbody>
+</table>
+
+After all round-3 commits, the engine against the merged pruned engine:
+packet gold-turn recall 0.642 → 0.691 (S), 0.597 → 0.644 (Eval 1, 19
+cases better, 1 worse), 0.103 → 0.118 (BEAM); Haiku-judged sufficiency
++0.060 ± 0.057, +0.039 ± 0.021 and +0.014 ± 0.048; instructions retired
+−12% (S), −12% (Eval 1), −24% (BEAM); peak RSS −14%, −3% and −17%.
+Artifacts: `.claude/hillclimb/ablation/ablate3/`.
+
 ## Experimental Interpretation
 
-The hard-cut branch changes the research question. Earlier results asked
-how much quality came from online memory, graph retrieval, semantic
-extraction, daily decoder-backed consolidation, and external blind
-judging. The current branch asks a narrower product question:
+The research question changed twice. The v1 hard cut asked how much
+long-horizon utility remains when Cortext is restricted to
+embedding-space memory, graph structure, shallow replay and bounded
+reconstruction. The 2026-10 ablation answered that the lifecycle
+mechanisms contributed nothing measurable on long horizons
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>). v5 then
+asks a different question:
 
-> How much long-horizon utility remains when Cortext is restricted to
-> embedding-space memory, graph structure, shallow replay, and bounded
-> reconstruction?
+> How far can LLM-free segmentation, hybrid multi-granularity retrieval
+> and a small late-interaction reranker go against systems that spend
+> LLM calls at write time?
 
-The answer is not fully settled by unit tests. The current evidence
-proves that the v1 runtime compiles, passes its retained behavioral
-suite, no longer depends on deleted decoder paths, structurally matches
-the preserved replay binary, and recovers the historical roughly-15/31
-blind-judge level on frozen one-year sparse probes while using
-substantially fewer context tokens. Broader quality claims still require
-replicated harnesses against frozen probes, with evaluator state
-isolated from the production library and with the repository treated as
-the production engine under test.
+On the one benchmark run under a shared pipeline (LoCoMo), Cortext is
+within 2.8 points of Mem0 and ahead of Graphiti, with no write-time
+model calls and recall about 17× faster. On the zero-shot BEAM scales,
+it is ahead of Exabase M-1 and behind past.dev under the ExaBase
+protocol. Most other gaps come from vendors’ own protocols and are
+directional only. Several of the strongest numbers (LongMemEval-S,
+DolphinBench, MemLens) are on benchmarks that overlap the reranker’s
+training pools. The held-out slices of those benchmarks are the fair
+comparison. Broader claims still need replicated harnesses against
+frozen probes, with evaluator state outside the production library.
 
 ## Reproducibility Notes
 
@@ -5418,11 +6934,11 @@ is the manuscript regeneration command used for local verification.
 
 The current runtime is embedding- and graph-first. Online scoring,
 boundary detection, write gating, graph updates, retrieval,
-working-memory maintenance, and soft-anchor formation all operate over
-embeddings, bounded processor state, and SQLite graph rows. Raw text,
-audio, and image payloads are used to produce embeddings and to hydrate
-returned memories for applications; hydrated payloads do not feed back
-into online ranking.
+working-memory maintenance, all operate over embeddings, bounded
+processor state, and SQLite graph rows. Raw text, audio, and image
+payloads are used to produce embeddings and to hydrate returned memories
+for applications; hydrated payloads do not feed back into online
+ranking.
 
 The hard-cut runtime no longer contains an internal generative model
 stack. There is no semantic batch stack, adapter registry, mode-selected
@@ -5431,32 +6947,32 @@ bitemporal fact store, or short-term shadow graph. The remaining model
 dependency in the core loop is the configured multimodal embedding path.
 
 Retrieved memories are hydrated only after retrieval has selected a
-compact ranked set. Internal routing nodes such as `LABEL` or
-`ASSOCIATION` rows are not treated as user-facing payloads. When such a
-row reaches the retrieval surface, hydration resolves bounded linked
-source memories where possible so callers see concrete source-backed
-context instead of empty routing artifacts. A linked source keeps its
-own relevance and composite score when it was independently ranked.
-Otherwise query-backed hydration computes relevance from that source’s
-own embedding and computes its composite display score from that
-relevance and the retained relationship weight. Scores therefore
-describe the displayed source result rather than borrowing the internal
-routing node’s score. The same scored memory object is serialized by the
-C API and JavaScript addon. An internal hydration call without a query
-and without an independent source trace leaves both optional scores
-unset; it does not relabel a centroid score as source relevance.
+compact ranked set. A retrieved memory without hydrated content is
+skipped. Earlier builds resolved `LABEL` and `ASSOCIATION` routing rows
+to linked source memories through `has_label` / `derived_from` routes,
+ranked those sources query-aware before truncation, and gave them their
+own relevance and composite scores. The engine ablation study (2026-10)
+removed clustering consolidation, which was the only writer of those
+routes
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>), and
+with it linked-source hydration. A displayed memory carries the
+relevance and composite score of its own retrieval trace. The C API and
+JavaScript addon serialize the same memory object.
 
-Linked-source selection is query-aware before truncation. SQLite
-computes cosine relevance for every eligible member of the bounded
-linked graph set. Multiple graph routes to the same memory are grouped
-by memory id before ranking, so they cannot consume several compact
-slots. SQLite then combines source relevance with the F/S/T-derived
-relationship weight, orders that complete unique set, and only then
-applies the knob-derived compact limit. This prevents either duplicate
-routes or a recent but weakly related fragment from occupying the
-transfer cap ahead of an older verbatim-relevant source, while keeping
-embedding decoding and application-side hydration bounded to the
-selected rows.
+Each retrieved text turn is also hydrated with the adjacent turns of its
+own source stream (temporal contiguity): the immediate successor and
+predecessor of every anchor in rank order, then the turns two steps
+away, each clipped to 480 bytes under one 12 KiB budget per context. The
+round-3 ablation (2026-10) measured the earlier 6 KiB budget and lag-2
+cap (top 6 anchors) as binding. Raising the budget to 12 KiB and giving
+every anchor lag-2 turns raised packet gold-turn recall from 0.642 to
+0.691 on LongMemEval-S and from 0.597 to 0.629 on Eval 1 (13 cases
+better, none worse) for +2.2 KB per Eval 1 packet, and Haiku-judged
+sufficiency by +0.048 ± 0.056 (S) and +0.037 ± 0.019 (Eval 1). Budgets
+of 16 and 24 KiB gave packets identical to 12 KiB. Switching contiguity
+off costs 0.06 to 0.09 packet recall; clipping neighbours to 240 bytes
+raised the clipped-text recall proxy but not judged sufficiency, so the
+480-byte clip stays.
 
 ## Durable Memory Surface
 
@@ -5466,18 +6982,14 @@ live layer:
 -   **Working memory:** active coherent memories used for recent-turn
     continuity, overlap suppression, and prompt reconstruction.
 -   **Long-term graph memory:** persisted `memories`, `signals`,
-    `embeddings`, `associations`, reconstruction rows, eviction audit
-    rows, and optional soft-anchor state.
--   **Soft anchors:** uncertainty-preserving continuity links formed at
-    ingress and exposed as optional memory metadata.
+    `embeddings`, `associations`, and reconstruction rows.
 
 Long-term graph memory is the durable substrate. `memories` stores
-working, long-term, label, and association nodes; `associations` stores
-graph edges such as `derived_from`, `has_label`, `similar_to`,
-`co_occurs`, `causes`, and `reinforces`. Existing `LABEL` nodes can
-still participate in shallow consolidation and hydration, but Cortext no
-longer creates labels from an internal decoder or an attached static
-taxonomy.
+working and long-term nodes; `associations` stores the directional
+`supersedes` edges that memory storage writes. Older stores may still
+hold `LABEL`/`ASSOCIATION` nodes and typed edges from removed
+consolidation paths; the current runtime neither writes nor traverses
+them.
 
 `source_id` is treated as opaque provenance and exact-equality grouping
 only. Cortext does not infer application roles, speaker names,
@@ -5485,14 +6997,28 @@ modalities, maintenance commands, or consolidation behavior from
 reserved source strings. Explicit maintenance is driven by API calls and
 `Signal::force_consolidation`, not magic source identifiers.
 
+Per-source accumulator state (open unit, drift, pacing, refractory)
+lives only in process memory and is never persisted. After each root
+signal the processor keeps every source with an open unit and at most
+256 closed sources, evicting the least recently active closed ones; an
+evicted source restarts from fresh state exactly as it would after an
+engine restart. Hosts that mint one `source_id` per turn or per call
+therefore hold constant per-source memory instead of ~4.5 KB per id. The
+AIST text encoder’s repeat-text cache is a 256 KiB byte-bounded LRU for
+the same reason: benchmark streams repeat fewer than 0.6% of their
+texts, so an unbounded map grew with every ingested turn.
+
 SQLite parameters are checked at bind time, including exact
 statement/argument counts, so `SQLITE_TOOBIG`, `SQLITE_RANGE`, and
 allocation failures cannot be silently converted into NULL values.
 `Process()` and `Flush()` both snapshot mutable processor state until
 the database transaction commits; rollback restores working-memory dirty
-flags and persisted-record cursors. Association writers invalidate the
-fanout cache in constant time and rebuild it lazily on the next
-traversal.
+flags and persisted-record cursors. No operation traverses association
+edges at runtime, so the engine keeps no in-memory association fanout
+index. An earlier fanout cache served only the reconsolidation ripple;
+after that was removed it was rebuilt from a full `associations` scan on
+the first query after every flush (54 ms at 20k BEAM turns) and never
+read.
 
 Natural and Durable retention enter the same operation chain and
 accumulate the current signal before boundary evaluation. Natural leaves
@@ -5502,164 +7028,68 @@ it does not construct a second single-signal memory alongside the
 accumulated unit. The Durable packet is the last signal in the flushed
 unit exactly once.
 
-### Lazy retrieval-inhibition state and the active epoch
+`Flush()` closes every source’s open unit before it commits: each unit
+takes the boundary path of its last signal (write gate, storage, working
+memory, accumulator reset), oldest activity first, under the boundary
+type `flush`. Natural units that had not yet met a boundary (a
+conversation’s last turns, a two-turn conversation below the boundary
+warm-up) were otherwise volatile and lost at the next restart; under
+per-conversation Natural ingest that was 19% of turns. Units closed by
+`Flush()` reach the sparse route as ordinary writes do (dirty rows
+sealed by a later signal), so the published route survives the flush. A
+failed `Flush()` rolls back and reopens exactly the units it closed; its
+snapshot copies only those accumulators, so it stays independent of idle
+sources and store size.
 
-Migration 28 keeps the existing `memories` columns but adds a private
-SQLite recovery clock, generation resets, per-memory anchored inhibition
-state, an expiry index, and a connection-local temporary effective-value
-view. The persistent migration inventory is exactly the three state
-tables plus the expiry index; it does not install durable views or
-triggers. Retrieval competition advances one global log-recovery clock
-per event, materializes at most one knob-derived row batch whose exact
-suppression has crossed the existing 10<sup>−9</sup> active threshold,
-and updates only newly suppressed losers. A full-recovery interval
-advances a generation; older rows are materialized in the same
-knob-derived batches and reset markers are pruned after their generation
-has no remaining active rows. Internal reads that depend on strength,
-suppression, or the suppression timestamp use the temporary effective
-view. Compatibility handling conservatively materializes and rebuilds
-the private representation around every caller-supplied SQL statement
-because aliases, wildcards, views, subqueries, and triggers cannot be
-classified safely from SQL text. A caller mutation also invalidates
-every database-derived processor cache before the statement executes.
+WAL checkpoints never run on the ingest thread. Each file-backed SQLite
+store owns a background checkpointer (its own connection and thread)
+that runs PASSIVE checkpoints when the WAL reaches the auto-checkpoint
+size (1,000 pages) and after every `Flush()`; commits only request one.
+`Flush()` therefore returns once its transaction is in the WAL
+(process-crash durable), and the background checkpoint syncs it against
+power loss; recovery replays only whole committed transactions, so the
+store is consistent after either crash. Durable retention’s post-commit
+barrier is one fsync of the WAL that holds its commit (power-loss
+durable when `Process()` returns) instead of a TRUNCATE checkpoint;
+copying the WAL into the database is left to the background
+checkpointer. Under synthetic disk pressure (8 writers, 256 MB each with
+`F_FULLFSYNC`) a foreground Flush checkpoint stalled 99-161 ms and
+commits carrying SQLite’s foreground auto-checkpoint up to 378 ms; with
+the background checkpointer Flush took at most 5 ms and the remaining
+commit stalls were the WAL page writes themselves.
 
-The engine’s structured competition records carry `memory_id`, so
-ordinary retrieval-induced inhibition remains scoped to exactly one
-losing memory. Legacy callers may instead provide only an embedding
-identity. Because several memories may share that embedding,
-compatibility resolution enumerates every matching memory in stable
-identity order and applies the same suppression to each one. This
-prevents one arbitrary sibling from escaping inhibition, but it also
-means the embedding-only compatibility edge may perform work
-proportional to the shared-embedding membership. It is not included in
-the fixed memory-scoped operation claim.
+Resident embeddings live in one process-wide arena. Every in-memory
+consumer of a stored vector (the processor retrieval surface, the
+historical and current supersession/seed surfaces, rollback snapshots,
+and borrowed supersession candidates) holds an 8-byte handle to an
+immutable float32 row instead of its own copy. Rows are
+content-addressed bitwise and reference-counted, so the
+retrieval-surface, historical, and current entries of one memory share a
+single 1 KiB row, a reconstruction is a new row (copy-on-write), and a
+rollback snapshot copies handles rather than vectors. Stored embedding
+rows are append-only in SQLite (inserted and deleted, never updated),
+which is what makes content addressing exact. Rows sit in 64-byte
+aligned chunks that never move; exact scans read them in place,
+replacing the two flat search buffers that duplicated every historical
+and current vector, and evaluate the same per-row Eigen expressions as
+those buffers did, so ranking is bit-identical. The cosine-family
+collapse keeps only a side table of block norms per historical entry and
+re-expands the normalized vector from the row on use.
 
-On startup from schema 27, migration may anchor active rows that carry
-different historical suppression timestamps to one recovery clock. The
-processor calibrates those rows transactionally and rebuilds the
-disposable active epoch before working-memory hydration reads the
-effective-value view. This ordering prevents restart from seeding a
-working slot with an uncalibrated strength and subsequently persisting
-that stale value.
+### Retrieval-inhibition state (removed)
 
-Consolidation candidate selection also consumes effective rather than
-stale materialized RIF strength. It merges an indexed, at-most-*A*
-inactive-memory frontier with an at-most-*A* exact active-RIF frontier,
-then retains the lowest *A* combined identities for scoring. Before the
-active branch is evaluated, the implementation counts at most 64*C* + 1
-active rows and fails closed when the existing knob-derived active-epoch
-mutation ceiling 64*C* has been exceeded. Consequently the indexed
-inactive scan can skip at most 64*C* active rows, the active calculation
-examines at most 64*C* rows, and downstream association work still sees
-at most *A* identities. A recovered active row therefore cannot consume
-a low-strength slot merely because its durable `memories.strength` has
-not yet been materialized.
-
-The authoritative signal mutation still commits once to persistent
-SQLite. After that commit, a separate connection-local in-memory SQLite
-database publishes only the current recovery clock and the identities
-touched in the current engine epoch. Persistent SQLite may retain more
-active inhibition identities than this disposable epoch projection.
-Suppression, recovery-total, anchor, expiry, and effective-value fields
-remain solely in persistent SQLite; no production consumer reads a
-duplicated RIF value from the disposable identity ledger. Strength-only
-changes that cannot alter active membership therefore do not republish
-it. The ledger never mirrors durable memory, signal, embedding,
-association, or payload history. A failed persistent commit restores the
-pre-signal processor snapshot; a failed post-commit epoch publication
-discards and rebuilds the disposable database from persistent authority
-without replaying the committed signal. Natural returns after
-publication. Durable follows the identical path and then executes only
-the named WAL checkpoint barrier.
-
-The active epoch records event, changed-row, allocated-byte, and maximum
-statement-row measures. Its harness safety ceilings are derived from the
-same clamped F/S/T route capacity and row batch
-
-*C*(*F*, *S*, *T*) = round (256 + 256*F* + 128*S* + 128*T*),   *B*(*F*, *S*, *T*) = round (64 + 64*F* + 32*S* + 32*T*).
-
-events are bounded by *C*, mutations by 64*C*, and allocated bytes by
-131, 072*C*. Persistent active-row loads, in-memory SQLite publication,
-recovery calibration, and retired-generation materialization use
-statements of at most *B* rows. Thus all-low, midpoint, and all-high
-resolve respectively to 256/16,384/32 MiB/64 rows, 512/32,768/64 MiB/128
-rows, and 768/49,152/96 MiB/192 rows. The midpoint values are defaults,
-not fixed production constants. Reaching an epoch ceiling raises the
-existing `Required` consolidation hint before an honoring caller can
-enter another event. Ignoring the hint neither starts another epoch nor
-drops mutations. A live *B* + 1 mutation set is completed by a second
-independently *B*-bounded statement; *B* is a statement bound, not a
-history cap. This is distinct from historical sparse-route backfill,
-whose logical *B* + 1 completion probe does not read or process the
-additional historical row. Any epoch overflow observation is named as
-the resolved limit plus one and is not an additional work-batch size. A
-successful explicit consolidation commits persistent SQLite and then
-starts a fresh in-memory SQLite epoch containing only the current clock.
-It does not copy the persistent active-identity population into the new
-epoch. The next ordinary event publishes only its changed identities. A
-failed consolidation leaves the old epoch intact, while a publication
-failure after persistent commit discards and recreates the same empty
-epoch without replaying the durable mutation. The retry intent is sticky
-until that empty epoch is published: even if both publication and
-immediate recovery fail, the next processor event executes the empty
-reset rather than a full persistent-history rebuild. Retrieval-surface
-reloads preserve the RIF epoch sidecar across their independent cache
-refresh, including the exception path after a failed reload, so
-consolidation cannot erase that retry intent after the durable commit.
-These are harness-scoped ceilings, not a claim that every production
-workload is globally bounded. Non-finite F/S/T values fail before
-integer capacity derivation; finite out-of-range values retain the
-engine’s established clamping to \[0, 1\].
-
-The row-batch contract is exercised structurally over all 27 points in
-{0, 0.5, 1}<sup>3</sup> and through live *B* + 1 publication at nine
-production-shaped points: midpoint, both joint endpoints, and each
-one-axis endpoint. The latter varies text, audio, image, shared-source,
-and opaque-source labels while requiring the same resolved batch and the
-same two-statement completion. Thus 128 is only the neutral-knob result,
-and 129 is only its derived *B* + 1 boundary.
-
-The consolidation-reset regression uses the same nine knob points and
-seeds a knob-derived *B* + 1 persistent active population with mixed
-text, audio, image, shared-source, and opaque-source labels. At every
-point the durable population survives consolidation, the new disposable
-epoch contains zero copied identities, and the following event publishes
-exactly its one changed identity. An additional failure-chain regression
-seeds a neutral *B* + 1 = 129 mature durable population, injects
-failures into publication, immediate recovery, and the following
-retrieval-surface reload, and requires the next event to observe zero
-copied rows before publishing exactly one changed identity. The
-persistent 129-row population remains authoritative; it is never
-converted into a 129-row statement. The reload exception was first
-reproduced as a missing sidecar before the catch path was repaired. This
-removes store-sized work from the successful-consolidation publication
-edge. It does not yet bound initial processor startup: compatibility and
-restart recovery may still reconstruct current-generation identity and
-calibration state from persistent SQLite, so bounded whole-engine
-restart remains an explicit open gate.
-
-The same derivation owns the integrated SQLite HNSW maintenance and
-consolidation frontiers. Public route inspection and queue effort reset
-to 8*C* after consolidation, advance by *R* = max (2, ⌊*B*/16⌋) per
-retrieval-active query, and saturate at 9*C*; downstream activated
-identities are bounded by *A* = 2*C* + 2*B*; graph degree is
-*N* = max (8, ⌊*B*/2⌋); search expansion is *E* = max (8, ⌊*B*/4⌋); and
-ordinary route sealing occurs at *B* − *E*. Score consolidation reads at
-most *A* indexed low-strength identities and at most *N* association
-edges for each admitted identity. Natural and Durable execute these same
-operations and mutations; Durable adds only the existing post-commit
-flush/checkpoint barrier. None of these bounds branches on modality or
-source identifier.
-
-The pinned HNSW implementation retains its SIMD distance kernels, while
-a content-checked local patch bounds every speculative neighbor prefetch
-by the actual adjacency length. This prevents a sanitizer-visible
-one-past-end read and skips the zero-byte adjacency copy whose
-empty-vector destination may be null, without changing candidate
-membership, adjacency contents, or ranking. Cache-byte estimation also
-performs its knob-derived multiplication explicitly in `std::size_t`,
-keeping the same capacity on native and WebAssembly targets instead of
-relying on an implicit 64-to-32-bit narrowing conversion.
+Migration 28 had added a lazy retrieval-induced-forgetting
+representation: a global log-recovery clock, generation resets,
+per-memory anchored inhibition rows, a connection-local effective-value
+view, and an in-memory SQLite active-epoch projection that could raise
+the `Required` consolidation hint. Caller-supplied SQL was wrapped to
+materialize and rebuild that state around every statement. Retrieval
+competition was removed
+(<a href="#sec-advanced" class="quarto-xref">Section 10</a>), and
+migration 45 drops the three tables and the `suppression`,
+`suppression_ts`, `suppression_count` and `recovery_time_start` columns.
+Caller SQL still invalidates every database-derived processor cache
+before it executes.
 
 ### Bounded activation observation shadow
 
@@ -5812,27 +7242,24 @@ limit is *m**a**x*(16, ⌊*C*/4⌋), and maximum hierarchy level is
 *m**a**x*(2, ⌊*B*/16⌋) reciprocal rows. HNSW construction effort is
 *m**a**x*(32, round (25*C*/64)) and query effort is
 *m**a**x*(*C*, round (5*C*/2)). The bootstrap, maximum public
-visited-node, maximum public queue, shadow-cache, construction-node, and
-construction-queue limits are respectively 2*C*, 9*C*, 9*C*, 24*C*,
-*C* + *B*, and 2*B*. The 9*C* quantity is a hard routing-inspection
-ceiling, not the activated working set; the cache’s node map and FIFO
-order are bounded together, and a successful seal clears both so
-invalidated rows cannot leave accumulating order entries. After exact
-reranking, no more than *A* identities may proceed into eligibility,
-family collapse, graph expansion, and final ranking. Exact cosine family
-checks have a separate 2*C* per-event ceiling. The breadth-first
-adjacency fetch batch is *m**a**x*(8, ⌊*B*/4⌋). The larger query and
-bounded cache coefficients were selected by copied-late quality probes:
-2*C*/*C* and 3*C*/2*C* search candidates missed the exact-identity gate;
-8*C*/4*C* with a 16*C* cache passed on the initial store but missed one
-exact top-1 after the bounded supersession surface changed the live
-graph. A later expanding 5*C* → 12*C* envelope restored exact sampled
-quality but made both query and construction work grow with query age.
-The retained candidate resets public route inspection to 8*C*, advances
-it by *R* only until the 9*C* ceiling, fixes downstream activation at
-*A* = 2*C* + 2*B*, and reserves the smaller *C* + *B*/2*B* envelope for
-graph construction. These are knob-derived finite limits, not midpoint
-constants.
+visited-node, maximum public queue, construction-node, and
+construction-queue limits are respectively 2*C*, 9*C*, 9*C*, *C* + *B*,
+and 2*B*. The 9*C* quantity is a hard routing-inspection ceiling, not
+the activated working set. After exact reranking, no more than *A*
+identities may proceed into eligibility, family collapse, and final
+ranking. Exact cosine family checks have a separate 2*C* per-event
+ceiling. The breadth-first adjacency fetch batch is
+*m**a**x*(8, ⌊*B*/4⌋). The larger query and bounded cache coefficients
+were selected by copied-late quality probes: 2*C*/*C* and 3*C*/2*C*
+search candidates missed the exact-identity gate; 8*C*/4*C* with a 16*C*
+cache passed on the initial store but missed one exact top-1 after the
+bounded supersession surface changed the live graph. A later expanding
+5*C* → 12*C* envelope restored exact sampled quality but made both query
+and construction work grow with query age. The retained candidate resets
+public route inspection to 8*C*, advances it by *R* only until the 9*C*
+ceiling, fixes downstream activation at *A* = 2*C* + 2*B*, and reserves
+the smaller *C* + *B*/2*B* envelope for graph construction. These are
+knob-derived finite limits, not midpoint constants.
 
 Sparse activation is candidate generation rather than an exact
 completeness certificate. The route first rejects an activated proposal
@@ -5888,53 +7315,28 @@ over-capacity metadata invalidates the route. Graph and memory rows
 remain authoritative in SQLite.
 
 Sparse HNSW activation is candidate generation rather than an
-eligibility-complete seed surface. Routing nodes such as `ASSOCIATION`
-memories may consume activated slots and are then removed by the public
-long-term seed predicate. If that filtering leaves fewer than the
-requested candidate limit, the operation discards the underfilled sparse
-proposal and executes the existing exact SQL seed path. Consequently the
-fixed sparse envelope is not misrepresented as complete after
-operation-specific filtering; the fallback may still perform store-sized
-exact work.
+eligibility-complete seed surface. Routing nodes such as legacy
+`ASSOCIATION` memories in older stores may consume activated slots and
+are then removed by the public long-term seed predicate. If that
+filtering leaves fewer than the requested candidate limit, the operation
+discards the underfilled sparse proposal and executes the existing exact
+SQL seed path. Consequently the fixed sparse envelope is not
+misrepresented as complete after operation-specific filtering; the
+fallback may still perform store-sized exact work.
 
-Decoded activation-snapshot rows reuse the route’s existing
-generation-qualified shadow-node cache rather than being selected and
-decoded again for every query. The first query after reopen loads only
-snapshot identities absent from that cache; later queries reuse those
-immutable decoded rows while continuing to compute query distance
-exactly. The shared cache remains bounded by 24*C*, and every successful
-seal clears both its node map and FIFO order before any row from the
-next authoritative SQLite state can be reused. A separate physical
-snapshot-cache-miss counter distinguishes the fixed *A* rows evaluated
-from the rows actually loaded from SQLite. This is a read-through
-optimization of the one persisted route, not an in-memory authority or a
+Activation-snapshot rows are read from the same resident generation
+graph as every other traversal row, so no query decodes a node row from
+SQLite; query distances are still computed exactly per query. The
+resident graph mirrors the one persisted route (each seal commits to
+SQLite before its rows are replaced in memory) rather than acting as a
 second write path, and it contains no modality or source-id predicate.
 
-Emotional propagation uses the same first-source-wins semantics while
-avoiding duplicate downstream work. Its breadth-first kernel carries up
-to 64 source ordinals in one bit mask. For each reached embedding, the
-kernel records only the lowest source ordinal and that source’s first
-(therefore shortest) positive depth; after all batches, it emits one
-winning pair per embedding in deterministic source/depth/identity order.
-Separate counters record all source–embedding reachability pairs and all
-physical adjacency visits, so winner collapse does not relabel unbounded
-traversal as bounded work. The optimization is independent of modality
-and source-id labels and does not change persistence or add a write
-path.
-
-The bounded-cascade experiment adds three independent F/S/T-derived
-limits around that exact winner rule. Its maintained source-priority
-snapshot holds at most the public routing budget 5*C*; one cascade
-inspects no more than that snapshot and executes at most *B* eligible
-sources. The shared traversal stops before physical adjacency visit
-5*C* + 1, and the existing enqueue stage emits at most *A* = 2*C* + 2*B*
-embedding updates. SQL fallback materializes at most the same 5*C*
-source prefix. Inspection, accepted-source, physical-edge, winning-pair,
-and update counts remain distinct, with their resolved limits recorded
-on each profiled event. The snapshot ordering depends only on timestamp
-and memory identity; no source-id or modality label participates. These
-limits remain private experiment hooks until the complete quality,
-plateau, restart, and knob-ablation contracts pass.
+Earlier builds also bounded the emotional cascade’s breadth-first
+propagation with a first-source-wins winner collapse and three
+F/S/T-derived limits. The cascade was removed with emotional
+consolidation
+(<a href="#sec-negative" class="quarto-xref">Section 14</a>), and these
+limits went with it; Appendix E keeps the measurements.
 
 The cycle auditor classifies retrieval independently from whole-engine
 process shape. It selects retrieval-active events from explicit route
@@ -5977,11 +7379,11 @@ The independently persisted consolidation snapshot then contributes at
 most *A* additional rows to the same exact union, after which the
 operation returns at most *A* memory identities to the existing
 downstream path. Timestamp eligibility, current-surface membership,
-supersession, long-term kind, cosine-family collapse, graph expansion,
-final scoring, and deterministic ties remain authoritative. This sparse
-activation route fixes disconnected-node blindness without introducing a
-second retrieval or write path; HNSW controls locality while the derived
-envelope controls exact coverage and work.
+long-term kind, cosine-family collapse, final scoring, and deterministic
+ties remain authoritative. This sparse activation route fixes
+disconnected-node blindness without introducing a second retrieval or
+write path; HNSW controls locality while the derived envelope controls
+exact coverage and work.
 
 Deterministic envelope completion reads only rows with `active=1`
 through the existing `(generation, active, memory_id)` index. Sealed
@@ -6070,13 +7472,23 @@ implementation tests whether the in-memory ordered iterator has another
 entry. Thus 129 is the derived logical *B* + 1 boundary, not a physical
 129th-row read and never a 129-row work batch. Opening the sparse route
 loads one metadata row, validates at most *A* packed activation
-identities from that row, resolves only that knob-bounded ordered slice,
-and lazily fetches graph nodes under the 9*C* canonical plus *A*
-snapshot public-query bounds; the route itself does not replay or mirror
-complete history. This is not a bounded whole-engine restart claim:
-`SignalProcessor` startup still materializes the complete current memory
-surface before retrieval begins, so startup remains *O*(history) until
-that separate hydration path is removed.
+identities from that row, and then loads every node row of the route
+generation into memory once, in fixed 4,096-row chunks. Traversal reads
+adjacency and vectors only from that resident graph; each committed seal
+replaces exactly the rows it wrote, and SQLite remains the durable
+authority the graph is reloaded from after restart or recovery. A
+resident node keeps its adjacency and a handle to an arena row: the
+memory’s current raw row when normalizing it reproduces the stored
+normalized vector bit for bit (the distance then normalizes each
+component on the fly, exactly as the stored vector was formed),
+otherwise the stored vector itself. The per-query 9*C* canonical plus
+*A* snapshot row envelope is unchanged, including the slot an identity
+outside the generation consumes. On the 111k-node BEAM-chain snapshot,
+513 activated searches return identical identity lists (same hash) and
+per-search CPU falls from 16.4/24.8 ms (p50/p95) with per-node SQLite
+fetches to 3.8/4.6 ms. Route opening is therefore *O*(generation), like
+`SignalProcessor` startup, which already materializes the complete
+current memory surface before retrieval begins.
 
 Live writes do not grow an unbounded in-memory construction delta for
 either active or unpublished routes. Each construction edge drains at
@@ -6091,25 +7503,31 @@ the journal are complete. Thus a busy active route or legacy-store
 migration cannot turn the sparse index into a second unbounded write
 path.
 
-Normal writes and reconsolidations append only their memory identities
-to the durable journal. A successful seal writes changed nodes and
-knob-bounded reciprocal neighbors, advances graph metadata, and clears
-only its staged root identities in the same SQLite transaction. Neighbor
-proposal during this seal uses the *C* + *B* node and 2*B* queue
-construction envelope, not the public 9*C* activation envelope. If an
-existing active node’s normalized embedding moves beyond the fixed
-10<sup>−6</sup> cosine-distance tolerance, the generation is invalidated
-rather than pairing the new vector with stale adjacency. Exact retrieval
-remains authoritative while the existing bounded backfill constructs a
-replacement generation. The rejected incremental-relink experiment is
-reported in the optimization section. A failed authoritative transaction
-cannot leave a durable route mutation. An ordinary interrupted or failed
-seal leaves the identities journaled for restaging. Intentional
-moved-embedding invalidation instead abandons the incoherent generation
-and clears its journal; the authoritative current surface feeds the
-replacement bounded build while exact retrieval remains authoritative.
-This gives consolidation a real route-epoch boundary without a
-store-sized graph rewrite.
+Normal writes append only their memory identities to the durable
+journal. A successful seal writes changed nodes and knob-bounded
+reciprocal neighbors, advances graph metadata, and clears only its
+staged root identities in the same SQLite transaction. A full neighbor
+list admits a closer new node by replacing a member, but never a member
+for which that link is its only level-0 inbound link (the resident graph
+keeps the exact level-0 in-degree of every row); and a new node that no
+neighbor admitted by distance is linked from its nearest neighbor that
+can give up such a member. Distance-only replacement had left 1.5% of
+nodes with no inbound link and 2.9% unreachable from the entry at 443k
+nodes. Neighbor proposal during this seal uses the *C* + *B* node and
+2*B* queue construction envelope, not the public 9*C* activation
+envelope. If an existing active node’s normalized embedding moves beyond
+the fixed 10<sup>−6</sup> cosine-distance tolerance, the generation is
+invalidated rather than pairing the new vector with stale adjacency.
+Exact retrieval remains authoritative while the existing bounded
+backfill constructs a replacement generation. The rejected
+incremental-relink experiment is reported in the optimization section. A
+failed authoritative transaction cannot leave a durable route mutation.
+An ordinary interrupted or failed seal leaves the identities journaled
+for restaging. Intentional moved-embedding invalidation instead abandons
+the incoherent generation and clears its journal; the authoritative
+current surface feeds the replacement bounded build while exact
+retrieval remains authoritative. This gives consolidation a real
+route-epoch boundary without a store-sized graph rewrite.
 
 Application hydration uses a bounded-output rule when a memory has no
 materialized memory or reconstruction blob. SQLite retains every
@@ -6193,19 +7611,17 @@ CoreStage:
   adaptive metric weights, thresholding, recent context, boundary/write gate
 
 StorageStage:
-  memory storage, soft-anchor update, synaptic tagging, signal metrics
+  memory storage, signal metrics
 
 RetrievalStage:
   streaming pacing, graph-augmented retrieval, rate/MNI gating,
   memory-usage detection
 
 FeedbackStage:
-  retrieval competition, predictive pre-activation, reconsolidation,
-  focus/sensitivity/stability feedback, influence feedback,
-  serial-position effects, memory strength/eviction, emotional consolidation,
-  working memory, accumulator reset, consolidation gate/cluster/shallow,
-  graph build, emotional cascade, meta-learning
+  memory usage counters, working memory, accumulator reset
 ```
+
+<!-- PRUNE: update the CoreStage list above (metrics, neuromodulators, adaptive metric weights, mood, thresholding) to the final removal list. -->
 
 Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so
 replay probes can inspect retrieval without mutating the durable store.
@@ -6214,71 +7630,225 @@ replay probes can inspect retrieval without mutating the durable store.
 
 Consolidation is explicit. The runtime does not schedule it
 automatically and does not expose mode variants. Callers invoke
-`Consolidate()` or inject a signal with `force_consolidation=true`; a
-signal dispatcher then runs only the knob-derived consolidation gate,
-clusterer, shallow consolidation, and graph builder. The normal core,
-storage, retrieval, feedback, episode, object-store, working-memory,
-signal-counter, and rate-observation paths are not maintenance steps.
+`Consolidate()` or inject a signal with `force_consolidation=true`; the
+signal dispatcher then runs no operations, and the processor seals and
+recenters the sparse retrieval route. Clustering consolidation was
+removed in the 2026-10 engine ablation
+(<a href="#sec-consolidation" class="quarto-xref">Section 12</a>). The
+normal core, storage, retrieval, feedback, episode, object-store,
+working-memory, signal-counter, and rate-observation paths are not
+maintenance steps.
 
-Emotional cascade metadata is hydrated into a private, rebuildable
-processor cache keyed by memory id and base embedding id. The cache
-preserves the SQL aggregation contract for shared embeddings by
-retaining every member row and deriving current intensity and half-life
-bonus with the same per-embedding minima. Its bounded flashbulb-source
-prefix is ordered by descending emotional intensity with ascending
-memory-id ties. Before each cascade, SQLite applies the event’s
-intensity, arousal, and recent-window predicates and only then orders
-and truncates to the knob-derived source limit. The private cache
-therefore consumes the same eligible prefix as the SQL fallback: a stale
-or low-arousal high-intensity row cannot hide a lower-intensity eligible
-source. This is selection-equivalence evidence, not a claim that SQLite
-can always locate that prefix in work proportional to the returned
-limit; a history with many higher-intensity ineligible rows may require
-additional indexed filtering. Emotional consolidation overwrites the
-affected embedding family, cascade propagation applies the existing
-maxima, storage and shallow consolidation append rows, and eviction
-removes them. Journal-aware rollback discards and rehydrates this
-database-derived cache, while arbitrary custom pipelines retain the
-complete snapshot path. This changes execution ownership only; source
-thresholds, tie order, traversal, decay, updates, and persisted rows are
-unchanged. When multiple emotional sources require traversal, the
-implementation batches them in source-order groups of at most 64 and
-propagates a bit per source through the same breadth-first levels. Each
-bit retains its source-specific radius, and reached embeddings are
-emitted at the first depth observed for that source. Batches are
-processed in original source order, so the existing first-source-wins
-update rule is unchanged. This shares edge visits without using source
-identity or modality as an optimization key. The cache also records the
-memory nodes from which each source could still expand within its
-radius. An incrementally inserted association can therefore advance the
-fixed point without another traversal when neither endpoint lies in any
-source’s expansion footprint. A topology rebuild invalidates the
-footprint conservatively. Ordinary unconnected non-source inserts and
-monotone increases to target emotional values likewise preserve the
-fixed point; source changes and target-value decreases still re-arm it.
-A traversal that reaches either its update ceiling or its physical
-edge-visit ceiling is only a partial prefix and never records a fixed
-point, so the next event revisits the unresolved graph tail.
-
-Shallow consolidation is embedding-only. It clusters eligible long-term
-memories, writes an `ASSOCIATION` centroid node for each cluster,
-assigns source memories to the cluster, and emits `derived_from` edges.
-If durable `LABEL` nodes already exist, shallow consolidation can attach
-the closest labels to the association centroid with F/S/T-derived limits
-and similarity thresholds. It does not synthesize payload summaries,
-extract relations, create fact assertions, call a decoder, or attach a
-read-only external taxonomy.
-
-This keeps replay close to the current product target: consolidation
-behaves like low-latency sleep replay over stored embeddings and graph
-edges, not a batch semantic extraction job.
+Emotional consolidation and the emotional cascade were removed in the
+2026-10 engine ablation, together with their private emotional-metadata
+cache, fixed point and topology footprint
+(<a href="#sec-emotional-consolidation"
+class="quarto-xref">Section 10.12</a>).
 
 ## Retrieval Implementation
 
+<a href="#sec-retrieval" class="quarto-xref">Section 6</a> and
+<a href="#sec-hydration" class="quarto-xref">Section 7</a> specify the
+v5 retrieval and hydration algorithms. This section records
+implementation detail and stage measurements behind them.
+
+Read-only (ephemeral) text queries add a lexical seed channel to the
+vector seeds. Each stored long-term text memory is indexed in a
+contentless SQLite FTS5 table (`memory_text_fts`, rowid = memory id,
+porter-stemmed `unicode61` tokens) inside the savepoint that writes the
+memory, so the index commits, rolls back, and is deleted with it; the
+text itself stays in the object store. A query ORs its non-stopword
+words (at most 16, each a quoted FTS5 string), dropping words whose
+index term occurs in more than max (64, 0.05*N*) of the *N* memories:
+such terms carry little BM25 weight, and their posting lists dominated
+query time on a 22.6k-turn store (FTS5 time per query fell from about 14
+ms to 2 ms). A connection-local scratch FTS5 table with the index’s
+tokenizer maps query words to index terms, and an `fts5vocab` table
+supplies their document frequencies. The query takes the 20 best
+`bm25()` hits that pass the same seed eligibility as vector seeds
+(long-term, vector-seed eligible, written before the exclusion time).
+Vector seed ranks and lexical ranks are fused by reciprocal rank,
+∑1/(60 + *r*), which orders the output; the semantic score of every
+candidate is unchanged. The channel targets turns that share a query’s
+rare words (names, numbers) but sit far down the vector ranking: on the
+250-case packet-sufficiency evaluation, gold-turn recall in the packet
+rose from 0.60 to 0.79 and judged sufficiency rose by 0.13 (train) and
+0.22 (test); on the 48 LongMemEval-M haystacks (about 4.9k turns each)
+packet recall rose from 0.41 to 0.67 and judged sufficiency from 0.53 to
+0.82, with query p95 and ingest time within 2% of the vector-only
+engine. Ingest-time retrieval stays vector-only; lexical seeds there
+cost per-turn time without improving recall.
+
+A query may carry a reference time *T* (`Cortext::RetrievalTime`), in
+the past or the future, as signal metadata compared with stored memory
+times, never as text. Unset, retrieval is unchanged (packets
+byte-identical on the LoCoMo clock replay). Set, a temporal seed channel
+(`src/operations/temporal_seed_internal.cpp`) returns the *K* = 10
+long-term memories nearest *T* by interval distance: 0 when *T* falls
+inside \[start, end\], else the distance to the nearer edge. Three range
+scans over partial indexes on long-term `start_ts` and `end_ts` (schema
+migration 55), each limited to 2*K* + 4 rows, find them in
+*O*(log *N* + *K*). The list joins the reciprocal-rank fusion with
+weight 0.5, 0.5/(60 + *r*), so a memory found only by time ranks after
+every dense seed, while a dense or keyword seed near *T* rises; the
+channel adds candidates and removes none. Only the query’s still-open
+write unit stays excluded. With `as_of`, every seed path and the
+attached later turns and restatements also exclude memories that start
+after *T*, an as-of view of what was stored by then. An oracle probe
+that sets *T* to each LoCoMo question’s earliest gold turn raised
+evidence hits in the packet from 1767 to 1783 of 1979 questions (17
+gained, 1 lost), with query p50 0.07 to 0.17 ms higher and p95 within
+the spread between run orders; it bounds the mechanism, not a benchmark
+score.
+
+Queries rerank the head of the fused candidate pool with a learned
+late-interaction model over the frozen AIST encoder
+(`models/AIST-87M-GGUF/AIST-87M-LI.gguf`, 102,469 weights or 0.10M
+parameters, `src/models/aist_late_interaction.cpp`; training in
+`tools/reranker`). Every item, in any modality, becomes a set of unit
+vectors in one 64-d space. The first source is its AIST position
+features: text token hidden states and 12x12 image patches, each tower
+with its own linear map. The second is its stored 256-d retrieval
+vector, through one map shared by all modalities. A stored signal keeps
+16 spherical k-means codes of its positions as int8 (table
+`memory_signal_li_codes`, schema migration 54, a 1,028-byte blob per
+stored payload). A query keeps all of its positions, each with a learned
+gate weight. A member scores the gate-weighted mean over query vectors
+of the best cosine to its own vectors (MaxSim); a memory scores a soft
+maximum over its first eight members plus a rank prior. The model is
+distilled from a text cross-encoder (MiniLM-L6) with listwise KL. A
+listwise loss on gold memories is added. Image members get soft labels
+through their captions and hard labels through MemLens gold, so
+cross-modal pairs are trained directly.
+
+The rerank runs on the top 64 candidates after neighbour deferral and
+before the output cut. Deferring the neighbours of the reranked picks
+instead lowered Eval1 packet recall from 0.938 to 0.892. Some memories
+have no member with codes: towers without a trained map (audio) and
+signals stored before the model. These keep their slots, and the coded
+memories reorder among the remaining ones; a lone global vector cannot
+compete with a code set. A query without position vectors keeps the
+engine order.
+
+Packet gold-turn recall rose on every set. Eval1 rose from 0.846 to
+0.938; its conversations held out from training rose from 0.878 to
+0.955. On LongMemEval-S, S rose from 0.808 to 0.992 and M from 0.770 to
+0.894. On MemLens, text gold rose from 0.415 to 0.575 and image gold
+from 0.344 to 0.396. On BEAM at a 34,800-byte budget, recall at 100K /
+1M / 10M rose from 0.615 / 0.413 / 0.274 to 0.696 / 0.518 / 0.369; 100K
+and 10M were never trained on.
+
+Judged packet sufficiency was near ceiling. Eval1 went from 0.955 to
+0.973 and the MemLens image rubric from 0.852 to 0.878. On BEAM end to
+end, the judged score at 100K / 1M / 10M moved from 0.816 / 0.778 /
+0.667 to 0.843 / 0.799 / 0.699. DolphinBench passed 0.812 against 0.788
+(600 tests), with abstention flat to slightly lower.
+
+The rerank step costs 1 to 3 ms per query. Query p95 stayed within 1.02x
+to 1.14x of the engine without it at 10K to 443K memories. Its codes
+added 11% to Eval1 store size.
+
+Standing memories are a small query-independent channel for lasting
+directives and preferences (“Always include version numbers when I ask
+about libraries”, “From now on, answer in French”). Membership is a
+property of the stored signal that states the directive (table
+`standing_signals`, schema migration 53, which replaced the memory-level
+set of migration 51), set when its memory is written: under Natural
+retention a directive is one turn of a grouped memory several kilobytes
+long, which a memory-level check never admits. Today’s only detector is
+a pattern check over a signal’s text (at most 480 bytes, a clause
+opening with *always*, *never*, *from now on*, *going forward*,
+*whenever I*, *I prefer* and similar, optionally after *please*). The
+set keeps the newest 256 members; stores written before migration 53
+fill it once on open. Every query ranks the members written before it
+within the set, fusing cosine to the query (the signal’s own stored
+vector) with a BM25 rank by reciprocal rank. The BM25 runs over word
+stems (first six bytes of each non-stopword word) stored with each
+member, with document frequencies from the set itself: store-wide
+frequencies would discount the topic words that tell directives apart,
+and the store’s FTS5 index cannot be restricted to the set cheaply (a
+full posting-list scan cost about 20 ms per query on a 10M store). The
+best five, within 2 KiB, form a standing block of their own ahead of the
+retrieved memories (`Context::standing_memory`), each entry holding only
+the directive signals of one memory, never its whole memory or
+neighbours. The block takes no retrieved slot: a consumer that cuts the
+retrieved list at k keeps the same k retrieved memories (LongMemEval-M
+gold recall at k = 11 fell by 0.087 while standing items took ranked
+slots, and by 0.024 \[-0.071, 0.000\] with the block). Query p95 at 100K
+/ 1M / 10M stays within 0.98 / 0.96 / 1.14 of the engine without the
+channel. A directive is stated once and must shape answers long after it
+falls out of query similarity: on BEAM the share of
+instruction-following gold turns (the instruction and its
+acknowledgement) in the 8k-token packet was 0.44 / 0.26 / 0.00 at 100K /
+1M / 10M tokens before, and 0.86 / 0.81 / 0.44 after (PR #28, standing
+block b5447e25 against the engine without it); gold-turn share in that
+packet rose by 0.070 / 0.075 / 0.053 overall, with no other category
+losing more than 0.01.
+
+Knowledge updates also reach the packet from the newer side. A query
+phrased like a fact’s first statement retrieves that older version,
+while the latest restatement, which links to it with a `supersedes`
+edge, ranks below it. For each of the eleven best-ranked memories,
+packet hydration therefore appends the newest superseding memory’s text
+(at most 512 bytes) after the anchor’s own content, so the packet reads
+oldest to newest; at most 4 KiB per packet, in one indexed lookup on the
+edge target for all anchors. On BEAM this added 0.005 gold-turn share at
+each scale and 0.023 \[0.010, 0.036\] to the Haiku-answered 10M score.
+
+Memories grouped from several signals need two more query-time steps.
+Under Natural retention with one source per conversation, BEAM
+conversations are stored as units of three to five turns (about 10 KB
+each with their attached neighbours), so an 8,000-token evidence budget
+held three or four retrieved memories, and a unit’s pooled vector sits
+between its members, close to none of them. *Evidence budget*: the
+engine cannot know a reader’s budget, so a caller may pass one per
+query, in bytes (text by its bytes, other media 480 bytes each); unset,
+memories come back whole. Set, the standing block and the retrieved
+memories with their attached neighbours are fitted to it once the packet
+is complete: memories join in rank order at their floor (a grouped
+memory’s member most similar to the query in each modality, by stored
+shared-space vector, `memory_signal_vectors`), with their neighbours
+when those fit, without them when only the memory does, or not at all;
+then one member cap shared by every grouped memory grows to the largest
+with which the packet fits, kept members in their original order. More
+distinct memories are kept trimmed before lower-ranked ones are left
+out. *Member scoring*: query seeding scores a grouped memory by the
+higher of its pooled cosine and its best member’s cosine, and the twenty
+memories with the best members join the seeds. Member vectors of grouped
+LONG_TERM memories stay resident as int8 codes (dimension + 4 bytes per
+member, read incrementally by signal id; single-signal memories are not
+held, so Durable stores are unchanged), and each hit is resolved to its
+current memory through the store. Opening a file store in WAL mode reads
+the stored member vectors on a read-only connection and thread of its
+own while the rest of open runs, and the first query adopts that read:
+at 10M the first query after open took 54 ms when it read them itself
+and takes 26 ms (26 ms without the member channel). On BEAM under
+Natural ingest the gold-turn share of the 8,000-token packet rose from
+0.385 / 0.195 / 0.125 to 0.617 / 0.420 / 0.272 at 100K / 1M / 10M
+(Durable ingest: 0.675 / 0.472 / 0.296), and the past.dev-protocol score
+answered and judged by gpt-5.6-luna from 0.793 / 0.750 / 0.651 to 0.847
+/ 0.813 / 0.718 (+0.054 \[0.019, 0.095\], +0.062 \[0.044, 0.081\],
++0.067 \[0.029, 0.100\]); knowledge update rose most (+0.24 at 1M). A
+fixed 3 KiB member cap per memory, the first form of this trimming, cost
+judged Eval 1 sufficiency -0.016 ± 0.016 when the reader saw the whole
+packet (LongMemEval-S -0.006 ± 0.026, LongMemEval-M -0.006 ± 0.043,
+MemLens +0.000 ± 0.026); the budget leaves such packets whole. Unset,
+judged against the Natural baseline by gpt-5.6-luna (both arms, four
+repetitions), Eval 1 is -0.006 ± 0.012 and LongMemEval-S -0.003 ± 0.013
+(two repetitions: LongMemEval-M +0.018 ± 0.020, MemLens +0.008 ± 0.025).
+With the BEAM reader’s budget passed (8,000 luna tokens, 34,800 bytes)
+the gold-turn share of its context equals the 3 KiB cap’s (-0.002 /
++0.001 / +0.002) and the e2e score is 0.842 / 0.806 / 0.715 against
+0.844 / 0.811 / 0.695 (paired -0.002 \[-0.018, 0.014\], -0.005 \[-0.019,
+0.008\], +0.021 \[0.005, 0.037\]); unset, the whole memories overflow
+that reader (gold share -0.144 / -0.115 / -0.093). Paired query p50 /
+p95 at 1M and 10M, first queries after open included, are within 1.05 /
+1.04 and 1.07 / 1.03 of the engine without both steps.
+
 Production retrieval discovers a broad but bounded vector seed set from
-durable memory embeddings. Before the seed cap, it removes directed
-`supersedes` targets and collapses near-duplicate embedding families to
-one representative. The family index accumulates exact squared
+durable memory embeddings. Before the seed cap, it collapses
+near-duplicate embedding families to one representative; superseded
+targets stay eligible. The family index accumulates exact squared
 coordinate differences in 16-coordinate vectorized blocks and rejects a
 pair as soon as a completed block exceeds the complete squared-distance
 limit implied by the cosine threshold. Surviving pairs use complementary
@@ -6301,45 +7871,32 @@ repeated normalization and Walsh–Hadamard construction without changing
 family order, comparison arithmetic, or fallback behavior. If the
 private vector cache is unavailable, durable processing rebuilds it once
 from the complete persisted surface and immediately applies the same
-family and supersession filters before truncation. A failed rebuild
-installs a failure sentinel rather than repeating the two complete
-surface scans on every request. A unique cached vector retains every
-long-term memory metadata alternative that shares its base embedding,
-and query-time eligibility chooses a nonsuperseded sibling without
-duplicating vector storage. The cache separately indexes entries that
-have at least one long-term metadata alternative. Retrieval applies the
-existing timestamp, current-surface, and supersession predicates to that
-subset before evaluating vector distance, so signal-only historical
-embeddings do not enter the distance kernel. This is an execution-only
-index: it does not change the eligible set, distance expression, tie
-order, family collapse, or source and modality semantics. Alongside the
-shared association fanout cache, an internal execution sidecar
-maintains, for each supersession target, the earliest start timestamp of
-an eligible replacement. Retrieval tests that timestamp directly instead
-of rebuilding a target set by scanning every incoming edge. Memory
-storage publishes its already-committed supersession decisions into the
-fanout cache and recomputes only the affected target’s eligibility. A
-current-surface change likewise recomputes only targets reached by that
-memory’s outgoing `supersedes` edges. Missing target metadata
-invalidates the cache and returns to authoritative SQLite rehydration.
-Neither structure is part of the public processor layout. The strict
-replacement-before-query predicate and base embedding identity remain
-unchanged. The emotional-metadata portion of the sidecar is trusted only
-by the engine-owned operation root that maintains it. A caller-supplied
-root’s transaction view invalidates that sidecar before forwarding its
-first SQL statement, so a custom transaction that updates emotional
-columns directly cannot leave a valid-looking stale fixed point for a
-later operation in the same transaction. Cache-only custom roots retain
-their exact rollback snapshot. The fallback executes a demand-driven
-sequence of ordered SQL pages over the current and historical vector
-surfaces. Each page joins memory metadata and applies kind, timestamp,
-and supersession eligibility before distance ordering, excludes a
-historical row when that memory already has a current reconstruction,
-collapses byte-identical historical vectors, and uses a second
-application of the existing F/S/T-derived seed-search breadth as its row
-bound. One in-memory cosine-family index spans every page; paging stops
-when the ordinary semantic-family seed budget is full or the eligible
-surface is exhausted. Processor hydration tracks
+family filter before truncation. A failed rebuild installs a failure
+sentinel rather than repeating the two complete surface scans on every
+request. A unique cached vector retains every long-term memory metadata
+alternative that shares its base embedding, and query-time eligibility
+chooses an eligible sibling without duplicating vector storage. The
+cache separately indexes entries that have at least one long-term
+metadata alternative. Retrieval applies the existing timestamp,
+current-surface, and supersession predicates to that subset before
+evaluating vector distance, so signal-only historical embeddings do not
+enter the distance kernel. This is an execution-only index: it does not
+change the eligible set, distance expression, tie order, family
+collapse, or source and modality semantics. An internal execution
+sidecar is keyed by processor-context identity and is not part of the
+public processor layout. Its earlier contents (the retrieval-inhibition
+active epoch, the supersession-target set and the emotional-metadata
+cache) served retrieval competition, supersession exclusion and the
+emotional cascade. All three were removed by the ablation study. The
+fallback executes a demand-driven sequence of ordered SQL pages over the
+current and historical vector surfaces. Each page joins memory metadata
+and applies kind and timestamp eligibility before distance ordering,
+excludes a historical row when that memory already has a current
+reconstruction, collapses byte-identical historical vectors, and uses a
+second application of the existing F/S/T-derived seed-search breadth as
+its row bound. One in-memory cosine-family index spans every page;
+paging stops when the ordinary semantic-family seed budget is full or
+the eligible surface is exhausted. Processor hydration tracks
 persisted-current-surface currency and processor-surface completeness
 independently. The private current-vector search cache is built and
 incrementally updated from the processor’s latest reconstruction
@@ -6373,63 +7930,60 @@ complete embedding-level pass therefore preserves sibling fanout even
 when the per-memory candidate limit is saturated. This proof changes
 neither the candidate population nor the chosen supersession edges, but
 the current surface distance pass remains proportional to that surface.
-Rollback and flush recovery also rehydrate each current entry’s original
-base ID from `memories.embedding_id`; they never infer it from the
-reconstructed surface. When constructive recall is disabled, both
-restart hydration and cache-loss rebuild select the base embedding and
-ignore reconstruction/current surfaces. This recovery path preserves an
-eligible target behind 900 closer ineligible rows and preserves an
-eligible sibling of a superseded shared embedding. A separate 600-member
-byte-distinct cosine-near family requires two bounded pages and cannot
-hide the next semantic target. The ordinary 430-family regression
-remains one page and returns no more than the 477-row default page bound
-rather than materializing all 1,331 eligible rows. The embedded
-sqlite-vec implementation is brute-force, so every requested page scans
-the persisted vector surfaces; the optimization bounds rows returned to
-C++ and downstream embedding decoding, not the scan’s asymptotic order
-or the historical window partition’s internal sort and materialization
-work. Ephemeral retrieval uses the fallback without installing volatile
-registry state. It then expands through retained structural graph edges
-and returns a compact selected set. Vector similarity owns the rank;
-recency is a tie-break and graph activation is a bounded residual bonus.
-`source_id` and modality are metadata, not ranking inputs. Direct vector
-seeds are source `LONG_TERM` memories; derived `ASSOCIATION` centroids
-enter through graph expansion. Direct families are ranked and the
-protected direct prefix is committed before expanded families are
-admitted; expanded candidates are then deduplicated against those
-protected representatives. When a current embedding exists, its
-redundant historical base embedding is omitted from the historical seed
-search because the authoritative surface was already searched. Current
-writes are excluded by timestamp, and working-memory overlap filters
-prevent the retrieval result from echoing the active memory tail.
-Association edges are used as graph evidence; they do not bypass final
-scoring or output caps. When eviction removes a replacement memory from
-the processor surface, removal is published before its outgoing
-`supersedes` targets are recomputed. The sidecar therefore cannot retain
-an activation timestamp derived from a surface entry that has just been
-evicted. One dispatch exposes at most one actually used retrieval
-candidate, so retrieval does not synthesize reinforcement pair edges
-from the packet. Existing `reinforces` edges remain eligible for decay,
-pruning, degree normalization, and graph evidence. Historical public
-knob helpers for the removed packet-pair writer remain source-compatible
+Above the sparse cutover the current result comes from the bounded
+SQLite route and carries no exact cutoff, so memory storage no longer
+verifies it against the complete historical population: it ranks only
+the tracked changed memories’ historical embeddings exactly and accepts
+the route’s approximate current neighbours for every unchanged memory.
+Candidate work is then independent of store size, and the written
+`supersedes` edges are as approximate as the route. Rollback and flush
+recovery also rehydrate each current entry’s original base ID from
+`memories.embedding_id`; they never infer it from the reconstructed
+surface. When constructive recall is disabled, both restart hydration
+and cache-loss rebuild select the base embedding and ignore
+reconstruction/current surfaces. This recovery path preserves an
+eligible target behind 900 closer ineligible rows and surfaces a shared
+embedding through exactly one of its memory alternatives. A separate
+600-member byte-distinct cosine-near family requires two bounded pages
+and cannot hide the next semantic target. The ordinary 430-family
+regression remains one page and returns no more than the 477-row default
+page bound rather than materializing all 1,331 eligible rows. The
+embedded sqlite-vec implementation is brute-force, so every requested
+page scans the persisted vector surfaces; the optimization bounds rows
+returned to C++ and downstream embedding decoding, not the scan’s
+asymptotic order or the historical window partition’s internal sort and
+materialization work. Ephemeral retrieval uses the fallback without
+installing volatile registry state. It returns a compact selected set
+from those seeds, ranked by vector similarity alone. Graph expansion
+over association edges was removed in the 2026-10 engine ablation: once
+clustering consolidation was gone, no traversable edge type was ever
+written. `source_id` and modality are metadata, not ranking inputs. When
+a current embedding exists, its redundant historical base embedding is
+omitted from the historical seed search because the authoritative
+surface was already searched. Current writes are excluded by timestamp,
+and working-memory overlap filters prevent the retrieval result from
+echoing the active memory tail. One dispatch exposes at most one
+actually used retrieval candidate, so retrieval does not synthesize
+reinforcement pair edges from the packet. Historical public knob helpers
+for the removed packet-pair writer remain source-compatible
 calibrations; only the step calibration still feeds the production
 pruning floor.
 
 The retrieval trace path records a ranking ledger for selected and
 rejected candidates. Production graph retrieval populates composite
-score, seed relevance, temporal score, and the base/spreading fields of
-the activation ledger. The shared trace structure still contains
-reserved processor, predictive, pre-activation, durable-source, and
-evidence fields, but this path leaves them at zero; their presence is
-not evidence that those terms participate in ranking. Deleted
-label-graph and fact-layer fields are not emitted.
+score, seed relevance, temporal score, and the base field of the
+activation ledger. The shared trace structure still contains reserved
+processor, durable-source, and evidence fields, but this path leaves
+them at zero; their presence is not evidence that those terms
+participate in ranking. Deleted label-graph and fact-layer fields are
+not emitted.
 
 `Retention::Ephemeral` executes this read path inside a transaction,
 assembles the retrieval result, rolls back the transaction and object
-transaction, and restores the exact pre-query processor snapshot.
-Retrieval-time reconstruction, usage reinforcement, reconsolidation, and
-strength mutation are skipped for that retention policy, so querying
-cannot change durable rank state.
+transaction, and restores the exact pre-query processor snapshot, so
+querying cannot change durable state. Earlier builds also had to skip
+retrieval-time reconstruction, usage reinforcement, reconsolidation and
+strength mutation for queries; those mechanisms no longer exist.
 
 Schema migrations 25–27 add `consolidation_rate_floor`,
 `consolidation_rate_peak`, initialization, and the armed latch to the
@@ -6451,44 +8005,6 @@ acknowledged, while a rolled-back request restores the exact prior latch
 and range. State-row restoration does not depend on a nonzero
 processed-signal counter, so a maintenance-only disarmed state survives
 restart.
-
-## Soft Anchor Implementation Status
-
-Soft Anchor
-(<a href="#sec-soft-anchor" class="quarto-xref">Section 8.4</a>) is
-wired into the engine as an always-on ingress formation path. It is not
-a hard referent resolver and it is not a retrieval-time reranker. The
-operation runs after memory storage, consumes the stored memory id and
-current representative embedding, and compares the current signal only
-against prior soft-anchor state.
-
-When a model exposes a 1536-dimensional soft-anchor embedding, the
-runtime uses the semantic/entity/full slices described in
-<a href="#sec-soft-anchor" class="quarto-xref">Section 8.4</a>. When
-only the standard 256-dimensional retrieval embedding is available, it
-falls back to a single normalized view for all three centroids and
-lowers entity quality with a knob-derived prior.
-
-Schema migration 6 adds:
-
-``` text
-soft_anchors(anchor_id, status, semantic_centroid, entity_centroid,
-             full_centroid, semantic_radius, entity_radius, full_radius,
-             source_id, first_step, last_step, last_boundary_id,
-             first_ts, last_ts, anchor_strength, support_count,
-             contradiction_count, recent_memory_ids, updated_at)
-
-soft_anchor_links(memory_id, anchor_id, anchor_strength, anchor_label,
-                  evidence_kind, memory_tier, score, margin, entropy,
-                  support_count, contradiction_count, created_step,
-                  updated_step, created_at)
-```
-
-Hydrated memories expose up to three soft-anchor entries through
-`Context::Memory::soft_anchors`, and the C API JSON mirrors those
-entries under each returned memory. Production retrieval does not use
-those links as ranking features, and no bundled chat renderer is part of
-this claim.
 
 ## Computational Complexity
 
@@ -6578,9 +8094,8 @@ durable embedding and association surface. With `N` stored memories and
 embedding dimension `d`, the current write path computes exact
 current/base distances in `O(Nd)` and performs `O(N)` bounded-top-k
 selection before writing a knob-capped number of supersession edges.
-Graph expansion after seed discovery is bounded by F/S/T-derived row and
-fanout limits. Working-memory and soft-anchor updates operate over
-bounded live state and remain independent of total store size.
+Working-memory updates operate over bounded live state and remain
+independent of total store size.
 
 For an open Natural unit containing `U` signal records, the ordinary
 rollback snapshot performs constant-time accumulator-map ownership
@@ -6601,17 +8116,6 @@ per changed slot during normal persistence, and graph writes perform
 only O(1) cache invalidation. None adds a store-size-dependent query or
 eager graph reconstruction; working-memory persistence remains bounded
 by the configured live-slot capacity.
-
-The RIF shadow epoch is a disposable SQLite projection of committed
-persistent state. Suppression and recovery stage changed identities and
-clock values while the persistent transaction is open, but they do not
-pre-adjust the shadow’s `active_rows` counter. After the persistent
-commit, publication compares the old and new shadow membership and
-applies each insertion or removal exactly once. Consolidation’s
-active-RIF count and both candidate arms join the singleton recovery
-clock on the current generation; retired-generation rows may await
-bounded materialization, but they neither consume the active work
-ceiling nor enter the current active candidate frontier.
 
 The retained long-horizon optimization target is that mean process
 latency stays approximately flat as the database grows. The July 2026
@@ -6634,7 +8138,809 @@ public state ownership. They do not depend on hidden decoder calls, and
 the current result must not be described as flat storage or flat
 throughput.
 
-# Performance Optimization
+# Systems Architecture and Performance
+
+This section describes the storage and execution machinery that keeps
+the v5 engine realtime at hundreds of thousands of stored turns. It
+covers only surviving architecture. The full optimization ledger,
+including micro-optimizations and proof traces for subsystems the
+2026-10 ablation later removed, is preserved verbatim in Appendix E
+(`docs/paper/appendix/optimization_ledger.qmd`).
+
+The design rule throughout is that SQLite stays authoritative. Every
+resident structure below is a cache or index that can be rebuilt from
+SQLite, and retrieval results are byte-identical whether a structure is
+warm or rebuilt. None of these structures branches on `source_id` or
+modality.
+
+## Content-Addressed Embedding Arena
+
+Several in-memory consumers hold the same stored vectors: the processor
+retrieval surface, the historical and current supersession and seed
+surfaces, rollback snapshots and borrowed supersession candidates.
+Before the arena each kept its own copy. Now one process-wide arena
+holds each vector once, as an immutable, reference-counted float32 row,
+and every consumer holds an 8-byte handle.
+
+-   **Content addressing.** Rows are keyed by their exact bits. Stored
+    embedding rows are append-only in SQLite (inserted and deleted,
+    never updated), so equal bits always mean the same vector and
+    sharing is exact.
+-   **Copy-on-write.** A new representation of a memory is a new row. A
+    rollback snapshot copies handles, not vectors.
+-   **Layout.** Rows sit in 64-byte-aligned chunks that never move.
+    Exact scans read rows in place and evaluate the same per-row Eigen
+    expressions as the flat buffers they replaced, so ranking is
+    bit-identical.
+-   **Family collapse.** The cosine-family index keeps only a side table
+    of block norms per historical entry and re-expands the normalized
+    vector from the row on use.
+
+Together with the in-memory route below, the arena cut route search at
+111k turns from 16.4/24.8 ms to 3.8/4.6 ms (p50/p95) and peak RSS by 614
+MB, with packets byte-identical (PR #28).
+
+## Rollback Journal
+
+`Process()` and `Flush()` must restore exact processor state when their
+SQLite transaction fails, and an Ephemeral query must leave no trace. A
+naive full context snapshot copied every open accumulator and
+working-memory record on each signal. That made a long Natural unit of
+`U` signals cost `O(U^2)` record copies in total.
+
+The engine journals ownership instead:
+
+-   An ordinary non-boundary signal records only the original vector
+    lengths of the active source, then appends in place: amortized
+    `O(1)`.
+-   A path that may mutate or clear prior records (accepted storage,
+    accumulator reset after a flush, or an accepted interrupt reset)
+    takes one deep backup of the active source first, so that transition
+    copies `O(U)` once.
+-   Working-memory appends roll back by original length. An evicted
+    slot’s record vectors move into the journal instead of being copied.
+-   Success discards the journal. Failure restores ownership or the
+    backup.
+
+A caller-supplied `IOperation` root keeps the automatic full-context
+snapshot, so hookless custom operations still roll back exactly. The
+private production root is the only one whose mutation sites carry the
+journal contract.
+
+## Sparse Route and In-Memory Route
+
+Above a knob-derived population, dense seeding does not scan every
+vector. It walks a sparse, persisted HNSW-style route (Malkov and
+Yashunin 2018) over the current long-term surface. Its capacities are
+functions of the knobs. With *F*, *S* and *T* clamped to \[0, 1\]:
+
+*C* = round (256 + 256*F* + 128*S* + 128*T*),  *B* = round (64 + 64*F* + 32*S* + 32*T*),  *A* = 2*C* + 2*B*.
+
+At neutral knobs *C* = 512, *B* = 128 and *A* = 1, 280. A query inspects
+at most 8*C* to 9*C* canonical rows (the floor resets on each recenter
+and the ceiling rises by *R* = max (2, ⌊*B*/16⌋) per query), plus at
+most *A* rows from the consolidation snapshot. Every routed row is
+reranked by exact cosine, and at most *A* identities go on to
+eligibility, family collapse and final scoring. If eligibility or family
+collapse leaves the proposal short of the requested seed count, the
+route discards it and the exact SQL seed path runs instead. A short
+result is never returned as complete.
+
+-   **Epochs.** New memories join a dirty journal in the writing
+    transaction. `Consolidate()` seals at most *C* dirty identities into
+    the route and recenters its activation snapshot on the active-signal
+    ring centroid. That is all maintenance does now
+    (<a href="#sec-consolidation" class="quarto-xref">Section 12</a>).
+    The engine recommends a pass once *C* memories have been written
+    since the last one, and requires one at *C*×
+    `ConsolidationEscalationMultiplier(T)`. This restored 44
+    consolidations on BEAM-10M conversation 7 after retrieval
+    competition, the previous hint source, was removed.
+-   **Admission.** A full neighbour list admits a closer node by
+    replacing a member, but never a member for which that link is its
+    only level-0 inbound link. Distance-only replacement had left 1.5%
+    of nodes with no inbound link and 2.9% unreachable at 443k nodes.
+    After the fix, 98.99% of nodes are reachable and none lacks an
+    inbound link (PR #28).
+-   **In-memory route.** Opening the route loads its generation’s node
+    rows once, in 4,096-row chunks, into a resident graph whose nodes
+    hold adjacency and an arena handle. Traversal never reads SQLite,
+    and each committed seal replaces exactly the rows it wrote. The
+    resident graph mirrors the persisted route; it is not a second write
+    path.
+-   **Supersession reuse.** Above the cutover, write-time supersession
+    search reuses the route instead of scanning history. Historical rows
+    visited per turn on BEAM conversation 7 fell from up to 43k to 0,
+    and the written edges are approximate (Jaccard 0.985 against the
+    exact scan).
+
+The round-3 ablation kept the route on cost alone
+(<a href="#sec-experimental" class="quarto-xref">Section 15</a>). At
+111,527 chained turns, switching it off raised instructions by 26%,
+ingest past 100k turns from 95 to 170 ms per turn, query median from 33
+to 45 ms and RSS from 6.7 to 7.4 GB. The route is approximate, though:
+with it off, packet gold-turn recall was 0.076 against 0.062 with it on,
+and judged sufficiency moved +0.020 ± 0.052.
+
+## WAL Checkpointer Thread
+
+Each file-backed SQLite store owns a background checkpointer: its own
+connection and thread. It runs PASSIVE checkpoints when the WAL reaches
+the auto-checkpoint size (1,000 pages) and after every `Flush()`.
+Commits only request a checkpoint.
+
+-   `Flush()` returns once its transaction is in the WAL, which is
+    durable against a process crash. The background checkpoint then
+    syncs it against power loss.
+-   Durable retention’s post-commit barrier is one fsync of the WAL
+    holding its commit, instead of a TRUNCATE checkpoint.
+-   Writes take the lock at `BEGIN IMMEDIATE`, so `busy_timeout` covers
+    every signal. This removed “database is locked” errors under ingest
+    plus concurrent Ephemeral probes.
+
+Under synthetic disk pressure (8 writers, 256 MB each with
+`F_FULLFSYNC`), a foreground `Flush()` checkpoint stalled 99 to 161 ms.
+With the checkpointer, `Flush()` took at most 5 ms
+(<a href="#sec-implementation" class="quarto-xref">Section 16</a>).
+Under the I/O-pressure test in PR #28, maximum consolidation time fell
+from 728 to 103 ms and maximum `Flush()` time from 696 to 89 ms.
+
+## Family-Collapse Bounds
+
+Before the seed cap, near-duplicate embedding families collapse to one
+representative (<a href="#sec-math" class="quarto-xref">Section 4</a>).
+Comparing every candidate with every representative would be quadratic,
+so each pair passes through sound filters before any exact cosine:
+
+1.  **Partial squared distance.** Coordinate differences accumulate in
+    16-coordinate vectorized blocks. A pair is rejected as soon as a
+    completed block exceeds the squared-distance limit implied by the
+    cosine threshold. Every omitted term is nonnegative, so this never
+    rejects a true duplicate.
+2.  **Cauchy–Schwarz block bounds in two bases.** Coordinates are split
+    into 32 blocks. For normalized *x* and *y*,
+    cos (*x*, *y*) ≤ ∑<sub>*b*</sub>∥*x*<sub>*b*</sub>∥∥*y*<sub>*b*</sub>∥.
+    The bound is computed both in the stored basis and in a normalized
+    Walsh–Hadamard basis *H*, using
+    cos (*x*, *y*) = cos (*H**x*, *H**y*). Vectors that are sparse in
+    coordinates are dense after *H* and vice versa, so one of the two
+    bounds is tight for both kinds of surface.
+3.  **Exact cosine** for the survivors.
+
+Both bounds are upper bounds, so neither can exclude a pair that meets
+the threshold. The normalized vector and both block-norm summaries are
+immutable functions of an embedding, computed on first use and cached
+with the surface entry. One event may run at most 2*C* exact checks.
+Once that budget is spent, the remaining candidates are admitted rather
+than compared, which keeps the work bounded at the cost of an occasional
+duplicate in the seed set. A 256-vector orthogonal-basis regression
+requires exact comparisons to stay below a quarter of the all-pairs
+count.
+
+## FTS5 Top-k Collector
+
+The keyword channel
+(<a href="#sec-retrieval" class="quarto-xref">Section 6</a>) runs BM25
+over a contentless FTS5 index. Two changes keep it bounded on large
+stores.
+
+-   **Document-frequency cut.** Query words whose index term occurs in
+    more than max (64, 0.05*N*) of *N* memories are dropped before the
+    query runs. Their posting lists dominated query time but carry
+    little BM25 weight. On a 22.6k-turn store, FTS5 time per query fell
+    from about 14 ms to 2 ms. The df probe itself stops at the cut.
+-   **Top-k collector.** FTS5’s `ORDER BY rank` scores every matching
+    row with `bm25()`, one document-size read each, and sorts them all.
+    One six-word question matched 32.8k rows: 2 ms to match and 42 ms to
+    rank. The engine registers an FTS5 auxiliary function,
+    `cortext_bm25_topk`, that computes the same score term for term and
+    keeps the best 2 × 20 + 4 rows in a heap. The over-fetch covers hits
+    that later fail seed eligibility. It also skips the document-size
+    read and the score of a row whose upper bound cannot enter the heap.
+    At 443k turns, query CPU fell from 57.9/100.9 ms to 24.6/37.6 ms
+    (p50/p95) (PR #28).
+
+## Resident Surfaces
+
+Query-time channels read from resident structures that advance
+incrementally instead of reloading.
+
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Contents</th>
+<th>Maintenance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>retrieval surface</td>
+<td>current long-term vector and metadata per memory</td>
+<td>kept across read-only queries and across <code>Flush()</code>, not
+reloaded; loaded as a stream at open</td>
+</tr>
+<tr>
+<td>member index</td>
+<td>int8 codes (dimension + 4 bytes) of the member signals of
+multi-signal long-term memories</td>
+<td>reads signal ids above its mark; a WAL store starts a warm read on
+its own connection and thread at open, and the first query adopts
+it</td>
+</tr>
+<tr>
+<td>cross-modal populations</td>
+<td>one aligned matrix per stored modality of long-term signal
+vectors</td>
+<td>loaded on first use by a query of another modality; then reads only
+rows above a long-term mark</td>
+</tr>
+<tr>
+<td>standing set</td>
+<td>at most 256 directive signals with their word stems</td>
+<td>maintained in the writing transaction</td>
+</tr>
+<tr>
+<td>sparse route</td>
+<td>resident node graph of the published generation</td>
+<td>replaced row-for-row by each committed seal</td>
+</tr>
+</tbody>
+</table>
+
+What these surfaces bought, by the stage measurements in PR #28 and
+<a href="#sec-implementation" class="quarto-xref">Section 16</a>:
+
+-   Keeping the retrieval surface across queries took the query median
+    at 20k turns from 690 ms to 14.9 ms.
+-   Streaming the surface at open took 443k-turn reopen RSS from 6.77 to
+    4.57 GB.
+-   Resident cross-modal populations took queries over 125k image
+    vectors from 204/243 ms to 20/26 ms.
+-   Reading the member index at open, and advancing it past non-member
+    rows, took 443k-turn queries from 400 ms to 30.7/44.5 ms p50/p95.
+    The first query after open at BEAM-10M takes 26 ms instead of 54 ms.
+
+The late-interaction codes are not resident. A query reads them for its
+top 64 candidates only, by one indexed statement.
+
+## Latency Summary
+
+All rows are measurements already reported in the repository. They come
+from different stages and stores, so read each row on its own rather
+than as one benchmark run.
+
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Path</th>
+<th>Store</th>
+<th>Measurement</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>recall (end to end)</td>
+<td>LoCoMo, 1,540 questions</td>
+<td>9.7 / 13.7 ms p50 / p95</td>
+<td>README Benchmarks</td>
+</tr>
+<tr>
+<td>query</td>
+<td>443k-turn chain, v5</td>
+<td>30.7 / 44.5 ms p50 / p95; reopen RSS 4.57 GB</td>
+<td>PR #28</td>
+</tr>
+<tr>
+<td>route search</td>
+<td>111k-turn BEAM chain</td>
+<td>3.8 / 4.6 ms p50 / p95 (was 16.4 / 24.8)</td>
+<td><a href="#sec-implementation"
+class="quarto-xref">Section 16</a></td>
+</tr>
+<tr>
+<td>keyword channel CPU</td>
+<td>443k turns</td>
+<td>24.6 / 37.6 ms p50 / p95 (was 57.9 / 100.9)</td>
+<td>PR #28</td>
+</tr>
+<tr>
+<td>late-interaction rerank</td>
+<td>10k to 443k memories</td>
+<td>0.4 to 3 ms per query; query p95 ×1.00 to ×1.14</td>
+<td>PR #28, <a href="#sec-retrieval"
+class="quarto-xref">Section 6</a></td>
+</tr>
+<tr>
+<td>first query after open</td>
+<td>BEAM-10M</td>
+<td>26 ms (was 54)</td>
+<td><a href="#sec-implementation"
+class="quarto-xref">Section 16</a></td>
+</tr>
+<tr>
+<td>Natural ingest</td>
+<td>BEAM-10M conversation 7</td>
+<td>8.8 / 19.7 / 67.4 ms p50 / p95 / max</td>
+<td>PR #28</td>
+</tr>
+<tr>
+<td>image turn ingest</td>
+<td>native image tower</td>
+<td>22.9 / 27.9 ms</td>
+<td>PR #28</td>
+</tr>
+<tr>
+<td>consolidation (maintenance)</td>
+<td>BEAM-10M conversation 7</td>
+<td>26.0 / 32.6 ms wall p50 / p95</td>
+<td>PR #28</td>
+</tr>
+<tr>
+<td><code>Flush()</code> under disk pressure</td>
+<td>synthetic, 8 writers</td>
+<td>at most 5 ms (foreground checkpoint 99 to 161 ms)</td>
+<td><a href="#sec-implementation"
+class="quarto-xref">Section 16</a></td>
+</tr>
+</tbody>
+</table>
+
+Realtime targets were p95 under 50, 100 and 150 ms at 10k, 100k and 200k
+memories, and every reranker configuration stayed inside them (PR #28).
+
+## Remaining Costs
+
+The engine is not flat in store size, and this section does not claim it
+is.
+
+-   sqlite-vec is a brute-force scan. Below the sparse cutover, and on
+    every route fallback, exact seeding is linear in the current
+    surface.
+-   Write-time supersession verification can still do history-sized work
+    below the cutover, or when the route is unpublished or invalid.
+-   Opening a store is *O*(generation). It materializes the current
+    surface and the resident route.
+-   Hydration cost follows the packet: contiguity, supersession
+    attachments and evidence fitting are bounded per anchor, but payload
+    reads scale with the bytes returned.
+
+Further asymptotic gains need a change to candidate semantics, a storage
+or index backend change, or a tiering policy. A tiering policy is a
+forgetting policy, and
+<a href="#sec-negative" class="quarto-xref">Section 14</a> shows how
+badly an unmeasured one fails.
+
+# Conclusion and Future Directions
+
+Cortext stores what it observed and puts its effort into retrieval.
+Online segmentation decides what a memory is, and every closed unit is
+kept. Retrieval works at three granularities over unit vectors, member
+vectors and late-interaction codes, and fuses dense, keyword,
+cross-modal and temporal evidence by reciprocal rank. A 0.1M-parameter
+reranker over a frozen encoder reorders the head of the pool. Hydration
+then rebuilds the context around each hit and fits it to the reader’s
+budget. With no language model on either path, this reaches 86.2% on
+LoCoMo under a shared pipeline, 2.8 points behind a system that spends
+544 model calls at write time, with recall about 17× faster.
+
+The negative result matters as much as the system. The bio-inspired
+lifecycle mechanisms that earlier versions of this paper put at the
+centre did not survive long-horizon ablation. Short-horizon judged
+screens had also attributed effects to mechanisms whose packets never
+changed. We recommend two practices to memory-system work: diff packets
+before judging, and ablate on the engine that ships.
+
+Future work:
+
+1.  **A measured forgetting policy.** The store grows without bound. Any
+    tiering or eviction must first be gated on packet recall over
+    month-scale timestamps.
+2.  **Out-of-pool gold.** At BEAM 1M and 10M, 42% and 67% of gold turns
+    never enter the candidate pool. This, not reranking, is the next
+    recall lever.
+3.  **Reranker coverage.** The reranker needs an audio position map and
+    re-encoding of stored codes when the reranker model changes.
+4.  **Zero-shot evaluation.** The reranker should be evaluated on more
+    benchmarks it was never trained on.
+5.  **Standing-directive detection.** The current detector is a pattern
+    check, and a learned one could replace it.
+
+# References
+
+Anderson, Michael C, Robert A Bjork, and Elizabeth L Bjork. 1994.
+“Remembering Can Cause Forgetting: Retrieval Dynamics in Long-Term
+Memory.” *Journal of Experimental Psychology: Learning, Memory, and
+Cognition* 20 (5): 1063.
+
+Åström, Karl Johan, and Richard M Murray. 2008. *Feedback Systems: An
+Introduction for Scientists and Engineers*. Princeton university press.
+
+Baddeley, Alan. 2000. “The Episodic Buffer: A New Component of Working
+Memory?” *Trends in Cognitive Sciences* 4 (11): 417–23.
+
+Chhikara, Prateek et al. 2025. “Mem0: Building Production-Ready AI
+Agents with Scalable Long-Term Memory.” *arXiv Preprint
+arXiv:2504.19413*.
+
+Cormack, Gordon V, Charles L A Clarke, and Stefan Buettcher. 2009.
+“Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank
+Learning Methods.” In *Proceedings of the 32nd International ACM SIGIR
+Conference on Research and Development in Information Retrieval*,
+758–59.
+
+Cowan, Nelson. 2001. “The Magical Number 4 in Short-Term Memory: A
+Reconsideration of Mental Storage Capacity.” *Behavioral and Brain
+Sciences* 24 (1): 87–114.
+
+———. 2010. “The Magical Mystery Four: How Is Working Memory Capacity
+Limited, and Why?” *Current Directions in Psychological Science* 19 (1):
+51–57.
+
+Fountas, Zafeirios et al. 2024. “EM-LLM: Episodic Memory in Large
+Language Models.” *arXiv Preprint*.
+
+Hunt, R Reed. 1995. “The Subtlety of Distinctiveness: What von Restorff
+Really Did.” *Psychonomic Bulletin & Review* 2 (1): 105–12.
+
+Khattab, Omar, and Matei Zaharia. 2020. “ColBERT: Efficient and
+Effective Passage Search via Contextualized Late Interaction over BERT.”
+In *Proceedings of the 43rd International ACM SIGIR Conference on
+Research and Development in Information Retrieval*, 39–48.
+
+LaBar, Kevin S, and Roberto Cabeza. 2006. “Cognitive Neuroscience of
+Emotional Memory.” *Nature Reviews Neuroscience* 7 (1): 54–64.
+
+Liu, Jun S, and Rong Chen. 1998. “Sequential Monte Carlo Methods for
+Dynamic Systems.” *Journal of the American Statistical Association* 93
+(443): 1032–44.
+
+Maharana, Adyasha, Dong-Ho Lee, Sergey Tulyakov, Mohit Bansal, Francesco
+Barbieri, and Yuwei Fang. 2024. “Evaluating Very Long-Term
+Conversational Memory of LLM Agents.” In *Proceedings of the 62nd Annual
+Meeting of the Association for Computational Linguistics*.
+
+Malkov, Yu A, and Dmitry A Yashunin. 2018. “Efficient and Robust
+Approximate Nearest Neighbor Search Using Hierarchical Navigable Small
+World Graphs.” *IEEE Transactions on Pattern Analysis and Machine
+Intelligence* 42 (4): 824–36.
+
+McClelland, James L, Bruce L McNaughton, and Randall C O’Reilly. 1995.
+“Why There Are Complementary Learning Systems in the Hippocampus and
+Neocortex: Insights from the Successes and Failures of Connectionist
+Models of Learning and Memory.” *Psychological Review* 102 (3): 419.
+
+McGaugh, James L. 2004. “The Amygdala Modulates the Consolidation of
+Memories of Emotionally Arousing Experiences.” *Annual Review of
+Neuroscience* 27: 1–28.
+
+Miller, George A. 1956. “The Magical Number Seven, Plus or Minus Two:
+Some Limits on Our Capacity for Processing Information.” *Psychological
+Review* 63 (2): 81.
+
+Murdock Jr, Bennet B. 1962. “The Serial Position Effect of Free Recall.”
+*Journal of Experimental Psychology* 64 (5): 482.
+
+Nader, Karim. 2003. “Memory Traces Unbound.” *Trends in Neurosciences*
+26 (2): 65–72.
+
+Nader, Karim, Glenn E Schafe, and Joseph E Le Doux. 2000. “Fear Memories
+Require Protein Synthesis in the Amygdala for Reconsolidation After
+Retrieval.” *Nature* 406 (6797): 722–26.
+
+Packer, Charles et al. 2023. “MemGPT: Towards LLMs as Operating
+Systems.” *arXiv Preprint arXiv:2310.08560*.
+
+Rasmussen, Preston et al. 2025. “Zep: A Temporal Knowledge Graph
+Architecture for Agent Memory.” *arXiv Preprint arXiv:2501.13956*.
+
+Robertson, Stephen, and Hugo Zaragoza. 2009. “The Probabilistic
+Relevance Framework: BM25 and Beyond.” *Foundations and Trends in
+Information Retrieval* 3 (4): 333–89.
+
+Russell, James A. 1980. “A Circumplex Model of Affect.” *Journal of
+Personality and Social Psychology* 39 (6): 1161.
+
+Tulving, Endel. 1972. “Episodic and Semantic Memory.” In *Organization
+of Memory*, 1:381–403. Academic Press.
+
+Wu, Di, Hongwei Wang, Wenhao Yu, Yuwei Zhang, Kai-Wei Chang, and Dong
+Yu. 2024. “LongMemEval: Benchmarking Chat Assistants on Long-Term
+Interactive Memory.” *arXiv Preprint arXiv:2410.10813*.
+
+Zacks, Jeffrey M, and Kymberly M Swallow. 2007. “Event Segmentation.”
+*Current Directions in Psychological Science* 16 (2): 80–84.
+
+# Appendix A. State Variables Map
+
+This appendix enumerates the state variables used by the specification
+and separates retained state (carried across timesteps) from per-step
+derived quantities. The canonical source for section references is
+`docs/paper/sections/*.qmd`; anchors in these files are authoritative
+when resolving cross-reference drift.
+
+## State + Initialization (Canonical)
+
+On cold start (no persisted state), initialize retained state as follows
+(unless otherwise specified by knob priors):
+
+-   **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`,
+    `mood_vector = 0_vector`, `last_mood_ts = now_ms()`,
+    `theta_dynamic = theta_target = θ_prior(F,S,T)`,
+    `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`,
+    `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`,
+    `reliability = 1`, `last_rate_timestamp = now_ms()`,
+    `last_retrieval_ts = 0`, `last_embedding = unset`,
+    `x_pred_ema = unset`. (The oscillator phase `φ_t` was removed with
+    the encode/retrieve oscillator.)
+
+-   **Accumulator defaults (per stream):** `μ_acc = 0_vector`,
+    `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`,
+    `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`,
+    `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`,
+    `eta_acc = 0`, `coherence_prev = 0`, `drift_accum = 0`,
+    `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`,
+    `x_last_check = unset` (μ_acc), `prev_x = unset` (μ_acc).
+
+-   **Per-memory defaults (on insert):**
+    `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`,
+    `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`,
+    `context = 0_vector`,
+    `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`.
+    Lability, suppression and synaptic-tag fields were dropped by
+    migrations 39, 45 and 46.
+    <!-- PRUNE: migration 56 drops context and the reliability/contradiction/last-verified fields; trim this list to the final removal list. -->
+    Application provenance remains in the separate opaque `source_id`.
+    SQLite defaults remain migration/backstop values for legacy rows.
+    Evidence packets live in ordered `signals` rows, and the
+    constructive-recall ledger starts empty until the initial
+    reconstruction row is appended in `memory_reconstructions`.
+
+-   **RLS defaults:** `w_* = w_bootstrap`, `P = diag(P_init(T))` with
+    `P_init(T) = lerp(500, 2000, 1 − T)`, `blender_ready = false`,
+    `blender_update_count = 0`.
+
+-   **Knob-derived control parameters (initialized from priors):**
+    `weight_relevance`, `attention_width`, `coverage_gain_floor`,
+    `mismatch_weight`, `weight_novelty`, `weight_surprise`,
+    `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`,
+    `rate_target`.
+
+-   **Buffers:** `signal_stream` (μ_acc stream), `score_stream`,
+    `memory_stream`, `recent_memory_centroids` start empty.
+
+-   **Retention history:** `retention_history` starts empty (populated
+    after the first signal step).
+
+-   **Accumulator state (per stream; retained across timesteps):**
+
+    -   `{μ_acc, c_t, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
+
+-   **Global state (retained across timesteps):**
+
+    -   `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, blender_ready, blender_update_count, blender_P}`
+
+-   **Buffers (retained across timesteps; bounded by window rules):**
+
+    -   `{signal_stream, score_stream, memory_stream, recent_memory_centroids, retention_history}`
+
+-   **Recorded signal fields (per signal):**
+
+    -   `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`
+
+-   **Recorded global fields:**
+
+    -   `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
+
+-   **Per-step derived scalars/vectors (ephemeral; recomputed each
+    step):**
+
+    -   `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t}`
+        (NE_t and DA_t were removed with their modulators)
+
+# Appendix B. Derived Signals: Definitions and Bounds
+
+This appendix defines non-trivial derived signals used throughout the
+specification. Unless otherwise stated, all derived scalars are clamped
+to \[0, 1\].
+
+**novelty:** A normalized dissimilarity-to-context signal computed on
+the accumulator centroid.
+
+    max_cos ← max_{c ∈ recent_context} cos(μ_acc, c)  # in [−1, 1]
+    novelty_t ← clamp((1 − max_cos) / 2, 0, 1)
+
+Fallback: if recent_context is empty, set novelty_t ← 1.
+
+**μ_sim:** A normalized mean similarity to context.
+
+    mean_cos ← mean_{c ∈ recent_context} cos(μ_acc, c)
+    μ_sim ← clamp((mean_cos + 1) / 2, 0, 1)
+
+Fallback: if recent_context is empty, set μ_sim ← 0.5.
+
+**rarity_t:** A normalized rarity signal defined as
+dissimilarity-to-context mean.
+
+    rarity_t ← clamp(1 − μ_sim, 0, 1)
+
+Fallback: inherits μ_sim fallback, so rarity_t defaults to 0.5 when
+recent_context is empty.
+
+**relevance_to_task(q, task_ctx):** A normalized relevance of embedding
+q to a task context set.
+
+    if |task_ctx| == 0: return 0.5
+    return clamp((cos(q, mean(task_ctx)) + 1) / 2, 0, 1)
+
+**novelty_to_set(q, S_set_embeddings):** A normalized novelty of q
+relative to a set of embeddings.
+
+    novelty_to_set(q, S_set_embeddings) ← 1 − redundancy(q, S_set_embeddings)
+
+**ΔSSE:** A normalized improvement in reconstruction/prediction error
+(utility proxy).
+
+    ΔSSE ← clamp((SSE_prev − SSE_curr) / max(SSE_prev, ε), 0, 1)
+
+Definitions:
+
+    SSE_curr ← ‖μ_acc − x_pred_t‖^2          # prediction error at t (x_pred_t = x_pred_ema for EMA predictor)
+    SSE_prev ← previous SSE_curr (t−1)     # or EWMA if smoothing is used
+
+Fallback: if no prediction model is available, or if dimensions
+mismatch, set ΔSSE ← 0.
+
+**redundancy(a, S_set):** A normalized redundancy of item a w.r.t. a set
+S_set.
+
+    redundancy(a, S_set) ← max_{s ∈ S_set} clamp((cos(a, s) + 1) / 2, 0, 1)
+
+Fallback: if S_set is empty, redundancy(a, S_set) ← 0.
+
+**coverage_gain(candidate | included_set):** Incremental coverage
+contribution of adding candidate.
+
+    coverage_gain(candidate | included_set) ← 1 − redundancy(candidate, included_set)
+
+# Appendix C. Edge Case Rules
+
+These rules resolve empty-store and small-store cases to preserve
+causality and avoid undefined metrics.
+
+-   **memory_stream empty:** kNN returns empty; retrieval returns no
+    candidates; graph traversal is skipped. Set `focus_spread_t = 0`.
+-   **memory_stream small:** use
+    `k_eff = min(k_neighbors(T), |memory_stream|)`. If `k_eff < 2`, set
+    `focus_spread_t = 0`.
+-   **graph absent or empty:** skip graph traversal; use vector search
+    only.
+-   **recent_context empty:** apply fallbacks defined in Appendix B
+    (e.g., `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`,
+    `μ_ctx = 0_vector` so `map01(cos)=0.5`).
+-   **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold
+    updates.
+
+# Appendix D. Main Loop Execution Order and Normative Invariants
+
+This ordering is canonical and supersedes any other sequence described
+elsewhere in the document. It mirrors the production
+`BuildRootOperationSet` stage order: `CoreStage`, `StorageStage`,
+`RetrievalStage`, then `FeedbackStage`. Probe mode runs only `CoreStage`
+plus `RetrievalStage`.
+
+Canonical single-step pseudocode (timestep t):
+
+    # Main loop (single timestep t)
+    now_s, now_ms, x_t ← read_inputs()
+
+    # CoreStage
+    initialize_embedded_centroids_and_priors()
+    coherence_t ← compute_coherence()
+    μ_acc ← update_accumulator_embedding(x_t)
+    drift_accum ← update_cumulative_drift(x_t)
+    focus_spread_t ← compute_focus_spread()
+    prediction_error_t ← update_embedding_prediction_error()
+    u_t ← update_uncertainty(...)
+    update_focus_sensitivity_mood_and_effective_focus()
+    metrics_t ← compute_structural_and_affective_metrics()
+    update_neuromodulators_and_metric_weights()
+    score_t ← compute_composite_score(metrics_t)
+    update_accumulator_scores(score_t, μ_acc)
+    update_precision_delta_and_threshold()
+    recent_context ← append_recent_context(μ_acc)
+    boundary_score, should_flush ← detect_boundary(capacity_pressure, inactivity_boost)
+    spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
+    write_memory ← force_write OR should_flush   # every closed unit is stored
+    Δwrites ← 1 if write_memory else 0
+
+    # StorageStage
+    stored_memory_id ← maybe_commit_memory_unit(write_memory)
+    persist_signal_metrics(stored_memory_id)
+
+    # RetrievalStage (q_retrieval is captured before any accumulator reset)
+    q_retrieval ← l2_normalize(μ_acc)
+    streaming_pacing_check()
+    graph_retrieval(q_retrieval)
+    update_rate_state(Δwrites)
+    compute_mni_gate_decision()
+    detect_memory_usage()   # usage counters only; reinforcement was removed
+
+    # FeedbackStage
+    record_memory_usage()
+    update_working_memory()
+    reset_accumulator_after_flush_or_interrupt()
+
+The normative execution order for a single timestep t:
+
+1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
+2.  **Run CoreStage:** initialize priors, update accumulator/drift,
+    compute uncertainty, adaptation, metrics, neuromodulators, composite
+    score, threshold, boundary, spike bypass, and write gate.
+3.  **Run StorageStage:** write the closed memory unit (every closed
+    unit is stored), then persist signal metrics from the stored memory
+    id.
+4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any
+    reset, run streaming pacing and graph retrieval, update rate state
+    from the current write decision, compute the MNI gate, and record
+    memory usage.
+5.  **Run FeedbackStage:** apply usage counters, working memory, and
+    accumulator reset. A `force_consolidation` maintenance signal runs
+    none of these stages; the processor only seals and recenters the
+    sparse route.
+6.  **Interrupt Abort:** If the MNI gate marked a pending abort, the
+    next signal compares similarity to the selected memory against the
+    current unit and resets only when the new signal aligns more with
+    the selected memory.
+
+Timing notes:
+
+-   `now_s()` is captured at step 1 and reused for all Δt computations
+    in this timestep.
+-   Threshold updates in `CoreStage` use the score computed earlier in
+    the same stage.
+-   Rate updates in `RetrievalStage` use Δwrites from the current step’s
+    `write_memory` decision.
+-   Accumulator resets happen in `FeedbackStage`, after storage,
+    retrieval, MNI, memory-usage detection, and working-memory updates
+    have consumed the current-unit query.
+
+**Normative Invariants:** \* **Causality:** Step `k` uses only values
+computed in steps `1` through `k` or retained from `t-1`. \* **Write
+Atomicity:** A “write” is an atomic commit of a `should_flush` unit.
+Partial units are never written. \* **Gap Consistency:** `now_s()` is
+fixed at step 1. All `Δt` calculations use this fixed value.
+
+# Appendix E. Optimization Ledger (Historical)
+
+This appendix preserves, verbatim below the rule, the full optimization
+ledger that was the manuscript’s performance section through engine v5.
+It records micro-optimizations, `TRACE[...]` proof anchors and
+experiments for every subsystem that existed at the time, including
+subsystems the 2026-10 engine ablation later removed (retrieval-induced
+inhibition, reconsolidation, emotional cascade, synaptic tagging,
+clustering consolidation, graph expansion). It is a historical record,
+not a description of the current engine.
+<a href="#sec-optimization" class="quarto-xref">Section 17</a>
+summarizes the surviving architecture. The ledger’s own first heading is
+demoted to keep section identifiers unique; its body is otherwise
+unchanged.
+
+------------------------------------------------------------------------
+
+## Performance Optimization (ledger as of engine v5)
 
 This section documents the optimization state of the current hard-cut
 Cortext runtime. The runtime no longer has internal decoder-backed
@@ -6653,7 +8959,7 @@ signal embedding
   -> graph retrieval
   -> constructive reconstruction when enabled
   -> feedback and working-memory maintenance
-  -> optional shallow consolidation on explicit request
+  -> sparse-route maintenance on explicit Consolidate()
 ```
 
 The removed hot path was:
@@ -6740,18 +9046,18 @@ path</td>
 </tr>
 <tr>
 <td>retrieval seed surface</td>
-<td>current-memory embedding lookup with pre-cap supersession filtering;
-immutable normalized and stored/Hadamard block summaries cached per
-private surface entry; exact partial squared-distance rejection plus
-complementary sound 32-block Cauchy–Schwarz bounds in the stored and
-Walsh–Hadamard bases before exact cosine family checks; shared vectors
-retain all long-term metadata alternatives; the private search cache
-follows the processor’s latest reconstruction surface independently of
-persisted-current materialization; cache loss uses the complete
-processor surface directly or, only when that surface is incomplete,
-metadata-eligible, distance-ordered, F/S/T-bounded SQL pages feeding one
-cross-page cosine-family index that substitutes latest reconstructions
-before accounting</td>
+<td>current-memory embedding lookup; immutable normalized and
+stored/Hadamard block summaries cached per private surface entry; exact
+partial squared-distance rejection plus complementary sound 32-block
+Cauchy–Schwarz bounds in the stored and Walsh–Hadamard bases before
+exact cosine family checks; shared vectors retain all long-term metadata
+alternatives; the private search cache follows the processor’s latest
+reconstruction surface independently of persisted-current
+materialization; cache loss uses the complete processor surface directly
+or, only when that surface is incomplete, metadata-eligible,
+distance-ordered, F/S/T-bounded SQL pages feeding one cross-page
+cosine-family index that substitutes latest reconstructions before
+accounting</td>
 <td>latest reconstruction and eligible shared-embedding siblings remain
 visible, byte-distinct near-duplicate boilerplate and stale base
 families that converge after reconstruction cannot consume the
@@ -6767,26 +9073,21 @@ sorter memory</td>
 </tr>
 <tr>
 <td>graph expansion</td>
-<td>retained traversal types: <code>co_occurs</code>,
-<code>similar_to</code>, <code>reinforces</code>, <code>causes</code>,
-<code>derived_from</code>, <code>next_in_episode</code>,
-<code>prev_in_episode</code>, and <code>within_same_event</code>;
-<code>reinforces</code> is degree-normalized</td>
-<td>graph activation is bounded and high-degree hubs cannot dominate;
-directional <code>supersedes</code> relations define families but are
-not activation edges</td>
+<td>removed in the 2026-10 engine ablation; with clustering
+consolidation gone, only non-traversable <code>supersedes</code> edges
+are written</td>
+<td>retrieval ranks the family-collapsed seed set directly</td>
 </tr>
 <tr>
 <td>supersession eligibility</td>
-<td>derive target-to-earliest-replacement timestamps in an internal
-execution sidecar beside the shared association fanout cache and
-incrementally publish committed MemoryStorage supersession edges instead
-of invalidating and rebuilding all fanout rows; remove an evicted
-replacement surface before recomputing its targets</td>
-<td>exact edge direction, base embedding ids, strict timestamp boundary,
-source/modality independence, SQLite fallback, rollback rehydration, and
-the public processor layout are retained; an evicted replacement cannot
-leave a stale target timestamp</td>
+<td>removed in the 2026-10 engine ablation together with supersession
+exclusion (<a href="#sec-experimental"
+class="quarto-xref">Section 15</a>); the sidecar, its incremental
+maintenance and the SQL <code>instr()</code> superseded-id filter are
+gone</td>
+<td>superseded targets compete as ordinary seeds;
+<code>supersedes</code> edges still drive superseded-predecessor
+hydration</td>
 </tr>
 <tr>
 <td>reconstruction</td>
@@ -6812,21 +9113,36 @@ advances by <span
 class="math inline"><em>R</em> = max (2, ⌊<em>B</em>/16⌋)</span> to a
 <span class="math inline">9<em>C</em></span> ceiling, rerank at most
 <span class="math inline"><em>A</em> = 2<em>C</em> + 2<em>B</em></span>
-activated current centroids, then require the historical cache’s exact
-coverage/ranking proof or retain SQLite fallback rather than treating
-the sparse result as complete</td>
-<td>the current sparse-candidate query remains bounded by <span
-class="math inline">9<em>C</em> + <em>A</em></span>, but exact
-historical verification may remain history-sized; timestamp, kind,
-duplicate band, similarity threshold, edge limit, deterministic tie
-order, rollback, source/modality independence, and public API shape
-remain unchanged; write throughput and production-wide boundedness are
+activated current centroids, then add exact candidates only from the
+tracked historical/current population mismatches (memories whose
+historical embedding differs from, or has no, current surface row)
+instead of scanning the historical population; an ambiguous
+memory-to-embedding lineage retains the SQLite fallback</td>
+<td>the supersession candidate search is bounded by <span
+class="math inline">9<em>C</em> + <em>A</em></span> plus the mismatch
+count and no longer grows with the store (BEAM conv 7, 22.6k turns:
+historical rows visited per turn 1.1k$<span
+class="math inline">43<em>k</em><em>b</em><em>e</em><em>f</em><em>o</em><em>r</em><em>e</em>, 0<em>a</em><em>f</em><em>t</em><em>e</em><em>r</em>, <em>l</em><em>a</em><em>s</em><em>t</em> − <em>t</em><em>e</em><em>n</em><em>t</em><em>h</em><em>i</em><em>n</em><em>g</em><em>e</em><em>s</em><em>t</em>227</span><span
+class="math inline">200<em>M</em><em>i</em><em>n</em><em>s</em><em>t</em><em>r</em><em>u</em><em>c</em><em>t</em><em>i</em><em>o</em><em>n</em><em>s</em>/<em>t</em><em>u</em><em>r</em><em>n</em>; 111.5<em>k</em> − <em>t</em><em>u</em><em>r</em><em>n</em><em>B</em><em>E</em><em>A</em><em>M</em><em>c</em><em>h</em><em>a</em><em>i</em><em>n</em> : 212<em>k</em></span><span
+class="math inline">0<em>r</em><em>o</em><em>w</em><em>s</em>, <em>l</em><em>a</em><em>s</em><em>t</em> − <em>t</em><em>e</em><em>n</em><em>t</em><em>h</em>411</span>$277
+M instructions/turn, total <span class="math inline">−22%</span>); edges
+are now approximate above the cutover (<code>supersedes</code> Jaccard
+against the exact scan 0.985 on conv 7 and 0.854 on the chain; packets
+4/20 and 69/99 changed; gold-turn packet recall .088<span
+class="math inline">=</span>.088 and .108<span
+class="math inline">→</span>.106; Haiku sufficiency <span
+class="math inline">−0.014 ± 0.027</span> and <span
+class="math inline">−0.006 ± 0.019</span>, chain misleading <span
+class="math inline">+0.030 ± 0.031</span>); the remaining ingest growth
+is the saturated sparse-route search itself; timestamp, kind, duplicate
+band, similarity threshold, edge limit, deterministic tie order,
+rollback, source/modality independence, and public API shape remain
+unchanged; write throughput and production-wide boundedness are
 explicitly unclaimed</td>
 </tr>
 <tr>
 <td>graph retrieval</td>
-<td>score vector similarity first, restrict recency to a tie-break, cap
-graph bonus, reserve final occupancy for direct semantic anchors, and
+<td>score vector similarity first, restrict recency to a tie-break, and
 reject an underfilled sparse seed proposal after operation-specific
 eligibility filtering and again after exact semantic-family
 collapse</td>
@@ -6855,36 +9171,15 @@ and retention semantics are unchanged</td>
 </tr>
 <tr>
 <td>emotional cascade metadata</td>
-<td>maintain a private rebuildable cache of per-memory emotional rows,
-per-embedding shared-member minima, runtime-eligible flashbulb sources,
-and the expandable topology footprint of the last fixed point; apply
-intensity, arousal, and recent-window predicates before intensity-order
-truncation; update the cache at the same successful storage,
-consolidation, cascade, association, and eviction decisions and
-rehydrate it after journal-aware rollback; caller-supplied roots
-invalidate the sidecar before forwarding their first transaction
-statement, while cache-only roots retain their exact snapshot; share
-breadth-first edge visits across source-order 64-bit batches while
-retaining a distinct visited bit and radius for every source</td>
-<td>source eligibility and stable tie order, shared-embedding
-<code>MIN</code>/<code>MAX</code> semantics, shortest depth per source,
-first-source-wins ordering, custom raw-SQL updates within the current
-transaction, update decisions, and durable database state match the
-scalar path; high-intensity stale or low-arousal rows cannot hide
-eligible sources, though locating the eligible prefix is not claimed to
-require only returned-prefix work; an inserted edge outside every
-source’s remaining-radius footprint advances the fixed point without a
-graph walk, topology rebuilds invalidate conservatively, batches
-continue for arbitrary source counts, and neither path keys behavior by
-source id or modality; ordinary engine-owned snapshot work still copies
-zero store-sized cache entries</td>
+<td>removed in the 2026-10 engine ablation with emotional consolidation
+and the cascade</td>
+<td>—</td>
 </tr>
 <tr>
 <td>synaptic tagging</td>
-<td>use indexed temporal candidate supersets with boundary ties before
-applying the original exact score and order</td>
-<td>the same nearest source-backed memories are tagged without a
-whole-source group scan</td>
+<td>removed in the 2026-10 engine ablation (its only consumer was the
+consolidation score)</td>
+<td>—</td>
 </tr>
 <tr>
 <td>live replay ingress</td>
@@ -8285,14 +10580,14 @@ recover distant neighborhoods. Exact reranking then retains at most
 
 *A* = 2*C* + 2*B*
 
-identities for current-surface eligibility, family collapse, graph
-expansion, and final ranking. At neutral knobs *C* = 512, *B* = 128, and
-*A* = 1, 280; at the all-low and all-high endpoints *A* is 640 and
-1,920. Construction remains a separate *C* + *B* node and 2*B* queue
-operation. The canonical maximum-level HNSW entry performs global
-descent, while the nearest consolidation centroid is an additional
-level-zero seed and deterministic fill pivot. Neither identity set,
-seed, nor limit depends on modality or `source_id`.
+identities for current-surface eligibility, family collapse, and final
+ranking. At neutral knobs *C* = 512, *B* = 128, and *A* = 1, 280; at the
+all-low and all-high endpoints *A* is 640 and 1,920. Construction
+remains a separate *C* + *B* node and 2*B* queue operation. The
+canonical maximum-level HNSW entry performs global descent, while the
+nearest consolidation centroid is an additional level-zero seed and
+deterministic fill pivot. Neither identity set, seed, nor limit depends
+on modality or `source_id`.
 
 The activated target was selected through a sequence of full-corpus and
 focused negative experiments. The table reports exact top-1, mean
@@ -8787,6 +11082,10 @@ remain separate gates. The content-addressed aggregate digest is
 `TRACE[state:sqlite_hnsw_knob_ablation]`.
 
 ### Activation-snapshot read-through reuse
+
+(Superseded: the route generation is now resident in memory in full, see
+the sparse-route paragraphs of the implementation section; the bounded
+shadow cache described here was removed.)
 
 The retained multi-entry route initially selected and decoded the same
 persisted activation snapshot on every query. A read-through repair
@@ -9387,8 +11686,8 @@ routing.</td>
 </tr>
 <tr>
 <td><code>TRACE[state:graph_supersession_eligibility_repair]</code></td>
-<td>Retained focused repair; the next independent graph-family
-comparison remained required.</td>
+<td>Superseded: supersession exclusion and its eligibility sidecar were
+removed in the 2026-10 engine ablation.</td>
 </tr>
 <tr>
 <td><code>TRACE[state:graph_family_vector_bound_candidate]</code></td>
@@ -9841,8 +12140,8 @@ implementation fails closed.
 <tbody>
 <tr>
 <td><code>TRACE[algorithm:consolidation-envelope-and-detector]</code></td>
-<td>Drift rearm, accumulator reset, shallow consolidation, and
-consolidation-throughput state.</td>
+<td>Drift rearm, accumulator reset, and consolidation-throughput state
+(shallow consolidation removed 2026-10).</td>
 </tr>
 <tr>
 <td><code>TRACE[algorithm:shared-retention-and-rollback]</code></td>
@@ -9867,8 +12166,8 @@ cache.</td>
 </tr>
 <tr>
 <td><code>TRACE[algorithm:memory-storage-and-graph-maintenance]</code></td>
-<td>Supersession storage, association fanout, eviction,
-predictive/stability updates, and usage detection.</td>
+<td>Supersession storage, association fanout, stability updates, and
+usage detection (eviction removed 2026-10).</td>
 </tr>
 <tr>
 <td><code>TRACE[algorithm:runtime-composition]</code></td>
@@ -10848,13 +13147,17 @@ knob-derived retrieval envelope and shared operation path, not to
 bounded whole-engine restart, production-wide latency, release, or
 deployment.
 
-## Standard Eviction-Frontier Estimate
+## Standard Eviction-Frontier Estimate (Historical)
 
-The standard file-backed pressure gate is 500,000,000 bytes. Exact
-databases occupied 10,014,720 bytes at 500 messages, 18,169,856 bytes at
-1,000, and 48,857,088 bytes at 2,636. The full-span storage slope
-projects the gate at approximately 27,445 messages; the observed
-interval slopes give a planning range of roughly 26,700–30,500 messages.
+Strength-based eviction and its storage gate were removed in the 2026-10
+engine ablation
+(<a href="#sec-reinforcement" class="quarto-xref">Section 13</a>); this
+estimate is kept as history. The standard file-backed pressure gate is
+500,000,000 bytes. Exact databases occupied 10,014,720 bytes at 500
+messages, 18,169,856 bytes at 1,000, and 48,857,088 bytes at 2,636. The
+full-span storage slope projects the gate at approximately 27,445
+messages; the observed interval slopes give a planning range of roughly
+26,700–30,500 messages.
 
 Projecting Candidate 34’s corrected post-warmup trends to 27,445
 messages gives 89.8 ms of engine process time (11.1 writes/s) and 103.7
@@ -10979,382 +13282,3 @@ non-flat. Further asymptotic gains require an approved semantics,
 lifecycle, backend, or state-ownership change rather than another
 unproven narrow hot-loop rewrite or the restoration of deleted decoder
 features.
-
-# Conclusion and Future Directions
-
-We have presented Cortext, a three-knob adaptive memory architecture
-that unifies working, episodic, and semantic memory processes under a
-continuous control regime. By deriving most system parameters from
-Focus, Sensitivity, and Stability, while fixing a small set of
-invariants for controller stability, Cortext avoids the fragility of
-hard-coded constants and enables robust operation across diverse
-environments.
-
-Key contributions include the formalization of knob-derived parameter
-spaces, the integration of uncertainty-weighted Bayesian adaptation, and
-the implementation of bio-inspired mechanisms like homeostatic rate
-control and emotional consolidation.
-
-Future work will focus on:
-
-1.  **Replicated long-horizon evaluation:** Validating the architecture
-    on frozen public corpora and larger stress runs.
-2.  **Soft Anchor consumption:** Testing whether uncertain continuity
-    hints improve downstream context without turning tentative evidence
-    into hard assertions.
-3.  **Hardware acceleration:** Optimizing vector search, graph
-    traversal, and SQLite access paths for edge devices.
-
-Cortext represents a step toward more organic, life-long learning
-systems that adapt continuously to their experiences, moving beyond
-static knowledge bases toward truly cognitive memory.
-
-# References
-
-Anderson, Michael C, Robert A Bjork, and Elizabeth L Bjork. 1994.
-“Remembering Can Cause Forgetting: Retrieval Dynamics in Long-Term
-Memory.” *Journal of Experimental Psychology: Learning, Memory, and
-Cognition* 20 (5): 1063.
-
-Åström, Karl Johan, and Richard M Murray. 2008. *Feedback Systems: An
-Introduction for Scientists and Engineers*. Princeton university press.
-
-Baddeley, Alan. 2000. “The Episodic Buffer: A New Component of Working
-Memory?” *Trends in Cognitive Sciences* 4 (11): 417–23.
-
-Cowan, Nelson. 2001. “The Magical Number 4 in Short-Term Memory: A
-Reconsideration of Mental Storage Capacity.” *Behavioral and Brain
-Sciences* 24 (1): 87–114.
-
-———. 2010. “The Magical Mystery Four: How Is Working Memory Capacity
-Limited, and Why?” *Current Directions in Psychological Science* 19 (1):
-51–57.
-
-Fountas, Zafeirios et al. 2024. “EM-LLM: Episodic Memory in Large
-Language Models.” *arXiv Preprint*.
-
-Hunt, R Reed. 1995. “The Subtlety of Distinctiveness: What von Restorff
-Really Did.” *Psychonomic Bulletin & Review* 2 (1): 105–12.
-
-LaBar, Kevin S, and Roberto Cabeza. 2006. “Cognitive Neuroscience of
-Emotional Memory.” *Nature Reviews Neuroscience* 7 (1): 54–64.
-
-Liu, Jun S, and Rong Chen. 1998. “Sequential Monte Carlo Methods for
-Dynamic Systems.” *Journal of the American Statistical Association* 93
-(443): 1032–44.
-
-McClelland, James L, Bruce L McNaughton, and Randall C O’Reilly. 1995.
-“Why There Are Complementary Learning Systems in the Hippocampus and
-Neocortex: Insights from the Successes and Failures of Connectionist
-Models of Learning and Memory.” *Psychological Review* 102 (3): 419.
-
-McCloskey, Michael, and Neal J Cohen. 1989. “Catastrophic Interference
-in Connectionist Networks: The Sequential Learning Problem.” In *The
-Psychology of Learning and Motivation*, 24:109–65. Elsevier.
-
-McGaugh, James L. 2004. “The Amygdala Modulates the Consolidation of
-Memories of Emotionally Arousing Experiences.” *Annual Review of
-Neuroscience* 27: 1–28.
-
-Miller, George A. 1956. “The Magical Number Seven, Plus or Minus Two:
-Some Limits on Our Capacity for Processing Information.” *Psychological
-Review* 63 (2): 81.
-
-Murdock Jr, Bennet B. 1962. “The Serial Position Effect of Free Recall.”
-*Journal of Experimental Psychology* 64 (5): 482.
-
-Nader, Karim. 2003. “Memory Traces Unbound.” *Trends in Neurosciences*
-26 (2): 65–72.
-
-Nader, Karim, Glenn E Schafe, and Joseph E Le Doux. 2000. “Fear Memories
-Require Protein Synthesis in the Amygdala for Reconsolidation After
-Retrieval.” *Nature* 406 (6797): 722–26.
-
-Russell, James A. 1980. “A Circumplex Model of Affect.” *Journal of
-Personality and Social Psychology* 39 (6): 1161.
-
-Tulving, Endel. 1972. “Episodic and Semantic Memory.” In *Organization
-of Memory*, 1:381–403. Academic Press.
-
-Zacks, Jeffrey M, and Kymberly M Swallow. 2007. “Event Segmentation.”
-*Current Directions in Psychological Science* 16 (2): 80–84.
-
-# Appendix A. State Variables Map
-
-This appendix enumerates the state variables used by the specification
-and separates retained state (carried across timesteps) from per-step
-derived quantities. The canonical source for section references is
-`docs/paper/sections/*.qmd`; anchors in these files are authoritative
-when resolving cross-reference drift.
-
-## State + Initialization (Canonical)
-
-On cold start (no persisted state), initialize retained state as follows
-(unless otherwise specified by knob priors):
-
--   **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`,
-    `mood_vector = 0_vector`, `last_mood_ts = now_ms()`,
-    `theta_dynamic = theta_target = θ_prior(F,S,T)`,
-    `hysteresis = lerp(0.02, 0.25, T)`, `half_life = base_half_life(T)`,
-    `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`,
-    `reliability = 1`, `retention_ema = 0`,
-    `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`,
-    `last_embedding = unset`, `x_pred_ema = unset`, `outcome_pred = 0`,
-    `φ_t = 0`.
-
--   **Accumulator defaults (per stream):** `μ_acc = 0_vector`,
-    `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`,
-    `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`,
-    `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`,
-    `last_write_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`,
-    `drift_accum = 0`, `drift_at_last_interrupt = 0`,
-    `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc),
-    `prev_x = unset` (μ_acc).
-
--   **Per-memory defaults (on insert):**
-    `strength = memory_initial_strength(F,S,T)`,
-    `trace_* = memory_initial_trace_policy(F,S,T)`, `use_frequency = 0`,
-    `stability = memory_initial_stability(F,S,T)`, `connectivity = 0`,
-    `drift_mag = 0`, `influence = 0`, `sustained_influence = 0`,
-    `contextual_gain = 0`, `redundancy = 0`, `pre_activation = 0`,
-    `lability_state = 0`, `suppression_count = 0`, `suppression = 0`,
-    `flashbulb = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`,
-    `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`,
-    `context = 0_vector`,
-    `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`.
-    Application provenance remains in the separate opaque `source_id`.
-    SQLite defaults remain migration/backstop values for legacy rows.
-    Evidence packets live in ordered `signals` rows, and the
-    constructive-recall ledger starts empty until the initial
-    reconstruction row is appended in `memory_reconstructions`.
-
--   **RLS defaults:** `w_* = w_bootstrap`, `P = diag(P_init(T))` with
-    `P_init(T) = lerp(500, 2000, 1 − T)`, `blender_ready = false`,
-    `blender_update_count = 0`.
-
--   **Knob-derived control parameters (initialized from priors):**
-    `weight_relevance`, `attention_width`, `coverage_gain_floor`,
-    `mismatch_weight`, `weight_novelty`, `weight_surprise`,
-    `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`,
-    `rate_target`, `rate_decay`, `periphery_half_life`,
-    `salience_half_life`, `drift_weight`.
-
--   **Buffers:** `signal_stream` (μ_acc stream), `score_stream`,
-    `memory_stream`, `recent_memory_centroids`, `index_store`,
-    `procedural_store` start empty.
-
--   **Retention history:** `retention_history` starts empty (populated
-    after the first signal step).
-
--   **Accumulator state (per stream; retained across timesteps):**
-
-    -   `{μ_acc, c_t, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, last_write_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
-
--   **Global state (retained across timesteps):**
-
-    -   `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, half_life, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, retention_ema, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, outcome_pred, φ_t, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, rate_decay, periphery_half_life, salience_half_life, drift_weight, blender_ready, blender_update_count, blender_P}`
-
--   **Buffers (retained across timesteps; bounded by window rules):**
-
-    -   `{signal_stream, score_stream, memory_stream, recent_memory_centroids, index_store, procedural_store, retention_history}`
-
--   **Recorded signal fields (per signal):**
-
-    -   `{coherence_struct_t → SIGNALS.coherence, focus_spread_t → SIGNALS.focus_spread}`
-
--   **Recorded global fields:**
-
-    -   `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
-
--   **Per-step derived scalars/vectors (ephemeral; recomputed each
-    step):**
-
-    -   `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t, NE_t, DA_t}`
-
-# Appendix B. Derived Signals: Definitions and Bounds
-
-This appendix defines non-trivial derived signals used throughout the
-specification. Unless otherwise stated, all derived scalars are clamped
-to \[0, 1\].
-
-**novelty:** A normalized dissimilarity-to-context signal computed on
-the accumulator centroid.
-
-    max_cos ← max_{c ∈ recent_context} cos(μ_acc, c)  # in [−1, 1]
-    novelty_t ← clamp((1 − max_cos) / 2, 0, 1)
-
-Fallback: if recent_context is empty, set novelty_t ← 1.
-
-**μ_sim:** A normalized mean similarity to context.
-
-    mean_cos ← mean_{c ∈ recent_context} cos(μ_acc, c)
-    μ_sim ← clamp((mean_cos + 1) / 2, 0, 1)
-
-Fallback: if recent_context is empty, set μ_sim ← 0.5.
-
-**rarity_t:** A normalized rarity signal defined as
-dissimilarity-to-context mean.
-
-    rarity_t ← clamp(1 − μ_sim, 0, 1)
-
-Fallback: inherits μ_sim fallback, so rarity_t defaults to 0.5 when
-recent_context is empty.
-
-**relevance_to_task(q, task_ctx):** A normalized relevance of embedding
-q to a task context set.
-
-    if |task_ctx| == 0: return 0.5
-    return clamp((cos(q, mean(task_ctx)) + 1) / 2, 0, 1)
-
-**novelty_to_set(q, S_set_embeddings):** A normalized novelty of q
-relative to a set of embeddings.
-
-    novelty_to_set(q, S_set_embeddings) ← 1 − redundancy(q, S_set_embeddings)
-
-**ΔSSE:** A normalized improvement in reconstruction/prediction error
-(utility proxy).
-
-    ΔSSE ← clamp((SSE_prev − SSE_curr) / max(SSE_prev, ε), 0, 1)
-
-Definitions:
-
-    SSE_curr ← ‖μ_acc − x_pred_t‖^2          # prediction error at t (x_pred_t = x_pred_ema for EMA predictor)
-    SSE_prev ← previous SSE_curr (t−1)     # or EWMA if smoothing is used
-
-Fallback: if no prediction model is available, or if dimensions
-mismatch, set ΔSSE ← 0.
-
-**redundancy(a, S_set):** A normalized redundancy of item a w.r.t. a set
-S_set.
-
-    redundancy(a, S_set) ← max_{s ∈ S_set} clamp((cos(a, s) + 1) / 2, 0, 1)
-
-Fallback: if S_set is empty, redundancy(a, S_set) ← 0.
-
-**coverage_gain(candidate | included_set):** Incremental coverage
-contribution of adding candidate.
-
-    coverage_gain(candidate | included_set) ← 1 − redundancy(candidate, included_set)
-
-# Appendix C. Edge Case Rules
-
-These rules resolve empty-store and small-store cases to preserve
-causality and avoid undefined metrics.
-
--   **memory_stream empty:** kNN returns empty; retrieval returns no
-    candidates; graph traversal is skipped. Set `focus_spread_t = 0`.
--   **memory_stream small:** use
-    `k_eff = min(k_neighbors(T), |memory_stream|)`. If `k_eff < 2`, set
-    `focus_spread_t = 0`.
--   **graph absent or empty:** skip graph traversal; use vector search
-    only.
--   **recent_context empty:** apply fallbacks defined in Appendix B
-    (e.g., `novelty_t = 1`, `μ_sim = 0.5`, `rarity_t = 0.5`,
-    `μ_ctx = 0_vector` so `map01(cos)=0.5`).
--   **recent_scores empty:** set `observed_p90 ← θ_prior` in threshold
-    updates.
-
-# Appendix D. Main Loop Execution Order and Normative Invariants
-
-This ordering is canonical and supersedes any other sequence described
-elsewhere in the document. It mirrors the production
-`BuildRootOperationSet` stage order: `CoreStage`, `StorageStage`,
-`RetrievalStage`, then `FeedbackStage`. Probe mode runs only `CoreStage`
-plus `RetrievalStage`.
-
-Canonical single-step pseudocode (timestep t):
-
-    # Main loop (single timestep t)
-    now_s, now_ms, x_t ← read_inputs()
-
-    # CoreStage
-    initialize_embedded_centroids_and_priors()
-    coherence_t ← compute_coherence()
-    μ_acc ← update_accumulator_embedding(x_t)
-    drift_accum ← update_cumulative_drift(x_t)
-    focus_spread_t ← compute_focus_spread()
-    prediction_error_t ← update_embedding_prediction_error()
-    u_t ← update_uncertainty(...)
-    update_focus_sensitivity_mood_and_effective_focus()
-    metrics_t ← compute_structural_and_affective_metrics()
-    update_neuromodulators_and_metric_weights()
-    score_t ← compute_composite_score(metrics_t)
-    update_accumulator_scores(score_t, μ_acc)
-    update_precision_delta_and_threshold()
-    recent_context ← append_recent_context(μ_acc)
-    boundary_score, should_flush ← detect_boundary(capacity_pressure, inactivity_boost)
-    spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
-    write_memory ← compute_write_gate(force_write, should_flush, spike_bypass)
-    Δwrites ← 1 if write_memory else 0
-
-    # StorageStage
-    stored_memory_id ← maybe_commit_memory_unit(write_memory)
-    update_soft_anchor(stored_memory_id)
-    apply_synaptic_tagging(stored_memory_id)
-    persist_signal_metrics(stored_memory_id)
-
-    # RetrievalStage (q_retrieval is captured before any accumulator reset)
-    q_retrieval ← l2_normalize(μ_acc)
-    streaming_pacing_check()
-    graph_retrieval(q_retrieval)
-    update_rate_state(Δwrites)
-    compute_mni_gate_decision()
-    detect_memory_usage_and_update_reinforcement()
-
-    # FeedbackStage
-    update_retrieval_competition()
-    apply_predictive_preactivation()
-    apply_reconsolidation()
-    apply_focus_sensitivity_stability_feedback()
-    apply_influence_feedback()
-    apply_serial_position_and_strength_effects()
-    run_emotional_consolidation()
-    update_working_memory()
-    reset_accumulator_after_flush_or_interrupt()
-    if signal.force_consolidation:
-        evaluate_consolidation()
-        gate_cluster_and_shallow_replay()
-        build_memory_graph()
-    update_emotional_cascade()
-    update_meta_learning()
-
-The normative execution order for a single timestep t:
-
-1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
-2.  **Run CoreStage:** initialize priors, update accumulator/drift,
-    compute uncertainty, adaptation, metrics, neuromodulators, composite
-    score, threshold, boundary, spike bypass, and write gate.
-3.  **Run StorageStage:** write the memory unit when the write gate
-    opens, then update Soft Anchor, synaptic tagging, and signal metric
-    persistence from the stored memory id.
-4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any
-    reset, run streaming pacing and graph retrieval, update rate state
-    from the current write decision, compute the MNI gate, and record
-    memory usage/reinforcement.
-5.  **Run FeedbackStage:** apply retrieval competition, predictive
-    pre-activation, reconsolidation, F/S/T feedback, serial-position and
-    strength updates, emotional consolidation, working memory,
-    accumulator reset, optional forced consolidation, graph build,
-    emotional cascade, and meta-learning.
-6.  **Interrupt Abort:** If the MNI gate marked a pending abort, the
-    next signal compares similarity to the selected memory against the
-    current unit and resets only when the new signal aligns more with
-    the selected memory.
-
-Timing notes:
-
--   `now_s()` is captured at step 1 and reused for all Δt computations
-    in this timestep.
--   Threshold updates in `CoreStage` use the score computed earlier in
-    the same stage.
--   Rate updates in `RetrievalStage` use Δwrites from the current step’s
-    `write_memory` decision.
--   Accumulator resets happen in `FeedbackStage`, after storage,
-    retrieval, MNI, memory-usage detection, and working-memory updates
-    have consumed the current-unit query.
-
-**Normative Invariants:** \* **Causality:** Step `k` uses only values
-computed in steps `1` through `k` or retained from `t-1`. \* **Write
-Atomicity:** A “write” is an atomic commit of a `should_flush` unit.
-Partial units are never written. \* **Gap Consistency:** `now_s()` is
-fixed at step 1. All `Δt` calculations use this fixed value.
