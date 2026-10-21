@@ -306,7 +306,7 @@ pub fn build(b: *std.Build) void {
         .name = "cortext",
         .linkage = if (shared) .dynamic else .static,
         .root_module = mod,
-        .version = .{ .major = 1, .minor = 3, .patch = 3 },
+        .version = std.SemanticVersion.parse(cortext_version) catch unreachable,
     });
 
     // Keep Zig consumers on the same pinned hnswlib safety contract as the

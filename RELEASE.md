@@ -94,7 +94,7 @@ the tag or publish the release.
 The engine release surfaces report `2.0.0`:
 
 - `CMakeLists.txt` project version
-- `build.zig` `cortext_version` and library package version
+- `build.zig` `cortext_version` (the Zig library version is derived from it)
 - `build.zig.zon` package version
 - `models/manifest.json` `cortext_version`
 - `README.md` asset download example (`ASSETS_VERSION`)
