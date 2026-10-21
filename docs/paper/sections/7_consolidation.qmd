@@ -1,4 +1,4 @@
-# Consolidation and Graph Integration {#sec-consolidation}
+# Consolidation as Route Maintenance {#sec-consolidation}
 
 `Consolidate()` is now a maintenance call. It seals and recenters the sparse retrieval route on a maintenance-only transaction path beside the normal signal pipeline. Clustering consolidation is gone: shallow replay into `ASSOCIATION` centroids and the typed-edge graph build were removed in the 2026-10 engine ablation (see "Clustering Consolidation (Removed)" below). Earlier hard cuts had already removed the generative consolidation stack.
 
@@ -29,11 +29,18 @@ recenters the sparse retrieval route. Maintenance therefore does
 not create an episode, signal, working-memory row, long-term memory, blob, or
 searchable embedding, and it does not update normal throughput observations.
 The single `consolidation_state` output is an ordered hint for the caller; it
-does not schedule maintenance work by itself. In addition to the throughput
-classifier below, the private active-epoch store raises `Required` when its
-event, mutation, or allocated-byte safety ceiling is reached. That boundary is
-source- and modality-independent, remains asserted if ignored, and is cleared
-only after a successful forced-maintenance commit publishes a fresh epoch.
+does not schedule maintenance work by itself. It is the more urgent of two
+classifiers. The first reads sparse-route growth. Once a route is published,
+$C$ memories written since the last maintenance commit recommend a pass, and
+$C \times$ `ConsolidationEscalationMultiplier(T)` require one, with $C$ the
+route capacity of @sec-optimization. A maintenance commit resets the count.
+The second is the throughput classifier below. Both are source- and
+modality-independent.
+
+Earlier builds raised `Required` from the active epoch of retrieval-induced
+forgetting. When retrieval competition was removed, BEAM-10M conversation 7
+consolidated once in 22,652 turns and its route never recentered. The growth
+rule brought it back to 44 consolidations and 43 recenters.
 
 A caller can use the engine hints as the external scheduling rule. Since the
 last committed forced request, including a coherent no-op with no persisted
@@ -124,19 +131,16 @@ The 2026-10 engine ablation found the pipeline inert at the default knobs. Per-m
 
 The pipeline, its knobs (`MergeThreshold`, `MinClusterSize`, `ConsolidationMaxClusters`, graph-build thresholds and others) and its operation-context plumbing were removed. Maintenance signals now run no per-signal operations. The sparse route recenters on the active-signal ring centroid, which was already the fallback whenever no cluster centroid existed. At the default knobs that was every pass.
 
-## Reconstruction Surface Discipline
+## Reconstruction Surface (Legacy Stores)
 
-Constructive reconsolidation appends reconstruction records rather than
-rewriting every historical embedding reference. When an append succeeds, the
-bounded `current_memory_embeddings` surface must advance to the newest
-reconstruction embedding. Retrieval reads that current surface first, falling
-back to the latest reconstruction only when the cached current row is stale.
-
-This keeps graph retrieval aligned with the live memory surface while preserving
-older signal rows, shared base embeddings, and sibling memories that still point
-at the original embedding. Non-constructive fallback updates still fork shared
-embeddings before writing in place, so a reconsolidated memory does not mutate
-unrelated memories that happened to share the same vector row.
+Reconsolidation and retrieval-time reconstruction were removed (@sec-negative).
+New stores write one initial reconstruction per memory at storage time and
+never append another, so their current surface equals the stored embedding.
+Stores written by earlier builds may hold appended reconstructions. Retrieval
+still reads the `current_memory_embeddings` surface first and falls back to
+the latest reconstruction when a cached current row is stale. Older signal
+rows, shared base embeddings and sibling memories that point at an original
+embedding are preserved.
 
 ## What Was Removed
 
@@ -151,7 +155,8 @@ The following systems are no longer part of the runtime:
 * persistent confidence-monitoring state,
 * bitemporal fact assertion/cache/evidence tables,
 * fact-aware retrieval and eviction policies,
-* clustering consolidation (candidate scoring, clustering, shallow `ASSOCIATION` replay, typed-edge graph build).
+* clustering consolidation (candidate scoring, clustering, shallow `ASSOCIATION` replay, typed-edge graph build),
+* the memory-lifecycle mechanisms of @sec-negative: strength decay and eviction, reconsolidation, retrieval competition, synaptic tagging, emotional consolidation and the NE-like and DA-like modulators.
 
 The removal is a hard cut, not a compatibility shim. New databases no longer
 create the removed tables, public bindings no longer expose the removed mode

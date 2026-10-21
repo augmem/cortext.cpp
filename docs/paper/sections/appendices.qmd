@@ -6,9 +6,9 @@ This appendix enumerates the state variables used by the specification and separ
 
 On cold start (no persisted state), initialize retained state as follows (unless otherwise specified by knob priors):
 
-* **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `x_pred_ema = unset`, `φ_t = 0`.
+* **Global defaults:** `signals_processed = 0`, `u_uncertainty = 0`, `mood_vector = 0_vector`, `last_mood_ts = now_ms()`, `theta_dynamic = theta_target = θ_prior(F,S,T)`, `hysteresis = lerp(0.02, 0.25, T)`, `m_rate = 0`, `rho_hat_prev = 0`, `dt_ema = 0`, `rate_ticks = 0`, `reliability = 1`, `last_rate_timestamp = now_ms()`, `last_retrieval_ts = 0`, `last_embedding = unset`, `x_pred_ema = unset`. (The oscillator phase `φ_t` was removed with the encode/retrieve oscillator.)
 * **Accumulator defaults (per stream):** `μ_acc = 0_vector`, `c_t = 0_vector`, `drift_acc = 0`, `s_sum = 0`, `s_max = 0`, `n = 0`, `e_peak = 0_vector`, `emo_max = 0`, `arousal_sum = 0`, `acc_signals_window = []`, `t_start = 0`, `last_signal_ts = 0`, `eta_acc = 0`, `coherence_prev = 0`, `drift_accum = 0`, `drift_at_last_interrupt = 0`, `drift_acc_pacing = 0`, `x_last_check = unset` (μ_acc), `prev_x = unset` (μ_acc).
-* **Per-memory defaults (on insert):** `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`, `lability_state = 0`, `suppression_count = 0`, `suppression = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `tagged = false`, `tag_expires_at = 0`, `context = 0_vector`, `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`. Application provenance remains in the separate opaque `source_id`. SQLite defaults remain migration/backstop values for legacy rows. Evidence packets live in ordered `signals` rows, and the constructive-recall ledger starts empty until the initial reconstruction row is appended in `memory_reconstructions`.
+* **Per-memory defaults (on insert):** `strength = memory_initial_strength(F,S,T)`, `drift_mag = 0`, `s_emotion_max = 0`, `s_arousal_avg = 0`, `boundary_score = 0`, `context = 0_vector`, `source_model = {origin: "source", reliability: source_reliability_0(F,S,T), contradiction_count: 0, last_verified_ts: 0}`. Lability, suppression and synaptic-tag fields were dropped by migrations 39, 45 and 46. <!-- PRUNE: migration 56 drops context and the reliability/contradiction/last-verified fields; trim this list to the final removal list. --> Application provenance remains in the separate opaque `source_id`. SQLite defaults remain migration/backstop values for legacy rows. Evidence packets live in ordered `signals` rows, and the constructive-recall ledger starts empty until the initial reconstruction row is appended in `memory_reconstructions`.
 * **RLS defaults:** `w_* = w_bootstrap`, `P = diag(P_init(T))` with `P_init(T) = lerp(500, 2000, 1 − T)`, `blender_ready = false`, `blender_update_count = 0`.
 * **Knob-derived control parameters (initialized from priors):** `weight_relevance`, `attention_width`, `coverage_gain_floor`, `mismatch_weight`, `weight_novelty`, `weight_surprise`, `weight_valence`, `weight_arousal`, `emotion_gain`, `score_gain`, `rate_target`.
 * **Buffers:** `signal_stream` (μ_acc stream), `score_stream`, `memory_stream`, `recent_memory_centroids` start empty.
@@ -18,7 +18,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
   * `{μ_acc, c_t, drift_acc, s_sum, s_max, n, e_peak, emo_max, arousal_sum, eta_acc, coherence_prev, acc_signals_window, t_start, last_signal_ts, drift_accum, drift_at_last_interrupt, drift_acc_pacing, x_last_check, prev_x}`
 
 * **Global state (retained across timesteps):**
-  * `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, φ_t, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, blender_ready, blender_update_count, blender_P}`
+  * `{signals_processed, u_uncertainty, mood_vector, last_mood_ts, theta_dynamic, theta_target, hysteresis, m_rate, rho_hat_prev, dt_ema, rate_ticks, reliability, last_rate_timestamp, last_retrieval_ts, last_embedding, x_pred_ema, weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, weight_novelty, weight_surprise, weight_valence, weight_arousal, emotion_gain, score_gain, rate_target, blender_ready, blender_update_count, blender_P}`
 
 * **Buffers (retained across timesteps; bounded by window rules):**
   * `{signal_stream, score_stream, memory_stream, recent_memory_centroids, retention_history}`
@@ -30,7 +30,7 @@ On cold start (no persisted state), initialize retained state as follows (unless
   * `{u(t) → STATE.u_uncertainty, M_t → STATE.mood_vector}`
 
 * **Per-step derived scalars/vectors (ephemeral; recomputed each step):**
-  * `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t, NE_t, DA_t}`
+  * `{signal_gap_s, coherence_curr, s_avg, S_window, boundary_score, max_signals, max_signal_flush, should_flush, write_memory, Δwrites, q_retrieval, ACh_t}` (NE_t and DA_t were removed with their modulators)
 
 # Appendix B. Derived Signals: Definitions and Bounds {#sec-app-derived .unnumbered}
 
@@ -126,7 +126,7 @@ update_precision_delta_and_threshold()
 recent_context ← append_recent_context(μ_acc)
 boundary_score, should_flush ← detect_boundary(capacity_pressure, inactivity_boost)
 spike_bypass ← check_spike_bypass(score_t, θ_dynamic, mem_maturity, coherence_t)
-write_memory ← compute_write_gate(force_write, should_flush, spike_bypass)
+write_memory ← force_write OR should_flush   # every closed unit is stored
 Δwrites ← 1 if write_memory else 0
 
 # StorageStage
@@ -139,7 +139,7 @@ streaming_pacing_check()
 graph_retrieval(q_retrieval)
 update_rate_state(Δwrites)
 compute_mni_gate_decision()
-detect_memory_usage_and_update_reinforcement()
+detect_memory_usage()   # usage counters only; reinforcement was removed
 
 # FeedbackStage
 record_memory_usage()
@@ -151,8 +151,8 @@ The normative execution order for a single timestep t:
 
 1.  **Read Inputs:** `x_t`, `now_s()`, `system_time_ms`.
 2.  **Run CoreStage:** initialize priors, update accumulator/drift, compute uncertainty, adaptation, metrics, neuromodulators, composite score, threshold, boundary, spike bypass, and write gate.
-3.  **Run StorageStage:** write the memory unit when the write gate opens, then persist signal metrics from the stored memory id.
-4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any reset, run streaming pacing and graph retrieval, update rate state from the current write decision, compute the MNI gate, and record memory usage/reinforcement.
+3.  **Run StorageStage:** write the closed memory unit (every closed unit is stored), then persist signal metrics from the stored memory id.
+4.  **Run RetrievalStage:** cache `q_retrieval ← μ_acc` before any reset, run streaming pacing and graph retrieval, update rate state from the current write decision, compute the MNI gate, and record memory usage.
 5.  **Run FeedbackStage:** apply usage counters, working memory, and accumulator reset. A `force_consolidation` maintenance signal runs none of these stages; the processor only seals and recenters the sparse route.
 6.  **Interrupt Abort:** If the MNI gate marked a pending abort, the next signal compares similarity to the selected memory against the current unit and resets only when the new signal aligns more with the selected memory.
 

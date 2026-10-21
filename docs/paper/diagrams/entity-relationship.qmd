@@ -1,9 +1,10 @@
 Note: All knob-derived parameters in online operations use the midpoint‑biased
 knobs F̃ and S̃ defined in Section 1. This does not change the schema, but it
 does affect the interpretation of threshold- and gate-related fields.
-Note: Consolidation is shallow and embedding-only. It creates ASSOCIATION
-centroids without blobs and does not call a summarization, extraction, or
-provider backend.
+Note: The engine calls no summarization, extraction, or provider backend.
+Stores written before the 2026-10 ablation may hold ASSOCIATION centroids from
+removed clustering consolidation; the current runtime neither writes nor reads
+them.
 Note: This diagram emphasizes the core memory/signal/association schema. Later
 migrations also add reconstruction tables.
 Note: Consolidation is external-only maintenance; callers invoke C++
@@ -21,11 +22,13 @@ memory than with the current accumulator centroid. This is operational only
 and does not alter the schema.
 Note: Production graph retrieval does not use `s_arousal_avg` in candidate
 ranking. Affect still modulates interrupt gating.
-Note: Retrieval seeding scans LONG_TERM and ASSOCIATION embeddings, then graph
-expansion follows the production traversal subset: `co_occurs`, `similar_to`,
-`reinforces`, `causes`, `derived_from`, `next_in_episode`, `prev_in_episode`,
-`within_same_event`, and `supersedes`. Other stored edge types can support
-maintenance, hydration, or audit paths without participating in expansion.
+Note: Retrieval seeds from LONG_TERM memories only and traverses no edges.
+The only edge type the runtime writes is `supersedes`, which hydration reads
+in both directions. Other edge types in this diagram are legacy rows from
+removed consolidation and graph-expansion paths. The diagram predates the v5
+tables `memory_text_fts`, `memory_signal_vectors`, `standing_signals` and
+`memory_signal_li_codes` (migrations 49-54); see the paper's retrieval
+section.
 
 ```{mermaid}
 erDiagram

@@ -1,10 +1,15 @@
-# Advanced Cognitive Processes {#sec-advanced}
+# Working Memory, Supersession and Removed Cognitive Mechanisms {#sec-advanced}
 
-This section presents algorithms modeling higher-order cognitive phenomena:
-working memory maintenance, retrieval uncertainty, and the removed
-reconsolidation and Soft Anchor dynamics.
+This section specifies the surviving cognitively motivated components:
+bounded working memory, the temporal context vector, and graph-native belief
+revision through `supersedes` edges. It also keeps a short record of the
+higher-order mechanisms the 2026-10 ablation removed, with their measured
+effects. The removed mechanisms are reconsolidation, retrieval competition,
+predictive pre-activation, serial-position effects, emotional consolidation,
+synaptic tagging, Soft Anchors, and pattern separation with its procedural
+lane (@sec-negative).
 
-**Knob note:** Unless explicitly stated otherwise, F and S in this section refer to midpoint‑biased values (F̃, S̃) defined in Section 1.
+**Knob note:** Unless explicitly stated otherwise, F and S in this section refer to midpoint‑biased values (F̃, S̃) defined in @sec-math.
 
 ## Working Memory Gates
 
@@ -34,19 +39,20 @@ memory.modality ← primary modality ('text', 'audio', 'image')
 memory.blob_ids ← [blob_1, blob_2, ..., blob_n]  # blob refs
 memory.embedding ← e_rep  # representative embedding (@sec-rep-embedding)
 memory.signals ← [x_1, x_2, ..., x_n]  # ordered signal embeddings
-memory.context ← c_t  # temporal context state (@sec-temporal-context)
-memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}
+memory.context ← c_t  # temporal context state (@sec-temporal-context); PRUNE: persisted copy dropped by migration 56
+memory.source_model ← {origin, reliability, contradiction_count, last_verified_ts}  # PRUNE: reliability, contradiction_count, last_verified_ts dropped by migration 56
 memory.evidence_packets ← ordered immutable signal rows
 memory.current_view ← latest reconstruction blob if present, else concatenated signal blobs
 memory.metadata ← {n, s_max, s_avg, drift_acc, mem_elapsed,
                    s_emotion_max, s_arousal_avg}
 ```
 
-The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation for use by Emotional Consolidation (@sec-emotional-consolidation).
+The emotional metrics (s_emotion_max, s_arousal_avg) are accumulated during memory formation. Their consumer, Emotional Consolidation, was removed (@sec-emotional-consolidation).
+<!-- PRUNE: if chore/prune-write-only drops these write-only metadata fields, remove them from the structure above and delete this sentence. -->
 
 ## Temporal Context State (Time-Cells Analogue) {#sec-temporal-context}
 
-Beyond the accumulator centroid μ_acc, Cortext maintains a slowly drifting temporal context vector `c_t`. This provides ordered recall and reduces topic-collision errors by enabling **context reinstatement**.
+Beyond the accumulator centroid μ_acc, Cortext maintains a slowly drifting temporal context vector `c_t`. It anchors the topic-shift term of boundary detection (@sec-boundary). Using it for ordered recall through **context reinstatement** remains a proposed extension, described below; it is not shipped.
 
 ```
 α_c(S,T) = AccumulatorTemporalContextAlpha(S,T)
@@ -183,29 +189,49 @@ so it was removed.
 
 **Implementation note:** durable ingress inputs preserve an ordered working-memory trace independent of the literal `source_id` string. `source_id` is still used for opaque provenance and exact same-source grouping, but Cortext does not parse roles such as user, assistant, speaker, or device from it. Internal maintenance work follows the same rule: explicit consolidation is driven by a force flag on the signal, not by a magic `source_id` value. Prompt hydration orders active slots by insertion/start time rather than `last_access`; otherwise slot updates can scramble the visible recent context even when the underlying memories are correct.
 
-## Two-Layer Graph Memory Surface {#sec-three-tier-graph-memory}
+## Two-Layer Memory Surface {#sec-three-tier-graph-memory}
 
-Cortext now separates live memory state into two graph-compatible layers. The
-layers differ by latency and commitment rather than by modality:
+Cortext separates live memory state into two layers. They differ by latency
+and commitment, not by modality.
 
-1. **Working memory (WM):** the bounded active slot set used for immediate prompt reconstruction, overlap suppression, and recent-turn continuity. WM stores coherent memories and preserves their ordered evidence packets. It is the most volatile layer and is optimized for exact recent context rather than broad semantic search.
-2. **Long-term graph memory (LTM):** the persisted graph of long-term memories, association centroids, optional label nodes, and durable association edges. Durable memory nodes live in the `memories` table and durable edges live in `associations`. There is no processor-local STM shadow graph and no separate fact assertion store.
+1. **Working memory (WM)** is the bounded active slot set used for recent-turn
+   continuity, overlap suppression and the `working_memory` block of a packet.
+   It stores coherent units with their ordered evidence. It is the most
+   volatile layer and serves exact recent context rather than broad semantic
+   search.
+2. **Long-term memory (LTM)** is the durable store. Each closed unit is a
+   `LONG_TERM` row in `memories`, with its pooled representative embedding.
+   Its signals are `signals` rows with object-store payloads, addressed by
+   BLAKE3 content id. Four per-payload or per-memory indexes serve retrieval
+   (@sec-retrieval):
+   * `memory_signal_vectors`: one shared-space vector per payload;
+   * `memory_signal_li_codes`: late-interaction codes per payload;
+   * `memory_text_fts`: FTS5 keyword index over long-term text;
+   * `standing_signals`: the standing set.
 
-The intended control flow is:
+   The only edges are directed `supersedes` edges in `associations`.
 
-```
+There is no processor-local short-term shadow graph and no fact assertion
+store. Clustering consolidation no longer writes `ASSOCIATION` centroids,
+`derived_from` edges or typed graph edges (@sec-consolidation). Older stores
+may still hold such rows, and the runtime neither writes nor traverses them.
+
+The control flow is:
+
+```text
 signal embedding
-  -> WM active-slot update
-  -> LTM retrieval from memories and association centroids
-  -> explicit consolidation
-  -> shallow association centroid insert/update
-  -> durable LTM graph edge insert/update
+  -> accumulator update and boundary segmentation
+  -> on a boundary: LTM unit write (+ indexes, + supersedes edges)
+  -> WM admission of the closed unit
+query embedding
+  -> hybrid retrieval over LTM (@sec-retrieval)
+  -> hydration and evidence fitting (@sec-hydration)
+Consolidate()
+  -> seal and recenter the sparse retrieval route (@sec-optimization)
 ```
 
-This keeps the online loop fast and modality-agnostic. Consolidation is a
-shallow, embedding-only commitment step: it clusters mature long-term memories,
-creates association centroids, connects member memories with `derived_from`, and
-optionally attaches already-existing label nodes by embedding similarity.
+Every step is embedding-only or metadata-only and modality-agnostic, and no
+step calls a language model.
 
 ## Soft Anchor Formation (Removed) {#sec-soft-anchor}
 
@@ -233,7 +259,8 @@ rank_margin(q) = score_1(q) - score_2(q)
 retrieval_uncertainty(q) = 1 - clamp(rank_margin(q) / margin_ref(F,S,T), 0, 1)
 ```
 
-This keeps uncertainty local to the retrieval event. Callers can use the ranked
+The engine does not compute this quantity; it is a reading the caller can take
+from the returned scores. This keeps uncertainty local to the retrieval event. Callers can use the ranked
 candidate packet and evidence surfaces to decide whether to answer, ask for
 clarification, or expose multiple possible memories without the engine carrying
 a separate persistent confidence machine.
@@ -259,6 +286,7 @@ read through their latest reconstruction.
 
 ## Stored Source Metadata and Supersession
 
+<!-- PRUNE: migration 56 on chore/prune-write-only drops source_reliability, source_contradiction_count and source_last_verified_ts; replace the next two paragraphs and the proposed confidence rule with a removal note, and drop the contradiction_count line from the supersession rule. -->
 Each memory stores opaque `source_id` provenance plus `source_origin`,
 `source_reliability`, and `source_contradiction_count`. The current writer uses
 the constant origin class `"source"`; the actual application provenance remains
@@ -306,8 +334,9 @@ if θ_topic ≤ cos(e_new, e_old) < θ_dup:
 ```
 
 Retrieval treats `supersedes` as a directional family relation rather than a
-traversable activation edge. Packet hydration uses it to attach a retrieved
-replacement's superseded predecessors. Earlier builds also removed superseded
+traversable activation edge. Packet hydration uses it in both directions: a
+retrieved replacement gets its superseded predecessors, and a retrieved older
+version gets its newest superseding successor (@sec-hydration). Earlier builds also removed superseded
 targets before the vector seed cap. The engine ablation study (2026-10) measured
 that exclusion as harmful and removed it. Keeping superseded targets eligible
 raised the share of gold turns among the seed anchors by +0.16 on Eval 1, +0.14
@@ -324,9 +353,9 @@ turns, while on BEAM-10M conversation 7 dropping it raised packet gold-turn
 recall from 0.103 to 0.118 (2 cases better, none worse) for 0.5 KB more packet.
 The skip was removed.
 
-## Constructive Recall and Controlled Distortion
+## Reconstruction Ledger
 
-Constructive recall is now implemented as a two-layer memory view:
+Each memory keeps a two-layer view, a remnant of the removed constructive-recall design:
 
 * **Evidence packets** remain the immutable ordered `signals` rows attached to a memory.
 * **Reconstructions** are versioned rows in `memory_reconstructions`, each carrying `{embedding_id, blob_id, ts, uncertainty, trigger}`.
