@@ -1168,6 +1168,21 @@ GetCoreMigrations ()
               "ON memories(end_ts) WHERE kind = 'LONG_TERM'",
           },
       },
+      {
+          56,
+          "Drop write-only memory source metadata and stored context",
+          {
+              // No query reads these: source reliability was a knob
+              // constant per row, the contradiction count is carried by the
+              // supersedes edges, the verification time was never set, and
+              // the temporal context c_t is used in memory for boundary
+              // detection only.
+              "ALTER TABLE memories DROP COLUMN source_reliability",
+              "ALTER TABLE memories DROP COLUMN source_contradiction_count",
+              "ALTER TABLE memories DROP COLUMN source_last_verified_ts",
+              "ALTER TABLE memories DROP COLUMN context",
+          },
+      },
   };
 }
 

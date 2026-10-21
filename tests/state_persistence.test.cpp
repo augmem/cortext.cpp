@@ -953,17 +953,11 @@ TEST_CASE ("Working memory slots are persisted",
   // Check memories table has WM entries (v2 schema: kind='WORKING', active slots)
   // Active slots have end_ts IS NULL
   auto rows = store->Execute (
-      "SELECT memory_id, strength, source_reliability FROM memories "
+      "SELECT memory_id, strength FROM memories "
       "WHERE kind = 'WORKING' AND end_ts IS NULL ORDER BY memory_id");
   REQUIRE (rows.size () == 2);
   REQUIRE_THAT (GetDouble (rows[0], "strength"), WithinAbs (0.8, 0.01));
   REQUIRE_THAT (GetDouble (rows[1], "strength"), WithinAbs (0.8, 0.01));
-  const double expected_source_reliability
-      = core::SourceReliabilityPrior (0.0, 1.0, 0.0);
-  REQUIRE_THAT (GetDouble (rows[0], "source_reliability"),
-                WithinAbs (expected_source_reliability, 1e-9));
-  REQUIRE_THAT (GetDouble (rows[1], "source_reliability"),
-                WithinAbs (expected_source_reliability, 1e-9));
 }
 
 TEST_CASE ("Closed working memory rows are pruned incrementally",

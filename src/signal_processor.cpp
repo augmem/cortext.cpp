@@ -4444,9 +4444,6 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
             *context_, embedding_id);
     }
 
-  const double working_source_reliability = core::SourceReliabilityPrior (
-      config_.focus, config_.sensitivity, config_.stability);
-
   bool all_slots_clean = true;
 
   // Upsert current slots as MEMORIES with kind='WORKING'. Clean slots are
@@ -4533,7 +4530,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                       "embedding_id = ?, source_id = ?, modality = ?, "
                       "start_ts = ?, n_signals = ?, s_max = ?, s_avg = ?, "
                       "s_emotion_max = ?, s_arousal_avg = ?, drift_mag = ?, "
-                      "strength = ?, source_reliability = ?, "
+                      "strength = ?, "
                       "last_access = ?, strength_updated_at = ?, end_ts = NULL "
                       "WHERE memory_id = ? AND kind = 'WORKING'",
                       { embedding_id,
@@ -4542,7 +4539,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                         slot.modality, slot.start_ts, slot.n_signals,
                         slot.s_max, slot.s_avg, slot.s_emotion_max,
                         slot.s_arousal_avg, slot.drift_acc, slot.strength,
-                        working_source_reliability, ts_ms,
+                        ts_ms,
                         strength_ts_ms, memory_id });
                   add_timing ("SignalProcessor.wm_update_slot_memory",
                               t_sql_start);
@@ -4556,16 +4553,15 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                   "INSERT INTO memories "
                   "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
                   " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
-                  " strength, source_reliability, last_access, "
-                  " strength_updated_at, created_at) "
-                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  " strength, last_access, strength_updated_at, created_at) "
+                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   { embedding_id,
                     slot.source_id.empty () ? std::string ("unknown")
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
-                    slot.drift_acc, slot.strength, working_source_reliability,
-                    ts_ms, strength_ts_ms, slot_created_at });
+                    slot.drift_acc, slot.strength, ts_ms, strength_ts_ms,
+                    slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
               add_timing ("SignalProcessor.wm_insert_slot_memory",
