@@ -49,7 +49,6 @@ TEST_CASE ("ComputeWriteGate accepts when S_window above threshold",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.3); // Low threshold
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -81,7 +80,6 @@ TEST_CASE ("ComputeWriteGate stores a closed unit whatever its window score",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.9);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -115,7 +113,6 @@ TEST_CASE ("ComputeWriteGate rejects when no flush required",
   OperationContext ctx (s, pctx, cfg);
   // No flush required - signal not at boundary
   ctx.SetFlushRequired (false);
-  ctx.SetThresholdTDynamic (0.2);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -124,38 +121,7 @@ TEST_CASE ("ComputeWriteGate rejects when no flush required",
   REQUIRE (ctx.GetAccumulatorWriteDecision () == false);
 }
 
-TEST_CASE ("ComputeWriteGate accepts with spike_bypass",
-           "[operations][write_gate]")
-{
-  Signal s;
-  s.embedding = Eigen::VectorXf::Ones (kEmbeddingDim);
-  s.embedding.normalize ();
-  s.timestamp = 100000;
-  s.source_id = "test";
-
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
-
-  // Set up accumulator with high scores
-  SetupAccumulatorState (pctx, s, 0.8, 2.0, 3);
-
-  OperationContext ctx (s, pctx, cfg);
-  ctx.SetFlushRequired (false); // No boundary
-  ctx.SetSpikeBypass (true);    // But spike bypass triggers
-  ctx.SetThresholdTDynamic (0.3);
-
-  ComputeWriteGate op;
-  op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-  // Spike bypass → can still write
-  REQUIRE (ctx.GetAccumulatorWriteDecision () == true);
-}
-
-TEST_CASE ("ComputeWriteGate rejects ephemeral signals even with spike_bypass",
+TEST_CASE ("ComputeWriteGate rejects ephemeral signals even with a flush",
            "[operations][write_gate]")
 {
   Signal s;
@@ -176,8 +142,6 @@ TEST_CASE ("ComputeWriteGate rejects ephemeral signals even with spike_bypass",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetSpikeBypass (true);
-  ctx.SetThresholdTDynamic (0.1);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -208,7 +172,6 @@ TEST_CASE ("ComputeWriteGate rejects when no accumulator state",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.0);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -240,7 +203,6 @@ TEST_CASE ("ComputeWriteGate populates recent_memory_centroids on accept",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.3);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -272,7 +234,6 @@ TEST_CASE ("ComputeWriteGate profiles every decision input without changing it",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.3);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -280,7 +241,7 @@ TEST_CASE ("ComputeWriteGate profiles every decision input without changing it",
   const auto &profile_values = ctx.GetOperationTimings ();
   REQUIRE (ctx.GetAccumulatorWriteDecision ());
   REQUIRE (profile_values.at ("WriteGate.flush_trigger") == 1.0);
-  REQUIRE (profile_values.at ("WriteGate.spike_bypass") == 0.0);
+  REQUIRE_FALSE (profile_values.contains ("WriteGate.spike_bypass"));
   REQUIRE (profile_values.at ("WriteGate.accumulator_available") == 1.0);
   REQUIRE (profile_values.at ("WriteGate.n_signals") == 3.0);
   REQUIRE (profile_values.at ("WriteGate.write_accumulator") == 1.0);
@@ -308,7 +269,6 @@ TEST_CASE ("ComputeWriteGate profiles non-boundary rejection",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (false);
-  ctx.SetThresholdTDynamic (0.3);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -347,8 +307,6 @@ TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
     SetupAccumulatorState (pctx, s, 0.8, 2.0, 3);
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-    ctx.SetSpikeBypass (true);
-    ctx.SetThresholdTDynamic (0.3);
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     const auto &values = ctx.GetOperationTimings ();
@@ -363,7 +321,6 @@ TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
     ProcessorContext pctx;
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-    ctx.SetThresholdTDynamic (0.3);
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     const auto &values = ctx.GetOperationTimings ();
@@ -375,12 +332,11 @@ TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
 
   SECTION ("forced")
   {
+    s.retention = Retention::Durable;
     ProcessorContext pctx;
     SetupAccumulatorState (pctx, s, 0.1, 0.2, 2);
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetFlushRequired (false);
-    ctx.SetSpikeBypass (true);
-    ctx.SetThresholdTDynamic (0.9);
+    ctx.SetFlushRequired (true);
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     const auto &values = ctx.GetOperationTimings ();
@@ -396,7 +352,6 @@ TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
     SetupAccumulatorState (pctx, s, 0.1, 0.2, 2);
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-    ctx.SetThresholdTDynamic (0.9);
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     const auto &values = ctx.GetOperationTimings ();

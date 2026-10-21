@@ -368,12 +368,6 @@ ParseConfigObject (napi_env env, napi_value value, cortext_config &cfg)
       || !GetOptionalDoubleProperty (env, value, "stability", cfg.stability)
       || !GetOptionalBoolProperty (env, value, "affectInterrupt",
                                    cfg.affect_interrupt)
-      || !GetOptionalBoolProperty (env, value, "affectRetrieval",
-                                   cfg.affect_retrieval)
-      || !GetOptionalBoolProperty (env, value, "reinforcementEnabled",
-                                   cfg.reinforcement_enabled)
-      || !GetOptionalBoolProperty (env, value, "sequentialEdgesEnabled",
-                                   cfg.sequential_edges_enabled)
       || !GetOptionalBoolProperty (env, value, "signalFilterAudioEnabled",
                                    cfg.signal_filter_audio_enabled)
       || !GetOptionalBoolProperty (env, value, "signalFilterImageEnabled",

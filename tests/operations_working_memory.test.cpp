@@ -63,7 +63,6 @@ TEST_CASE ("Alg24 inserts new WM slot when margin exceeds cost",
   cfg.stability = 0.5;
 
   // Ensure empty WM and permissive threshold
-  pctx.T_dynamic = 0.2;
   pctx.weight_relevance = 0.5;
 
   WorkingMemory op;
@@ -106,7 +105,6 @@ TEST_CASE ("Alg24 chunks into best-matching slot above threshold",
   const double before_strength = pctx.wm_slots.front ().strength;
 
   // Threshold permissive enough with high benefit
-  pctx.T_dynamic = 0.2;
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
 
@@ -149,7 +147,6 @@ TEST_CASE ("Alg24 a full slot takes no further chunk",
   slot.n_signals = cap - 2;
   pctx.wm_slots.push_back (slot);
 
-  pctx.T_dynamic = 0.2;
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
   SetupMemoryGatingContext (ctx, pctx, s, 0.95);
@@ -185,7 +182,6 @@ TEST_CASE ("Alg24 maintenance decays slots but preserves them with floor",
   slot.last_ts = 0.0;
   slot.pos_index = 0;
   pctx.wm_slots.push_back (slot);
-  pctx.T_dynamic = 0.95; // ensure reject to avoid adding strength
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);
@@ -228,7 +224,6 @@ TEST_CASE ("Alg24 maintenance reduces strength without removal when dt small",
   slot.last_ts = 0.0;
   slot.pos_index = 0;
   pctx.wm_slots.push_back (slot);
-  pctx.T_dynamic = 0.95; // unused now, but kept for legacy
 
   WorkingMemory op;
   OperationContext ctx (s, pctx, cfg);

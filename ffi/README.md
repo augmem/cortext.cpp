@@ -37,8 +37,7 @@ whose methods wrap the C API one to one and return the C API JSON string:
 | `embedTextJson`, `embedAudioJson`, `embedImageJson`, `consolidateJson`, `flush`, `reset` | the matching C calls |
 
 `config` takes `focus`, `sensitivity`, `stability` and the boolean
-`cortext_config` fields in camelCase (`affectInterrupt`, `affectRetrieval`,
-`reinforcementEnabled`, `sequentialEdgesEnabled`,
+`cortext_config` fields in camelCase (`affectInterrupt`,
 `signalFilter{Audio,Image,Text}Enabled`).
 
 `media` is bytes (`Buffer` or `Uint8Array`) stored as the payload

@@ -72,7 +72,6 @@ public:
   struct ProcessorOutput
   {
     std::optional<double> composite_score;
-    std::optional<double> threshold;
     std::optional<bool> decision;
     double effective_focus = 0.0;
     double coherence = 0.0;
@@ -119,21 +118,18 @@ public:
       std::string modality;  ///< shared signal modality, or "mixed"
       std::string mimetype;  ///< MIME type of the memory's first signal
 
-      // Flattened metrics (formerly HistoricalMetrics)
+      /// Retrieved: the retrieval relevance of the ranked candidate; 0 for
+      /// working memory.
       double relevance = 0.0;
-      double mismatch = 0.0;
-      double surprise = 0.0;
-      double rarity = 0.0;
-      double drift = 0.0;
-      double contradiction = 0.0;
-      double utility = 0.0;
-      double periphery = 0.0;
-      double coverage = 0.0;
+      /// Working memory: the slot's peak signal score (s_max); 0 for
+      /// retrieved memories.
       double salience = 0.0;
-      double valence = 0.5;
+      /// Working memory: the slot's mean signal arousal; 0 for retrieved
+      /// memories.
       double arousal = 0.0;
+      /// Retrieved: the final retrieval score; working memory: the slot's
+      /// mean signal score (s_avg).
       double composite_score = 0.0;
-      double threshold_t = 0.0;
     };
 
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
@@ -209,9 +205,6 @@ public:
     double sensitivity = 0.5;
     double stability = 0.5;
     bool affect_interrupt = true;
-    bool affect_retrieval = true;
-    bool reinforcement_enabled = true;
-    bool sequential_edges_enabled = true;
     bool signal_filter_audio_enabled = true;
     bool signal_filter_image_enabled = true;
     bool signal_filter_text_enabled = false;
@@ -408,7 +401,12 @@ public:
   std::vector<float> EmbedImage (const std::uint8_t *data, int width,
                                  int height, int channels) const;
 
-  /// @brief Attempt to trigger consolidation if conditions allow.
+  /// @brief Run one explicit maintenance pass.
+  ///
+  /// Sends a maintenance signal that runs no pipeline operations and encodes
+  /// nothing: the engine seals the epoch's sparse retrieval-route delta and
+  /// recenters the route on the active-signal centroid. The returned
+  /// context carries working memory and an empty embedding.
   Context Consolidate ();
   Context Consolidate (StopToken stop_token);
 

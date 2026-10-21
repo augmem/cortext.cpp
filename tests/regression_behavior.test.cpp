@@ -169,50 +169,6 @@ TEST_CASE ("WM gate threshold follows spec: lerp(0.1, 0.4, FocusBias(F))",
   }
 }
 
-// =============================================================================
-// 5.3.4 Mood Magnitude Normalization Tests
-// =============================================================================
-
-TEST_CASE ("Mood magnitude uses sqrt(6) normalization",
-           "[regression][mood]")
-{
-  // Paper Section 4.2.4: m_norm = ||M_t|| / sqrt(6)
-  // This ensures mood threshold modulation stays in expected bounds
-
-  SECTION ("Max mood state produces m_norm = 1.0")
-  {
-    // Max mood vector: [1, 1, 1, 1, 1, 1]
-    // ||M|| = sqrt(6)
-    // m_norm = sqrt(6) / sqrt(6) = 1.0
-    Eigen::VectorXf max_mood = Eigen::VectorXf::Ones (6);
-    double magnitude = max_mood.norm ();
-    double m_norm = magnitude / std::sqrt (6.0);
-
-    REQUIRE (magnitude == Catch::Approx (std::sqrt (6.0)));
-    REQUIRE (m_norm == Catch::Approx (1.0));
-  }
-
-  SECTION ("Zero mood produces m_norm = 0.0")
-  {
-    Eigen::VectorXf zero_mood = Eigen::VectorXf::Zero (6);
-    double magnitude = zero_mood.norm ();
-    double m_norm = Clamp (magnitude / std::sqrt (6.0), 0.0, 1.0);
-
-    REQUIRE (m_norm == 0.0);
-  }
-
-  SECTION ("Half-intensity mood produces m_norm approx 0.5")
-  {
-    // Mood vector with all elements at 0.5
-    Eigen::VectorXf half_mood = Eigen::VectorXf::Constant (6, 0.5f);
-    double magnitude = half_mood.norm (); // sqrt(6 * 0.25) = sqrt(1.5)
-    double m_norm = Clamp (magnitude / std::sqrt (6.0), 0.0, 1.0);
-
-    REQUIRE (m_norm == Catch::Approx (std::sqrt (1.5 / 6.0)));
-    REQUIRE (m_norm < 1.0);
-  }
-}
-
 TEST_CASE ("Focus update uses recent_context buffer ordering",
            "[regression][focus][order]")
 {
@@ -250,47 +206,6 @@ TEST_CASE ("Focus update uses recent_context buffer ordering",
   REQUIRE (pctx.weight_relevance
            == Catch::Approx (expected).epsilon (1e-6));
 }
-
-TEST_CASE ("Delta_threshold_mood bounded by kappa_mood",
-           "[regression][mood]")
-{
-  // ΔThreshold_mood = -κ_mood × clamp(m_norm, 0, 1)
-  // With normalization, delta is always in [-κ_mood, 0]
-
-  const double kappa_mood = 0.1; // Example kappa value
-
-  SECTION ("At max mood, delta equals -kappa_mood")
-  {
-    double m_norm = 1.0; // Max normalized mood
-    double delta = -kappa_mood * Clamp (m_norm, 0.0, 1.0);
-
-    REQUIRE (delta == Catch::Approx (-kappa_mood));
-  }
-
-  SECTION ("At zero mood, delta equals 0")
-  {
-    double m_norm = 0.0;
-    double delta = -kappa_mood * Clamp (m_norm, 0.0, 1.0);
-
-    REQUIRE (delta == 0.0);
-  }
-
-  SECTION ("Delta is always non-positive")
-  {
-    for (double m_norm = 0.0; m_norm <= 1.5; m_norm += 0.1)
-      {
-        double clamped = Clamp (m_norm, 0.0, 1.0);
-        double delta = -kappa_mood * clamped;
-
-        REQUIRE (delta <= 0.0);
-        REQUIRE (delta >= -kappa_mood);
-      }
-  }
-}
-
-// =============================================================================
-// 5.3.6 Streaming Pacing Thresholds (Phase 2 additions)
-// =============================================================================
 
 TEST_CASE ("Streaming pacing threshold decreases with Sensitivity",
            "[regression][streaming]")
@@ -376,7 +291,6 @@ TEST_CASE ("High Sensitivity affects all plasticity parameters consistently",
   double S = 0.9;
 
   // All should be "more responsive" / faster adaptation
-  REQUIRE (AlphaMood (S) > 0.17);                // Faster mood update
   REQUIRE (StreamingPacingThreshold (S) < 0.15); // More frequent checks
   REQUIRE (FlashbulbThreshold (S) < 0.75);       // Lower flashbulb trigger
 }
@@ -387,6 +301,5 @@ TEST_CASE ("High Stability affects all persistence parameters consistently",
   double T = 0.9;
 
   // All should be "more persistent" / slower decay
-  REQUIRE (LambdaMood (1.0, T) > 0.99);         // Slower mood decay
   REQUIRE (WRateSeconds (T) > 250);             // Longer write intervals
 }

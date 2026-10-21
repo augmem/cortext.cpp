@@ -40,9 +40,6 @@ public:
     double sensitivity = 0.5;
     double stability = 0.5;
     bool affect_interrupt = true;
-    bool affect_retrieval = true;
-    bool reinforcement_enabled = true;
-    bool sequential_edges_enabled = true;
 
     Encoder *encoder = nullptr; // Required for embedding-based operations
     std::shared_ptr<Clock> clock;
@@ -78,7 +75,7 @@ public:
     // Gate decisions
     bool interrupt_allowed = false;  // Algorithm 27
     bool at_boundary = false;        // Algorithm 12
-    bool write_decision = false;     // Algorithm 7+8: score > (T - hysteresis)
+    bool write_decision = false;     // a closed unit was stored
     bool interrupt_aborted = false;  // Interrupt-triggered accumulator abort
 
     // Storage output (MemoryStorage operation)
@@ -87,8 +84,6 @@ public:
     std::optional<long long> stored_signal_id;     // Set if stored to signal
 
     // Key thresholds and stabilizers
-    double threshold_T_dynamic = 0.0;  // Alg 8
-    double threshold_hysteresis = 0.0; // Alg 8
     double effective_focus = 0.0;      // Alg 10 stabilizer
     double coherence = 0.0;            // Structural coherence
 
