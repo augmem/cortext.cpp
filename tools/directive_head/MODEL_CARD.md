@@ -10,7 +10,7 @@ replace the English marker rule `IsStandingDirective` in `src/operations/standin
 
 | | |
 |---|---|
-| Status | **Not recommended to ship**: it wins on the synthetic held-out test and loses to the rule on real streams (README, Verdict) |
+| Status | **Not shipped. The rules stay**: it wins on the synthetic held-out test and loses to the rule on real streams (README, Conclusion) |
 | Best head | `attn_text`: 8-head attention pool over the AIST text tower's last hidden states (384-d per token, first 128 positions), then LayerNorm, then linear |
 | Parameters | 12,297 (F32) |
 | GGUF | `AIST-87M-DH.gguf`, 49,920 bytes (kept at `/Volumes/Build/cortext/directive-head/`, not committed) |
@@ -50,7 +50,15 @@ counts, judged disagreements and BEAM gold recall.
 
 ### Public datasets
 
-No public dataset was used for training. The evaluation-only inputs are:
+No public dataset was used for training.
+
+- **OpenAssistant oasst1.** It was downloaded but is **unused**. Source: `OpenAssistant/oasst1` on Hugging Face,
+  revision `fdf72ae0827c1cda404aff25b6603abec9e3399b`, license Apache-2.0, 221 MB, at
+  `/Volumes/Build/cortext/directive-head/data/oasst1`.
+- **Why it was not used.** Work stopped before `run_oasst.sh` ran, because multilingual support, the reason
+  for the head, is out of scope (README, Conclusion).
+
+The evaluation-only inputs are:
 
 | Input | Use | License / provenance |
 |---|---|---|

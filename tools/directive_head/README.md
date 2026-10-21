@@ -5,23 +5,49 @@ a **lasting directive or preference**, and it was built to replace the English m
 in `src/operations/standing_memory_internal.cpp`. This phase covers data, training and offline evaluation only.
 No engine file is touched. The model card is `MODEL_CARD.md`.
 
-## Verdict
+## Conclusion: the rules stay
 
-**Do not replace `IsStandingDirective` with this head yet.**
+`IsStandingDirective` stays as the standing-memory detector. This work is closed, and no engine change follows
+from it.
 
-- **Synthetic test: the head wins.** On the multilingual held-out test, the attention head beats the rule
-  clearly. English F1 is 0.81 against 0.39 at higher precision, and four Latin-script languages go from 0 to
-  F1 0.57–0.64.
-- **Real streams: the head loses.** On real replay streams it fires on 4.7% of turns where the rule fires on
-  0.2%. Judged by gpt-6.1-sol, 1 of 25 head-only flags is a lasting directive, against 15 of 25 rule-only
-  flags. Its recall of BEAM's gold instruction turns is 0.62, against 0.98 for the rule.
-- **Root cause 1: the training data.** Synthetic training data does not cover the register of real chat turns.
-  Three generation rounds narrowed the gap but did not close it.
-- **Root cause 2: the encoder cannot read non-Latin text.** Under the engine's tokenizer, every byte ≥ 0x80
-  becomes `[UNK]`, so for ja/zh/ko/hi/ar the head has nothing to learn from.
-  The tokenizer is also locale-dependent, which is a separate engine bug (see Findings).
+**Why.** Multilingual coverage was the only reason to replace the English marker rules, and multilingual
+support is not a current concern. On real English streams the rules beat every learned head:
 
-The tooling, data and evaluation harness are reusable, and the next steps are listed at the end.
+| Evidence (real replay streams, about 1.04M turns) | Rules | Head (attn h8) |
+|---|---|---|
+| Turns flagged | 2,193 (0.21%) | 48,723 (4.7%) |
+| Judged lasting, 25 sampled disagreements each (gpt-6.1-sol) | **15 / 25** | 1 / 25 |
+| Judged lasting, head's top-confidence flags (score ≥ 6, 25 sampled) | n/a | 1 / 25 |
+| BEAM instruction_following gold recall (127 turns) | **0.98** | 0.62 |
+| BEAM preference_following gold recall (125 turns) | **0.37** | 0.06 |
+
+The head wins only on the synthetic held-out test:
+
+| Synthetic held-out test, English (1,138 rows) | P | R | F1 |
+|---|---|---|---|
+| Rules | 0.79 | 0.26 | 0.39 |
+| Head (attn h8) | 0.86 | 0.77 | 0.81 |
+
+That gain does not transfer. The synthetic negatives miss the register of real chat turns, which is where the
+head's false positives come from. For ja/zh/ko/hi/ar, no head on the current encoder can work at all, because
+the engine tokenizer maps every byte ≥ 0x80 to `[UNK]`.
+
+The full tables are in sections 1–5 below. The engine findings (tokenizer `[UNK]`, locale dependence) stand on
+their own, and the tokenizer is being fixed separately. The FTS5 recommendation is to keep porter.
+
+### How to resume if multilingual support ever matters
+
+1. **Wait for the tokenizer fix and re-embed.** Every head variant then needs new features: the attention heads
+   (token states change), the pooled heads (vectors change), the stream features (`streams/feat_*`), the
+   modality probe and the parity fixtures. `rules.py` and `fts5_study.py` do not depend on the encoder.
+2. **Add real-chat data.** oasst1 is already downloaded but unused. It sits at
+   `/Volumes/Build/cortext/directive-head/data/oasst1`, revision `fdf72ae0827c1cda404aff25b6603abec9e3399b`,
+   Apache-2.0. Then run `sh run_oasst.sh`. That script labels user turns with the gpt-6.1-sol judge, which
+   costs CPA calls; splits by conversation; merges with the synthetic set; then retrains, re-scores the
+   streams, evaluates against the rules, judges, and exports.
+3. **Bar for replacing the rules.** On a judged sample, head-only precision must be ≥ rule-only precision. BEAM
+   instruction_following gold recall must be ≥ 0.95. The stream flag rate must be at most a few times the
+   rules'. The integration plan below applies only once that bar is met.
 
 ## Pipeline
 
@@ -270,10 +296,4 @@ QueryWords ≤ 16, df cut at max(64, 5%), OR query, bm25).
 
 ## Next steps
 
-1. **Fix the engine tokenizer first.** Do the locale-independent byte classes now (a bug fix). The Unicode-aware
-   basic tokenizer comes with the next embedding-model pin. No head on the current encoder can be multilingual
-   for non-Latin scripts.
-2. **Train on real negatives.** Use a permissively licensed real chat corpus that is not one of the excluded
-   benchmarks, for example OpenAssistant oasst1 (Apache-2.0, multilingual). Downloading it needs approval, so
-   it was not done here. The gap is the register of real turns, not more synthetic variety.
-3. **Re-run `evaluate.py` and `judge.py` against the bar above** before any engine integration.
+None while multilingual support is out of scope. See "How to resume" above.
