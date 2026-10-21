@@ -68,16 +68,32 @@ signal_gap ← now_s() − to_s(last_signal_ts)  # seconds
 
 **Time constants:** All time-related constants are specified with explicit units (e.g., τ_min(T) in seconds). Gap scaling returns values in seconds (gap_scale multiplies dt_ema to form gap_ref_s).
 
-### No Fixed Behavioral Constants
+### Knob-Derived and Fixed Constants
 
-Most behavioral thresholds, gains, and caps are derived from the three knobs (F, S, T) and/or state. Fixed numeric values are permitted for numerical stability floors (e.g., ε(F, S, T)), unit conversions, and explicitly labeled resource/safety invariants such as storage-pressure floors. This keeps the system's qualitative behavior governed by the three knobs while still allowing bounded implementation guards.
+The segmentation, working-memory, retrieval-breadth, supersession, streaming
+and route-capacity parameters are closed-form functions of the three knobs
+(F, S, T) and of stream state. The v5 recall and hydration mechanisms are
+not. Their constants were fixed by ablation and hill-climbing on long-horizon
+evaluations (@sec-retrieval, @sec-hydration):
+
+* RRF k = 60 and the per-channel limits;
+* the late-interaction depth of 64;
+* the contiguity, supersession and standing budgets;
+* the 480-byte media charge.
+
+Numerical floors such as ε(F, S, T), unit conversions and schema invariants
+are fixed as well. Earlier versions of this paper claimed that no behavioral
+constant was fixed; that is no longer true, and the fixed constants are
+labeled where they appear.
 
 ## Temporal Semantics
 
 Cortext treats durable memories as **event-time observations**: a memory is
-written when a coherent unit is detected, and its stored timestamp records when
-that unit was observed. The engine no longer maintains a separate structured
-fact layer with valid-time and transaction-time intervals; temporal reasoning
+written when a coherent unit is detected, and its stored span
+`[start_ts, end_ts]` records when that unit was observed. Each stored signal
+keeps its own timestamp, and retrieved memories return one timestamp per
+content blob (@sec-hydration). The engine maintains no separate structured
+fact layer with valid-time and transaction-time intervals. Temporal reasoning
 therefore operates over memory and signal timestamps directly.
 
 For an episodic memory `m_i`, the event timestamp is:
@@ -86,11 +102,16 @@ For an episodic memory `m_i`, the event timestamp is:
 t_event(m_i) = created_at(m_i)
 ```
 
-Retrieval and consolidation consume this event time through recency windows,
-association ordering, and explicit replay timestamps. The accumulator's
-temporal-context vector is used separately for boundary/topic-shift state and
-is persisted with memories; as noted in @sec-temporal-context, it is not yet a
-production retrieval-score term.
+Retrieval consumes event time in three places: the write-exclusion bound
+(a query never retrieves its own open unit), the temporal seed channel and
+`as_of` cutoff for queries that carry a reference time (@sec-retrieval), and
+the contiguity gap that decides which adjacent turns belong to the same
+stretch of conversation (@sec-hydration). Engine time never runs behind the
+signals the store holds: if a supplied clock is behind, the implicit "now" is
+the newest stored signal plus one millisecond. The accumulator's
+temporal-context vector serves boundary topic-shift detection only; as noted
+in @sec-temporal-context, it is not a retrieval-score term.
+<!-- PRUNE: migration 56 on chore/prune-write-only drops the persisted per-memory context BLOB; c_t stays in memory. -->
 
 ```
 t_retrieve(q, m_i) = q.timestamp - t_event(m_i)
@@ -120,15 +141,30 @@ recent_memory_centroids ← tail(recent_memory_centroids, win_mem_ctx(T))
 
 ## The Three-Knob Philosophy
 
-Cortext is governed by three continuous control parameters, each representing a distinct dimension of cognitive regulation:
+Cortext exposes three continuous control parameters. In v5 they are a
+macro-control surface over a calibrated default profile (F = S = T = 0.5,
+the evaluated operating point), not the mechanism that decides what is
+stored or recalled (@sec-overview).
 
-**Focus (F ∈ [0, 1]):** Perceptual selectivity and precision. Higher Focus narrows attention, increases relevance weighting, and reduces retrieval breadth. Focus modulates the trade-off between exploitation of known-relevant information and exploration of potentially useful context.
+**Focus (F ∈ [0, 1]):** selectivity. Higher Focus narrows retrieval breadth
+(fewer seeds, a smaller output), raises the change-point threshold while
+lowering the unit capacity ceiling, enlarges working memory, and tightens
+duplicate suppression.
 
-**Sensitivity (S ∈ [0, 1]):** Plasticity and affective gain. Higher Sensitivity accelerates learning, increases emotional and novelty responsiveness, and raises write-rate targets. Sensitivity governs how readily the system captures novel information and responds to salient stimuli.
+**Sensitivity (S ∈ [0, 1]):** reactivity. Higher Sensitivity raises the
+boundary hazard (shorter units), lowers the spike-bypass margin, shrinks
+working memory (faster turnover), and makes streaming retrieval checks more
+frequent.
 
-**Stability (T ∈ [0, 1]):** Temporal persistence and inertia. Higher Stability lengthens memory half-lives, widens hysteresis bands, slows adaptive updates, and tightens safety bounds over time. Stability controls the resistance to change and the preservation of established knowledge.
+**Stability (T ∈ [0, 1]):** inertia. Higher Stability widens context windows
+and hysteresis, slows the adaptive score statistics, enlarges the unit
+capacity ceiling and the sparse-route capacities, and requires a deeper
+throughput trough before recommending maintenance.
 
-A central design principle is that knobs set rates rather than modes. Behavioral differences emerge continuously from parameter interactions; there are no hard-coded phase transitions or discrete operational states.
+The design principle that knobs set rates rather than modes still holds.
+Behavior changes continuously with the knobs, and there are no discrete
+operational modes. Earlier versions also tied Stability to memory half-lives
+and eviction. Those were removed (@sec-negative).
 
 ### Midpoint-Biased Knob Mapping
 
@@ -167,15 +203,22 @@ base_rate(S) = lerp(r_min, r_max, S)
 
 The hysteresis band prevents oscillation in threshold-crossing decisions. Write-rate targets establish homeostatic setpoints for the threshold controller.
 
-These ranges are canonical knob maps for memory behavior: admission thresholds, retrieval weights, graph expansion breadth, lifecycle scoring, and consolidation policy are derived from F/S/T. Fixed values may still appear as schema invariants, vector dimensions, parser guardrails, numeric epsilons, migration defaults, and benchmark protocol settings, but they are not additional user-facing memory knobs.
+These ranges feed the spike-bypass threshold controller (@sec-spike-threshold),
+which no longer gates storage. Fixed values also appear as schema invariants,
+vector dimensions, parser guardrails, numeric epsilons, migration defaults,
+benchmark protocol settings and the v5 recall constants listed above. None of
+these is an additional user-facing knob.
 
 ### Retrieval Breadth
 
 Retrieval uses two F/S/T-derived breadths rather than one global top-k. The
-candidate discovery pass stays broad so durable memories remain reachable:
+candidate discovery pass stays broad so durable memories remain reachable.
+Retrieval uses its own midpoint biases (`RetrievalFocusBias`, and likewise
+for S and T), shifted so that neutral knobs land on the operating point a
+judged sweep selected:
 
 ```
-seed_k(F) = round(lerp(96, 8, FocusBias(F)))
+seed_k(F) = round(lerp(96, 8, RetrievalFocusBias(F)))   # 37 at neutral
 ```
 
 Before the vector-seed cap is applied, near-duplicate embedding families are
@@ -197,14 +240,19 @@ prompt-facing output is then narrowed after vector relevance and bounded graph
 expansion:
 
 ```
-selected_k(F,T) = round(lerp(20, 8, FocusBias(F)) * lerp(1.08, 0.92, T))
+selected_k(F,T) = round(lerp(20, 8, RetrievalFocusBias(F))
+                        * lerp(1.08, 0.92, RetrievalStabilityBias(T)))   # 11 at neutral
 ```
 
-Vector relevance is the rank:
+Dense vector relevance is the first-stage score:
 
 ```
 score(m) = map01(cos(q, embedding(m)))
 ```
+
+For queries, member, keyword, cross-modal and temporal channels then join
+this list by reciprocal-rank fusion, and a late-interaction model reranks the
+head of the pool (@sec-retrieval).
 
 Earlier builds added an event-time recency tie-break,
 `(1 − semantic) × 10^-6 × temporal_rank(m)`. The round-3 ablation (2026-10)
@@ -215,6 +263,7 @@ Earlier builds added a bounded graph bonus from one-hop association expansion.
 It was removed with clustering consolidation (@sec-experimental), because no
 traversable edges remained.
 
+<!-- PRUNE: migration 56 on chore/prune-write-only drops source_reliability and source_contradiction_count; replace the next paragraph and formula with a one-line removal note. -->
 New source-backed memories also receive a knob-derived source reliability prior
 instead of relying on a fixed storage default:
 
@@ -226,10 +275,9 @@ source_reliability_0(F,S,T)
 ```
 
 This split lets low Focus explore many durable-memory seeds while keeping the
-application prompt bounded by a compact final surface. The intermediate graph
-breadth and score weights are likewise derived from Focus, Sensitivity, and
-Stability in the implementation rather than exposed as additional user
-settings. Neither `source_id` nor modality participates in candidate discovery,
+application prompt bounded by a compact final surface. The intermediate seed
+search breadth (345 at neutral) is likewise derived from Focus, Sensitivity,
+and Stability rather than exposed as an additional user setting. Neither `source_id` nor modality participates in candidate discovery,
 family collapse, scoring, or final selection. The stored `source_reliability` and
 `source_contradiction_count` fields are not currently consumed by production
 ranking; @sec-advanced distinguishes that metadata from the proposed confidence

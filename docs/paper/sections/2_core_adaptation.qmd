@@ -1,6 +1,25 @@
-# Core Adaptation Algorithms {#sec-core-adaptation}
+# The Macro-Control Surface: Knob Priors and Affect {#sec-core-adaptation}
 
-This section presents the algorithms governing adaptation along each of the three primary dimensions. Each algorithm consists of a prior computation (executed at initialization) and a dynamic update (executed per signal).
+This section and @sec-structural-metrics specify the per-signal control stack
+that earlier versions of this paper presented as the core of the system. It
+still runs on every signal, in the engine's `CoreStage`. Its reach is now
+narrow:
+
+* The composite score and θ_dynamic set the spike-bypass margin
+  (@sec-spike-threshold).
+* The window score ranks closed units for working-memory admission
+  (@sec-wm-gating).
+* Score variance enters the uncertainty estimate, which feeds back into the
+  learning rates below.
+* The ACh-like encode/retrieve bias paces streaming retrieval checks between
+  boundaries (@sec-interrupt).
+
+Nothing in this section decides whether a unit is stored, or how a query
+ranks memories. Segmentation (@sec-thresholding) and retrieval
+(@sec-retrieval) carry the v5 results.
+
+Each algorithm consists of a prior computation (executed at initialization) and a dynamic update (executed per signal).
+<!-- PRUNE: chore/prune-write-only may remove mood, the threshold controller and CoreStage metrics; trim the bullets above and the subsections below to the final removal list. -->
 
 ## Focus-Driven Selectivity
 

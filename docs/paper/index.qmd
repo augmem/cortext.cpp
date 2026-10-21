@@ -1,80 +1,253 @@
 ---
-title: "Cortext: A Three-Knob Adaptive Memory Architecture"
-subtitle: "for Continuous Cognitive Processing"
+title: "Cortext: LLM-Free Long-Horizon Memory"
+subtitle: "Online Segmentation, Multi-Granularity Hybrid Retrieval and Late-Interaction Reranking"
 author:
   - name: "Gabriel Willen"
     affiliation: "augmem.ai / Cortext Research"
-date: "July 2026"
+date: "October 2026"
 bibliography: references.bib
 ---
 
 # Abstract {.unnumbered}
 
-We present Cortext, a biologically-inspired adaptive memory system governed by three continuous control parameters: Focus (F), Sensitivity (S), and Stability (T). Unlike traditional memory architectures that employ discrete operational modes, Cortext achieves developmental progression through parameter-derived rate modulation, allowing behavior to emerge continuously from the interaction of knob settings and experiential mass. The architecture integrates established cognitive science principles—including Cowan's working memory constraints and Nader's reconsolidation dynamics—into a unified computational framework. We derive most system parameters from the three primary knobs through principled mathematical transformations, while explicitly labeling the small set of fixed invariants (e.g., controller gains), reducing reliance on hard-coded constants. The production system is an embedding-first graph memory engine: it does not ship an internal decoder path, adapter registry, fact table, static taxonomy loader, or processor-local shadow STM graph. The system demonstrates self-calibrating priors that blend with evidence using uncertainty-weighted Bayesian averaging, homeostatic threshold control with effective sample size estimation, and graph-augmented retrieval combining embedding similarity with durable association expansion. Experimental analysis indicates the architecture maintains stable operation across developmental phases while adapting write rates, decay dynamics, and retrieval precision to environmental demands. This work contributes a formally specified cognitive memory model suitable for implementation in streaming AI systems requiring persistent, context-aware memory.
+We present Cortext, a local multimodal memory engine that stores and recalls
+long conversational and sensory streams without calling a language model on
+either path.
 
-**Keywords:** cognitive architecture, adaptive memory, working memory, episodic memory, semantic memory, knowledge graphs, homeostatic control
+*Write path.* An online Bayesian change-point segmenter over embedding
+statistics closes each source stream into coherent units, and every closed
+unit is stored. A stored unit is indexed at three granularities: a pooled unit
+vector, one shared-space vector per member signal, and 16 int8
+late-interaction codes per text or image payload, up to 16. Its text also
+enters an FTS5 keyword index.
+
+*Read path.* A query builds a dense seed list over pooled unit vectors, into
+which best-member hits are merged. When auxiliary channels return hits, it
+fuses that list by reciprocal-rank fusion with BM25 keyword seeds, one
+gap-corrected list per other stored modality, and an optional reference-time
+list. A 0.1M-parameter
+late-interaction MaxSim reranker over frozen AIST-87M position features then
+reorders the top 64. Hydration attaches adjacent turns, superseded
+predecessors and superseding successors, each with its own timestamp, and fits
+the packet to a caller-supplied byte budget.
+
+*Results.* Under one shared answer model, judge and 34,800-byte budget on
+LoCoMo, Cortext scores 86.2%, against 89.0% for Mem0 and 81.0% for Graphiti.
+It makes zero write-time model calls and recalls in 9.7 ms at the median.
+
+*Negative result.* A leave-one-out ablation on evaluations of up to 111k turns
+tested the bio-inspired lifecycle mechanisms of earlier versions: strength
+decay and eviction, reconsolidation, clustering consolidation,
+retrieval-induced forgetting, synaptic tagging and neuromodulation. Each was
+inert at its defaults or hurt recall once it fired. Eviction alone cut packet
+recall from 0.630 to 0.086. We report which benchmarks overlap the reranker's
+training data. The original three-knob control design (Focus, Sensitivity,
+Stability) remains as a macro-control surface over a calibrated default
+profile.
+
+**Keywords:** long-term memory, event segmentation, hybrid retrieval,
+reciprocal-rank fusion, late interaction, multimodal retrieval, negative
+results
 
 # Introduction
 
-Memory systems in artificial intelligence face a fundamental tension between plasticity and stability. Systems that learn rapidly risk catastrophic interference, while those that maintain stable representations may fail to capture novel patterns [@mccloskey1989catastrophic]. Biological memory systems resolve this tension through sophisticated regulatory mechanisms that modulate learning rates, decay dynamics, and retrieval thresholds in response to environmental demands and internal state [@mcclelland1995why].
+An assistant that runs for months accumulates more history than any context
+window holds. The common answer is to spend language-model calls at write
+time: extract facts, summarize sessions, maintain a knowledge graph, and
+retrieve from those products later [@packer2023memgpt; @chhikara2025mem0;
+@rasmussen2025zep]. This works, but it makes memory as expensive and as slow
+as the model. It rewrites what was said into what a model inferred, and it
+cannot run on a device without one.
 
-This paper introduces Cortext, a cognitive memory architecture that addresses this stability-plasticity dilemma through three continuous control parameters that govern all system behavior. Rather than implementing discrete operational modes or hard-coded phase transitions, Cortext achieves developmental progression through the continuous interaction of parameter settings with accumulated experience. The architecture draws on established findings from cognitive psychology and neuroscience, including working memory capacity limits [@cowan2001magical], memory reconsolidation [@nader2000fear], serial position effects [@murdock1962serial], and emotional modulation of memory [@mcgaugh2004amygdala].
+Cortext takes the other path. It stores what was observed, as segmented
+units of the original signals, and puts the work into retrieval and
+hydration. Neither path calls a language model. The only learned components
+are a frozen multimodal encoder (AIST-87M) and a 0.1M-parameter
+late-interaction reranker over its per-position features.
 
-The core contribution of this work is a formally specified memory architecture in which:
+This paper is a rewrite of the earlier Cortext specification, which presented
+a three-knob (F, S, T) cognitive architecture: twelve metrics blended by
+recursive least squares, mood and affect, a homeostatic write threshold, and a
+family of bio-inspired lifecycle mechanisms. Long-horizon ablation showed the
+lifecycle mechanisms did not earn their place (@sec-negative), and removing
+the write threshold raised recall. What drives recall in the current (v5)
+engine is a different set of mechanisms. The paper is organized around them.
 
-1. Most tuneable parameters derive from three primary knobs (Focus, Sensitivity, Stability) through explicit mathematical transformations, while fixed invariants (e.g., controller gains) are labeled and justified.
-2. System priors self-calibrate through uncertainty-weighted Bayesian blending with observed evidence.
-3. Developmental phases emerge from annealed safety bounds and experiential mass accumulation, not explicit mode switching.
-4. A knowledge graph layer enables shallow embedding consolidation and graph-augmented retrieval.
+The contributions are:
 
-The remainder of this paper is organized as follows. Section 2 reviews relevant literature. Section 3 presents the mathematical foundations including notation, helper functions, and knob-derived parameters. Section 4 details the core algorithms for Focus, Sensitivity, and Stability adaptation. Section 5 describes structural metrics and composite scoring. Section 6 covers dynamic thresholding and homeostatic control. Section 7 presents the reinforcement and decay dynamics. Section 8 describes advanced cognitive processes including working memory, the removed Soft Anchor formation and pattern-separation/procedural sparse keys, synaptic tagging, and emotional consolidation. Section 9 details the consolidation and graph integration system. Section 10 presents the interrupt gate for streaming integration. Section 11 reports experimental results. Section 12 discusses implementation considerations and computational complexity. Section 13 documents the performance profiling and optimization of the reference implementation. Section 14 concludes with limitations and future directions. In the source tree these correspond to `sections/1_...` through `sections/11_...`; the rendered manuscript section numbering includes the introduction and related-work sections before those files.
+1. **LLM-free online segmentation, storing every closed unit**
+   (@sec-thresholding). A calibrated change-point posterior over surprisal,
+   drift, coherence, topic shift and inter-arrival gaps decides unit
+   boundaries per source stream. The write rule is
+   `write_memory = force_write ∨ should_flush`.
+2. **Multi-granularity hybrid retrieval** (@sec-retrieval). Dense seeds
+   score pooled unit vectors, and best-member hits raise or join them in the
+   same list. Reciprocal-rank fusion (k = 60) then combines that list with
+   FTS5 BM25, one z-gated list per other stored modality, and a
+   reference-time list, whenever any of those returns hits.
+3. **A modality-agnostic late-interaction reranker** (@sec-retrieval). Each
+   stored member keeps up to 16 int8 spherical k-means codes of its encoder
+   positions, at most about 1 KB. Queries rerank the top 64 by gated MaxSim with a
+   learned first-stage rank prior, in 0.4 to 3 ms.
+4. **Hydration and evidence fitting** (@sec-hydration):
+   * contiguity with adjacent turns;
+   * superseded-predecessor and superseding-successor attachment through
+     `supersedes` edges;
+   * standing directives outside the ranked list;
+   * per-blob content timestamps;
+   * a per-call evidence budget that trims grouped units to their best
+     members before dropping whole memories.
+5. **Negative results** (@sec-negative). A leave-one-out study removed:
+   * forgetting through strength decay and eviction;
+   * reconsolidation;
+   * clustering consolidation;
+   * retrieval-induced forgetting;
+   * synaptic tagging;
+   * the NE-like and DA-like neuromodulators;
+   * meta-learned priors and several feedback loops.
+
+   It also found that short-horizon blind-judge screens had reported harm
+   from removing mechanisms whose packets were byte-identical.
+6. **Realtime systems design** (@sec-optimization):
+   * a content-addressed embedding arena;
+   * a sparse in-memory route;
+   * off-thread WAL checkpointing;
+   * sound family-collapse bounds;
+   * a top-k BM25 collector.
+
+   Together these keep query p95 at 44.5 ms on a 443k-turn store.
+
+@sec-overview gives the whole pipeline and says exactly what the three knobs
+still influence. @sec-math fixes notation and the knob maps. Then come
+segmentation and the write path (@sec-thresholding), retrieval
+(@sec-retrieval) and hydration (@sec-hydration), which form the main line.
+The per-signal control stack follows (@sec-core-adaptation,
+@sec-structural-metrics), with working memory and supersession
+(@sec-advanced), the streaming interrupt gate (@sec-interrupt), maintenance
+(@sec-consolidation), and the record of removed reinforcement and decay
+(@sec-reinforcement). @sec-negative presents the ablation, @sec-experimental
+the full experimental record with reranker-overlap separation,
+@sec-implementation implementation detail, and @sec-optimization the systems
+architecture. The historical optimization ledger is preserved in
+Appendix E (`docs/paper/appendix/optimization_ledger.qmd`).
 
 # Related Work
 
+## LLM Memory Systems and Benchmarks
+
+MemGPT [@packer2023memgpt] pages context in and out of a model's window under
+model control. Mem0 [@chhikara2025mem0] extracts and consolidates facts with
+a model at write time, and Zep [@rasmussen2025zep] (with its open-source
+engine Graphiti) maintains a temporal knowledge graph built by model calls.
+Cortext differs in kind: it makes no model call on either path, and it stores
+observed signals rather than model-written facts. @sec-v5-benchmarks
+compares it with Mem0 and Graphiti under one shared pipeline on LoCoMo
+[@maharana2024locomo], and with published results on LongMemEval
+[@wu2024longmemeval], BEAM, DolphinBench and MemLens.
+
+## Event Segmentation
+
+Cortext's unit of memory comes from event segmentation theory
+[@zacks2007event]: people segment continuous experience at points of
+prediction error, and those boundaries structure later recall. EM-LLM
+[@fountas2024em] segments token streams into episodic events by surprise,
+refined by graph-theoretic cohesion. Cortext adapts the idea to any embedding
+stream. EMA prediction error supplies surprise, within-unit cosine coherence
+supplies cohesion, and drift, topic shift and inter-arrival gaps supply
+further evidence for a calibrated change-point posterior
+(@sec-thresholding). Because it operates on embeddings, the same segmenter
+serves text turns, audio chunks and images.
+
+## Hybrid and Late-Interaction Retrieval
+
+BM25 [@robertson2009probabilistic] remains a strong lexical baseline, and
+fusing lexical and dense rankings by reciprocal rank [@cormack2009reciprocal]
+is a robust, training-free way to combine them. Cortext uses RRF with the
+standard k = 60 over the dense list (with member hits merged in), the
+keyword list, the per-modality cross-modal lists and the temporal list. Late-interaction retrieval
+[@khattab2020colbert] scores a query against a document's per-token vectors
+by MaxSim. Cortext applies it as a reranker over frozen encoder positions of
+any modality. Each stored member compresses its positions to at most 16 int8
+spherical k-means codes, which keeps storage near 1 KB per payload without a
+shared codebook. The sparse candidate route follows the HNSW construction
+[@malkov2018efficient].
+
 ## Working Memory Models
 
-The working memory component of Cortext draws conceptually on
-@cowan2001magical embedded-processes model, which posits a capacity limit of
-approximately 4±1 chunks for the focus of attention. This contrasts with
-@miller1956magical earlier estimate of 7±2 items, which subsequent research has
-shown conflates chunking with raw capacity [@cowan2010magical]. Cortext's
-production slots are larger, application-level memory units rather than a
-direct cognitive-chunk implementation: the shipped F/S-derived capacity is
-15--27 slots, with 21 at neutral knobs, selected from the product evaluation
-reported in @sec-experimental. The biological result motivates boundedness and
-competition, not a claim that the software reproduces human span numerically.
+The working memory component draws conceptually on @cowan2001magical
+embedded-processes model, which posits a capacity limit of about 4±1 chunks
+for the focus of attention. That figure contrasts with @miller1956magical
+earlier estimate of 7±2 items, which later research showed conflates chunking
+with raw capacity [@cowan2010magical]. Cortext's production slots are larger
+application-level memory units rather than cognitive chunks. The shipped
+F/S-derived capacity is 15–27 slots, 21 at neutral knobs, selected from the
+product evaluation in @sec-experimental. The biological result motivates a
+bounded set, not a claim that the software reproduces human span. The
+episodic buffer of @baddeley2000episodic aligns with binding information
+across modalities through one shared vector space.
 
-@baddeley2000episodic multicomponent model informs our treatment of maintenance and rehearsal processes, though we adopt a more unified representational substrate based on distributed embeddings rather than separate phonological and visuospatial stores. The episodic buffer concept [@baddeley2000episodic] aligns with our approach to binding information across modalities through shared vector spaces.
+## Consolidation, Reconsolidation and Forgetting
 
-## Memory Consolidation
+Complementary learning systems [@mcclelland1995why] motivate a fast episodic
+store beside slower structure, and reconsolidation theory
+[@nader2000fear; @nader2003memory] holds that retrieved memories become
+labile and can be modified before restabilizing. Earlier Cortext versions
+implemented the following, each with knob-derived rates:
 
-The consolidation mechanisms in Cortext reflect findings from the memory reconsolidation literature [@nader2000fear; @nader2003memory]. Reconsolidation theory posits that retrieved memories enter a labile state during which they can be modified before restabilization. Our architecture implements this through time-bounded lability windows governed by the Stability parameter, with reconsolidation gain modulated by both Sensitivity and contextual relevance.
+* reconsolidation drift during a lability window;
+* clustering consolidation into abstraction nodes;
+* multi-timescale strength decay with eviction;
+* retrieval-induced forgetting [@anderson1994remembering].
 
-The distinction between episodic and semantic memory [@tulving1972episodic] motivates our two-tier storage approach: a streaming episodic buffer for immediate experiences and a durable graph over consolidated embedding structure. The current consolidation process transforms high-redundancy episodic clusters into association centroid nodes linked to their sources by durable graph edges; it does not synthesize payload summaries or extract free-form semantic relations.
+All four were evaluated and removed (@sec-negative). Reconsolidation was
+neutral to harmful, and consolidation never fired at its defaults and did not
+help when forced. Eviction deleted 92–99.7% of stores once its gate opened.
+The engine now keeps the episodic substrate [@tulving1972episodic] and no
+consolidated semantic tier. Its only consolidation-like step is maintenance
+of the retrieval route (@sec-consolidation).
 
 ## Emotional Influences on Memory
 
-@mcgaugh2004amygdala extensive work on emotional modulation of memory consolidation informs our treatment of affect-gated encoding. The architecture implements emotional intensity as a threshold modifier, consistent with findings that arousal enhances memory through amygdala-mediated modulation of hippocampal encoding [@labar2006cognitive]. We adopt a dimensional model of emotion [@russell1980circumplex] with valence and arousal as primary axes, projected from categorical emotion embeddings.
+@mcgaugh2004amygdala showed that arousal modulates memory consolidation
+through amygdala-mediated effects on hippocampal encoding
+[@labar2006cognitive]. Earlier Cortext versions implemented emotional
+consolidation and an emotional cascade over graph neighbours. Both were
+removed after leaving every packet byte-identical (@sec-negative). The
+per-signal emotion projection onto a dimensional valence-arousal model
+[@russell1980circumplex] remains in the control stack. Its only effect is a
+small move of the spike-bypass threshold (@sec-core-adaptation).
 
-## Adaptive Control Systems
+## Adaptive Control
 
-The homeostatic threshold controller draws on classical control theory, specifically proportional-integral approaches to setpoint maintenance [@astrom2008feedback]. The use of exponentially-weighted moving averages for rate estimation follows standard practice in adaptive systems, while our effective sample size calculation for reliability estimation extends techniques from sequential Monte Carlo methods [@liu1998sequential].
+The homeostatic threshold controller follows proportional-integral setpoint
+control [@astrom2008feedback]. Its effective-sample-size reliability estimate
+borrows from sequential Monte Carlo [@liu1998sequential]. In v5 the
+controller no longer gates persistence. It sets only the margin a salience
+spike must clear to close a unit early (@sec-spike-threshold).
+
+{{< include sections/overview.qmd >}}
 
 {{< include sections/1_math_foundations.qmd >}}
+
+{{< include sections/4_dynamic_thresholding.qmd >}}
+
+{{< include sections/retrieval.qmd >}}
+
+{{< include sections/hydration.qmd >}}
 
 {{< include sections/2_core_adaptation.qmd >}}
 
 {{< include sections/3_structural_metrics.qmd >}}
 
-{{< include sections/4_dynamic_thresholding.qmd >}}
-
-{{< include sections/5_reinforcement.qmd >}}
-
 {{< include sections/6_advanced_cognitive.qmd >}}
+
+{{< include sections/8_interrupt_gate.qmd >}}
 
 {{< include sections/7_consolidation.qmd >}}
 
-{{< include sections/8_interrupt_gate.qmd >}}
+{{< include sections/5_reinforcement.qmd >}}
+
+{{< include sections/negative_results.qmd >}}
 
 {{< include sections/9_experimental.qmd >}}
 
@@ -84,16 +257,37 @@ The homeostatic threshold controller draws on classical control theory, specific
 
 # Conclusion and Future Directions
 
-We have presented Cortext, a three-knob adaptive memory architecture that unifies working, episodic, and semantic memory processes under a continuous control regime. By deriving most system parameters from Focus, Sensitivity, and Stability, while fixing a small set of invariants for controller stability, Cortext avoids the fragility of hard-coded constants and enables robust operation across diverse environments.
+Cortext stores what it observed and puts its effort into retrieval. Online
+segmentation decides what a memory is, and every closed unit is kept.
+Retrieval works at three granularities over unit vectors, member vectors and
+late-interaction codes, and fuses dense, keyword, cross-modal and temporal
+evidence by reciprocal rank. A 0.1M-parameter reranker over a frozen encoder
+reorders the head of the pool. Hydration then rebuilds the context around
+each hit and fits it to the reader's budget. With no language model on
+either path, this reaches 86.2% on LoCoMo under a shared pipeline, 2.8 points
+behind a system that spends 544 model calls at write time, with recall about
+17× faster.
 
-Key contributions include the formalization of knob-derived parameter spaces, the integration of uncertainty-weighted Bayesian adaptation, and the implementation of bio-inspired mechanisms like homeostatic rate control and emotional consolidation.
+The negative result matters as much as the system. The bio-inspired
+lifecycle mechanisms that earlier versions of this paper put at the centre
+did not survive long-horizon ablation. Short-horizon judged screens had also
+attributed effects to mechanisms whose packets never changed. We recommend
+two practices to memory-system work: diff packets before judging, and ablate
+on the engine that ships.
 
-Future work will focus on:
+Future work:
 
-1.  **Replicated long-horizon evaluation:** Validating the architecture on frozen public corpora and larger stress runs.
-2.  **Hardware acceleration:** Optimizing vector search, graph traversal, and SQLite access paths for edge devices.
-
-Cortext represents a step toward more organic, life-long learning systems that adapt continuously to their experiences, moving beyond static knowledge bases toward truly cognitive memory.
+1. **A measured forgetting policy.** The store grows without bound. Any
+   tiering or eviction must first be gated on packet recall over month-scale
+   timestamps.
+2. **Out-of-pool gold.** At BEAM 1M and 10M, 42% and 67% of gold turns never
+   enter the candidate pool. This, not reranking, is the next recall lever.
+3. **Reranker coverage.** The reranker needs an audio position map and
+   re-encoding of stored codes when the reranker model changes.
+4. **Zero-shot evaluation.** The reranker should be evaluated on more
+   benchmarks it was never trained on.
+5. **Standing-directive detection.** The current detector is a pattern
+   check, and a learned one could replace it.
 
 # References {.unnumbered}
 
@@ -101,3 +295,5 @@ Cortext represents a step toward more organic, life-long learning systems that a
 :::
 
 {{< include sections/appendices.qmd >}}
+
+{{< include appendix/optimization_ledger.qmd >}}

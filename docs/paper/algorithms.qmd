@@ -1,33 +1,42 @@
 ---
-title: "Cortext: A Three-Knob Adaptive Memory Architecture"
+title: "Cortext: LLM-Free Long-Horizon Memory"
 subtitle: "Algorithmic Specification"
 bibliography: references.bib
 ---
 
 # Abstract {.unnumbered}
 
-This document details the complete algorithmic specification for Cortext, a
-biologically-inspired adaptive memory system. It serves as a technical
-reference for implementation, focusing purely on mathematical definitions,
-signal processing flows and adaptive control logic
-governed by the three primary parameters: Focus (F), Sensitivity (S), and
-Stability (T).
+This document is the algorithmic specification for Cortext, a local
+multimodal memory engine with no language model on its write or read path. It
+is a technical reference for implementation. It covers online boundary
+segmentation, multi-granularity hybrid retrieval with late-interaction
+reranking, hydration and evidence fitting, the Focus (F), Sensitivity (S)
+and Stability (T) macro-control surface, and the record of mechanisms removed
+by long-horizon ablation.
+
+{{< include sections/overview.qmd >}}
 
 {{< include sections/1_math_foundations.qmd >}}
+
+{{< include sections/4_dynamic_thresholding.qmd >}}
+
+{{< include sections/retrieval.qmd >}}
+
+{{< include sections/hydration.qmd >}}
 
 {{< include sections/2_core_adaptation.qmd >}}
 
 {{< include sections/3_structural_metrics.qmd >}}
 
-{{< include sections/4_dynamic_thresholding.qmd >}}
-
-{{< include sections/5_reinforcement.qmd >}}
-
 {{< include sections/6_advanced_cognitive.qmd >}}
+
+{{< include sections/8_interrupt_gate.qmd >}}
 
 {{< include sections/7_consolidation.qmd >}}
 
-{{< include sections/8_interrupt_gate.qmd >}}
+{{< include sections/5_reinforcement.qmd >}}
+
+{{< include sections/negative_results.qmd >}}
 
 {{< include sections/9_experimental.qmd >}}
 
@@ -36,3 +45,5 @@ Stability (T).
 {{< include sections/11_optimization.qmd >}}
 
 {{< include sections/appendices.qmd >}}
+
+{{< include appendix/optimization_ledger.qmd >}}
