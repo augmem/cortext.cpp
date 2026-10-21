@@ -1008,19 +1008,9 @@ memory_to_json (const cortext::Cortext::Context::Memory &memory)
     { "mimetype", memory.mimetype },
     { "content", std::move (content) },
     { "relevance", memory.relevance },
-    { "mismatch", memory.mismatch },
-    { "surprise", memory.surprise },
-    { "rarity", memory.rarity },
-    { "drift", memory.drift },
-    { "contradiction", memory.contradiction },
-    { "utility", memory.utility },
-    { "periphery", memory.periphery },
-    { "coverage", memory.coverage },
     { "salience", memory.salience },
-    { "valence", memory.valence },
     { "arousal", memory.arousal },
     { "composite_score", memory.composite_score },
-    { "threshold_t", memory.threshold_t },
   };
 }
 

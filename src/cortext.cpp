@@ -763,23 +763,6 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           // v2: Counts are inline on memories table
           m.retrieved_count = get_ll ("retrieved_count");
           m.used_count = get_ll ("used_count");
-
-          // v2: signal_metrics are stored on signals table, not readily available here
-          // Set defaults for now - metrics come from signal processing context
-          m.relevance = 0.0;
-          m.mismatch = 0.0;
-          m.surprise = 0.0;
-          m.rarity = 0.0;
-          m.drift = 0.0;
-          m.contradiction = 0.0;
-          m.utility = 0.0;
-          m.periphery = 0.0;
-          m.coverage = 0.0;
-          m.salience = 0.0;
-          m.valence = 0.5;
-          m.arousal = 0.0;
-          m.composite_score = 0.0;
-          m.threshold_t = 0.0;
         }
     }
   catch (const std::exception &e)

@@ -119,21 +119,18 @@ public:
       std::string modality;  ///< shared signal modality, or "mixed"
       std::string mimetype;  ///< MIME type of the memory's first signal
 
-      // Flattened metrics (formerly HistoricalMetrics)
+      /// Retrieved: the retrieval relevance of the ranked candidate; 0 for
+      /// working memory.
       double relevance = 0.0;
-      double mismatch = 0.0;
-      double surprise = 0.0;
-      double rarity = 0.0;
-      double drift = 0.0;
-      double contradiction = 0.0;
-      double utility = 0.0;
-      double periphery = 0.0;
-      double coverage = 0.0;
+      /// Working memory: the slot's peak signal score (s_max); 0 for
+      /// retrieved memories.
       double salience = 0.0;
-      double valence = 0.5;
+      /// Working memory: the slot's mean signal arousal; 0 for retrieved
+      /// memories.
       double arousal = 0.0;
+      /// Retrieved: the final retrieval score; working memory: the slot's
+      /// mean signal score (s_avg).
       double composite_score = 0.0;
-      double threshold_t = 0.0;
     };
 
     std::vector<Memory> working_memory;    ///< Active WM slots (conversation context)
