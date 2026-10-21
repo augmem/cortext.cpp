@@ -110,6 +110,7 @@ def main():
     y = np.array([r["label"] for r in R])
     lang = np.array([r["lang"] for r in R]); hold = np.array([r["hold"] for r in R]); cat = np.array([r["cat"] for r in R])
     wrapd = np.array([r["wrap"] != "none" for r in R])
+    src = np.array([r.get("src", "synthetic") for r in R])
     preds = {"engine_rule": np.array([rules.engine_rule(r["text"]) for r in R]),
              "brief_rule": np.array([rules.brief_rule(r["text"]) for r in R])}
     scores = {}
@@ -140,7 +141,11 @@ def main():
              "by_lang": {l: sub(lang == l) for l in sorted(set(lang))},
              "by_hold": {h: sub(hold == h) for h in sorted(set(hold))},
              "wrapped": sub(wrapd), "unwrapped": sub(~wrapd),
-             "by_cat": {}}
+             "by_cat": {},
+             "by_src": {sname: {"overall": sub(src == sname),
+                                "by_lang": {l: sub((src == sname) & (lang == l))
+                                            for l in sorted(set(lang[src == sname]))}}
+                        for sname in sorted(set(src))}}
         for c in sorted(set(cat)):
             m = cat == c
             t["by_cat"][c] = {"n": int(m.sum()), "flag_rate": float(p[m].mean())}
