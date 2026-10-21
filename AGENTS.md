@@ -128,7 +128,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 ## Pattern Overview
 - `include/cortext/cortext.hpp` exposes a small facade API while `src/cortext.cpp` owns wiring, backend selection, and memory hydration.
 - `include/cortext/processor.hpp`, `include/cortext/processor/operation.hpp`, and `include/cortext/processor/operation_set.hpp` define a sequential operation pipeline executed by `src/signal_processor.cpp`.
-- `include/cortext/store/store.hpp` abstracts persistence while `include/cortext/store/sqlite_store.hpp`, `src/store.cpp`, and `src/store/schema.cpp` implement a SQLite-first runtime with migrations and nested transactions.
+- `include/cortext/store/store.hpp` abstracts persistence while `include/cortext/store/sqlite_store.hpp`, `src/store.cpp`, and `src/store/schema.cpp` implement a SQLite-first runtime with migrations and nested transactions. New stores get the baseline schema in `src/store/schema.cpp`; older stores upgrade through `src/store/schema_legacy_migrations.cpp`, and `tests/schema_baseline.test.cpp` proves both paths reach the same schema.
 ## Layers
 - Purpose: Stable entrypoints for native and FFI consumers.
 - Location: `include/cortext/cortext.hpp`, `include/cortext/capi.h`, `src/capi.cpp`
