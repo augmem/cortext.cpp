@@ -175,9 +175,10 @@ verdicts came from blind-judge screens over short corpora
 | synaptic tagging | removal hurts: −0.20 (July, 3 reps) | 0/40 packets changed | July branch had live consolidation, the tag's only consumer |
 | graph expansion | unresolved, leaning negative (long-horizon sweep) | 0/40 packets changed | only non-traversable `supersedes` edges existed on the current engine |
 | daily consolidation | retained by default (long-horizon sweep) | inert at defaults; −0.012 / −0.010 recall when forced | the current engine never fired it |
+| emotion/mood threshold cascade | measured harm: −0.43, loses on all three paired repetitions (long-horizon sweep) | emotion and mood threshold deltas removed with the dynamic threshold, packets byte-identical | measured while the threshold still gated writes |
 
 A sufficiency delta cannot come from identical packets. The July oscillator
-delta was therefore judge variance, which the July confirmation itself put at
+delta, measured on the same protocol, was therefore judge variance, which the July confirmation itself put at
 up to 0.32 between repetitions. The other rows were measured on a
 research-branch engine whose mechanisms interacted differently.
 
@@ -225,9 +226,23 @@ narrower things:
 A bounded store still needs a forgetting policy. Any future one should be
 gated on packet recall over month-scale timestamps before it ships.
 
+A follow-up prune then removed what the write-path change had orphaned:
+
+* the dynamic threshold controller and its 19 knobs;
+* the spike bypass, which never fired on the parity sets;
+* the 6D mood integrator, whose only effect was a threshold delta;
+* stored source-reliability metadata and the per-memory context column;
+* three dead configuration flags.
+
+Every removal left packets byte-identical (@sec-overview).
+
 Two per-signal pieces of the original affect and neuromodulation design
-remain in the scoring stack. They are the ACh-like encode/retrieve bias,
-which paces streaming retrieval checks, and the emotion and mood threshold
-deltas, which move the spike-bypass threshold (@sec-core-adaptation). This
-study did not remove them. Neither gates storage or ranks recall.
-<!-- PRUNE: chore/prune-write-only may remove mood and the threshold controller; adjust this paragraph to the final removal list. -->
+remain, and both are live:
+
+* the ACh-like encode/retrieve bias, which paces streaming retrieval checks;
+* the emotion projection, whose valence and arousal feed the composite score
+  and the interrupt gate (@sec-core-adaptation). Switching it off changes
+  171 of 1,986 LoCoMo retrieved sets.
+
+The composite score itself is live too (@sec-structural-metrics). It is not
+a write gate.

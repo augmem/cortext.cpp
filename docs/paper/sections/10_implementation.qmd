@@ -629,9 +629,12 @@ The production operation chain is:
 
 ```text
 CoreStage:
-  embedded centroid init, priors, coherence, accumulation, drift,
-  uncertainty, focus/sensitivity/mood, metrics, neuromodulators,
-  adaptive metric weights, thresholding, recent context, boundary/write gate
+  embedded centroid init, focus and sensitivity priors, coherence,
+  accumulation, drift, focus spread, prediction error, uncertainty,
+  focus/sensitivity (emotion projection), effective focus, metrics,
+  neuromodulators (ACh), RLS metric weights, composite score,
+  accumulator scores, signal history (score window, dt_ema),
+  recent context, boundary, capacity flush, write gate
 
 StorageStage:
   memory storage, signal metrics
@@ -644,7 +647,10 @@ FeedbackStage:
   memory usage counters, working memory, accumulator reset
 ```
 
-<!-- PRUNE: update the CoreStage list above (metrics, neuromodulators, adaptive metric weights, mood, thresholding) to the final removal list. -->
+`UpdateMood`, `UpdatePrecisionDelta`, `InitializeStabilityPriors` and the
+threshold half of `UpdateThreshold` were removed (migrations 57 and 58).
+`CheckSpikeBypass` became `CheckCapacityFlush`
+(@sec-thresholding).
 Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so replay
 probes can inspect retrieval without mutating the durable store.
 
