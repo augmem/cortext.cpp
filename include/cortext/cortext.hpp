@@ -402,7 +402,12 @@ public:
   std::vector<float> EmbedImage (const std::uint8_t *data, int width,
                                  int height, int channels) const;
 
-  /// @brief Attempt to trigger consolidation if conditions allow.
+  /// @brief Run one explicit maintenance pass.
+  ///
+  /// Sends a maintenance signal that runs no pipeline operations and encodes
+  /// nothing: the engine seals the epoch's sparse retrieval-route delta and
+  /// recenters the route on the active-signal centroid. The returned
+  /// context carries working memory and an empty embedding.
   Context Consolidate ();
   Context Consolidate (StopToken stop_token);
 

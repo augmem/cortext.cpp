@@ -2757,6 +2757,9 @@ TEST_CASE ("Sparse route growth recommends consolidation and recenters the "
       ts += 1'000;
       const auto maintenance
           = cortext::internal::ReplayIngress::ConsolidateAt (*engine, ts);
+      // Maintenance encodes nothing.
+      REQUIRE (maintenance.embedding.empty ());
+      REQUIRE (maintenance.encode_ms == 0.0);
       ++consolidations;
       const auto it = maintenance.output.operation_ms.find (
           "SignalProcessor.sqlite_sparse_route_recenter_succeeded");

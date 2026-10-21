@@ -1648,15 +1648,14 @@ BlobToSharedEmbedding (const std::any &blob)
 }
 
 ActivationCentroid
-BuildActiveSignalRingCentroid (Store &store, int embedding_dim,
-                               double focus, double sensitivity,
+BuildActiveSignalRingCentroid (Store &store, double focus, double sensitivity,
                                double stability)
 {
   ActivationCentroid result;
   const int capacity
       = operations::active_signal_embedding_ring_internal::Capacity (
           focus, sensitivity, stability);
-  if (embedding_dim <= 0 || capacity <= 0)
+  if (capacity <= 0)
     return result;
   const auto rows = store.Execute (
       "SELECT embedding, capacity "
@@ -1665,14 +1664,21 @@ BuildActiveSignalRingCentroid (Store &store, int embedding_dim,
   if (rows.empty ()
       || rows.size () > static_cast<std::size_t> (capacity))
     return result;
-  Eigen::VectorXd sum = Eigen::VectorXd::Zero (embedding_dim);
+  // Every ring member carries the retrieval-view dimension of the first.
+  Eigen::Index embedding_dim = 0;
+  Eigen::VectorXd sum;
   for (const auto &row : rows)
     {
       const auto stored_capacity
           = store::AnyToLongLong (row.at ("capacity")).value_or (0);
       const Eigen::VectorXf embedding = BlobToEigen (row.at ("embedding"));
-      if (stored_capacity != capacity || embedding.size () != embedding_dim
-          || !embedding.allFinite ())
+      if (embedding_dim == 0)
+        {
+          embedding_dim = embedding.size ();
+          sum = Eigen::VectorXd::Zero (embedding_dim);
+        }
+      if (stored_capacity != capacity || embedding_dim == 0
+          || embedding.size () != embedding_dim || !embedding.allFinite ())
         return {};
       sum += embedding.cast<double> ();
     }
@@ -3500,8 +3506,7 @@ SignalProcessor::Process (const Signal &signal)
                       // (source 2); 0 means no centroid was available.
                       const auto recenter_centroid
                           = BuildActiveSignalRingCentroid (
-                              *store_, signal.embedding.size (),
-                              config_.focus, config_.sensitivity,
+                              *store_, config_.focus, config_.sensitivity,
                               config_.stability);
                       const int recenter_centroid_source
                           = recenter_centroid.embedding ? 2 : 0;
@@ -3509,6 +3514,7 @@ SignalProcessor::Process (const Signal &signal)
                           pre_recenter_activated;
                       std::size_t pre_recenter_node_rows = 0;
                       if (profile_recenter_overlap
+                          && signal.embedding.size () > 0
                           && state->sqlite_sparse_route)
                         {
                           pre_recenter_activated
@@ -3545,7 +3551,8 @@ SignalProcessor::Process (const Signal &signal)
                       std::optional<std::vector<long long>>
                           post_recenter_activated;
                       std::size_t post_recenter_node_rows = 0;
-                      if (profile_recenter_overlap && recentered)
+                      if (profile_recenter_overlap
+                          && signal.embedding.size () > 0 && recentered)
                         {
                           post_recenter_activated
                               = state->sqlite_sparse_route->SearchActivated (

@@ -426,8 +426,10 @@ extern "C"
   /// @param h Handle to a Cortext instance.
   /// @return 0 on success, 1 if invalid handle, 2 on internal error.
   ///
-  /// This replays stored embeddings through the v1 graph/label consolidation
-  /// path. Changes are buffered until cortext_flush().
+  /// Sends a maintenance signal that runs no pipeline operations: the engine
+  /// seals the epoch's sparse retrieval-route delta and recenters the route
+  /// on the active-signal centroid. Nothing is encoded. Changes are buffered
+  /// until cortext_flush().
   CORTEXT_EXPORT int cortext_consolidate (cortext_handle h);
 
   /// @brief Commits all buffered database writes.

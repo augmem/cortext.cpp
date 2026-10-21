@@ -2008,10 +2008,8 @@ AttachContiguousTurns (Store *store,
 // count, a previous status, the session where an event was first mentioned)
 // becomes unreachable as soon as a similar later turn arrives. People do not
 // lose the earlier version of a fact when they learn the newer one: recalling
-// the update brings back the earlier episode it updated. Within one stretch
-// of conversation (same source stream, inside the contiguity gap) a newer
-// statement is a correction that replaces the stale one outright, so those
-// predecessors stay suppressed. For each of the top retrieved
+// the update brings back the earlier episode it updated, whatever source
+// stream it came from. For each of the top retrieved
 // memories, the older memories it supersedes (strongest edges first) are
 // hydrated as extra content blobs of that same retrieved memory, placed
 // before its own content so the packet reads oldest to newest, clipped and
@@ -2975,18 +2973,11 @@ struct Cortext::Impl
     internal::ThrowIfStopRequested ();
     telemetry::ScopedSpan span ("cortext.api.consolidate");
     const auto total_start = std::chrono::steady_clock::now ();
-    // A maintenance signal runs no operations; the processor seals and
-    // recenters the sparse retrieval route around it.
-    std::vector<float> v;
-    telemetry::ScopedSpan encode_span ("cortext.encode");
-    encoder->EncodeText (std::string (), v);
-    encode_span.SetStatusOk ();
-    const auto encode_end = std::chrono::steady_clock::now ();
-    internal::ThrowIfStopRequested ();
+    // A maintenance signal carries no content and runs no operations; the
+    // processor seals the sparse retrieval route and recenters it on the
+    // active-signal ring centroid.
     const auto process_start = std::chrono::steady_clock::now ();
-    const Eigen::VectorXf consolidation_embedding
-        = ToEigen (RetrievalEmbeddingView (v));
-    auto out = ProcessEmbedding (consolidation_embedding,
+    auto out = ProcessEmbedding (Eigen::VectorXf (),
                                  timestamp != 0 ? timestamp : NowMillis (),
                                  kMaintenanceSourceId, true);
     const auto process_end = std::chrono::steady_clock::now ();
@@ -2999,11 +2990,9 @@ struct Cortext::Impl
     span.SetStatusOk ();
     telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
     const auto hydrate_start = std::chrono::steady_clock::now ();
-    Cortext::Context result
-        = HydrateContext (out, true, &consolidation_embedding);
+    Cortext::Context result = HydrateContext (out, true);
     const auto hydrate_end = std::chrono::steady_clock::now ();
     hydrate_span.SetStatusOk ();
-    result.encode_ms = ToMillis (encode_end - total_start);
     result.process_ms = ToMillis (process_end - process_start);
     result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
     result.total_ms = ToMillis (hydrate_end - total_start);
