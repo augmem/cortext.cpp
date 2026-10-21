@@ -6,9 +6,9 @@
 namespace cortext::operations
 {
 
-/// @brief Reset accumulator state after a flush/spike decision.
+/// @brief Reset accumulator state after a flush decision.
 class ResetAccumulatorAfterFlush
-    : public Operation<Requires<tags::FlushRequired, tags::SpikeBypass>, Satisfies<> >
+    : public Operation<Requires<tags::FlushRequired>, Satisfies<> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

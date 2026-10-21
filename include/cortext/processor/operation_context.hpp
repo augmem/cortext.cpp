@@ -808,17 +808,6 @@ public:
   }
 
   void
-  SetSpikeBypass (bool v)
-  {
-    spike_bypass_ = v;
-  }
-  bool
-  GetSpikeBypass () const
-  {
-    return spike_bypass_;
-  }
-
-  void
   SetWindowScore (double v)
   {
     window_score_ = v;
@@ -1048,7 +1037,6 @@ private:
   std::optional<double> boundary_score_;
   std::optional<BoundaryDiagnostics> boundary_diagnostics_;
   bool flush_required_ = false;
-  bool spike_bypass_ = false;
   std::optional<double> window_score_;
   bool accumulator_write_decision_ = false;
   std::optional<std::uint64_t> write_exclusion_ts_;

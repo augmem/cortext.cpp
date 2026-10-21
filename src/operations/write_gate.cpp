@@ -31,7 +31,7 @@ ProfileWriteGateEnabled ()
 
 void
 RecordWriteGateProfile (OperationContext &context, bool flush,
-                        bool spike_bypass, bool accumulator_available,
+                        bool accumulator_available,
                         double n_signals, double coverage,
                         double window_score, bool force_write,
                         bool write_accumulator, WriteGateProfileReason reason)
@@ -40,8 +40,6 @@ RecordWriteGateProfile (OperationContext &context, bool flush,
     return;
 
   context.AddOperationTiming ("WriteGate.flush_trigger", flush ? 1.0 : 0.0);
-  context.AddOperationTiming ("WriteGate.spike_bypass",
-                              spike_bypass ? 1.0 : 0.0);
   context.AddOperationTiming ("WriteGate.accumulator_available",
                               accumulator_available ? 1.0 : 0.0);
   context.AddOperationTiming ("WriteGate.n_signals", n_signals);
@@ -69,14 +67,13 @@ ComputeWriteGate::Execute (OperationContext &context,
 
   // Check if flush is required
   const bool flush = context.GetFlushRequired ();
-  const bool spike_bypass = context.GetSpikeBypass ();
 
   if (signal.retention == Retention::Ephemeral)
     {
       context.SetAccumulatorWriteDecision (false);
       context.SetWriteDecision (false);
       RecordWriteGateProfile (
-          context, flush, spike_bypass, false, 0.0, 0.0, 0.0, false,
+          context, flush, false, 0.0, 0.0, 0.0, false,
           false, WriteGateProfileReason::Ephemeral);
       telemetry::AddCounter ("cortext.retention.ephemeral_no_store_total", 1);
       telemetry::LogDebug ("cortext.write_gate", {
@@ -86,12 +83,12 @@ ComputeWriteGate::Execute (OperationContext &context,
       return;
     }
 
-  if (!flush && !spike_bypass)
+  if (!flush)
     {
       // No flush trigger - no write decision
       context.SetAccumulatorWriteDecision (false);
       RecordWriteGateProfile (
-          context, flush, spike_bypass, false, 0.0, 0.0, 0.0, false,
+          context, flush, false, 0.0, 0.0, 0.0, false,
           false, WriteGateProfileReason::NoTrigger);
       return;
     }
@@ -103,7 +100,7 @@ ComputeWriteGate::Execute (OperationContext &context,
       // No accumulator state - fall back to per-signal gate
       context.SetAccumulatorWriteDecision (false);
       RecordWriteGateProfile (
-          context, flush, spike_bypass, false, 0.0, 0.0, 0.0, false,
+          context, flush, false, 0.0, 0.0, 0.0, false,
           false, WriteGateProfileReason::NoAccumulator);
       return;
     }
@@ -124,15 +121,15 @@ ComputeWriteGate::Execute (OperationContext &context,
 
   context.SetWindowScore (S_window);
 
-  // Every closed unit is stored. A boundary (or spike, or Durable turn)
-  // already decided the unit is complete; a score threshold here only
+  // Every closed unit is stored. A boundary (natural or capacity) or a
+  // Durable turn already decided the unit is complete; a score threshold here only
   // discarded finished units: under per-conversation Natural ingest it dropped
   // 7-11% of gold turns and lowered packet recall. S_window still feeds
   // working-memory admission.
-  const bool force_write = spike_bypass || RetentionForcesWrite (signal.retention);
+  const bool force_write = RetentionForcesWrite (signal.retention);
 
   RecordWriteGateProfile (
-      context, flush, spike_bypass, true, static_cast<double> (n), coverage,
+      context, flush, true, static_cast<double> (n), coverage,
       S_window, force_write, true,
       force_write ? WriteGateProfileReason::Forced
                   : WriteGateProfileReason::Closed);
@@ -212,7 +209,6 @@ ComputeWriteGate::Execute (OperationContext &context,
 
   telemetry::LogDebug ("cortext.write_gate", {
     telemetry::Attribute::Bool ("flush", flush),
-    telemetry::Attribute::Bool ("spike_bypass", spike_bypass),
     telemetry::Attribute::Double ("n_signals", static_cast<double> (n)),
     telemetry::Attribute::Double ("n_ctx", n_ctx),
     telemetry::Attribute::Double ("coverage", coverage),

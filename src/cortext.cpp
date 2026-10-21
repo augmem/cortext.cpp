@@ -85,7 +85,7 @@
 #include "cortext/operations/accumulator_reset.hpp"
 #include "cortext/operations/coherence.hpp"
 #include "cortext/operations/boundary.hpp"
-#include "cortext/operations/spike_bypass.hpp"
+#include "cortext/operations/capacity_flush.hpp"
 #include "cortext/operations/write_gate.hpp"
 
 // Phase 4: Knowledge Graph Enhancement
@@ -2482,7 +2482,7 @@ private:
 std::unique_ptr<IOperation>
 BuildRootOperationSet (bool probe_mode)
 {
-  using cortext::operations::CheckSpikeBypass;
+  using cortext::operations::CheckCapacityFlush;
   using cortext::operations::CheckStreamingPacing;
   using cortext::operations::ComputeCoherence;
   using cortext::operations::ComputeCompositeScore;
@@ -2537,7 +2537,7 @@ BuildRootOperationSet (bool probe_mode)
 
       UpdatePrecisionDelta, UpdateThreshold, UpdateRecentContext,
 
-      DetectBoundary, CheckSpikeBypass, ComputeWriteGate>;
+      DetectBoundary, CheckCapacityFlush, ComputeWriteGate>;
 
   using StorageStage = OperationSet<MemoryStorage, PersistSignalMetrics>;
 

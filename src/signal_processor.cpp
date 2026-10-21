@@ -4015,7 +4015,6 @@ SignalProcessor::CloseOpenUnits (
                            object_tx);
       op.SetThresholdTDynamic (context_->T_dynamic);
       op.SetFlushRequired (true);
-      op.SetSpikeBypass (false);
       op.SetAtBoundary (true);
       op.SetBoundaryScore (1.0);
       op.SetBoundaryType (std::string ("flush"));

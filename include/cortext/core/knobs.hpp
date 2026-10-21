@@ -2359,15 +2359,6 @@ GapScale (double T)
   return Lerp (3.0, 8.0, Clamp (T, 0.0, 1.0));
 }
 
-// Section 4.4.4 - Spike bypass margin above θ_dynamic
-inline double
-SpikeMargin (double S, double T)
-{
-  // spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)
-  return Lerp (0.2, 0.5, Clamp (T, 0.0, 1.0))
-       * Lerp (1.2, 0.8, SensitivityBias (S));
-}
-
 // Section 4.4.5 - Window score peak vs average weight
 inline double
 WindowScoreAlpha (double F)

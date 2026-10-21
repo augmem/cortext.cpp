@@ -12,9 +12,7 @@ void
 ResetAccumulatorAfterFlush::Execute (OperationContext &context,
                                      Transaction & /*tx*/) const
 {
-  const bool flush = context.GetFlushRequired ();
-  const bool spike_bypass = context.GetSpikeBypass ();
-  if (!flush && !spike_bypass)
+  if (!context.GetFlushRequired ())
     {
       return;
     }
@@ -47,9 +45,7 @@ ResetAccumulatorOnInterrupt::Execute (OperationContext &context,
       return;
     }
 
-  const bool flush = context.GetFlushRequired ();
-  const bool spike_bypass = context.GetSpikeBypass ();
-  if (flush || spike_bypass)
+  if (context.GetFlushRequired ())
     {
       return;
     }

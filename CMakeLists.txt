@@ -356,7 +356,7 @@ add_library(cortext
     src/operations/accumulator_scores.cpp
     src/operations/accumulator.cpp
     src/operations/accumulator_reset.cpp
-    src/operations/spike_bypass.cpp
+    src/operations/capacity_flush.cpp
     # Embedding-model pin (precomputed vectors hard-fail on encoder mismatch)
     src/models/embedding_model_pin.cpp
     # Baked-in AIST model materialization (payload optional via CORTEXT_EMBED_AIST_MODEL)

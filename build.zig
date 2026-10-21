@@ -58,7 +58,7 @@ const cortext_cpp_sources = &.{
     "src/operations/accumulator_scores.cpp",
     "src/operations/accumulator.cpp",
     "src/operations/accumulator_reset.cpp",
-    "src/operations/spike_bypass.cpp",
+    "src/operations/capacity_flush.cpp",
     "src/models/embedding_model_pin.cpp",
     "src/models/aist_embedded_model.cpp",
     "src/models/aist_gguf_encoder.cpp",

@@ -58,9 +58,6 @@ struct ThresholdState;  ///< T_dynamic + hysteresis
 struct BoundaryDecision;
 struct FlushRequired;
 
-// CheckSpikeBypass
-struct SpikeBypass;
-
 // ComputeWriteGate
 struct AccumulatorWriteDecision;
 struct WriteDecision;
