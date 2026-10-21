@@ -6,11 +6,12 @@
 namespace cortext::store
 {
 
-/// @brief Applies pending schema migrations to the store.
+/// @brief Brings the store's schema up to date.
 ///
-/// This function ensures the database schema is up to date with the core
-/// schema defined in schema.cpp. It creates the migration tracking table
-/// if needed and applies any pending migrations.
+/// An empty store gets the baseline schema (src/store/schema.cpp) directly.
+/// A store created earlier runs the legacy migrations it has not applied
+/// (src/store/schema_legacy_migrations.cpp). Both end at the same schema,
+/// then run any newer migrations. The pass holds the write lock throughout.
 ///
 /// @param store The store to migrate.
 void ApplyMigrations (Store &store);

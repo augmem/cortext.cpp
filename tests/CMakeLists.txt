@@ -66,6 +66,7 @@ add_executable(cortext_tests
   operations_accumulator.test.cpp
   operations_pipeline_tail.test.cpp
   migration_core.test.cpp
+  schema_baseline.test.cpp
   cortext.test.cpp
   signal_processor.test.cpp
   signal_filter.test.cpp
