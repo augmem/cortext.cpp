@@ -1,0 +1,1135 @@
+// Schema migrations 0..58, in id order. Each store runs the ones its
+// ledger (cortext_schema_migrations) has not recorded.
+
+#include "schema_internal.hpp"
+
+namespace cortext::store::schema_internal
+{
+
+std::vector<Migration>
+LegacyMigrations ()
+{
+  return {
+      // ==========================================================================
+      // Migration 0: v2 Schema per docs/paper/diagrams/entity-relationship.qmd
+      // Clean slate - EPISODES -> MEMORIES -> SIGNALS -> (EMBEDDINGS, BLOBS)
+      // ==========================================================================
+      {
+          0,
+          "Core schema v2 (docs/paper/diagrams/entity-relationship.qmd)",
+          {
+              // ------------------------------------------------------------------
+              // sqlite-objstore virtual table (BLOBS)
+              // ------------------------------------------------------------------
+              "CREATE VIRTUAL TABLE IF NOT EXISTS blobs USING objstore()",
+
+              // ------------------------------------------------------------------
+              // EPISODES - Episodic boundaries (top of hierarchy)
+              // ------------------------------------------------------------------
+              "CREATE TABLE IF NOT EXISTS episodes ("
+              "  episode_id INTEGER PRIMARY KEY,"
+              "  start_ts INTEGER NOT NULL,"
+              "  end_ts INTEGER,"
+              "  boundary_type TEXT,"
+              "  centroid BLOB,"
+              "  created_at INTEGER NOT NULL"
+              ")",
+
+              // ------------------------------------------------------------------
+              // LONG-TERM GRAPH MEMORY NODES
+              //
+              // The durable LTM is the persisted graph. This table stores graph
+              // nodes: episodic memories, associations, labels, and working
+              // memory records. Per-node adaptive state from memory_feedback,
+              // rif_state, and emotional_tags is folded into the same row.
+              // ------------------------------------------------------------------
+              "CREATE TABLE IF NOT EXISTS memories ("
+              "  memory_id INTEGER PRIMARY KEY,"
+              "  episode_id INTEGER,"
+              "  embedding_id INTEGER,"
+              "  blob_id BLOB,"
+              "  source_id TEXT NOT NULL,"
+              "  kind TEXT NOT NULL DEFAULT 'LONG_TERM',"
+              "  label TEXT,"
+              "  start_ts INTEGER NOT NULL,"
+              "  end_ts INTEGER,"
+              "  n_signals INTEGER NOT NULL DEFAULT 1,"
+              "  modality TEXT NOT NULL DEFAULT 'text',"
+              // Score metrics
+              "  s_max REAL NOT NULL DEFAULT 0.0,"
+              "  s_avg REAL NOT NULL DEFAULT 0.0,"
+              "  s_emotion_max REAL NOT NULL DEFAULT 0.0,"
+              "  s_arousal_avg REAL NOT NULL DEFAULT 0.0,"
+              "  boundary_score REAL NOT NULL DEFAULT 0.0,"
+              // Emotion vectors (6d)
+              "  emotion BLOB,"
+              "  ambient_mood BLOB,"
+              // Decay metrics (from embeddings v1)
+              "  strength REAL NOT NULL DEFAULT 1.0,"
+              "  trace_fast REAL NOT NULL DEFAULT 0.0,"
+              "  trace_med REAL NOT NULL DEFAULT 0.0,"
+              "  trace_slow REAL NOT NULL DEFAULT 0.0,"
+              "  trace_ultra REAL NOT NULL DEFAULT 0.0,"
+              "  use_frequency REAL NOT NULL DEFAULT 0.0,"
+              "  stability REAL NOT NULL DEFAULT 1.0,"
+              "  connectivity REAL NOT NULL DEFAULT 0.0,"
+              "  drift_mag REAL NOT NULL DEFAULT 0.0,"
+              "  influence REAL NOT NULL DEFAULT 0.0,"
+              "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
+              "  contextual_gain REAL NOT NULL DEFAULT 0.0,"
+              "  redundancy REAL NOT NULL DEFAULT 0.0,"
+              "  pre_activation REAL NOT NULL DEFAULT 0.0,"
+              "  lability_state REAL NOT NULL DEFAULT 0.0,"
+              "  suppression_count INTEGER NOT NULL DEFAULT 0,"
+              "  cluster_id INTEGER,"
+              "  last_access INTEGER,"
+              "  created_at INTEGER NOT NULL,"
+              "  context BLOB,"
+              // Memory feedback (from memory_feedback v1)
+              "  retrieved_count INTEGER NOT NULL DEFAULT 0,"
+              "  used_count INTEGER NOT NULL DEFAULT 0,"
+              "  influence_factor REAL NOT NULL DEFAULT 0.0,"
+              "  mean_influence REAL NOT NULL DEFAULT 0.0,"
+              "  last_used INTEGER,"
+              "  original_centroid BLOB,"
+              "  lability_ts INTEGER,"
+              "  recovery_time_start INTEGER,"
+              // RIF state (from rif_state v1)
+              "  suppression REAL NOT NULL DEFAULT 0.0,"
+              "  suppression_ts INTEGER,"
+              // Source monitoring
+              "  source_origin TEXT DEFAULT 'source',"
+              "  source_reliability REAL NOT NULL DEFAULT 0.7,"
+              "  source_contradiction_count INTEGER NOT NULL DEFAULT 0,"
+              "  source_last_verified_ts INTEGER NOT NULL DEFAULT 0,"
+              // Flashbulb (from emotional_tags v1)
+              "  flashbulb INTEGER NOT NULL DEFAULT 0,"
+              "  emotional_intensity REAL NOT NULL DEFAULT 0.0,"
+              "  half_life_bonus REAL NOT NULL DEFAULT 0.0,"
+              "  detail_suppression REAL NOT NULL DEFAULT 0.0,"
+              "  gist_components INTEGER NOT NULL DEFAULT 0,"
+              "  cascade_radius INTEGER NOT NULL DEFAULT 0,"
+              "  cascade_decay REAL NOT NULL DEFAULT 0.0,"
+              // Synaptic tagging
+              "  tag_strength REAL NOT NULL DEFAULT 0.0,"
+              "  tag_expires_at INTEGER NOT NULL DEFAULT 0"
+              ")",
+
+              // ------------------------------------------------------------------
+              // SIGNALS - Extended signal metadata with inline metrics
+              // (was split: signals + signal_metrics)
+              // ------------------------------------------------------------------
+              "CREATE TABLE IF NOT EXISTS signals ("
+              "  signal_id INTEGER PRIMARY KEY,"
+              "  memory_id INTEGER,"
+              "  source_id TEXT NOT NULL,"
+              "  embedding_id INTEGER NOT NULL,"
+              "  blob_id BLOB,"
+              "  timestamp INTEGER NOT NULL,"
+              "  modality TEXT NOT NULL DEFAULT 'text',"
+              "  mime TEXT,"
+              "  serial_position INTEGER NOT NULL DEFAULT 0,"
+              // Inline metrics (from signal_metrics v1)
+              "  score REAL NOT NULL DEFAULT 0.0,"
+              "  relevance REAL,"
+              "  mismatch REAL,"
+              "  surprise REAL,"
+              "  rarity REAL,"
+              "  drift REAL,"
+              "  contradiction REAL,"
+              "  utility REAL,"
+              "  periphery REAL,"
+              "  coverage REAL,"
+              "  salience REAL,"
+              "  valence REAL,"
+              "  arousal REAL,"
+              "  threshold_t REAL,"
+              "  write_decision INTEGER,"
+              "  coherence REAL,"
+              "  focus_spread REAL,"
+              "  f_effective REAL,"
+              "  created_at INTEGER NOT NULL"
+              ")",
+
+              // ------------------------------------------------------------------
+              // EMBEDDINGS - Minimal sqlite-vec virtual table
+              // Most metadata moved to MEMORIES
+              // ------------------------------------------------------------------
+              "CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0("
+              "embedding_id INTEGER PRIMARY KEY,"
+              "embedding float[256],"
+              "+created_at integer"
+              ")",
+
+              // ------------------------------------------------------------------
+              // LONG-TERM GRAPH MEMORY EDGES
+              //
+              // Durable graph edges such as has_label, derived_from, reinforces,
+              // and relation links. Together, memories + associations are LTM.
+              // ------------------------------------------------------------------
+              "CREATE TABLE IF NOT EXISTS associations ("
+              "  source_memory_id INTEGER NOT NULL,"
+              "  target_memory_id INTEGER NOT NULL,"
+              "  edge_type TEXT NOT NULL,"
+              "  weight REAL NOT NULL DEFAULT 1.0,"
+              "  decay_rate REAL,"
+              "  last_reinforced INTEGER,"
+              "  PRIMARY KEY (source_memory_id, target_memory_id, edge_type)"
+              ")",
+
+              // ------------------------------------------------------------------
+              // ACCUMULATORS - Write pacing per source (was accumulator_state)
+              // ------------------------------------------------------------------
+              "CREATE TABLE IF NOT EXISTS accumulators ("
+              "  source_id TEXT PRIMARY KEY,"
+              "  episode_id INTEGER,"
+              "  mu_acc BLOB,"
+              "  drift_acc REAL NOT NULL DEFAULT 0.0,"
+              "  s_sum REAL NOT NULL DEFAULT 0.0,"
+              "  s_max REAL NOT NULL DEFAULT 0.0,"
+              "  n INTEGER NOT NULL DEFAULT 0,"
+              "  e_peak BLOB,"
+              "  emo_max REAL NOT NULL DEFAULT 0.0,"
+              "  arousal_sum REAL NOT NULL DEFAULT 0.0,"
+              "  acc_signals_window BLOB,"
+              "  drift_accum REAL NOT NULL DEFAULT 0.0,"
+              "  drift_at_last_interrupt REAL NOT NULL DEFAULT 0.0,"
+              "  drift_acc_pacing REAL NOT NULL DEFAULT 0.0,"
+              "  x_last_check BLOB,"
+              "  prev_x BLOB,"
+              "  c_t BLOB,"
+              "  t_start INTEGER NOT NULL DEFAULT 0,"
+              "  last_write_ts INTEGER NOT NULL DEFAULT 0,"
+              "  last_signal_ts INTEGER NOT NULL DEFAULT 0,"
+              "  eta_acc REAL NOT NULL DEFAULT 0.0,"
+              "  coherence_prev REAL NOT NULL DEFAULT 1.0"
+              ")",
+
+              // ------------------------------------------------------------------
+              // STATE - Unified processor state (singleton, id=1)
+              // Includes: processor_state + 4 blender tables
+              // ------------------------------------------------------------------
+              "CREATE TABLE IF NOT EXISTS state ("
+              "  id INTEGER PRIMARY KEY CHECK (id = 1),"
+              "  signals_processed INTEGER NOT NULL DEFAULT 0,"
+              // Threshold state
+              "  theta_dynamic REAL NOT NULL DEFAULT 0.2,"
+              "  theta_target REAL NOT NULL DEFAULT 0.2,"
+              "  hysteresis REAL NOT NULL DEFAULT 0.05,"
+              "  half_life REAL NOT NULL DEFAULT 120.0,"
+              // Focus state
+              "  weight_relevance REAL NOT NULL DEFAULT 0.5,"
+              "  attention_width REAL NOT NULL DEFAULT 1.57,"
+              "  coverage_gain_floor REAL NOT NULL DEFAULT 0.65,"
+              "  mismatch_weight REAL NOT NULL DEFAULT 0.5,"
+              // Sensitivity state
+              "  weight_novelty REAL NOT NULL DEFAULT 0.3,"
+              "  weight_surprise REAL NOT NULL DEFAULT 0.2,"
+              "  weight_valence REAL NOT NULL DEFAULT 0.4,"
+              "  weight_arousal REAL NOT NULL DEFAULT 0.0,"
+              "  emotion_gain REAL NOT NULL DEFAULT 1.0,"
+              "  score_gain REAL NOT NULL DEFAULT 1.0,"
+              "  rate_target REAL NOT NULL DEFAULT 0.2,"
+              // Emotion state
+              "  emotion_intensity REAL NOT NULL DEFAULT 0.0,"
+              "  valence REAL NOT NULL DEFAULT 0.5,"
+              "  arousal REAL NOT NULL DEFAULT 0.0,"
+              "  mood_vector BLOB,"
+              "  last_mood_ts INTEGER NOT NULL DEFAULT 0,"
+              "  flashbulb_rate REAL NOT NULL DEFAULT 0.0,"
+              // Stability state
+              "  rate_decay REAL NOT NULL DEFAULT 0.60,"
+              "  periphery_half_life REAL NOT NULL DEFAULT 120.0,"
+              "  salience_half_life REAL NOT NULL DEFAULT 120.0,"
+              "  drift_weight REAL NOT NULL DEFAULT 0.5,"
+              "  retention_ema REAL NOT NULL DEFAULT 0.0,"
+              // Rate control
+              "  m_rate REAL NOT NULL DEFAULT 0.0,"
+              "  rho_hat_prev REAL NOT NULL DEFAULT 0.0,"
+              "  dt_ema REAL NOT NULL DEFAULT 0.0,"
+              "  rate_ticks INTEGER NOT NULL DEFAULT 0,"
+              "  last_rate_timestamp INTEGER NOT NULL DEFAULT 0,"
+              "  reliability REAL NOT NULL DEFAULT 1.0,"
+              // Uncertainty
+              "  u_uncertainty REAL NOT NULL DEFAULT 0.0,"
+              // Embedding prediction
+              "  last_embedding BLOB,"
+              "  x_pred_ema BLOB,"
+              "  delta_half_life_adj REAL NOT NULL DEFAULT 0.0,"
+              "  sustained_influence REAL NOT NULL DEFAULT 0.0,"
+              // Working memory
+              "  wm_maintenance_cost REAL NOT NULL DEFAULT 0.0,"
+              "  wm_slot_count INTEGER NOT NULL DEFAULT 0,"
+              "  wm_last_accepted INTEGER NOT NULL DEFAULT 0,"
+              "  wm_last_chunked INTEGER NOT NULL DEFAULT 0,"
+              // Consolidation
+              "  last_consolidation_ts INTEGER NOT NULL DEFAULT 0,"
+              "  consolidation_count INTEGER NOT NULL DEFAULT 0,"
+              "  memories_since_consolidation INTEGER NOT NULL DEFAULT 0,"
+              "  is_processing_signal INTEGER NOT NULL DEFAULT 0,"
+              "  last_retrieval_ts INTEGER NOT NULL DEFAULT 0,"
+              // Episode tracking
+              "  episode_start_ts INTEGER NOT NULL DEFAULT 0,"
+              "  last_interrupt_tick INTEGER NOT NULL DEFAULT 0,"
+              "  last_signal_timestamp INTEGER NOT NULL DEFAULT 0,"
+              "  updated_at INTEGER NOT NULL DEFAULT 0,"
+              // Outcome prediction + neuromodulators
+              "  outcome_pred REAL NOT NULL DEFAULT 0.0,"
+              "  neuromod_ach REAL NOT NULL DEFAULT 0.0,"
+              "  neuromod_ne REAL NOT NULL DEFAULT 0.0,"
+              "  neuromod_da REAL NOT NULL DEFAULT 0.0,"
+              "  osc_phase REAL NOT NULL DEFAULT 0.0,"
+              // Write rate
+              "  write_rate_timestamps BLOB,"
+              // Blender weights (from blender_weights v1)
+              "  w_relevance REAL,"
+              "  w_mismatch REAL,"
+              "  w_surprise REAL,"
+              "  w_rarity REAL,"
+              "  w_drift REAL,"
+              "  w_contradiction REAL,"
+              "  w_utility REAL,"
+              "  w_periphery REAL,"
+              "  w_coverage REAL,"
+              "  w_salience REAL,"
+              "  w_valence REAL,"
+              "  w_arousal REAL,"
+              "  blender_ready INTEGER NOT NULL DEFAULT 0,"
+              "  blender_update_count INTEGER NOT NULL DEFAULT 0,"
+              // Blender covariance (from blender_covariance v1)
+              "  blender_P_matrix BLOB,"
+              // Blender coefficients (from blender_coefficients v1)
+              "  blender_coefficients BLOB,"
+              // Blender coeff covariance (from blender_coeff_covariance v1)
+              "  blender_coeff_P_matrix BLOB"
+              ")",
+
+              // ------------------------------------------------------------------
+              // EPISODES indexes
+              // ------------------------------------------------------------------
+              "CREATE INDEX IF NOT EXISTS idx_episodes_end ON episodes(end_ts) WHERE end_ts IS NULL",
+
+              // ------------------------------------------------------------------
+              // MEMORIES indexes
+              // ------------------------------------------------------------------
+              "CREATE INDEX IF NOT EXISTS idx_memories_episode ON memories(episode_id, start_ts)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories(embedding_id)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_working_active "
+              "ON memories(end_ts, memory_id) "
+              "WHERE kind = 'WORKING' AND end_ts IS NULL",
+              "CREATE INDEX IF NOT EXISTS idx_memories_working_closed_end "
+              "ON memories(end_ts, memory_id) "
+              "WHERE kind = 'WORKING' AND end_ts IS NOT NULL",
+              "CREATE INDEX IF NOT EXISTS idx_memories_cluster ON memories(cluster_id) WHERE cluster_id IS NOT NULL",
+
+              // ------------------------------------------------------------------
+              // SIGNALS indexes
+              // ------------------------------------------------------------------
+              "CREATE INDEX IF NOT EXISTS idx_signals_memory ON signals(memory_id, serial_position)",
+              "CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source_id) WHERE memory_id IS NULL",
+              "CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(timestamp DESC)",
+
+              // ------------------------------------------------------------------
+              // ASSOCIATIONS indexes
+              // ------------------------------------------------------------------
+              "CREATE INDEX IF NOT EXISTS idx_associations_source ON associations(source_memory_id, edge_type)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target ON associations(target_memory_id, edge_type)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_source_weight "
+              "ON associations(source_memory_id, weight DESC, last_reinforced DESC, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target_weight "
+              "ON associations(target_memory_id, weight DESC, last_reinforced DESC, source_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_source_edge_weight "
+              "ON associations(source_memory_id, edge_type, weight DESC, last_reinforced DESC, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target_edge_weight "
+              "ON associations(target_memory_id, edge_type, weight DESC, last_reinforced DESC, source_memory_id)",
+
+              // ------------------------------------------------------------------
+              // ACCUMULATORS indexes
+              // ------------------------------------------------------------------
+              "CREATE INDEX IF NOT EXISTS idx_accumulators_episode ON accumulators(episode_id)",
+
+              // ------------------------------------------------------------------
+              // Views (Computed Windows) - replace sliding window tables
+              // ------------------------------------------------------------------
+              "CREATE VIEW IF NOT EXISTS recent_context AS "
+              "SELECT s.signal_id, s.embedding_id, e.embedding, s.timestamp "
+              "FROM signals s "
+              "JOIN embeddings e ON s.embedding_id = e.embedding_id "
+              "ORDER BY s.timestamp DESC "
+              "LIMIT 64",
+
+              "CREATE VIEW IF NOT EXISTS recent_scores AS "
+              "SELECT signal_id, score, timestamp "
+              "FROM signals "
+              "WHERE score IS NOT NULL "
+              "ORDER BY timestamp DESC "
+              "LIMIT 100",
+
+              "CREATE VIEW IF NOT EXISTS recent_ids AS "
+              "SELECT embedding_id, timestamp "
+              "FROM signals "
+              "ORDER BY timestamp DESC "
+              "LIMIT 1024",
+
+              "CREATE VIEW IF NOT EXISTS recent_retrievals AS "
+              "SELECT memory_id, last_access as last_retrieval_ts "
+              "FROM memories "
+              "WHERE last_access IS NOT NULL "
+              "  AND kind != 'WORKING' "
+              "ORDER BY last_access DESC "
+              "LIMIT 128",
+          },
+      },
+      {
+          4,
+          "Constructive recall reconstruction ledger",
+          {
+              "CREATE TABLE IF NOT EXISTS memory_reconstructions ("
+              "  reconstruction_id INTEGER PRIMARY KEY,"
+              "  memory_id INTEGER NOT NULL,"
+              "  embedding_id INTEGER NOT NULL,"
+              "  blob_id BLOB,"
+              "  created_at INTEGER NOT NULL,"
+              "  uncertainty REAL NOT NULL DEFAULT 0.0,"
+              "  trigger TEXT NOT NULL DEFAULT 'retrieval',"
+              "  source_confidence REAL NOT NULL DEFAULT 1.0,"
+              "  context_similarity REAL NOT NULL DEFAULT 0.0"
+              ")",
+              "CREATE INDEX IF NOT EXISTS idx_memory_reconstructions_memory "
+              "ON memory_reconstructions(memory_id, reconstruction_id DESC)",
+              "CREATE INDEX IF NOT EXISTS idx_memory_reconstructions_embedding "
+              "ON memory_reconstructions(embedding_id)",
+          },
+      },
+      {
+          6,
+          "Soft Anchor shadow state and links",
+          {
+              "CREATE TABLE IF NOT EXISTS soft_anchors ("
+              "  anchor_id TEXT PRIMARY KEY,"
+              "  status TEXT NOT NULL,"
+              "  semantic_centroid BLOB,"
+              "  entity_centroid BLOB,"
+              "  full_centroid BLOB,"
+              "  semantic_radius REAL NOT NULL DEFAULT 0.0,"
+              "  entity_radius REAL NOT NULL DEFAULT 0.0,"
+              "  full_radius REAL NOT NULL DEFAULT 0.0,"
+              "  source_id TEXT,"
+              "  first_step INTEGER NOT NULL DEFAULT 0,"
+              "  last_step INTEGER NOT NULL DEFAULT 0,"
+              "  first_ts INTEGER NOT NULL DEFAULT 0,"
+              "  last_ts INTEGER NOT NULL DEFAULT 0,"
+              "  last_boundary_id INTEGER NOT NULL DEFAULT 0,"
+              "  anchor_strength REAL NOT NULL DEFAULT 0.0,"
+              "  support_count INTEGER NOT NULL DEFAULT 0,"
+              "  contradiction_count INTEGER NOT NULL DEFAULT 0,"
+              "  recent_memory_ids TEXT,"
+              "  updated_at INTEGER NOT NULL DEFAULT 0"
+              ")",
+              "CREATE TABLE IF NOT EXISTS soft_anchor_links ("
+              "  memory_id INTEGER NOT NULL,"
+              "  anchor_id TEXT NOT NULL,"
+              "  anchor_strength REAL NOT NULL DEFAULT 0.0,"
+              "  anchor_label TEXT NOT NULL DEFAULT 'none',"
+              "  evidence_kind TEXT NOT NULL DEFAULT 'unknown',"
+              "  memory_tier TEXT NOT NULL DEFAULT 'WM',"
+              "  score REAL NOT NULL DEFAULT 0.0,"
+              "  margin REAL NOT NULL DEFAULT 0.0,"
+              "  entropy REAL NOT NULL DEFAULT 0.0,"
+              "  support_count INTEGER NOT NULL DEFAULT 0,"
+              "  contradiction_count INTEGER NOT NULL DEFAULT 0,"
+              "  created_step INTEGER NOT NULL DEFAULT 0,"
+              "  updated_step INTEGER NOT NULL DEFAULT 0,"
+              "  created_at INTEGER NOT NULL DEFAULT 0,"
+              "  PRIMARY KEY (memory_id, anchor_id)"
+              ")",
+              "CREATE INDEX IF NOT EXISTS idx_soft_anchors_status "
+              "ON soft_anchors(status, last_step)",
+              "CREATE INDEX IF NOT EXISTS idx_soft_anchor_links_anchor "
+              "ON soft_anchor_links(anchor_id, updated_step)",
+              "CREATE INDEX IF NOT EXISTS idx_soft_anchor_links_memory "
+              "ON soft_anchor_links(memory_id)",
+          },
+      },
+      {
+          7,
+          "Memory embedding lookup index for graph retrieval",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_embedding "
+              "ON memories(embedding_id)",
+          },
+      },
+      {
+          8,
+          "Normalize memory source metadata",
+          {
+              "UPDATE memories "
+              "SET source_origin = 'source', source_reliability = 0.7 "
+              "WHERE source_origin IS NULL "
+              "   OR source_origin != 'source' "
+              "   OR source_reliability IN (0.5, 0.6, 0.8, 0.9)",
+          },
+      },
+      {
+          9,
+          "Realtime retrieval lookup indexes",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_signals_embedding "
+              "ON signals(embedding_id)",
+              "CREATE INDEX IF NOT EXISTS idx_signals_source_ts_serial "
+              "ON signals(source_id, timestamp, serial_position)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_kind_source "
+              "ON memories(kind, source_id)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_source_start "
+              "ON memories(source_id, start_ts)",
+              "CREATE INDEX IF NOT EXISTS idx_memories_last_access "
+              "ON memories(last_access DESC) "
+              "WHERE last_access IS NOT NULL AND kind != 'WORKING'",
+              "CREATE INDEX IF NOT EXISTS idx_memories_label_created "
+              "ON memories(created_at DESC) WHERE kind = 'LABEL'",
+          },
+      },
+      {
+          10,
+          "Realtime graph retrieval query indexes",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_associations_edge_source_target "
+              "ON associations(edge_type, source_memory_id, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_edge_target_source "
+              "ON associations(edge_type, target_memory_id, source_memory_id)",
+          },
+      },
+      {
+          11,
+          "Current memory embedding surface",
+          {
+              "CREATE VIRTUAL TABLE IF NOT EXISTS current_memory_embeddings "
+              "USING vec0("
+              "memory_id INTEGER PRIMARY KEY,"
+              "embedding float[256],"
+              "+embedding_id INTEGER,"
+              "+created_at INTEGER"
+              ")",
+              "DELETE FROM current_memory_embeddings",
+              "INSERT INTO current_memory_embeddings("
+              "memory_id, embedding, embedding_id, created_at"
+              ") "
+              "WITH latest AS ("
+              "  SELECT mr.memory_id, mr.embedding_id, mr.created_at "
+              "  FROM memory_reconstructions mr "
+              "  JOIN ("
+              "    SELECT memory_id, MAX(reconstruction_id) AS reconstruction_id "
+              "    FROM memory_reconstructions "
+              "    GROUP BY memory_id"
+              "  ) mx ON mx.memory_id = mr.memory_id "
+              "       AND mx.reconstruction_id = mr.reconstruction_id"
+              "), current AS ("
+              "  SELECT m.memory_id, "
+              "         COALESCE(latest.embedding_id, m.embedding_id) AS embedding_id, "
+              "         COALESCE(latest.created_at, m.created_at, 0) AS created_at "
+              "  FROM memories m "
+              "  LEFT JOIN latest ON latest.memory_id = m.memory_id "
+              "  WHERE COALESCE(latest.embedding_id, m.embedding_id) IS NOT NULL "
+              "    AND m.kind NOT IN ('WORKING', 'LABEL')"
+              ") "
+              "SELECT current.memory_id, e.embedding, current.embedding_id, "
+              "       current.created_at "
+              "FROM current "
+              "JOIN embeddings e ON e.embedding_id = current.embedding_id",
+          },
+      },
+      {
+          12,
+          "Realtime memory recency lookup index",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_created_desc "
+              "ON memories(created_at DESC)",
+          },
+      },
+      {
+          13,
+          "Long-term memory eviction lookup index",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_strength_created "
+              "ON memories(strength, created_at, embedding_id) "
+              "WHERE kind = 'LONG_TERM'",
+          },
+      },
+      {
+          14,
+          "Covering strength index for retention aggregate",
+          {
+              "DROP INDEX IF EXISTS idx_memories_strength",
+              "CREATE INDEX IF NOT EXISTS idx_memories_strength "
+              "ON memories(strength, last_access, created_at, start_ts)",
+          },
+      },
+      {
+          15,
+          "Retrievable current embedding surface",
+          {
+              "DELETE FROM current_memory_embeddings "
+              "WHERE memory_id NOT IN ("
+              "  SELECT memory_id FROM memories "
+              "  WHERE kind NOT IN ('WORKING', 'LABEL')"
+              ")",
+          },
+      },
+      {
+          17,
+          "Association fanout order indexes",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_associations_source_weight "
+              "ON associations(source_memory_id, weight DESC, last_reinforced DESC, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target_weight "
+              "ON associations(target_memory_id, weight DESC, last_reinforced DESC, source_memory_id)",
+          },
+      },
+      {
+          18,
+          "Association edge-filtered fanout order indexes",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_associations_source_edge_weight "
+              "ON associations(source_memory_id, edge_type, weight DESC, last_reinforced DESC, target_memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_associations_target_edge_weight "
+              "ON associations(target_memory_id, edge_type, weight DESC, last_reinforced DESC, source_memory_id)",
+          },
+      },
+      {
+          20,
+          "Drop obsolete strength retention index",
+          {
+              "DROP INDEX IF EXISTS idx_memories_strength",
+          },
+      },
+      {
+          21,
+          "Bound working-memory lookup indexes",
+          {
+              "DROP INDEX IF EXISTS idx_memories_working",
+              "CREATE INDEX IF NOT EXISTS idx_memories_working_active "
+              "ON memories(end_ts, memory_id) "
+              "WHERE kind = 'WORKING' AND end_ts IS NULL",
+              "CREATE INDEX IF NOT EXISTS idx_memories_working_closed_end "
+              "ON memories(end_ts, memory_id) "
+              "WHERE kind = 'WORKING' AND end_ts IS NOT NULL",
+          },
+      },
+      {
+          22,
+          "Exclude working rows from durable recency lookups",
+          {
+              "DROP VIEW IF EXISTS recent_retrievals",
+              "CREATE VIEW IF NOT EXISTS recent_retrievals AS "
+              "SELECT memory_id, last_access as last_retrieval_ts "
+              "FROM memories "
+              "WHERE last_access IS NOT NULL "
+              "  AND kind != 'WORKING' "
+              "ORDER BY last_access DESC "
+              "LIMIT 128",
+              "DROP INDEX IF EXISTS idx_memories_last_access",
+              "CREATE INDEX IF NOT EXISTS idx_memories_last_access "
+              "ON memories(last_access DESC) "
+              "WHERE last_access IS NOT NULL AND kind != 'WORKING'",
+          },
+      },
+      {
+          24,
+          "Track working-memory strength decay timestamp",
+          {
+              "ALTER TABLE memories ADD COLUMN strength_updated_at INTEGER",
+              "UPDATE memories SET strength_updated_at = last_access "
+              "WHERE kind = 'WORKING' AND strength_updated_at IS NULL",
+          },
+      },
+      {
+          25,
+          "Persist consolidation throughput range",
+          {
+              "ALTER TABLE state ADD COLUMN consolidation_rate_floor REAL NOT NULL DEFAULT 0.0",
+              "ALTER TABLE state ADD COLUMN consolidation_rate_peak REAL NOT NULL DEFAULT 0.0",
+          },
+      },
+      {
+          26,
+          "Persist consolidation throughput initialization",
+          {
+              "ALTER TABLE state ADD COLUMN consolidation_rate_initialized INTEGER NOT NULL DEFAULT 0",
+              "UPDATE state SET consolidation_rate_initialized = 1 "
+              "WHERE consolidation_rate_floor != 0.0 "
+              "OR consolidation_rate_peak != 0.0",
+          },
+      },
+      {
+          27,
+          "Persist consolidation throughput recommendation latch",
+          {
+              "ALTER TABLE state ADD COLUMN consolidation_rate_armed INTEGER NOT NULL DEFAULT 1",
+          },
+      },
+      {
+          28,
+          "Persist lazy retrieval suppression recovery state",
+          {
+              "CREATE TABLE IF NOT EXISTS rif_recovery_clock("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "generation INTEGER NOT NULL CHECK(generation > 0), "
+              "log_factor REAL NOT NULL, last_ts INTEGER NOT NULL)",
+              "CREATE TABLE IF NOT EXISTS rif_generation_resets("
+              "generation INTEGER PRIMARY KEY CHECK(generation > 0), "
+              "reset_ts INTEGER NOT NULL)",
+              "CREATE TABLE IF NOT EXISTS rif_active_state("
+              "memory_id INTEGER PRIMARY KEY, "
+              "generation INTEGER NOT NULL CHECK(generation > 0), "
+              "anchor_suppression REAL NOT NULL "
+              "CHECK(anchor_suppression > 1e-9), "
+              "recovery_total REAL NOT NULL, "
+              "anchor_log_factor REAL NOT NULL, "
+              "expires_log_factor REAL NOT NULL, "
+              "FOREIGN KEY(memory_id) REFERENCES memories(memory_id) "
+              "ON DELETE CASCADE)",
+              "CREATE INDEX IF NOT EXISTS idx_rif_active_due ON rif_active_state("
+              "generation, expires_log_factor, memory_id)",
+              "INSERT OR IGNORE INTO rif_recovery_clock("
+              "singleton, generation, log_factor, last_ts) "
+              "SELECT 1, 1, 0.0, COALESCE(MAX(suppression_ts), 0) "
+              "FROM memories WHERE suppression > 1e-9",
+              "INSERT OR REPLACE INTO rif_active_state("
+              "memory_id, generation, anchor_suppression, recovery_total, "
+              "anchor_log_factor, expires_log_factor) "
+              "SELECT memory_id, 1, suppression, strength + suppression, "
+              "0.0, ln(1e-9 / suppression) "
+              "FROM memories WHERE suppression > 1e-9",
+          },
+      },
+      {
+          29,
+          "Persist row-addressed sparse retrieval route",
+          {
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_meta("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "schema_version INTEGER NOT NULL CHECK(schema_version = 1), "
+              "embedding_dim INTEGER NOT NULL CHECK(embedding_dim > 0), "
+              "entry_memory_id INTEGER NOT NULL CHECK(entry_memory_id >= 0), "
+              "max_level INTEGER NOT NULL CHECK(max_level >= 0), "
+              "active_count INTEGER NOT NULL CHECK(active_count >= 0), "
+              "generation INTEGER NOT NULL CHECK(generation >= 0))",
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_nodes("
+              "memory_id INTEGER PRIMARY KEY, "
+              "embedding BLOB NOT NULL, "
+              "level INTEGER NOT NULL CHECK(level >= 0), "
+              "links BLOB NOT NULL, "
+              "active INTEGER NOT NULL CHECK(active IN (0, 1)), "
+              "generation INTEGER NOT NULL CHECK(generation >= 0))",
+              "CREATE TABLE IF NOT EXISTS cortext_sparse_route_build("
+              "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+              "schema_version INTEGER NOT NULL CHECK(schema_version = 1), "
+              "embedding_dim INTEGER NOT NULL CHECK(embedding_dim > 0), "
+              "cursor_memory_id INTEGER NOT NULL "
+              "CHECK(cursor_memory_id >= 0), "
+              "entry_memory_id INTEGER NOT NULL CHECK(entry_memory_id >= 0), "
+              "max_level INTEGER NOT NULL CHECK(max_level >= 0), "
+              "active_count INTEGER NOT NULL CHECK(active_count >= 0), "
+              "generation INTEGER NOT NULL CHECK(generation > 0))",
+              "CREATE TABLE IF NOT EXISTS "
+              "cortext_sparse_route_dirty("
+              "memory_id INTEGER PRIMARY KEY CHECK(memory_id > 0))",
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_active "
+              "ON cortext_sparse_route_nodes(generation, active, memory_id)",
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_generation "
+              "ON cortext_sparse_route_nodes(generation)",
+          },
+      },
+      {
+          30,
+          "Persist exact signal embeddings outside the global vector route",
+          {
+              "CREATE TABLE IF NOT EXISTS cortext_active_signal_embeddings("
+              "slot INTEGER PRIMARY KEY CHECK(slot >= 0), "
+              "signal_id INTEGER NOT NULL UNIQUE, "
+              "embedding BLOB NOT NULL, "
+              "created_at INTEGER NOT NULL, "
+              "capacity INTEGER NOT NULL CHECK(capacity > 0), "
+              "FOREIGN KEY(signal_id) REFERENCES signals(signal_id) "
+              "ON DELETE CASCADE)",
+              "DROP VIEW IF EXISTS recent_context",
+              "CREATE VIEW recent_context AS "
+              "SELECT s.signal_id, s.embedding_id, "
+              "COALESCE(a.embedding, e.embedding) AS embedding, s.timestamp "
+              "FROM signals s "
+              "LEFT JOIN cortext_active_signal_embeddings a "
+              "ON a.signal_id = s.signal_id "
+              "LEFT JOIN embeddings e ON s.embedding_id = e.embedding_id "
+              "ORDER BY s.timestamp DESC "
+              "LIMIT 64",
+          },
+      },
+      {
+          31,
+          "Persist the consolidation-rebuilt sparse activation centroid",
+          {
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_entry_memory_id INTEGER NOT NULL DEFAULT 0 "
+              "CHECK(activation_entry_memory_id >= 0)",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_generation INTEGER NOT NULL DEFAULT 0 "
+              "CHECK(activation_generation >= 0)",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_centroid BLOB",
+              "ALTER TABLE cortext_sparse_route_meta ADD COLUMN "
+              "activation_identity_ids BLOB",
+          },
+      },
+      {
+          32,
+          "Index deterministic sparse-route entry replacement",
+          {
+              "CREATE INDEX IF NOT EXISTS idx_sparse_route_nodes_entry "
+              "ON cortext_sparse_route_nodes("
+              "generation, active, level DESC, memory_id ASC)",
+          },
+      },
+      {
+          34,
+          "Index bounded unclustered consolidation candidates",
+          {
+              "CREATE INDEX IF NOT EXISTS "
+              "idx_memories_ltm_unclustered_strength_created "
+              "ON memories(strength, created_at, embedding_id) "
+              "WHERE kind = 'LONG_TERM' AND cluster_id IS NULL",
+          },
+      },
+      {
+          35,
+          "Drop the removed meta-learning coefficient store from older stores",
+          {
+              "DROP TABLE IF EXISTS meta_learning_coeffs",
+          },
+      },
+      {
+          36,
+          "Drop the removed predictive pre-activation column and indexes",
+          {
+              "DROP INDEX IF EXISTS idx_memories_pre_activation_embedding",
+              "DROP INDEX IF EXISTS idx_memories_pre_activation_embedding_active",
+              "ALTER TABLE memories DROP COLUMN pre_activation",
+          },
+      },
+      {
+          37,
+          "Drop the removed influence-feedback columns",
+          {
+              "ALTER TABLE memories DROP COLUMN influence",
+              "ALTER TABLE memories DROP COLUMN sustained_influence",
+              "ALTER TABLE memories DROP COLUMN mean_influence",
+              "ALTER TABLE state DROP COLUMN sustained_influence",
+          },
+      },
+      {
+          38,
+          "Drop the removed memory-strength traces and eviction audit log",
+          {
+              "DROP TABLE IF EXISTS memory_evictions",
+              "ALTER TABLE memories DROP COLUMN trace_fast",
+              "ALTER TABLE memories DROP COLUMN trace_med",
+              "ALTER TABLE memories DROP COLUMN trace_slow",
+              "ALTER TABLE memories DROP COLUMN trace_ultra",
+              "ALTER TABLE memories DROP COLUMN use_frequency",
+              "ALTER TABLE memories DROP COLUMN contextual_gain",
+              "ALTER TABLE memories DROP COLUMN influence_factor",
+          },
+      },
+      {
+          39,
+          "Drop the removed synaptic-tag columns",
+          {
+              "ALTER TABLE memories DROP COLUMN tag_strength",
+              "ALTER TABLE memories DROP COLUMN tag_expires_at",
+          },
+      },
+      {
+          40,
+          "Drop the removed redundancy and connectivity columns",
+          {
+              "ALTER TABLE memories DROP COLUMN redundancy",
+              "ALTER TABLE memories DROP COLUMN connectivity",
+          },
+      },
+      {
+          41,
+          "Drop the removed per-memory stability and half-life adaptation state",
+          {
+              "DROP INDEX IF EXISTS idx_memories_ltm_created_strength",
+              "ALTER TABLE memories DROP COLUMN stability",
+              "ALTER TABLE state DROP COLUMN half_life",
+              "ALTER TABLE state DROP COLUMN rate_decay",
+              "ALTER TABLE state DROP COLUMN periphery_half_life",
+              "ALTER TABLE state DROP COLUMN salience_half_life",
+              "ALTER TABLE state DROP COLUMN drift_weight",
+              "ALTER TABLE state DROP COLUMN retention_ema",
+              "ALTER TABLE state DROP COLUMN delta_half_life_adj",
+          },
+      },
+      {
+          42,
+          "Drop the removed emotional-consolidation and cascade columns",
+          {
+              "DROP INDEX IF EXISTS idx_memories_flashbulb_intensity",
+              "ALTER TABLE memories DROP COLUMN flashbulb",
+              "ALTER TABLE memories DROP COLUMN emotional_intensity",
+              "ALTER TABLE memories DROP COLUMN half_life_bonus",
+              "ALTER TABLE memories DROP COLUMN detail_suppression",
+              "ALTER TABLE memories DROP COLUMN gist_components",
+              "ALTER TABLE memories DROP COLUMN cascade_radius",
+              "ALTER TABLE memories DROP COLUMN cascade_decay",
+          },
+      },
+      {
+          43,
+          "Drop the removed reward-prediction and dopamine state",
+          {
+              "ALTER TABLE state DROP COLUMN outcome_pred",
+              "ALTER TABLE state DROP COLUMN neuromod_da",
+          },
+      },
+      {
+          44,
+          "Drop the removed encode/retrieve oscillator phase",
+          {
+              "ALTER TABLE state DROP COLUMN osc_phase",
+          },
+      },
+      {
+          45,
+          "Drop the removed retrieval-induced forgetting state",
+          {
+              "DROP TABLE IF EXISTS rif_active_state",
+              "DROP TABLE IF EXISTS rif_generation_resets",
+              "DROP TABLE IF EXISTS rif_recovery_clock",
+              "ALTER TABLE memories DROP COLUMN suppression",
+              "ALTER TABLE memories DROP COLUMN suppression_ts",
+              "ALTER TABLE memories DROP COLUMN suppression_count",
+              "ALTER TABLE memories DROP COLUMN recovery_time_start",
+          },
+      },
+      {
+          46,
+          "Drop the removed reconsolidation lability state",
+          {
+              "ALTER TABLE memories DROP COLUMN lability_state",
+              "ALTER TABLE memories DROP COLUMN lability_ts",
+              "ALTER TABLE memories DROP COLUMN original_centroid",
+          },
+      },
+      {
+          47,
+          "Drop the removed norepinephrine-like modulator state",
+          {
+              "ALTER TABLE state DROP COLUMN neuromod_ne",
+          },
+      },
+      {
+          48,
+          "Drop the removed Soft Anchor state and links",
+          {
+              "DROP TABLE IF EXISTS soft_anchor_links",
+              "DROP TABLE IF EXISTS soft_anchors",
+          },
+      },
+      {
+          49,
+          "Keyword index over LONG_TERM memory text (FTS5, contentless)",
+          {
+              // rowid = memory_id. Text stays in the object store; the
+              // index keeps only inverted lists (porter-stemmed unicode61).
+              "CREATE VIRTUAL TABLE IF NOT EXISTS memory_text_fts USING fts5("
+              "  text, content='', contentless_delete=1,"
+              "  tokenize='porter unicode61 remove_diacritics 2')",
+              "CREATE TRIGGER IF NOT EXISTS memories_text_fts_delete "
+              "AFTER DELETE ON memories WHEN old.kind = 'LONG_TERM' "
+              "BEGIN DELETE FROM memory_text_fts WHERE rowid = old.memory_id; "
+              "END",
+              // Object payloads may live outside this database, so stores
+              // that already hold memories are indexed from C++ once
+              // (memory_text_index_internal::RunPendingBackfill).
+              "CREATE TABLE IF NOT EXISTS cortext_pending_backfills ("
+              "  name TEXT PRIMARY KEY)",
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'memory_text_fts' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
+      {
+          50,
+          "Shared-space vectors of stored signals, keyed by content",
+          {
+              // One retrieval-view vector per stored signal payload of any
+              // modality (content id = objstore BLAKE3 id). Memories reach a
+              // vector through their signal rows, so merges stay correct and
+              // identical payloads share one vector.
+              "CREATE TABLE IF NOT EXISTS memory_signal_vectors ("
+              "  blob_id BLOB PRIMARY KEY,"
+              "  modality TEXT NOT NULL,"
+              "  embedding BLOB NOT NULL)",
+              "CREATE INDEX IF NOT EXISTS idx_memory_signal_vectors_modality "
+              "ON memory_signal_vectors(modality)",
+              "CREATE INDEX IF NOT EXISTS idx_signals_blob "
+              "ON signals(blob_id) WHERE blob_id IS NOT NULL",
+              "CREATE TRIGGER IF NOT EXISTS signals_vector_delete "
+              "AFTER DELETE ON signals WHEN old.blob_id IS NOT NULL "
+              "BEGIN DELETE FROM memory_signal_vectors "
+              "WHERE blob_id = old.blob_id AND NOT EXISTS ("
+              "  SELECT 1 FROM signals WHERE blob_id = old.blob_id); END",
+          },
+      },
+      {
+          51,
+          "Standing memories: bounded set of lasting directives",
+          {
+              // Memories that state a lasting directive or preference
+              // (operations/standing_memory_internal.hpp). Queries rank
+              // this set on its own, so its members reach packets whatever
+              // their rank among all memories.
+              // terms: the member's word stems (TermsOf), so queries rank
+              // the set without reading member text or the store-wide index.
+              "CREATE TABLE IF NOT EXISTS standing_memories ("
+              "  memory_id INTEGER PRIMARY KEY,"
+              "  start_ts INTEGER NOT NULL,"
+              "  terms TEXT NOT NULL DEFAULT '')",
+              "CREATE TRIGGER IF NOT EXISTS memories_standing_delete "
+              "AFTER DELETE ON memories "
+              "BEGIN DELETE FROM standing_memories "
+              "WHERE memory_id = old.memory_id; END",
+              // Memories stored before this migration join the set once,
+              // from C++ (memory_text_index_internal::RunPendingBackfill).
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'standing_memories' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
+      {
+          52,
+          "Rebuild the sparse retrieval route with per-link distances",
+          {
+              // Route link rows now carry each link's distance so a full
+              // neighbor list keeps its nearest members. Older rows lack it;
+              // drop every generation and let the bounded backfill rebuild
+              // the route from the authoritative current surface.
+              "DELETE FROM cortext_sparse_route_dirty",
+              "DELETE FROM cortext_sparse_route_build",
+              "DELETE FROM cortext_sparse_route_meta",
+              "DELETE FROM cortext_sparse_route_nodes",
+          },
+      },
+      {
+          53,
+          "Standing set per stored signal",
+          {
+              // Membership moves from the memory to the stored signal that
+              // states the directive: a memory grouped from several signals
+              // (a Natural unit) is far longer than any directive, so a
+              // memory-level check never admits it, and a query packet
+              // joins the directive itself, not the whole unit.
+              // terms: the signal's word stems (TermsOf).
+              "DROP TRIGGER IF EXISTS memories_standing_delete",
+              "DROP TABLE IF EXISTS standing_memories",
+              "DELETE FROM cortext_pending_backfills "
+              "WHERE name = 'standing_memories'",
+              "CREATE TABLE IF NOT EXISTS standing_signals ("
+              "  signal_id INTEGER PRIMARY KEY,"
+              "  start_ts INTEGER NOT NULL,"
+              "  terms TEXT NOT NULL DEFAULT '')",
+              "CREATE TRIGGER IF NOT EXISTS signals_standing_delete "
+              "AFTER DELETE ON signals "
+              "BEGIN DELETE FROM standing_signals "
+              "WHERE signal_id = old.signal_id; END",
+              // Signals stored before this migration join the set once,
+              // from C++ (memory_text_index_internal::RunPendingBackfill).
+              "INSERT OR IGNORE INTO cortext_pending_backfills(name) "
+              "SELECT 'standing_signals' WHERE EXISTS ("
+              "  SELECT 1 FROM memories WHERE kind = 'LONG_TERM')",
+          },
+      },
+      {
+          54,
+          "Late-interaction reranker codes per stored signal payload",
+          {
+              // codes: k-means codes of the payload's AIST position features
+              // in the reranker's late-interaction space
+              // (models/aist_late_interaction.hpp Serialize format). Keyed
+              // like memory_signal_vectors (content id), in their own rowid
+              // table: a ~1 KB code blob beside the 1 KB vector would hold
+              // one vector row per page and make every vector read pull it.
+              // Queries rerank the head of the candidate pool with them.
+              "CREATE TABLE IF NOT EXISTS memory_signal_li_codes ("
+              "  blob_id BLOB NOT NULL UNIQUE,"
+              "  codes BLOB NOT NULL)",
+              "CREATE TRIGGER IF NOT EXISTS signals_li_codes_delete "
+              "AFTER DELETE ON signals WHEN old.blob_id IS NOT NULL "
+              "BEGIN DELETE FROM memory_signal_li_codes "
+              "WHERE blob_id = old.blob_id AND NOT EXISTS ("
+              "  SELECT 1 FROM signals WHERE blob_id = old.blob_id); END",
+          },
+      },
+      {
+          55,
+          "Long-term memory time indexes for reference-time retrieval",
+          {
+              // A query with a reference time finds the long-term memories
+              // nearest it with bounded range scans
+              // (operations/temporal_seed_internal.hpp): by start for the
+              // memories after it or holding it, by end for those before it.
+              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_start "
+              "ON memories(start_ts) WHERE kind = 'LONG_TERM'",
+              "CREATE INDEX IF NOT EXISTS idx_memories_ltm_end "
+              "ON memories(end_ts) WHERE kind = 'LONG_TERM'",
+          },
+      },
+      {
+          56,
+          "Drop write-only memory source metadata and stored context",
+          {
+              // No query reads these: source reliability was a knob
+              // constant per row, the contradiction count is carried by the
+              // supersedes edges, the verification time was never set, and
+              // the temporal context c_t is used in memory for boundary
+              // detection only.
+              "ALTER TABLE memories DROP COLUMN source_reliability",
+              "ALTER TABLE memories DROP COLUMN source_contradiction_count",
+              "ALTER TABLE memories DROP COLUMN source_last_verified_ts",
+              "ALTER TABLE memories DROP COLUMN context",
+          },
+      },
+      {
+          57,
+          "Drop the mood integrator state",
+          {
+              // The 6D mood vector only biased the dynamic threshold; it is
+              // gone, with the per-memory ambient mood snapshot of it.
+              "ALTER TABLE memories DROP COLUMN ambient_mood",
+              "ALTER TABLE state DROP COLUMN mood_vector",
+              "ALTER TABLE state DROP COLUMN last_mood_ts",
+          },
+      },
+      {
+          58,
+          "Drop the dynamic threshold controller state",
+          {
+              // No unit is stored or skipped by a score threshold, so the
+              // controller's threshold, hysteresis, homeostatic rate terms
+              // and the per-signal threshold snapshot are gone.
+              "ALTER TABLE state DROP COLUMN theta_dynamic",
+              "ALTER TABLE state DROP COLUMN theta_target",
+              "ALTER TABLE state DROP COLUMN hysteresis",
+              "ALTER TABLE state DROP COLUMN rate_target",
+              "ALTER TABLE state DROP COLUMN rho_hat_prev",
+              "ALTER TABLE state DROP COLUMN rate_ticks",
+              "ALTER TABLE state DROP COLUMN reliability",
+              "ALTER TABLE signals DROP COLUMN threshold_t",
+          },
+      },
+  };
+}
+
+} // namespace cortext::store::schema_internal
