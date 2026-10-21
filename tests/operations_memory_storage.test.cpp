@@ -315,11 +315,6 @@ TEST_CASE ("MemoryStorage stores payload when write_decision is true",
   const auto memory_id
       = AnyToLongLong (idx_rows[0].at ("memory_id")).value_or (0);
   REQUIRE (memory_id > 0);
-  REQUIRE (std::any_cast<double> (idx_rows[0].at ("source_reliability"))
-           == Catch::Approx (cortext::core::SourceReliabilityPrior (
-               cfg.focus, cfg.sensitivity, cfg.stability)));
-  REQUIRE (std::any_cast<double> (idx_rows[0].at ("source_reliability"))
-           != Catch::Approx (0.7));
 
   // Verify signal row inserted with its own embedding + blob
   auto sig_rows = store->Execute (
@@ -901,14 +896,6 @@ TEST_CASE ("MemoryStorage writes modality-agnostic supersedes edges",
       { correction_memory_id, 10LL });
   REQUIRE (edge_rows.size () == 1);
   REQUIRE (std::any_cast<double> (edge_rows[0].at ("weight")) > 0.0);
-
-  auto stale_rows = store->Execute (
-      "SELECT source_contradiction_count FROM memories WHERE memory_id = ?",
-      { 10LL });
-  REQUIRE (stale_rows.size () == 1);
-  REQUIRE (AnyToLongLong (stale_rows[0].at ("source_contradiction_count"))
-           == 1LL);
-
 }
 
 TEST_CASE ("Typed supersession candidates retain borrowed cache vectors",

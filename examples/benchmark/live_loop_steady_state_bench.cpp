@@ -182,7 +182,6 @@ main (int argc, char **argv)
   long long boundaries = 0;
   long long interrupts = 0;
   long long candidates_total = 0;
-  double threshold_sum = 0.0;
   double focus_sum = 0.0;
 
   const auto started = std::chrono::steady_clock::now ();
@@ -227,7 +226,6 @@ main (int argc, char **argv)
       interrupts += out.interrupt_allowed ? 1 : 0;
       candidates_total
           += static_cast<long long> (out.candidate_memory_ids.size ());
-      threshold_sum += out.threshold_T_dynamic;
       focus_sum += out.effective_focus;
     }
   processor.Flush ();
@@ -243,7 +241,6 @@ main (int argc, char **argv)
   std::cout << "steady_boundaries=" << boundaries << "\n";
   std::cout << "steady_interrupts=" << interrupts << "\n";
   std::cout << "steady_candidates_total=" << candidates_total << "\n";
-  std::cout << "steady_threshold_sum=" << threshold_sum << "\n";
   std::cout << "steady_effective_focus_sum=" << focus_sum << "\n";
   std::cout << "steady_final_memories=" << CountRows (*store, "memories")
             << "\n";

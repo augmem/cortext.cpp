@@ -322,9 +322,8 @@ add_library(cortext
     src/operations/recent_context.cpp
     src/operations/sensitivity.cpp
     src/operations/uncertainty.cpp
-    src/operations/threshold.cpp
+    src/operations/signal_history.cpp
     src/operations/coherence.cpp
-    src/operations/stability.cpp
     src/operations/blend.cpp
     src/operations/metrics.cpp
     src/operations/effective_focus.cpp
@@ -334,7 +333,6 @@ add_library(cortext
     src/operations/working_memory.cpp
     src/operations/interrupt_gate.cpp
     src/operations/embedding_prediction_error.cpp
-    src/operations/precision.cpp
     src/operations/constructive_recall_internal.cpp
     src/operations/graph_retrieval.cpp
     src/operations/member_vector_index_internal.cpp
@@ -356,7 +354,7 @@ add_library(cortext
     src/operations/accumulator_scores.cpp
     src/operations/accumulator.cpp
     src/operations/accumulator_reset.cpp
-    src/operations/spike_bypass.cpp
+    src/operations/capacity_flush.cpp
     # Embedding-model pin (precomputed vectors hard-fail on encoder mismatch)
     src/models/embedding_model_pin.cpp
     # Baked-in AIST model materialization (payload optional via CORTEXT_EMBED_AIST_MODEL)

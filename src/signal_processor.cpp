@@ -1391,8 +1391,6 @@ AssembleOutputFields (const OperationContext &op_context,
   out.interrupt_aborted = op_context.GetInterruptAborted ();
   out.at_boundary = op_context.GetAtBoundary ();
   out.write_decision = op_context.GetWriteDecision ();
-  out.threshold_T_dynamic = op_context.GetThresholdTDynamic ();
-  out.threshold_hysteresis = op_context.GetThresholdHysteresis ();
   out.effective_focus = op_context.GetEffectiveFocus ();
   out.coherence = op_context.GetCoherence ();
   out.emotion_intensity = op_context.GetEmotionIntensity ();
@@ -1531,10 +1529,6 @@ void
 LogProcessTelemetry (const OperationContext &op_context,
                      const SignalProcessor::Output &out)
 {
-  telemetry::RecordHistogram ("cortext.threshold_T_dynamic",
-                              op_context.GetThresholdTDynamic ());
-  telemetry::RecordHistogram ("cortext.threshold_hysteresis",
-                              op_context.GetThresholdHysteresis ());
   telemetry::RecordHistogram ("cortext.effective_focus",
                               op_context.GetEffectiveFocus ());
   telemetry::RecordHistogram ("cortext.coherence", op_context.GetCoherence ());
@@ -1648,15 +1642,14 @@ BlobToSharedEmbedding (const std::any &blob)
 }
 
 ActivationCentroid
-BuildActiveSignalRingCentroid (Store &store, int embedding_dim,
-                               double focus, double sensitivity,
+BuildActiveSignalRingCentroid (Store &store, double focus, double sensitivity,
                                double stability)
 {
   ActivationCentroid result;
   const int capacity
       = operations::active_signal_embedding_ring_internal::Capacity (
           focus, sensitivity, stability);
-  if (embedding_dim <= 0 || capacity <= 0)
+  if (capacity <= 0)
     return result;
   const auto rows = store.Execute (
       "SELECT embedding, capacity "
@@ -1665,14 +1658,21 @@ BuildActiveSignalRingCentroid (Store &store, int embedding_dim,
   if (rows.empty ()
       || rows.size () > static_cast<std::size_t> (capacity))
     return result;
-  Eigen::VectorXd sum = Eigen::VectorXd::Zero (embedding_dim);
+  // Every ring member carries the retrieval-view dimension of the first.
+  Eigen::Index embedding_dim = 0;
+  Eigen::VectorXd sum;
   for (const auto &row : rows)
     {
       const auto stored_capacity
           = store::AnyToLongLong (row.at ("capacity")).value_or (0);
       const Eigen::VectorXf embedding = BlobToEigen (row.at ("embedding"));
-      if (stored_capacity != capacity || embedding.size () != embedding_dim
-          || !embedding.allFinite ())
+      if (embedding_dim == 0)
+        {
+          embedding_dim = embedding.size ();
+          sum = Eigen::VectorXd::Zero (embedding_dim);
+        }
+      if (stored_capacity != capacity || embedding_dim == 0
+          || embedding.size () != embedding_dim || !embedding.allFinite ())
         return {};
       sum += embedding.cast<double> ();
     }
@@ -1816,7 +1816,6 @@ SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
 {
   const double F = core::Clamp (config.focus, 0.0, 1.0);
   const double S = core::Clamp (config.sensitivity, 0.0, 1.0);
-  const double T = core::Clamp (config.stability, 0.0, 1.0);
   const auto focus_priors = core::FocusStatePriorsForKnobs (F);
   const auto sensitivity_priors = core::SensitivityStatePriorsForKnobs (S);
 
@@ -1831,7 +1830,6 @@ SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
   ctx.coverage_gain_floor = ctx.coverage_gain_floor_prior;
   ctx.mismatch_weight = ctx.mismatch_weight_prior;
 
-  ctx.base_rate_prior = core::BaseRatePrior (S);
   ctx.weight_novelty_prior = sensitivity_priors.novelty_weight;
   ctx.weight_surprise_prior = sensitivity_priors.surprise_weight;
   ctx.weight_valence_prior = sensitivity_priors.valence_weight;
@@ -1839,20 +1837,12 @@ SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
   ctx.weight_emotion_prior = sensitivity_priors.emotion_weight;
   ctx.emotion_gain_prior = sensitivity_priors.emotion_gain;
   ctx.score_gain_prior = sensitivity_priors.score_gain;
-  ctx.rate_target_prior = ctx.base_rate_prior;
   ctx.weight_novelty = ctx.weight_novelty_prior;
   ctx.weight_surprise = ctx.weight_surprise_prior;
   ctx.weight_valence = ctx.weight_valence_prior;
   ctx.weight_arousal = ctx.weight_arousal_prior;
   ctx.emotion_gain = ctx.emotion_gain_prior;
   ctx.score_gain = ctx.score_gain_prior;
-  ctx.rate_target = ctx.rate_target_prior;
-
-  ctx.hysteresis_band_prior = core::BaseBandPrior (T);
-
-  ctx.T_dynamic = core::TPrior (F, S, T);
-  ctx.T_target = ctx.T_dynamic;
-  ctx.hysteresis = ctx.hysteresis_band_prior;
 }
 
 // --- State Loading Functions ---
@@ -1874,14 +1864,6 @@ LoadState (Store &store, ProcessorContext &ctx,
       // === Processor state fields ===
       ctx.signals_processed
           = static_cast<int> (ExtractInt64 (row, "signals_processed", 0));
-      const bool legacy_policy_defaults
-          = NearlyEqual (ExtractDouble (row, "theta_dynamic", 0.2), 0.2)
-            && NearlyEqual (ExtractDouble (row, "theta_target", 0.2), 0.2)
-            && NearlyEqual (ExtractDouble (row, "weight_relevance", 0.5), 0.5)
-            && NearlyEqual (ExtractDouble (row, "coverage_gain_floor", 0.65),
-                            0.65)
-            && NearlyEqual (ExtractDouble (row, "weight_novelty", 0.3), 0.3)
-            && NearlyEqual (ExtractDouble (row, "weight_surprise", 0.2), 0.2);
       ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
       ctx.neuromod_ach = ExtractDouble (row, "neuromod_ach", 0.0);
       ctx.weight_relevance = ExtractPolicyDouble (
@@ -1896,17 +1878,6 @@ LoadState (Store &store, ProcessorContext &ctx,
                                  true);
       ctx.mismatch_weight = ExtractPolicyDouble (
           row, "mismatch_weight", 0.5, ctx.mismatch_weight,
-          true);
-      ctx.T_dynamic = ExtractPolicyDouble (
-          row, "theta_dynamic", 0.2, ctx.T_dynamic,
-          true);
-      ctx.T_target = ExtractPolicyDouble (
-          row, "theta_target", 0.2, ctx.T_dynamic,
-          true);
-      ctx.hysteresis = ExtractPolicyDouble (
-          row, "hysteresis", 0.05, ctx.hysteresis, true);
-      ctx.rate_target = ExtractPolicyDouble (
-          row, "rate_target", 0.2, ctx.rate_target,
           true);
       ctx.last_signal_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_timestamp", 0));
@@ -1951,7 +1922,7 @@ LoadState (Store &store, ProcessorContext &ctx,
       ctx.score_gain = ExtractPolicyDouble (
           row, "score_gain", 1.0, ctx.score_gain, true);
 
-      // Rate control (Algorithm 8)
+      // Signal history and write rate
       ctx.m_rate = ExtractDouble (row, "m_rate", 0.0);
       operations::consolidation_throughput_state_internal::Reset (
           ctx,
@@ -1959,13 +1930,9 @@ LoadState (Store &store, ProcessorContext &ctx,
             ExtractDouble (row, "consolidation_rate_peak", 0.0),
             ExtractInt64 (row, "consolidation_rate_initialized", 0) != 0,
             ExtractInt64 (row, "consolidation_rate_armed", 1) != 0 });
-      ctx.rho_hat_prev = ExtractDouble (row, "rho_hat_prev", 0.0);
-      ctx.rate_ticks = static_cast<int> (ExtractInt64 (row, "rate_ticks", 0));
       ctx.dt_ema = ExtractDouble (row, "dt_ema", 0.0);
       ctx.last_rate_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_rate_timestamp", 0));
-      ctx.reliability = ExtractPolicyDouble (
-          row, "reliability", 1.0, 0.0, legacy_policy_defaults);
 
       // Restore write rate window timestamps if present.
       auto write_rate_it = row.find ("write_rate_timestamps");
@@ -1985,35 +1952,6 @@ LoadState (Store &store, ProcessorContext &ctx,
       ctx.arousal_ewma = ExtractDouble (row, "arousal", 0.0);
       ctx.flashbulb_rate_ewma
           = ExtractDouble (row, "flashbulb_rate", 0.0);
-
-      // Mood state (Algorithm 4b) - stored as BLOB (48 bytes = 6 doubles)
-      auto mood_it = row.find ("mood_vector");
-      if (mood_it != row.end () && mood_it->second.has_value ())
-        {
-          const double *data = nullptr;
-          size_t byte_size = 0;
-          if (mood_it->second.type () == typeid (std::vector<char>))
-            {
-              const auto &vec
-                  = std::any_cast<const std::vector<char> &> (mood_it->second);
-              data = reinterpret_cast<const double *> (vec.data ());
-              byte_size = vec.size ();
-            }
-          else if (mood_it->second.type () == typeid (std::vector<unsigned char>))
-            {
-              const auto &vec = std::any_cast<const std::vector<unsigned char> &> (
-                  mood_it->second);
-              data = reinterpret_cast<const double *> (vec.data ());
-              byte_size = vec.size ();
-            }
-          if (data && byte_size >= 6 * sizeof (double))
-            {
-              for (size_t i = 0; i < 6; ++i)
-                ctx.mood_vector[i] = data[i];
-            }
-        }
-      ctx.last_mood_ts
-          = static_cast<uint64_t> (ExtractInt64 (row, "last_mood_ts", 0));
 
       // Embedding prediction error state (Section 3.1.4)
       auto last_emb_it = row.find ("last_embedding");
@@ -2071,7 +2009,6 @@ LoadState (Store &store, ProcessorContext &ctx,
 
       ctx.focus_priors_initialized = true;
       ctx.sensitivity_priors_initialized = true;
-      ctx.stability_priors_initialized = true;
       return true;
     }
   catch (const std::exception &e)
@@ -2803,7 +2740,6 @@ SignalProcessor::SignalProcessor (const Config &config,
     {
       SeedKnobDerivedStateDefaults (*context_, config_);
       context_->last_rate_timestamp = static_cast<uint64_t> (now_ms);
-      context_->last_mood_ts = static_cast<uint64_t> (now_ms);
       operations::consolidation_throughput_state_internal::Reset (*context_);
     }
 }
@@ -3117,10 +3053,6 @@ SignalProcessor::Process (const Signal &signal)
       span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
       span.SetAttribute ("cortext.interrupt_allowed",
                          op_context.GetInterruptAllowed ());
-      span.SetAttribute ("cortext.threshold_T_dynamic",
-                         op_context.GetThresholdTDynamic ());
-      span.SetAttribute ("cortext.threshold_hysteresis",
-                         op_context.GetThresholdHysteresis ());
       span.SetAttribute ("cortext.effective_focus",
                          op_context.GetEffectiveFocus ());
 
@@ -3500,8 +3432,7 @@ SignalProcessor::Process (const Signal &signal)
                       // (source 2); 0 means no centroid was available.
                       const auto recenter_centroid
                           = BuildActiveSignalRingCentroid (
-                              *store_, signal.embedding.size (),
-                              config_.focus, config_.sensitivity,
+                              *store_, config_.focus, config_.sensitivity,
                               config_.stability);
                       const int recenter_centroid_source
                           = recenter_centroid.embedding ? 2 : 0;
@@ -3509,6 +3440,7 @@ SignalProcessor::Process (const Signal &signal)
                           pre_recenter_activated;
                       std::size_t pre_recenter_node_rows = 0;
                       if (profile_recenter_overlap
+                          && signal.embedding.size () > 0
                           && state->sqlite_sparse_route)
                         {
                           pre_recenter_activated
@@ -3545,7 +3477,8 @@ SignalProcessor::Process (const Signal &signal)
                       std::optional<std::vector<long long>>
                           post_recenter_activated;
                       std::size_t post_recenter_node_rows = 0;
-                      if (profile_recenter_overlap && recentered)
+                      if (profile_recenter_overlap
+                          && signal.embedding.size () > 0 && recentered)
                         {
                           post_recenter_activated
                               = state->sqlite_sparse_route->SearchActivated (
@@ -4006,9 +3939,7 @@ SignalProcessor::CloseOpenUnits (
       close.mimetype = last->mime;
       OperationContext op (close, *context_, config_, store_.get (),
                            object_tx);
-      op.SetThresholdTDynamic (context_->T_dynamic);
       op.SetFlushRequired (true);
-      op.SetSpikeBypass (false);
       op.SetAtBoundary (true);
       op.SetBoundaryScore (1.0);
       op.SetBoundaryType (std::string ("flush"));
@@ -4138,10 +4069,6 @@ SignalProcessor::PersistState (Transaction &tx)
                                 context_->last_signal_timestamp)
                           : wall_now_ms;
 
-  // Serialize mood_vector as raw binary BLOB (48 bytes = 6 doubles)
-  std::vector<char> mood_blob (6 * sizeof (double));
-  std::memcpy (mood_blob.data (), context_->mood_vector.data (),
-               6 * sizeof (double));
   const std::vector<char> write_rate_blob = SerializeUint64Vector (
       context_->write_rate_window_.GetTimestamps ());
   const double wm_maintenance_cost
@@ -4182,18 +4109,16 @@ SignalProcessor::PersistState (Transaction &tx)
   tx.Execute (
       "INSERT OR REPLACE INTO state "
       "(id, signals_processed, "
-      // Threshold state
-      "theta_dynamic, theta_target, hysteresis, "
       // Focus state
       "weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, "
       // Sensitivity state
       "weight_novelty, weight_surprise, weight_valence, weight_arousal, "
-      "emotion_gain, score_gain, rate_target, "
+      "emotion_gain, score_gain, "
       // Emotion state
-      "emotion_intensity, valence, arousal, mood_vector, last_mood_ts, "
+      "emotion_intensity, valence, arousal, "
       "flashbulb_rate, "
       // Rate control
-      "m_rate, rho_hat_prev, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
+      "m_rate, dt_ema, last_rate_timestamp, "
       // Uncertainty
       "u_uncertainty, "
       "neuromod_ach, "
@@ -4214,11 +4139,10 @@ SignalProcessor::PersistState (Transaction &tx)
       // Blender matrices
       "blender_P_matrix) "
       "VALUES (1, ?, "
-      "?, ?, ?, "  // Threshold
       "?, ?, ?, ?, "  // Focus
-      "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
-      "?, ?, ?, ?, ?, ?, "  // Emotion
-      "?, ?, ?, ?, ?, ?, "  // Rate control
+      "?, ?, ?, ?, ?, ?, "  // Sensitivity
+      "?, ?, ?, ?, "  // Emotion
+      "?, ?, ?, "  // Rate control
       "?, ?, "  // Uncertainty + modulators
       "?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
@@ -4229,25 +4153,19 @@ SignalProcessor::PersistState (Transaction &tx)
       "?)",  // Blender matrices
       {
         context_->signals_processed,
-        // Threshold state
-        context_->T_dynamic, context_->T_target, context_->hysteresis,
         // Focus state
         context_->weight_relevance, context_->attention_width,
         context_->coverage_gain_floor, context_->mismatch_weight,
         // Sensitivity state
         context_->weight_novelty, context_->weight_surprise,
         context_->weight_valence, context_->weight_arousal,
-        context_->emotion_gain, context_->score_gain, context_->rate_target,
+        context_->emotion_gain, context_->score_gain,
         // Emotion state
         context_->emotion_intensity_ewma, context_->valence_ewma,
-        context_->arousal_ewma, mood_blob,
-        static_cast<long long> (context_->last_mood_ts),
-        context_->flashbulb_rate_ewma,
+        context_->arousal_ewma, context_->flashbulb_rate_ewma,
         // Rate control
-        context_->m_rate, context_->rho_hat_prev, context_->dt_ema,
-        context_->rate_ticks,
+        context_->m_rate, context_->dt_ema,
         static_cast<long long> (context_->last_rate_timestamp),
-        context_->reliability,
         // Uncertainty
         context_->u_t,
         context_->neuromod_ach,
@@ -4444,9 +4362,6 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
             *context_, embedding_id);
     }
 
-  const double working_source_reliability = core::SourceReliabilityPrior (
-      config_.focus, config_.sensitivity, config_.stability);
-
   bool all_slots_clean = true;
 
   // Upsert current slots as MEMORIES with kind='WORKING'. Clean slots are
@@ -4533,7 +4448,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                       "embedding_id = ?, source_id = ?, modality = ?, "
                       "start_ts = ?, n_signals = ?, s_max = ?, s_avg = ?, "
                       "s_emotion_max = ?, s_arousal_avg = ?, drift_mag = ?, "
-                      "strength = ?, source_reliability = ?, "
+                      "strength = ?, "
                       "last_access = ?, strength_updated_at = ?, end_ts = NULL "
                       "WHERE memory_id = ? AND kind = 'WORKING'",
                       { embedding_id,
@@ -4542,7 +4457,7 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                         slot.modality, slot.start_ts, slot.n_signals,
                         slot.s_max, slot.s_avg, slot.s_emotion_max,
                         slot.s_arousal_avg, slot.drift_acc, slot.strength,
-                        working_source_reliability, ts_ms,
+                        ts_ms,
                         strength_ts_ms, memory_id });
                   add_timing ("SignalProcessor.wm_update_slot_memory",
                               t_sql_start);
@@ -4556,16 +4471,15 @@ SignalProcessor::PersistWorkingMemory (Transaction &tx, bool force,
                   "INSERT INTO memories "
                   "(embedding_id, source_id, kind, modality, start_ts, n_signals, "
                   " s_max, s_avg, s_emotion_max, s_arousal_avg, drift_mag, "
-                  " strength, source_reliability, last_access, "
-                  " strength_updated_at, created_at) "
-                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  " strength, last_access, strength_updated_at, created_at) "
+                  "VALUES (?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   { embedding_id,
                     slot.source_id.empty () ? std::string ("unknown")
                                             : slot.source_id,
                     slot.modality, slot.start_ts, slot.n_signals, slot.s_max,
                     slot.s_avg, slot.s_emotion_max, slot.s_arousal_avg,
-                    slot.drift_acc, slot.strength, working_source_reliability,
-                    ts_ms, strength_ts_ms, slot_created_at });
+                    slot.drift_acc, slot.strength, ts_ms, strength_ts_ms,
+                    slot_created_at });
 
               auto mem_rows = tx.Execute ("SELECT last_insert_rowid() AS id", {});
               add_timing ("SignalProcessor.wm_insert_slot_memory",

@@ -186,9 +186,9 @@ TEST_CASE("Migration 26 adds consolidation throughput initialization",
     REQUIRE(names.count("consolidation_rate_initialized") == 1);
 
     store->Execute(
-        "INSERT INTO state(id, rate_ticks, consolidation_rate_floor, "
+        "INSERT INTO state(id, consolidation_rate_floor, "
         "consolidation_rate_peak, consolidation_rate_initialized) "
-        "VALUES(1, 1, 0.0, 0.0, 1)");
+        "VALUES(1, 0.0, 0.0, 1)");
     const auto rows = store->Execute(
         "SELECT consolidation_rate_initialized FROM state WHERE id = 1");
     REQUIRE(std::any_cast<long long>(
@@ -537,13 +537,8 @@ TEST_CASE("Migrations create graph retrieval lookup indexes", "[schema][migratio
 
 TEST_CASE("Migrations normalize role-derived source metadata",
           "[schema][migration]") {
-    auto unique_store = SQLiteStore::Create(":memory:");
-    auto store = std::shared_ptr<Store>(std::move(unique_store));
-
-    auto ops = std::make_unique<DynamicOperationSet>();
-    SignalProcessor::Config cfg;
-    cortext::testing::RequireEncoder(cfg);
-    SignalProcessor processor(cfg, store, std::move(ops));
+    auto store = SQLiteStore::Create(":memory:");
+    cortext::store::DebugApplyCoreMigrationsThroughForTest(*store, 7);
 
     std::vector<float> embedding(256, 0.0f);
     embedding[0] = 1.0f;
@@ -559,17 +554,17 @@ TEST_CASE("Migrations normalize role-derived source metadata",
         {100LL, 100LL, std::string("association_1000_0"),
          std::string("association text"), std::string("assistant"), 0.6});
 
-    store->Execute("DELETE FROM cortext_schema_migrations WHERE id = 8");
     cortext::store::ApplyMigrations(*store);
 
     auto rows = store->Execute(
-        "SELECT kind, source_origin, source_reliability "
-        "FROM memories WHERE memory_id = ?",
-        {100LL});
+        "SELECT * FROM memories WHERE memory_id = ?", {100LL});
     REQUIRE(rows.size() == 1);
     REQUIRE(std::any_cast<std::string>(rows[0].at("kind")) == "ASSOCIATION");
     REQUIRE(std::any_cast<std::string>(rows[0].at("source_origin"))
             == "source");
-    REQUIRE(std::any_cast<double>(rows[0].at("source_reliability"))
-            == 0.7);
+    // Migration 56 drops the write-only source metadata and stored context.
+    REQUIRE(rows[0].count("source_reliability") == 0);
+    REQUIRE(rows[0].count("source_contradiction_count") == 0);
+    REQUIRE(rows[0].count("source_last_verified_ts") == 0);
+    REQUIRE(rows[0].count("context") == 0);
 }

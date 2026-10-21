@@ -79,13 +79,6 @@ RetrievalStabilityBias (double T)
   return BiasMid (T, kRetrievalStabilityMidBias);
 }
 
-inline double
-BaseRatePrior (double S)
-{
-  // base_rate_prior(S) = lerp(r_min, r_max, S), r_min=0.2, r_max=5.0
-  return Lerp (0.2, 5.0, SensitivityBias (S));
-}
-
 struct FocusStatePriors
 {
   double relevance_weight;
@@ -152,12 +145,6 @@ EmotionProjectionPolicyForKnobs (double S)
            Lerp (0.5, 0.25, s),
            Lerp (1.0, 2.2, s),
            Lerp (0.05, 0.30, s) };
-}
-
-inline double
-AffectThresholdGain (double S)
-{
-  return 0.10 * SensitivityBias (S);
 }
 
 inline double
@@ -1037,12 +1024,6 @@ LabelSalienceFallback (double F, double S, double T)
                 0.40, 0.60);
 }
 
-inline int
-PriorMass (double T)
-{
-  return static_cast<int> (std::round (Lerp (2.0, 32.0, T)));
-}
-
 // Rate estimation smoothing time constant (seconds)
 inline double
 TauDt (double T)
@@ -1064,26 +1045,6 @@ DtFloor (double T)
   return Lerp (0.1, 0.5, Clamp (T, 0.0, 1.0));
 }
 
-// ESS cap (stability-derived)
-inline double
-EssCap (double T)
-{
-  return Lerp (30.0, 120.0, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-ThresholdObservedQuantile (double F, double S, double T)
-{
-  const double f = FocusBias (F);
-  const double s = SensitivityBias (S);
-  const double t = Clamp (T, 0.0, 1.0);
-  const double f0 = FocusBias (0.5);
-  const double s0 = SensitivityBias (0.5);
-  return Clamp (0.90 + 0.03 * (f - f0) - 0.02 * (s - s0)
-                    + 0.02 * (t - 0.5),
-                0.75, 0.97);
-}
-
 inline int
 RecentScoreHistoryLimit (double T)
 {
@@ -1098,100 +1059,9 @@ RateTauStabilityExponentScale (double T)
 }
 
 inline double
-TPrior (double /*F*/, double S, double T)
-{
-  // T_prior(F,S,T) = lerp(0.10, 0.30, T) × (1 − 0.3×S)
-  return Lerp (0.10, 0.30, T) * (1.0 - 0.3 * SensitivityBias (S));
-}
-
-inline double
 TauM (double T)
 {
   return Lerp (10.0, 200.0, T);
-}
-
-inline double
-ComputeMaturity (int count, double T)
-{
-  // maturity(t) = 1 − exp(−count/τ_m(T))
-  const double tau_m = TauM (T);
-  return 1.0 - std::exp (-static_cast<double> (count) / tau_m);
-}
-
-inline double
-TMin (int count, double T)
-{
-  // Tmin(t) = lerp(0.01, 0.05, maturity(t))
-  return Lerp (0.01, 0.05, ComputeMaturity (count, T));
-}
-
-inline double
-TMax (int count, double T)
-{
-  // Tmax(t) = lerp(0.99, 0.95, maturity(t))
-  return Lerp (0.99, 0.95, ComputeMaturity (count, T));
-}
-
-inline double
-MaxDeltaTPerMin (int count, double T)
-{
-  // max_ΔT_per_min(t) = lerp(0.30, 0.10, maturity(t))
-  return Lerp (0.30, 0.10, ComputeMaturity (count, T));
-}
-
-// Homeostatic gain for threshold adjustment
-inline double
-KappaR (double /*F*/, double S, double T)
-{
-  return Lerp (0.06, 0.14, SensitivityBias (S))
-         * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-CapHomeo (double /*F*/, double S, double T, double hysteresis)
-{
-  return Lerp (0.35, 0.15, Clamp (T, 0.0, 1.0))
-         * Lerp (0.8, 1.2, SensitivityBias (S))
-         * hysteresis;
-}
-
-// Sensitivity-based threshold adjustment
-inline double
-KappaSens (double /*F*/, double S, double T)
-{
-  return Lerp (0.04, 0.12, SensitivityBias (S))
-         * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-CapSens (double /*F*/, double S, double T, double hysteresis)
-{
-  return Lerp (0.30, 0.10, Clamp (T, 0.0, 1.0))
-         * Lerp (0.9, 1.1, SensitivityBias (S))
-         * hysteresis;
-}
-
-inline double
-SigmaRef (double S, double T)
-{
-  return Lerp (0.08, 0.14, SensitivityBias (S))
-         * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
-}
-
-// Precision-based threshold adjustment
-inline double
-KappaPrec (double F, double /*S*/, double T)
-{
-  return Lerp (0.04, 0.10, FocusBias (F))
-         * Lerp (1.1, 0.9, Clamp (T, 0.0, 1.0));
-}
-
-inline double
-CapPrec (double F, double /*S*/, double T, double hysteresis)
-{
-  return Lerp (0.25, 0.08, Clamp (T, 0.0, 1.0))
-         * Lerp (0.9, 1.1, FocusBias (F))
-         * hysteresis;
 }
 
 // --- 0.3 Global EWMA & Uncertainty Schedules ---
@@ -1202,15 +1072,6 @@ AlphaU (double T)
   const double kAlphaUMin = 0.10;
   const double kAlphaUSpan = 0.60;
   return kAlphaUMin + (1.0 - T) * kAlphaUSpan;
-}
-
-inline double
-AlphaT (double T, double u_t)
-{
-  // α_T(t) = α_min_T + (1 − T) × α_span_T × u(t)
-  const double kAlphaMinT = 0.02;
-  const double kAlphaSpanT = 0.18;
-  return kAlphaMinT + (1.0 - T) * kAlphaSpanT * u_t;
 }
 
 inline double
@@ -1365,14 +1226,6 @@ MemoryInitialStrengthPolicy (double F, double S, double T)
                 0.90, 1.0);
 }
 
-// --- Stability prior helpers (Algorithm 5) ---
-inline double
-BaseBandPrior (double T)
-{
-  // band_min = 0.02; band_max = 0.25
-  return Lerp (0.02, 0.25, T);
-}
-
 // --- Algorithm 20 (Reconsolidation) Helpers ---
 inline double
 FlashbulbThreshold (double S)
@@ -1388,25 +1241,6 @@ EmotionHistoryWindow (double S, double T)
   const double t = Clamp (T, 0.0, 1.0);
   const double base = Lerp (24.0, 96.0, s) * Lerp (0.8, 1.2, t);
   return static_cast<int> (std::round (Clamp (base, 16.0, 160.0)));
-}
-
-// --- Algorithm 4b (Mood Integrator) Helpers ---
-inline double
-AlphaMood (double S)
-{
-  // α_mood(S) = lerp(0.01, 0.20, S)
-  // Higher sensitivity = faster mood reactivity to emotion events
-  return Lerp (0.01, 0.20, SensitivityBias (S));
-}
-
-inline double
-LambdaMood (double delta_seconds, double T)
-{
-  // λ_mood(Δt, T) = exp(−ln(2) × Δt / max(half_life_mood(T), ε))
-  const double half_life = std::max (Lerp (30.0, 600.0, Clamp (T, 0.0, 1.0)),
-                                     1e-6);
-  const double decay = -std::log (2.0) * delta_seconds / half_life;
-  return std::exp (decay);
 }
 
 // --- Algorithm 24 (Working Memory) Helpers ---
@@ -2357,15 +2191,6 @@ GapScale (double T)
   // gap_scale(T) = lerp(3.0, 8.0, T) seconds
   // Higher stability = longer pause expected before affecting boundary score
   return Lerp (3.0, 8.0, Clamp (T, 0.0, 1.0));
-}
-
-// Section 4.4.4 - Spike bypass margin above θ_dynamic
-inline double
-SpikeMargin (double S, double T)
-{
-  // spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)
-  return Lerp (0.2, 0.5, Clamp (T, 0.0, 1.0))
-       * Lerp (1.2, 0.8, SensitivityBias (S));
 }
 
 // Section 4.4.5 - Window score peak vs average weight

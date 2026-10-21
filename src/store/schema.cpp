@@ -1168,6 +1168,49 @@ GetCoreMigrations ()
               "ON memories(end_ts) WHERE kind = 'LONG_TERM'",
           },
       },
+      {
+          56,
+          "Drop write-only memory source metadata and stored context",
+          {
+              // No query reads these: source reliability was a knob
+              // constant per row, the contradiction count is carried by the
+              // supersedes edges, the verification time was never set, and
+              // the temporal context c_t is used in memory for boundary
+              // detection only.
+              "ALTER TABLE memories DROP COLUMN source_reliability",
+              "ALTER TABLE memories DROP COLUMN source_contradiction_count",
+              "ALTER TABLE memories DROP COLUMN source_last_verified_ts",
+              "ALTER TABLE memories DROP COLUMN context",
+          },
+      },
+      {
+          57,
+          "Drop the mood integrator state",
+          {
+              // The 6D mood vector only biased the dynamic threshold; it is
+              // gone, with the per-memory ambient mood snapshot of it.
+              "ALTER TABLE memories DROP COLUMN ambient_mood",
+              "ALTER TABLE state DROP COLUMN mood_vector",
+              "ALTER TABLE state DROP COLUMN last_mood_ts",
+          },
+      },
+      {
+          58,
+          "Drop the dynamic threshold controller state",
+          {
+              // No unit is stored or skipped by a score threshold, so the
+              // controller's threshold, hysteresis, homeostatic rate terms
+              // and the per-signal threshold snapshot are gone.
+              "ALTER TABLE state DROP COLUMN theta_dynamic",
+              "ALTER TABLE state DROP COLUMN theta_target",
+              "ALTER TABLE state DROP COLUMN hysteresis",
+              "ALTER TABLE state DROP COLUMN rate_target",
+              "ALTER TABLE state DROP COLUMN rho_hat_prev",
+              "ALTER TABLE state DROP COLUMN rate_ticks",
+              "ALTER TABLE state DROP COLUMN reliability",
+              "ALTER TABLE signals DROP COLUMN threshold_t",
+          },
+      },
   };
 }
 

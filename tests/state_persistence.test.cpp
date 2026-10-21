@@ -86,9 +86,7 @@ struct CaptureLoadedPolicyStateOp : IOperation
 {
   mutable double weight_relevance = 0.0;
   mutable double coverage_gain_floor = 0.0;
-  mutable double theta_dynamic = 0.0;
   mutable double weight_surprise = 0.0;
-  mutable double reliability = -1.0;
 
   void
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
@@ -96,9 +94,7 @@ struct CaptureLoadedPolicyStateOp : IOperation
     const auto &pctx = ctx.GetProcessorContext ();
     weight_relevance = pctx.weight_relevance;
     coverage_gain_floor = pctx.coverage_gain_floor;
-    theta_dynamic = pctx.T_dynamic;
     weight_surprise = pctx.weight_surprise;
-    reliability = pctx.reliability;
   }
 };
 
@@ -467,17 +463,13 @@ TEST_CASE ("Bootstrap state persistence uses active knobs",
   }
 
   auto rows
-      = store->Execute ("SELECT theta_dynamic, w_relevance FROM state WHERE id = 1");
+      = store->Execute ("SELECT w_relevance FROM state WHERE id = 1");
   REQUIRE (rows.size () == 1);
 
-  const double expected_theta
-      = core::TPrior (cfg.focus, cfg.sensitivity, cfg.stability);
   const double expected_blender
       = core::BlendBootstrapFallback (cfg.focus, cfg.sensitivity,
                                       cfg.stability);
   REQUIRE (expected_blender > 0.5);
-  REQUIRE_THAT (GetDouble (rows[0], "theta_dynamic"),
-                WithinAbs (expected_theta, 1e-9));
   REQUIRE_THAT (GetDouble (rows[0], "w_relevance"),
                 WithinAbs (expected_blender, 1e-9));
 }
@@ -517,13 +509,8 @@ TEST_CASE ("Legacy state defaults reload from active knobs",
                 WithinAbs (core::Sigmoid (1.0), 1e-9));
   REQUIRE_THAT (capture_raw->coverage_gain_floor,
                 WithinAbs (1.0, 1e-9));
-  REQUIRE_THAT (capture_raw->theta_dynamic,
-                WithinAbs (core::TPrior (cfg.focus, cfg.sensitivity,
-                                         cfg.stability),
-                           1e-9));
   REQUIRE_THAT (capture_raw->weight_surprise,
                 WithinAbs (1.0, 1e-9));
-  REQUIRE_THAT (capture_raw->reliability, WithinAbs (0.0, 1e-9));
 }
 
 TEST_CASE ("Partial legacy state defaults reload from active knobs",
@@ -559,10 +546,6 @@ TEST_CASE ("Partial legacy state defaults reload from active knobs",
   processor.Process (s);
 
   REQUIRE_THAT (capture_raw->weight_relevance, WithinAbs (0.9, 1e-9));
-  REQUIRE_THAT (capture_raw->theta_dynamic,
-                WithinAbs (core::TPrior (cfg.focus, cfg.sensitivity,
-                                         cfg.stability),
-                           1e-9));
   REQUIRE_THAT (capture_raw->weight_surprise,
                 WithinAbs (1.0, 1e-9));
 }
@@ -953,17 +936,11 @@ TEST_CASE ("Working memory slots are persisted",
   // Check memories table has WM entries (v2 schema: kind='WORKING', active slots)
   // Active slots have end_ts IS NULL
   auto rows = store->Execute (
-      "SELECT memory_id, strength, source_reliability FROM memories "
+      "SELECT memory_id, strength FROM memories "
       "WHERE kind = 'WORKING' AND end_ts IS NULL ORDER BY memory_id");
   REQUIRE (rows.size () == 2);
   REQUIRE_THAT (GetDouble (rows[0], "strength"), WithinAbs (0.8, 0.01));
   REQUIRE_THAT (GetDouble (rows[1], "strength"), WithinAbs (0.8, 0.01));
-  const double expected_source_reliability
-      = core::SourceReliabilityPrior (0.0, 1.0, 0.0);
-  REQUIRE_THAT (GetDouble (rows[0], "source_reliability"),
-                WithinAbs (expected_source_reliability, 1e-9));
-  REQUIRE_THAT (GetDouble (rows[1], "source_reliability"),
-                WithinAbs (expected_source_reliability, 1e-9));
 }
 
 TEST_CASE ("Closed working memory rows are pruned incrementally",

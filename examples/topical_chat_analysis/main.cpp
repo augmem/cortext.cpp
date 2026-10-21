@@ -269,8 +269,6 @@ struct AnalysisConfig {
   std::string affect_mode = "all";
   bool affect_interrupt = true;
   bool affect_retrieval = true;
-  bool reinforcement_enabled = true;
-  bool sequential_edges_enabled = true;
 };
 
 struct RetrievalExample {
@@ -923,16 +921,6 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
         cfg.affect_interrupt = true;
         cfg.affect_retrieval = true;
       }
-    } else if (auto v = take("--reinforcement-mode=")) {
-      if (*v == "on") {
-        cfg.reinforcement_enabled = true;
-      } else if (*v == "off") {
-        cfg.reinforcement_enabled = false;
-      } else {
-        std::cerr << "Unknown --reinforcement-mode=" << *v
-                  << "; defaulting to 'on'.\n";
-        cfg.reinforcement_enabled = true;
-      }
     } else if (auto v = take("--cadence-speed=")) {
       cfg.cadence_speed = std::stod(*v);
     } else if (auto v = take("--cadence-wpm=")) {
@@ -977,8 +965,6 @@ AnalysisConfig ParseArgs(int argc, char **argv) {
       cfg.semantic_overlap = true;
     } else if (arg == "--reuse") {
       cfg.reset_per_conversation = false;
-    } else if (arg == "--no-sequential-edges") {
-      cfg.sequential_edges_enabled = false;
     }
   }
   if (!std::filesystem::exists(cfg.dataset_path)) {
@@ -1166,9 +1152,6 @@ int main(int argc, char **argv) {
       c.sensitivity = cfg.sensitivity;
       c.stability = cfg.stability;
       c.affect_interrupt = cfg.affect_interrupt;
-      c.affect_retrieval = cfg.affect_retrieval;
-      c.reinforcement_enabled = cfg.reinforcement_enabled;
-      c.sequential_edges_enabled = cfg.sequential_edges_enabled;
       cortext = cortext::Cortext::Create(c, cfg.db_path);
       embedding_cache.clear();
       memory_kind_cache.clear();
@@ -1981,8 +1964,6 @@ int main(int argc, char **argv) {
   std::cout << "conversations=" << stats.conversations << "\n";
   std::cout << "turns=" << stats.turns << "\n";
   std::cout << "writes=" << stats.writes << "\n";
-  std::cout << "reinforcement_mode=" << (cfg.reinforcement_enabled ? "on" : "off")
-            << "\n";
   if (cfg.run_consolidation) {
     std::cout << "consolidation_runs=" << stats.consolidation_runs << "\n";
     std::cout << "consolidation_failures=" << stats.consolidation_failures << "\n";

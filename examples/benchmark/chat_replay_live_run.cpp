@@ -737,19 +737,9 @@ PublicMemoryBehaviorJson (
             { "modality", memory.modality },
             { "mimetype", memory.mimetype },
             { "relevance", memory.relevance },
-            { "mismatch", memory.mismatch },
-            { "surprise", memory.surprise },
-            { "rarity", memory.rarity },
-            { "drift", memory.drift },
-            { "contradiction", memory.contradiction },
-            { "utility", memory.utility },
-            { "periphery", memory.periphery },
-            { "coverage", memory.coverage },
             { "salience", memory.salience },
-            { "valence", memory.valence },
             { "arousal", memory.arousal },
-            { "composite_score", memory.composite_score },
-            { "threshold_t", memory.threshold_t } });
+            { "composite_score", memory.composite_score } });
     }
   return out;
 }
@@ -823,10 +813,6 @@ PublicBehaviorJson (const cortext::Cortext::Context &ctx,
         { "composite_score",
           ctx.output.composite_score.has_value ()
               ? nlohmann::json (*ctx.output.composite_score)
-              : nlohmann::json (nullptr) },
-        { "threshold",
-          ctx.output.threshold.has_value ()
-              ? nlohmann::json (*ctx.output.threshold)
               : nlohmann::json (nullptr) },
         { "decision",
           ctx.output.decision.has_value ()

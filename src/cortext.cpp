@@ -34,9 +34,8 @@
 
 #include "cortext/operations/embedding_prediction_error.hpp"
 #include "cortext/operations/centroids.hpp"
-#include "cortext/operations/precision.hpp"
 #include "cortext/operations/sensitivity.hpp"
-#include "cortext/operations/threshold.hpp"
+#include "cortext/operations/signal_history.hpp"
 #include "cortext/operations/uncertainty.hpp"
 #include "cortext/processor/operation.hpp"
 
@@ -71,7 +70,6 @@
 #include "cortext/operations/neuromodulators.hpp"
 #include "cortext/operations/recent_context.hpp"
 #include "cortext/operations/signal_metrics_persistence.hpp"
-#include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
 #include "cortext/operations/memory_storage.hpp"
 #include "cortext/operations/working_memory.hpp"
@@ -85,7 +83,7 @@
 #include "cortext/operations/accumulator_reset.hpp"
 #include "cortext/operations/coherence.hpp"
 #include "cortext/operations/boundary.hpp"
-#include "cortext/operations/spike_bypass.hpp"
+#include "cortext/operations/capacity_flush.hpp"
 #include "cortext/operations/write_gate.hpp"
 
 // Phase 4: Knowledge Graph Enhancement
@@ -763,23 +761,6 @@ HydrateMemory (Store *store, ObjectStore *object_store, long long id,
           // v2: Counts are inline on memories table
           m.retrieved_count = get_ll ("retrieved_count");
           m.used_count = get_ll ("used_count");
-
-          // v2: signal_metrics are stored on signals table, not readily available here
-          // Set defaults for now - metrics come from signal processing context
-          m.relevance = 0.0;
-          m.mismatch = 0.0;
-          m.surprise = 0.0;
-          m.rarity = 0.0;
-          m.drift = 0.0;
-          m.contradiction = 0.0;
-          m.utility = 0.0;
-          m.periphery = 0.0;
-          m.coverage = 0.0;
-          m.salience = 0.0;
-          m.valence = 0.5;
-          m.arousal = 0.0;
-          m.composite_score = 0.0;
-          m.threshold_t = 0.0;
         }
     }
   catch (const std::exception &e)
@@ -2025,10 +2006,8 @@ AttachContiguousTurns (Store *store,
 // count, a previous status, the session where an event was first mentioned)
 // becomes unreachable as soon as a similar later turn arrives. People do not
 // lose the earlier version of a fact when they learn the newer one: recalling
-// the update brings back the earlier episode it updated. Within one stretch
-// of conversation (same source stream, inside the contiguity gap) a newer
-// statement is a correction that replaces the stale one outright, so those
-// predecessors stay suppressed. For each of the top retrieved
+// the update brings back the earlier episode it updated, whatever source
+// stream it came from. For each of the top retrieved
 // memories, the older memories it supersedes (strongest edges first) are
 // hydrated as extra content blobs of that same retrieved memory, placed
 // before its own content so the packet reads oldest to newest, clipped and
@@ -2501,7 +2480,7 @@ private:
 std::unique_ptr<IOperation>
 BuildRootOperationSet (bool probe_mode)
 {
-  using cortext::operations::CheckSpikeBypass;
+  using cortext::operations::CheckCapacityFlush;
   using cortext::operations::CheckStreamingPacing;
   using cortext::operations::ComputeCoherence;
   using cortext::operations::ComputeCompositeScore;
@@ -2517,7 +2496,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::InitializeEmbeddedCentroids;
   using cortext::operations::InitializeFocusPriors;
   using cortext::operations::InitializeSensitivityPriors;
-  using cortext::operations::InitializeStabilityPriors;
   using cortext::operations::MemoryStorage;
   using cortext::operations::PersistSignalMetrics;
   using cortext::operations::ResetAccumulatorAfterFlush;
@@ -2528,13 +2506,11 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::UpdateEmbeddingPredictionError;
   using cortext::operations::UpdateFocus;
   using cortext::operations::RecordMemoryUsage;
-  using cortext::operations::UpdateMood;
   using cortext::operations::UpdateNeuromodulators;
-  using cortext::operations::UpdatePrecisionDelta;
   using cortext::operations::UpdateRateState;
   using cortext::operations::UpdateRecentContext;
   using cortext::operations::UpdateSensitivity;
-  using cortext::operations::UpdateThreshold;
+  using cortext::operations::UpdateSignalHistory;
   using cortext::operations::UpdateUncertainty;
   using cortext::operations::WorkingMemory;
 
@@ -2544,19 +2520,18 @@ BuildRootOperationSet (bool probe_mode)
       InitializeEmbeddedCentroids,
 
       InitializeFocusPriors, InitializeSensitivityPriors,
-      InitializeStabilityPriors,
 
       ComputeCoherence, UpdateAccumulator, UpdateDriftAccumulation,
       ComputeFocusSpread, UpdateEmbeddingPredictionError, UpdateUncertainty,
 
-      UpdateFocus, UpdateSensitivity, UpdateMood,
+      UpdateFocus, UpdateSensitivity,
 
       ComputeEffectiveFocus, ComputeMetrics, UpdateNeuromodulators,
       FitMetricWeightsRLS, ComputeCompositeScore, UpdateAccumulatorScores,
 
-      UpdatePrecisionDelta, UpdateThreshold, UpdateRecentContext,
+      UpdateSignalHistory, UpdateRecentContext,
 
-      DetectBoundary, CheckSpikeBypass, ComputeWriteGate>;
+      DetectBoundary, CheckCapacityFlush, ComputeWriteGate>;
 
   using StorageStage = OperationSet<MemoryStorage, PersistSignalMetrics>;
 
@@ -2893,9 +2868,6 @@ struct Cortext::Impl
     pcfg.sensitivity = cfg.sensitivity;
     pcfg.stability = cfg.stability;
     pcfg.affect_interrupt = cfg.affect_interrupt;
-    pcfg.affect_retrieval = cfg.affect_retrieval;
-    pcfg.reinforcement_enabled = cfg.reinforcement_enabled;
-    pcfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
     pcfg.encoder = encoder.get ();
     pcfg.clock = clock;
     pcfg.late_interaction = late_interaction.get ();
@@ -2995,18 +2967,11 @@ struct Cortext::Impl
     internal::ThrowIfStopRequested ();
     telemetry::ScopedSpan span ("cortext.api.consolidate");
     const auto total_start = std::chrono::steady_clock::now ();
-    // A maintenance signal runs no operations; the processor seals and
-    // recenters the sparse retrieval route around it.
-    std::vector<float> v;
-    telemetry::ScopedSpan encode_span ("cortext.encode");
-    encoder->EncodeText (std::string (), v);
-    encode_span.SetStatusOk ();
-    const auto encode_end = std::chrono::steady_clock::now ();
-    internal::ThrowIfStopRequested ();
+    // A maintenance signal carries no content and runs no operations; the
+    // processor seals the sparse retrieval route and recenters it on the
+    // active-signal ring centroid.
     const auto process_start = std::chrono::steady_clock::now ();
-    const Eigen::VectorXf consolidation_embedding
-        = ToEigen (RetrievalEmbeddingView (v));
-    auto out = ProcessEmbedding (consolidation_embedding,
+    auto out = ProcessEmbedding (Eigen::VectorXf (),
                                  timestamp != 0 ? timestamp : NowMillis (),
                                  kMaintenanceSourceId, true);
     const auto process_end = std::chrono::steady_clock::now ();
@@ -3019,11 +2984,9 @@ struct Cortext::Impl
     span.SetStatusOk ();
     telemetry::ScopedSpan hydrate_span ("cortext.hydrate");
     const auto hydrate_start = std::chrono::steady_clock::now ();
-    Cortext::Context result
-        = HydrateContext (out, true, &consolidation_embedding);
+    Cortext::Context result = HydrateContext (out, true);
     const auto hydrate_end = std::chrono::steady_clock::now ();
     hydrate_span.SetStatusOk ();
-    result.encode_ms = ToMillis (encode_end - total_start);
     result.process_ms = ToMillis (process_end - process_start);
     result.hydrate_ms = ToMillis (hydrate_end - hydrate_start);
     result.total_ms = ToMillis (hydrate_end - total_start);
@@ -3066,7 +3029,6 @@ struct Cortext::Impl
 
     // Populate output metrics
     result.output.composite_score = out.composite_score;
-    result.output.threshold = out.threshold_T_dynamic;
     result.output.decision = out.write_decision;
     result.output.effective_focus = out.effective_focus;
     result.output.coherence = out.coherence;

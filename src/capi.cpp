@@ -82,9 +82,6 @@ config_from_c (const cortext_config *cfg)
   cpp_cfg.sensitivity = cfg->sensitivity;
   cpp_cfg.stability = cfg->stability;
   cpp_cfg.affect_interrupt = cfg->affect_interrupt != 0;
-  cpp_cfg.affect_retrieval = cfg->affect_retrieval != 0;
-  cpp_cfg.reinforcement_enabled = cfg->reinforcement_enabled != 0;
-  cpp_cfg.sequential_edges_enabled = cfg->sequential_edges_enabled != 0;
   if (cfg->struct_size
       >= offsetof (cortext_config, signal_filter_audio_enabled)
              + sizeof (cfg->signal_filter_audio_enabled))
@@ -1011,19 +1008,9 @@ memory_to_json (const cortext::Cortext::Context::Memory &memory)
     { "mimetype", memory.mimetype },
     { "content", std::move (content) },
     { "relevance", memory.relevance },
-    { "mismatch", memory.mismatch },
-    { "surprise", memory.surprise },
-    { "rarity", memory.rarity },
-    { "drift", memory.drift },
-    { "contradiction", memory.contradiction },
-    { "utility", memory.utility },
-    { "periphery", memory.periphery },
-    { "coverage", memory.coverage },
     { "salience", memory.salience },
-    { "valence", memory.valence },
     { "arousal", memory.arousal },
     { "composite_score", memory.composite_score },
-    { "threshold_t", memory.threshold_t },
   };
 }
 
@@ -1073,9 +1060,6 @@ context_to_json (const cortext::Cortext::Context &ctx,
       ctx.output.composite_score.has_value ()
           ? nlohmann::json (*ctx.output.composite_score)
           : nlohmann::json (nullptr) },
-    { "threshold",
-      ctx.output.threshold.has_value () ? nlohmann::json (*ctx.output.threshold)
-                                        : nlohmann::json (nullptr) },
     { "decision",
       ctx.output.decision.has_value () ? nlohmann::json (*ctx.output.decision)
                                        : nlohmann::json (nullptr) },
@@ -1298,9 +1282,6 @@ extern "C"
     cfg->sensitivity = defaults.sensitivity;
     cfg->stability = defaults.stability;
     cfg->affect_interrupt = defaults.affect_interrupt ? 1 : 0;
-    cfg->affect_retrieval = defaults.affect_retrieval ? 1 : 0;
-    cfg->reinforcement_enabled = defaults.reinforcement_enabled ? 1 : 0;
-    cfg->sequential_edges_enabled = defaults.sequential_edges_enabled ? 1 : 0;
     if (field_fits (offsetof (cortext_config, signal_filter_audio_enabled),
                     sizeof (cfg->signal_filter_audio_enabled)))
       cfg->signal_filter_audio_enabled

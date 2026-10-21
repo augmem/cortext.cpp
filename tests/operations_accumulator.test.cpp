@@ -10,13 +10,16 @@
 #include <cortext/operations/boundary.hpp>
 #include <cortext/operations/coherence.hpp>
 #include <cortext/operations/write_gate.hpp>
-#include <cortext/operations/spike_bypass.hpp>
+#include <cortext/operations/capacity_flush.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 #include <cortext/processor/accumulator_state.hpp>
+#include <optional>
+#include <string>
+#include <tuple>
 
 using namespace cortext;
-using cortext::operations::CheckSpikeBypass;
+using cortext::operations::CheckCapacityFlush;
 using cortext::operations::ComputeWriteGate;
 using cortext::operations::DetectBoundary;
 using cortext::operations::UpdateAccumulator;
@@ -258,66 +261,54 @@ TEST_CASE ("Boundary detection does not wrap out-of-order timestamps",
   REQUIRE (*ctx.GetBoundaryScore () < 0.9);
 }
 
-TEST_CASE ("Spike bypass triggers for high-salience signals",
-           "[accumulator][4.4.4]")
+TEST_CASE ("Capacity flush closes a full unit", "[accumulator][capacity]")
 {
-  SECTION ("GIVEN score exceeds dynamic threshold plus margin")
-  {
+  SignalProcessor::Config cfg;
+  cortext::testing::RequireEncoder (cfg);
+  const int max_signals = cortext::core::MaxSignalsPerMemory (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+  const double floor = cortext::core::BoundaryFallbackFloor (
+      cfg.focus, cfg.sensitivity, cfg.stability);
+
+  const auto run = [&] (int n_signals, double boundary_score) {
     Signal s;
     s.source_id = "test_source";
     s.embedding = MakeRandomEmbedding ();
     s.timestamp = 5000;
-
     ProcessorContext pctx;
     AccumulatorState state;
     state.Reset (MakeRandomEmbedding (), 1000);
-    state.n_signals = 3;
+    state.n_signals = n_signals;
     pctx.accumulator_states["test_source"] = std::move (state);
-
-    SignalProcessor::Config cfg;
-
-    cortext::testing::RequireEncoder (cfg);
-    cfg.sensitivity = 0.5;
-    cfg.stability = 0.0;
-
     OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (1.0);
-    ctx.SetThresholdTDynamic (0.2);
-    ctx.SetAccumulatorCoherence (0.0);
-
-    CheckSpikeBypass op;
+    ctx.SetBoundaryScore (boundary_score);
+    CheckCapacityFlush op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
+    return std::make_tuple (ctx.GetFlushRequired (),
+                            ctx.ShouldFinalizeEpisode (),
+                            ctx.GetBoundaryType ());
+  };
 
-    REQUIRE (ctx.GetSpikeBypass () == true);
-    REQUIRE (ctx.GetFlushRequired () == true);
+  SECTION ("GIVEN a full unit at the boundary floor")
+  {
+    const auto [flush, finalize, type] = run (max_signals, floor);
+    REQUIRE (flush);
+    REQUIRE (finalize);
+    REQUIRE (type == std::optional<std::string> ("capacity"));
   }
 
-  SECTION ("GIVEN score below threshold plus margin")
+  SECTION ("GIVEN a unit below capacity")
   {
-    Signal s;
-    s.source_id = "test_source";
-    s.embedding = MakeRandomEmbedding ();
-    s.timestamp = 5000;
+    const auto [flush, finalize, type] = run (max_signals - 1, 1.0);
+    REQUIRE_FALSE (flush);
+    REQUIRE_FALSE (finalize);
+  }
 
-    ProcessorContext pctx;
-    AccumulatorState state;
-    state.Reset (MakeRandomEmbedding (), 1000);
-    state.n_signals = 3;
-    pctx.accumulator_states["test_source"] = std::move (state);
-
-    SignalProcessor::Config cfg;
-
-    cortext::testing::RequireEncoder (cfg);
-    cfg.sensitivity = 0.5;
-
-    OperationContext ctx (s, pctx, cfg);
-    ctx.SetCompositeScore (0.6);
-    ctx.SetThresholdTDynamic (0.5);
-
-    CheckSpikeBypass op;
-    op.Execute (ctx, cortext::testing::GetNullTransaction ());
-
-    REQUIRE (ctx.GetSpikeBypass () == false);
+  SECTION ("GIVEN a full unit below the boundary floor")
+  {
+    const auto [flush, finalize, type] = run (max_signals, floor - 0.01);
+    REQUIRE_FALSE (flush);
+    REQUIRE_FALSE (finalize);
   }
 }
 
@@ -344,14 +335,12 @@ TEST_CASE ("Ephemeral probes do not trigger capacity episode finalization",
   pctx.accumulator_states[s.source_id] = std::move (state);
 
   OperationContext ctx (s, pctx, cfg);
-  ctx.SetCompositeScore (1.0);
-  ctx.SetThresholdTDynamic (0.0);
   ctx.SetBoundaryScore (1.0);
 
-  CheckSpikeBypass op;
+  CheckCapacityFlush op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
-  REQUIRE_FALSE (ctx.GetSpikeBypass ());
+  REQUIRE_FALSE (ctx.GetFlushRequired ());
   REQUIRE_FALSE (ctx.ShouldFinalizeEpisode ());
   REQUIRE (pctx.accumulator_states.at (s.source_id).n_signals
            == cortext::core::MaxSignalsPerMemory (
@@ -385,7 +374,6 @@ TEST_CASE ("Write gate computes window score", "[accumulator][4.4.5]")
 
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-    ctx.SetThresholdTDynamic (0.3);
 
     ComputeWriteGate op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -416,7 +404,6 @@ TEST_CASE ("Write gate computes window score", "[accumulator][4.4.5]")
 
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (false);
-    ctx.SetSpikeBypass (false);
 
     ComputeWriteGate op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -472,14 +459,6 @@ TEST_CASE ("Knob-derived accumulator functions", "[accumulator][knobs]")
     double val = core::BoundaryThreshold (0.5, 0.5);
     REQUIRE (val > 0.0);
     REQUIRE (val < 1.0);
-  }
-
-  SECTION ("SpikeMargin varies with sensitivity and stability")
-  {
-    double low = core::SpikeMargin (0.0, 0.0);
-    double high = core::SpikeMargin (1.0, 0.0);
-    REQUIRE (low == Catch::Approx (0.24));
-    REQUIRE (high == Catch::Approx (0.16));
   }
 
   SECTION ("RepresentativeBlendRho varies with focus")

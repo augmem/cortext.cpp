@@ -107,7 +107,6 @@ TEST_CASE ("Alg27 allows on MU path", "[operations][interrupt_gate]")
 
   // Coherence high (low penalty), threshold very low to focus on MU/Jaccard
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
 
   // Candidate strongly aligned with centroid; low redundancy
@@ -160,7 +159,6 @@ TEST_CASE ("Ephemeral interrupt leaves accumulator refractory state unchanged",
   sig.retention = Retention::Ephemeral;
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
   oc.SetRetrievedMemoryEmbeddings ({{1LL, cand_emb}});
 
@@ -206,7 +204,6 @@ TEST_CASE ("Alg27 structured retrieval selects memory id",
   auto sig = MakeSignal ();
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
   oc.SetRetrievedMemoryEmbeddings (
       std::unordered_map<long long, Eigen::VectorXf>{ { 700LL, cand_emb } });
@@ -253,7 +250,6 @@ TEST_CASE ("Alg27 duplicate suppression", "[operations][interrupt_gate]")
   auto sig = MakeSignal ();
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.2);
   oc.SetAtBoundary (true);
 
   std::unordered_map<long long, Eigen::VectorXf> cands;
@@ -299,7 +295,6 @@ TEST_CASE ("Alg27 refractory raises thresholds",
   auto sig = MakeSignal ();
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.4); // require higher relevance
   oc.SetAtBoundary (false);      // force boundary multiplier path
 
   // Candidate aligns well, but refractory should raise thresholds
@@ -343,7 +338,6 @@ TEST_CASE ("Alg27 embedding novelty high for orthogonal candidate",
   auto sig = MakeSignal ();
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
 
   // Candidate orthogonal to context window (in Z direction)
@@ -387,7 +381,6 @@ TEST_CASE ("Alg27 embedding novelty low for similar candidate",
   auto sig = MakeSignal ();
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
 
   // Candidate very similar to context (almost same direction)
@@ -428,7 +421,6 @@ TEST_CASE ("Alg27 embedding novelty 1.0 when context window empty",
   auto sig = MakeSignal ();
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
 
   std::unordered_map<long long, Eigen::VectorXf> cands;
@@ -474,7 +466,6 @@ TEST_CASE ("Alg27 Section 8.3.1 Write Exclusion Filter prevents self-triggering"
   auto sig = MakeSignal ();
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
 
   // Even though we set retrieved embeddings, the candidate should be filtered
@@ -523,7 +514,6 @@ TEST_CASE ("Alg27 Section 8.3.1 mixes eligible and ineligible candidates",
   auto sig = MakeSignal ();
   OperationContext oc (sig, pc, cfg, store.get ());
   oc.SetCoherence (1.0);
-  oc.SetThresholdTDynamic (0.0);
   oc.SetAtBoundary (true);
 
   // Include both candidates in retrieved set

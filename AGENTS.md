@@ -104,7 +104,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Example binaries and scripts may still print to stdout or log files directly, for example `examples/topical_chat_analysis/main.cpp` and `scripts/run_memory_harness.py`.
 ## Comments
 - Use `/// @brief` comments for public headers and reusable helpers where callers need contract-level guidance, as seen in `include/cortext/cortext.hpp`, `include/cortext/store/schema.hpp`, and `include/cortext/processor/operation.hpp`.
-- Use short `//` comments for rationale, algorithm references, schema blocks, and test setup notes. Good examples are `src/store/schema.cpp`, `tests/formula_validation.test.cpp`, `tests/regression_behavior.test.cpp`, and `tests/operations_threshold.test.cpp`.
+- Use short `//` comments for rationale, algorithm references, schema blocks, and test setup notes. Good examples are `src/store/schema.cpp`, `tests/formula_validation.test.cpp`, `tests/regression_behavior.test.cpp`, and `tests/operations_signal_history.test.cpp`.
 - Prefer comments that explain why a step exists or which paper/spec rule it traces back to. Avoid line-by-line narration.
 - Doxygen-style `/// @brief`, `/// @param`, and `/// @return` comments are the main documentation pattern for C++ APIs and test helpers, not block comments or generated doc annotations from another toolchain.
 ## Function Design
@@ -174,7 +174,7 @@ cortext is the memory engine powering augmem.ai for augmenting human and LLM mem
 - Examples: `include/cortext/cortext.hpp`, `src/cortext.cpp`
 - Pattern: Pimpl facade with backend composition hidden in `Cortext::Impl`.
 - Purpose: One atomic algorithm step in the processing chain.
-- Examples: `include/cortext/processor/operation.hpp`, `include/cortext/processor/operation_set.hpp`, `src/operations/threshold.cpp`, `src/operations/graph_retrieval.cpp`
+- Examples: `include/cortext/processor/operation.hpp`, `include/cortext/processor/operation_set.hpp`, `src/operations/signal_history.cpp`, `src/operations/graph_retrieval.cpp`
 - Pattern: Command-style interface executed sequentially by `OperationSet`.
 - Purpose: Carry EWMAs, thresholds, priors, recent context, consolidation timers, working-memory state, and blender weights across signals.
 - Examples: `include/cortext/processor/processor_context.hpp`, `src/signal_processor.cpp`

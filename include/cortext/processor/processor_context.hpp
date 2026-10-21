@@ -51,14 +51,13 @@ struct BoundaryDiagnostics
 /// @brief Holds the long-lived, evolving state of the SignalProcessor.
 ///
 /// This includes all dynamic variables such as EWMAs, rolling windows,
-/// dynamic thresholds, and counters that persist across multiple signals.
+/// signal history, and counters that persist across multiple signals.
 ///
 /// State is organized into logical groups:
 /// - General: signals_processed, u_t, initialization flags
 /// - Focus: weight_relevance, attention_width, recent_context (Alg 1, 2, 15)
-/// - Sensitivity: base_rate, emotion weights/centroids, rate_target (Alg 3, 4, 16)
-/// - Stability: half_lives, hysteresis, retention history (Alg 5, 6, 17)
-/// - Threshold: T_dynamic, recent_scores, rate control (Alg 8)
+/// - Sensitivity: emotion weights/centroids (Alg 3, 4, 16)
+/// - Signal history: recent_scores, dt_ema, write-rate EWMA
 /// - Blender: metric weights, RLS state (Alg 7)
 /// - Consolidation: last_consolidation_ts, last_retrieval_ts (Alg 28)
 /// - Working Memory: wm_slots, acceptance state (Alg 24)
@@ -243,7 +242,6 @@ struct ProcessorContext
   double last_used_flag = 0.0;
   bool focus_priors_initialized = false;
   bool sensitivity_priors_initialized = false;
-  bool stability_priors_initialized = false;
   int last_interrupt_tick = -1000000;
   int blender_update_count = 0;
   WriteRateWindow write_rate_window_;
@@ -276,7 +274,6 @@ struct ProcessorContext
   // ======================================================================
   // Sensitivity-Related State (Algorithms 3, 4, 16)
   // ======================================================================
-  double base_rate_prior = 0.2;
   double weight_novelty_prior = 0.3;
   double weight_surprise_prior = 0.2;
   double weight_valence_prior = 0.4;
@@ -284,9 +281,7 @@ struct ProcessorContext
   double weight_emotion_prior = 0.2;
   double emotion_gain_prior = 1.0;
   double score_gain_prior = 1.0;
-  double rate_target_prior = 0.2;
   std::optional<data::Centroids> centroids;
-  double rate_target = 0.0;
   uint64_t last_signal_timestamp = 0;
   double weight_novelty = 0.3;
   double weight_surprise = 0.2;
@@ -302,29 +297,13 @@ struct ProcessorContext
   double arousal_ewma = 0.0;
   std::deque<double> recent_emotion_intensities;
 
-  // Mood state (Algorithm 4b, persisted tonic state)
-  // Order: [anger, fear, joy, love, sadness, surprise]
-  std::array<double, 6> mood_vector = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-  uint64_t last_mood_ts = 0;
-
   // ======================================================================
-  // Stability-Related State (Algorithms 5, 6, 17)
-  // ======================================================================
-  double hysteresis_band_prior = 0.02;
-
-  // ======================================================================
-  // Threshold & Score Tracking State (Algorithm 8)
+  // Signal History and Write-Rate State
   // ======================================================================
   std::deque<double> recent_scores;
-  double T_dynamic = 0.2;
-  double T_target = 0.2;
-  double hysteresis = 0.05;
   double dt_ema = 0.0;
   double m_rate = 0.0;
-  double rho_hat_prev = 0.0;
-  int rate_ticks = 0;
   uint64_t last_rate_timestamp = 0;
-  double reliability = 1.0;  // ESS-based reliability measure
   double boundary_rate_ema = 0.0;
 
   // ======================================================================
