@@ -3,11 +3,16 @@
 Two groups of signals are defined here. The embedding-derived signals
 (structural coherence, focus spread, instantaneous drift and EMA prediction
 error) feed boundary segmentation (@sec-thresholding) and the streaming gate
-(@sec-interrupt). The composite score built from the 12 metrics below has
-the narrower consumers listed in @sec-core-adaptation: the spike-bypass
-threshold, working-memory admission and the uncertainty estimate. It no
-longer gates storage.
-<!-- PRUNE: chore/prune-write-only may remove the RLS blender and some CoreStage metrics; the composite-score part of this section is the spot to cut. -->
+(@sec-interrupt). The composite score built from the 12 metrics below is
+live: it changes every LoCoMo retrieved set when switched off (Jaccard 0.08),
+and the RLS blender that weights it changes 1,980 of 1,986 (Jaccard 0.29). It
+is not a write gate. Its consumers are the ones listed in
+@sec-core-adaptation:
+
+* the peak embedding `e_peak`, which shapes each stored representative
+  embedding;
+* the window score for working-memory admission;
+* the score variance in the uncertainty estimate.
 
 Context definitions (used throughout Table 1 and structural metrics):
 ```
@@ -130,7 +135,7 @@ The system computes 12 metrics that blend into a composite write score:
 
 ## Metric Weight Blending
 
-Metric weights adapt online using recursive least squares (RLS) to minimize prediction error between composite scores and **downstream utility outcomes**. This avoids circular fitting to relevance and turns the blender into an adaptive cognitive policy. Initial weights derive from bootstrap coefficients:
+Metric weights adapt online using recursive least squares (RLS) to minimize prediction error between composite scores and **downstream utility outcomes**. This avoids circular fitting to relevance. In production the explicit user term `o_user` is 0. Initial weights derive from bootstrap coefficients:
 
 Blender weights are maintained as variables w_* (do not confuse these with control weights like weight_relevance or mismatch_weight). We denote the 12-element blender weight vector as:
 ```

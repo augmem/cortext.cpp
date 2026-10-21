@@ -2,24 +2,27 @@
 
 This section and @sec-structural-metrics specify the per-signal control stack
 that earlier versions of this paper presented as the core of the system. It
-still runs on every signal, in the engine's `CoreStage`. Its reach is now
-narrow:
+still runs on every signal, in the engine's `CoreStage`. It changes packets: switching off the RLS blender changes 1,980 of
+1,986 LoCoMo retrieved sets (Jaccard 0.29), switching off the composite score
+changes all of them (Jaccard 0.08), and switching off the emotion projection
+changes 171 (Jaccard 0.975). It reaches behavior through four paths:
 
-* The composite score and θ_dynamic set the spike-bypass margin
-  (@sec-spike-threshold).
-* The window score ranks closed units for working-memory admission
-  (@sec-wm-gating).
-* Score variance enters the uncertainty estimate, which feeds back into the
-  learning rates below.
-* The ACh-like encode/retrieve bias paces streaming retrieval checks between
-  boundaries (@sec-interrupt).
+* **The stored embedding.** The composite score picks `e_peak`, the
+  accumulator centroid at the unit's highest score, which is blended into the
+  representative embedding (@sec-rep-embedding).
+* **Working-memory admission.** The window score ranks closed units for
+  admission (@sec-wm-gating).
+* **Uncertainty.** Score variance enters the uncertainty estimate, which
+  feeds back into the learning rates below.
+* **Streaming.** The ACh-like encode/retrieve bias paces streaming retrieval
+  checks between boundaries, and valence, arousal and emotion intensity feed
+  the interrupt gate's affect drive (@sec-interrupt).
 
-Nothing in this section decides whether a unit is stored, or how a query
-ranks memories. Segmentation (@sec-thresholding) and retrieval
-(@sec-retrieval) carry the v5 results.
+Nothing in this section is a write gate: every closed unit is stored
+(@sec-thresholding). Nothing here enters query ranking either. Retrieval
+(@sec-retrieval) carries the v5 recall results.
 
 Each algorithm consists of a prior computation (executed at initialization) and a dynamic update (executed per signal).
-<!-- PRUNE: chore/prune-write-only may remove mood, the threshold controller and CoreStage metrics; trim the bullets above and the subsections below to the final removal list. -->
 
 ## Focus-Driven Selectivity
 
@@ -77,7 +80,6 @@ Sensitivity governs learning speed, emotional responsiveness, and novelty captur
 Given Sensitivity knob S ∈ [0, 1], initialize Sensitivity control variables:
 
 ```
-rate_target = base_rate(S)  # writes/min
 weight_novelty = 0.3 + 0.7S
 weight_surprise = 0.2 + 0.8S
 weight_valence = 0.4 + 0.6S
@@ -105,7 +107,7 @@ The projection procedure:
 ```
 raw_cos_c ← cos(μ_acc, centroids[c]) for each c ∈ C
 if all raw_cos_c ≤ 0:
-    p_c ← uniform(1/6)  # ensures downstream mood update is well-defined
+    p_c ← uniform(1/6)
     emotion_intensity_t ← 0; valence_t ← 0.5; arousal_t ← 0
 else:
     logits_c ← max(0, raw_cos_c)
@@ -124,50 +126,29 @@ The emotion intensity combines peak probability with distributional confidence
 through a Sensitivity-dependent power transform of their product. It is high
 only when a category dominates and the distribution has high confidence.
 
-### Threshold Modulation from Emotion {#sec-emotional-threshold}
+### Emotion Threshold Delta and Mood Integration (Removed) {#sec-emotional-threshold}
 
-Emotional activation loosens write thresholds to capture salient moments:
+The emotion projection above stays. Its valence, arousal and intensity feed
+the valence and arousal metrics of the composite score
+(@sec-structural-metrics) and the interrupt gate's affect drive
+(@sec-interrupt).
 
-```
-κ_emo ← κ_base × S  # where κ_base = 0.10
-ΔThreshold_emotion_t ← −κ_emo × emotion_intensity_t ×
-                        (0.5 + 0.5 × arousal_t)
-```
+Earlier builds also used it in two other ways. First, a threshold delta,
+`−0.10 S × emotion_intensity × (0.5 + 0.5 × arousal)`, loosened the dynamic
+threshold on salient signals, following @mcgaugh2004amygdala. Second, a 6D
+mood vector $M_t$ integrated the centred category probabilities with a
+Sensitivity-derived reactivity `lerp(0.01, 0.20, S)` and a Stability-derived
+half-life `lerp(30, 600, T)` seconds. It added a second threshold delta
+proportional to the norm of $M_t$ divided by √6. Mood's only effect was that delta.
 
-The emotional state acts as a modulator for memory encoding/consolidation,
-following @mcgaugh2004amygdala. High emotion intensity and arousal increase the
-likelihood of threshold crossings; valence is recorded as a separate metric but
-does not enter this threshold delta directly.
+Both deltas, the mood state and `memories.ambient_mood` were removed with the
+dynamic threshold controller (@sec-spike-threshold), with packets
+byte-identical (migrations 57 and 58).
 
-### Mood Integration {#sec-mood}
-Distinct from instantaneous emotion, the mood state M_t ∈ ℝ⁶ maintains a persistent background affective tone as a 6-dimensional vector (one component per emotion category from @sec-emotional-projection):
+## Stability-Driven Persistence (Removed)
 
-```
-α_mood(S) = lerp(0.01, 0.20, S)  # reactivity
-half_life_mood(T) = lerp(30, 600, T)  # seconds
-Δt_mood ← now_s() − to_s(last_mood_ts)
-λ_mood(Δt_mood, T) ← exp(−ln(2) × Δt_mood / max(half_life_mood(T), ε))
-e_t ← p_c − (1/6)  # centered 6D vector (can be negative)
-M_t = λ_mood(Δt_mood, T) × M_{t−1} + α_mood(S) × e_t
-M_t ← clamp_elementwise(M_t, −1.0, 1.0)  # per-component
-last_mood_ts ← now_ms()  # update timestamp after mood update (ms)
-```
-
-Note: when all raw_cos_c ≤ 0, p_c is uniform and e_t = 0, so mood only decays. Because e_t is centered around zero, M_t can have both positive and negative components, reflecting sustained elevation or suppression relative to baseline. The mood state provides a separate threshold bias via its normalized magnitude:
-
-```
-κ_mood ← κ_base × S
-m_norm ← ‖M_t‖ / √6  # max norm when all components at 1
-ΔThreshold_mood_t ← −κ_mood × clamp(m_norm, 0, 1)
-```
-
-## Stability-Driven Persistence
-
-Stability sets the hysteresis band of the write threshold:
-
-```
-hysteresis = lerp(0.02, 0.25, T)
-```
+Earlier builds derived the hysteresis band of the write threshold from
+Stability (`InitializeStabilityPriors`). It was removed with the threshold.
 
 ### Half-Life Adaptation (Removed) {#sec-stability-update}
 

@@ -18,7 +18,6 @@ The engine ablation study (2026-10) removed the traces, the reinforcement and de
 ## Contextual Gain (Definitions)
 
 Contextual gain was the per-retrieval signal of the removed feedback loops below. Usage detection still computes it, but no operation reads it:
-<!-- PRUNE: contextual_gain is computed in DetectMemoryUsage with no reader; drop this subsection if chore/prune-write-only removes it. -->
 
 ```
 contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and used (range [−1, 1])
