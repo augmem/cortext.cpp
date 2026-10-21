@@ -1183,6 +1183,17 @@ GetCoreMigrations ()
               "ALTER TABLE memories DROP COLUMN context",
           },
       },
+      {
+          57,
+          "Drop the mood integrator state",
+          {
+              // The 6D mood vector only biased the dynamic threshold; it is
+              // gone, with the per-memory ambient mood snapshot of it.
+              "ALTER TABLE memories DROP COLUMN ambient_mood",
+              "ALTER TABLE state DROP COLUMN mood_vector",
+              "ALTER TABLE state DROP COLUMN last_mood_ts",
+          },
+      },
   };
 }
 

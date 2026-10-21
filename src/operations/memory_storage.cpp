@@ -66,7 +66,7 @@ GetMemoryModality (const std::vector<SignalRecord> &signals,
   return uniform ? first : std::string ("mixed");
 }
 
-/// @brief Serialize 6d emotion/mood vector to blob
+/// @brief Serialize the 6d emotion probability vector to blob
 std::vector<char>
 SerializeEmotionVector (const std::array<double, 6> &vec)
 {
@@ -1161,11 +1161,9 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
       const double boundary_score
           = context.GetBoundaryScore ().value_or (0.0);
 
-      // 2. Get emotion and mood from context (Section 6.1.1)
+      // 2. Get emotion from context (Section 6.1.1)
       const auto &emotion_probs = context.GetEmotionProbabilities ();
-      const auto &mood_vec = p_ctx.mood_vector;
       const std::vector<char> emotion_blob = SerializeEmotionVector (emotion_probs);
-      const std::vector<char> mood_blob = SerializeEmotionVector (mood_vec);
 
       // 3. Determine the memory's modality from tracked signals
       const std::string memory_modality
@@ -1327,14 +1325,14 @@ MemoryStorage::Execute (OperationContext &context, Transaction &tx) const
           "INSERT INTO memories ("
           "  embedding_id, source_id, kind, start_ts, end_ts, n_signals, "
           "  modality, s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score, "
-          "  drift_mag, emotion, ambient_mood, episode_id, "
+          "  drift_mag, emotion, episode_id, "
           "  blob_id, created_at, source_origin, strength"
-          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          ") VALUES (?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { embedding_id, signal.source_id, static_cast<long long> (start_ts),
             static_cast<long long> (end_ts),
             static_cast<long long> (n_signals), memory_modality,
             s_max, s_avg, s_emotion_max, s_arousal_avg, boundary_score,
-            drift_mag, emotion_blob, mood_blob, episode_id_any,
+            drift_mag, emotion_blob, episode_id_any,
             content_blob_id.empty () ? std::any () : std::any (content_blob_id),
             static_cast<long long> (end_ts), origin, initial_strength });
       context.AddOperationTiming ("MemoryStorage.insert_memory",

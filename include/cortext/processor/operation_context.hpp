@@ -242,17 +242,6 @@ public:
     return delta_threshold_emotion_;
   }
 
-  void
-  SetDeltaThresholdMood (std::optional<double> v)
-  {
-    delta_threshold_mood_ = v;
-  }
-  std::optional<double>
-  GetDeltaThresholdMood () const
-  {
-    return delta_threshold_mood_;
-  }
-
   // Outputs exposed by operations for downstream consumers/telemetry
   void
   SetThresholdTDynamic (double v)
@@ -964,7 +953,6 @@ private:
   std::optional<double> delta_threshold_sensitivity_;
   std::optional<double> delta_threshold_precision_;
   std::optional<double> delta_threshold_emotion_;
-  std::optional<double> delta_threshold_mood_;
   double threshold_T_dynamic_ = 0.0;
   double threshold_hysteresis_ = 0.0;
   double coherence_ = 0.0;

@@ -113,9 +113,7 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
       = context.GetDeltaThresholdPrecision ().value_or (constants::kNormalizedMin);
   const double delta_emo
       = context.GetDeltaThresholdEmotion ().value_or (constants::kNormalizedMin);
-  const double delta_mood
-      = context.GetDeltaThresholdMood ().value_or (constants::kNormalizedMin);
-  double delta_total = delta_sens + delta_prec + delta_emo + delta_mood;
+  double delta_total = delta_sens + delta_prec + delta_emo;
 
   // 7) Continuous-time rate control (EMA + ESS) → ΔT_homeo
   // Use signal timestamps to estimate Δt in seconds; fallback to 1.0s if unavailable.
@@ -216,7 +214,6 @@ UpdateThreshold::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Double("delta_sens", delta_sens),
     telemetry::Attribute::Double("delta_prec", delta_prec),
     telemetry::Attribute::Double("delta_emo", delta_emo),
-    telemetry::Attribute::Double("delta_mood", delta_mood),
     telemetry::Attribute::Double("delta_total", delta_total),
     telemetry::Attribute::Double("delta_t", delta_t),
     telemetry::Attribute::Double("alpha_dt", alpha_dt),

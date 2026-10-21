@@ -302,11 +302,6 @@ struct ProcessorContext
   double arousal_ewma = 0.0;
   std::deque<double> recent_emotion_intensities;
 
-  // Mood state (Algorithm 4b, persisted tonic state)
-  // Order: [anger, fear, joy, love, sadness, surprise]
-  std::array<double, 6> mood_vector = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-  uint64_t last_mood_ts = 0;
-
   // ======================================================================
   // Stability-Related State (Algorithms 5, 6, 17)
   // ======================================================================

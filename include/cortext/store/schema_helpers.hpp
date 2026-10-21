@@ -16,31 +16,6 @@ constexpr const char *kEmbeddingsInsertColumns = "embedding, created_at";
 constexpr const char *kEmbeddingsInsertDefaults = "?, ?";
 
 // ===========================================================================
-// v2 MEMORIES - Full metadata table
-// ===========================================================================
-
-// Core insert columns (minimal required for new memory)
-constexpr const char *kMemoriesInsertColumns =
-    "embedding_id, source_id, kind, start_ts, end_ts, n_signals, modality, "
-    "s_max, s_avg, emotion, ambient_mood, created_at";
-
-// Default values for new LONG_TERM memory
-constexpr const char *kMemoriesLongTermDefaults =
-    "?, ?, 'LONG_TERM', ?, ?, ?, ?, ?, ?, ?, ?, ?";
-
-// Default values for new WORKING memory
-constexpr const char *kMemoriesWorkingDefaults =
-    "?, ?, 'WORKING', ?, ?, ?, ?, ?, ?, ?, ?, ?";
-
-// Default values for ASSOCIATION (consolidation centroids)
-constexpr const char *kMemoriesAssociationDefaults =
-    "?, ?, 'ASSOCIATION', ?, ?, ?, ?, ?, ?, ?, ?, ?";
-
-// Default values for LABEL (concept nodes)
-constexpr const char *kMemoriesLabelDefaults =
-    "?, ?, 'LABEL', ?, ?, ?, ?, ?, ?, ?, ?, ?";
-
-// ===========================================================================
 // v2 SIGNALS - Per-signal metrics (inline, no separate signal_metrics)
 // ===========================================================================
 

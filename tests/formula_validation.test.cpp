@@ -175,23 +175,6 @@ TEST_CASE ("AlphaT follows spec: α_min_T + (1−T)×α_span_T×u", "[formula][k
   REQUIRE (AlphaT (0.2, 0.8) > AlphaT (0.8, 0.8));
 }
 
-TEST_CASE ("AlphaMood follows spec: lerp(0.01, 0.20, S)",
-           "[formula][knobs][alpha]")
-{
-  // AlphaMood = lerp(0.01, 0.20, S)
-  REQUIRE (AlphaMood (0.0) == Catch::Approx (0.01));
-  REQUIRE (AlphaMood (1.0) == Catch::Approx (0.20));
-  REQUIRE (AlphaMood (0.5)
-           == Catch::Approx (SensitivityExpected (0.01, 0.20, 0.5)));
-
-  // Monotonic: higher S means faster mood reactivity
-  REQUIRE (AlphaMood (0.3) < AlphaMood (0.7));
-}
-
-// =============================================================================
-// 5.1.4 Maturity & Threshold Functions (5 functions)
-// =============================================================================
-
 TEST_CASE ("ComputeMaturity follows spec: 1 - exp(-count/TauM(T))",
            "[formula][knobs][maturity]")
 {
@@ -298,23 +281,6 @@ TEST_CASE ("Reinforcement edge-maintenance calibrations remain bounded",
   REQUIRE (ReinforcementFanoutDamping (1.0, 0.5, 0.5, 20)
            < ReinforcementFanoutDamping (0.0, 0.5, 0.5, 20));
 }
-
-TEST_CASE ("LambdaMood follows spec: exp(-ln2 * Δt / half_life)",
-           "[formula][knobs][decay]")
-{
-  // half_life_mood(T) = lerp(30, 600, T)
-  // λ_mood(Δt, T) = exp(-ln(2) * Δt / half_life_mood(T))
-  REQUIRE (LambdaMood (0.0, 0.0) == Catch::Approx (1.0));
-  REQUIRE (LambdaMood (30.0, 0.0) == Catch::Approx (0.5));
-  REQUIRE (LambdaMood (600.0, 1.0) == Catch::Approx (0.5));
-
-  // Monotonic: higher T => longer half-life => higher lambda for same Δt
-  REQUIRE (LambdaMood (30.0, 0.3) < LambdaMood (30.0, 0.7));
-}
-
-// =============================================================================
-// 5.1.6 Working Memory Functions
-// =============================================================================
 
 TEST_CASE ("WMMaintenanceCostPerSlot keeps the full-WM budget "
            "capacity-invariant",
@@ -600,8 +566,7 @@ TEST_CASE ("High Focus + Low Sensitivity interactions",
   REQUIRE (MaxResults (F) <= 24);
   REQUIRE (WMGateThreshold (F) >= 0.35);
 
-  // Low S: slower mood, lower learning rates
-  REQUIRE (AlphaMood (S) < 0.03);
+  // Low S: lower learning rates
   REQUIRE (StreamingPacingThreshold (S) > 0.25);
 
   // Multi-parameter: high F mitigates S
@@ -618,20 +583,8 @@ TEST_CASE ("Low Focus + High Sensitivity interactions",
   REQUIRE (MaxResults (F) >= 55);
   REQUIRE (WMGateThreshold (F) <= 0.15);
 
-  // High S: faster mood, higher learning rates
-  REQUIRE (AlphaMood (S) > 0.17);
+  // High S: higher learning rates
   REQUIRE (StreamingPacingThreshold (S) < 0.15);
 
   // Multi-parameter: high S amplified with low F
-}
-
-TEST_CASE ("Extreme stability values", "[formula][knobs][composite]")
-{
-  // High stability: long half-lives, slow decay, stable persistence
-  double T_high = 1.0;
-  REQUIRE (LambdaMood (30.0, T_high) > 0.95);
-
-  // Low stability: short half-lives, fast decay, responsive
-  double T_low = 0.0;
-  REQUIRE (LambdaMood (30.0, T_low) == Catch::Approx (0.5));
 }

@@ -2509,7 +2509,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::UpdateEmbeddingPredictionError;
   using cortext::operations::UpdateFocus;
   using cortext::operations::RecordMemoryUsage;
-  using cortext::operations::UpdateMood;
   using cortext::operations::UpdateNeuromodulators;
   using cortext::operations::UpdatePrecisionDelta;
   using cortext::operations::UpdateRateState;
@@ -2530,7 +2529,7 @@ BuildRootOperationSet (bool probe_mode)
       ComputeCoherence, UpdateAccumulator, UpdateDriftAccumulation,
       ComputeFocusSpread, UpdateEmbeddingPredictionError, UpdateUncertainty,
 
-      UpdateFocus, UpdateSensitivity, UpdateMood,
+      UpdateFocus, UpdateSensitivity,
 
       ComputeEffectiveFocus, ComputeMetrics, UpdateNeuromodulators,
       FitMetricWeightsRLS, ComputeCompositeScore, UpdateAccumulatorScores,

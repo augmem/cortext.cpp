@@ -1992,35 +1992,6 @@ LoadState (Store &store, ProcessorContext &ctx,
       ctx.flashbulb_rate_ewma
           = ExtractDouble (row, "flashbulb_rate", 0.0);
 
-      // Mood state (Algorithm 4b) - stored as BLOB (48 bytes = 6 doubles)
-      auto mood_it = row.find ("mood_vector");
-      if (mood_it != row.end () && mood_it->second.has_value ())
-        {
-          const double *data = nullptr;
-          size_t byte_size = 0;
-          if (mood_it->second.type () == typeid (std::vector<char>))
-            {
-              const auto &vec
-                  = std::any_cast<const std::vector<char> &> (mood_it->second);
-              data = reinterpret_cast<const double *> (vec.data ());
-              byte_size = vec.size ();
-            }
-          else if (mood_it->second.type () == typeid (std::vector<unsigned char>))
-            {
-              const auto &vec = std::any_cast<const std::vector<unsigned char> &> (
-                  mood_it->second);
-              data = reinterpret_cast<const double *> (vec.data ());
-              byte_size = vec.size ();
-            }
-          if (data && byte_size >= 6 * sizeof (double))
-            {
-              for (size_t i = 0; i < 6; ++i)
-                ctx.mood_vector[i] = data[i];
-            }
-        }
-      ctx.last_mood_ts
-          = static_cast<uint64_t> (ExtractInt64 (row, "last_mood_ts", 0));
-
       // Embedding prediction error state (Section 3.1.4)
       auto last_emb_it = row.find ("last_embedding");
       if (last_emb_it != row.end () && last_emb_it->second.has_value ())
@@ -2809,7 +2780,6 @@ SignalProcessor::SignalProcessor (const Config &config,
     {
       SeedKnobDerivedStateDefaults (*context_, config_);
       context_->last_rate_timestamp = static_cast<uint64_t> (now_ms);
-      context_->last_mood_ts = static_cast<uint64_t> (now_ms);
       operations::consolidation_throughput_state_internal::Reset (*context_);
     }
 }
@@ -4144,10 +4114,6 @@ SignalProcessor::PersistState (Transaction &tx)
                                 context_->last_signal_timestamp)
                           : wall_now_ms;
 
-  // Serialize mood_vector as raw binary BLOB (48 bytes = 6 doubles)
-  std::vector<char> mood_blob (6 * sizeof (double));
-  std::memcpy (mood_blob.data (), context_->mood_vector.data (),
-               6 * sizeof (double));
   const std::vector<char> write_rate_blob = SerializeUint64Vector (
       context_->write_rate_window_.GetTimestamps ());
   const double wm_maintenance_cost
@@ -4196,7 +4162,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "weight_novelty, weight_surprise, weight_valence, weight_arousal, "
       "emotion_gain, score_gain, rate_target, "
       // Emotion state
-      "emotion_intensity, valence, arousal, mood_vector, last_mood_ts, "
+      "emotion_intensity, valence, arousal, "
       "flashbulb_rate, "
       // Rate control
       "m_rate, rho_hat_prev, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
@@ -4223,7 +4189,7 @@ SignalProcessor::PersistState (Transaction &tx)
       "?, ?, ?, "  // Threshold
       "?, ?, ?, ?, "  // Focus
       "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
-      "?, ?, ?, ?, ?, ?, "  // Emotion
+      "?, ?, ?, ?, "  // Emotion
       "?, ?, ?, ?, ?, ?, "  // Rate control
       "?, ?, "  // Uncertainty + modulators
       "?, ?, "  // Embedding prediction
@@ -4246,9 +4212,7 @@ SignalProcessor::PersistState (Transaction &tx)
         context_->emotion_gain, context_->score_gain, context_->rate_target,
         // Emotion state
         context_->emotion_intensity_ewma, context_->valence_ewma,
-        context_->arousal_ewma, mood_blob,
-        static_cast<long long> (context_->last_mood_ts),
-        context_->flashbulb_rate_ewma,
+        context_->arousal_ewma, context_->flashbulb_rate_ewma,
         // Rate control
         context_->m_rate, context_->rho_hat_prev, context_->dt_ema,
         context_->rate_ticks,

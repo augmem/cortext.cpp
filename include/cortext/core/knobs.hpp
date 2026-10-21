@@ -1390,25 +1390,6 @@ EmotionHistoryWindow (double S, double T)
   return static_cast<int> (std::round (Clamp (base, 16.0, 160.0)));
 }
 
-// --- Algorithm 4b (Mood Integrator) Helpers ---
-inline double
-AlphaMood (double S)
-{
-  // α_mood(S) = lerp(0.01, 0.20, S)
-  // Higher sensitivity = faster mood reactivity to emotion events
-  return Lerp (0.01, 0.20, SensitivityBias (S));
-}
-
-inline double
-LambdaMood (double delta_seconds, double T)
-{
-  // λ_mood(Δt, T) = exp(−ln(2) × Δt / max(half_life_mood(T), ε))
-  const double half_life = std::max (Lerp (30.0, 600.0, Clamp (T, 0.0, 1.0)),
-                                     1e-6);
-  const double decay = -std::log (2.0) * delta_seconds / half_life;
-  return std::exp (decay);
-}
-
 // --- Algorithm 24 (Working Memory) Helpers ---
 
 inline int

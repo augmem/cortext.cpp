@@ -162,7 +162,7 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
             }
           SoftmaxNormalize (raw_cos, emotion_policy.softmax_beta);
 
-          // Expose emotion probabilities for Algorithm 4b (UpdateMood)
+          // Expose emotion probabilities (stored with the memory)
           for (int i = 0; i < kNumEmotions; ++i)
             {
               emotion_probs[static_cast<size_t> (i)]
@@ -290,73 +290,6 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
     telemetry::Attribute::Double("delta_T_sens", delta_T_sens),
     telemetry::Attribute::Double("rate_target", p_ctx.rate_target),
     telemetry::Attribute::Double("hysteresis", p_ctx.hysteresis)
-  });
-}
-
-void
-UpdateMood::Execute (OperationContext &context, Transaction &tx) const
-{
-  (void)tx;
-  auto &p_ctx = context.GetProcessorContext ();
-  const auto &cfg = context.GetConfig ();
-  const double S_raw = cfg.sensitivity;
-  const double T = cfg.stability;
-
-  // Get instantaneous emotion probabilities from Algorithm 4
-  const auto &p_c = context.GetEmotionProbabilities ();
-
-  // Get mood dynamics parameters (Algorithm 4b)
-  const double alpha_mood = core::AlphaMood (S_raw);
-  const uint64_t now_ts = context.GetSignal ().timestamp;
-  double delta_mood_s = 0.0;
-  if (p_ctx.last_mood_ts > 0 && now_ts > p_ctx.last_mood_ts)
-    {
-      delta_mood_s = static_cast<double> (now_ts - p_ctx.last_mood_ts) * 1e-3;
-    }
-  const double lambda_mood = core::LambdaMood (delta_mood_s, T);
-
-  // Center probabilities so e_t sums to 0.
-  std::array<double, 6> e_t;
-  const double center = 1.0 / static_cast<double> (kNumEmotions);
-  for (size_t i = 0; i < 6; ++i)
-    {
-      e_t[i] = p_c[i] - center;
-    }
-
-  // Update mood vector: M_t = λ_mood(T) × M_{t-1} + α_mood(S) × e_t
-  // Then clamp each dimension to [-1, 1]
-  auto &M = p_ctx.mood_vector;
-  for (size_t i = 0; i < 6; ++i)
-    {
-      M[i] = lambda_mood * M[i] + alpha_mood * e_t[i];
-      M[i] = core::Clamp (M[i], -1.0, 1.0);
-    }
-  if (now_ts > 0)
-    {
-      p_ctx.last_mood_ts = now_ts;
-    }
-
-  // Compute mood magnitude ||M_t||
-  double magnitude_sq = 0.0;
-  for (size_t i = 0; i < 6; ++i)
-    {
-      magnitude_sq += M[i] * M[i];
-    }
-  const double magnitude = std::sqrt (magnitude_sq);
-
-  // Normalize by √6 (max possible magnitude for 6-dim unit-bounded vector)
-  // and clamp to [0, 1] per paper Section 4.2.4
-  const double m_norm = core::Clamp (magnitude / std::sqrt (6.0), 0.0, 1.0);
-
-  // Compute threshold delta: ΔT_mood = −κ_mood × clamp(m_norm, 0, 1)
-  const double kappa_mood = core::AffectThresholdGain (cfg.sensitivity);
-  const double delta_T_mood
-      = AffectThresholdCascadeDisabled () ? 0.0 : -kappa_mood * m_norm;
-  context.SetDeltaThresholdMood (delta_T_mood);
-
-  telemetry::LogDebug("cortext.update_mood", {
-    telemetry::Attribute::Double("mood_magnitude", m_norm),
-    telemetry::Attribute::Double("delta_T_mood", delta_T_mood)
   });
 }
 
