@@ -2,10 +2,6 @@
 
 namespace cortext::operations::constants
 {
-// Hysteresis band
-constexpr double kHysteresisBandMin = 0.02;
-constexpr double kHysteresisBandMax = 0.25;
-
 // Stability half-life adjustment clamp bounds
 constexpr double kHalfLifeAdjClampMin = -0.25;
 constexpr double kHalfLifeAdjClampMax = 0.25;

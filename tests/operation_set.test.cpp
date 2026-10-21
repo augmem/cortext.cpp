@@ -15,12 +15,12 @@ struct SetCompositeScoreOp : IOperation
   }
 };
 
-struct SetDeltaSensitivityOp : IOperation
+struct SetBoundaryScoreOp : IOperation
 {
   void
   Execute (OperationContext &ctx, Transaction & /*tx*/) const override
   {
-    ctx.SetDeltaThresholdSensitivity (0.07);
+    ctx.SetBoundaryScore (0.07);
   }
 };
 
@@ -55,12 +55,12 @@ TEST_CASE ("DynamicOperationSet executes in order", "[operation_set]")
   OperationContext ctx (s, pctx, cfg);
 
   DynamicOperationSet set (std::make_unique<SetCompositeScoreOp> (),
-                    std::make_unique<SetDeltaSensitivityOp> ());
+                    std::make_unique<SetBoundaryScoreOp> ());
 
   set.Execute (ctx, cortext::testing::GetNullTransaction ());
 
   auto a = ctx.GetCompositeScore ();
-  auto b = ctx.GetDeltaThresholdSensitivity ();
+  auto b = ctx.GetBoundaryScore ();
   REQUIRE (a.has_value ());
   REQUIRE (b.has_value ());
 }

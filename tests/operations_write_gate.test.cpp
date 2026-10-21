@@ -49,7 +49,6 @@ TEST_CASE ("ComputeWriteGate accepts when S_window above threshold",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.3); // Low threshold
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -81,7 +80,6 @@ TEST_CASE ("ComputeWriteGate stores a closed unit whatever its window score",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.9);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -115,7 +113,6 @@ TEST_CASE ("ComputeWriteGate rejects when no flush required",
   OperationContext ctx (s, pctx, cfg);
   // No flush required - signal not at boundary
   ctx.SetFlushRequired (false);
-  ctx.SetThresholdTDynamic (0.2);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -145,7 +142,6 @@ TEST_CASE ("ComputeWriteGate rejects ephemeral signals even with a flush",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.1);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -176,7 +172,6 @@ TEST_CASE ("ComputeWriteGate rejects when no accumulator state",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.0);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -208,7 +203,6 @@ TEST_CASE ("ComputeWriteGate populates recent_memory_centroids on accept",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.3);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -240,7 +234,6 @@ TEST_CASE ("ComputeWriteGate profiles every decision input without changing it",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (true);
-  ctx.SetThresholdTDynamic (0.3);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -276,7 +269,6 @@ TEST_CASE ("ComputeWriteGate profiles non-boundary rejection",
 
   OperationContext ctx (s, pctx, cfg);
   ctx.SetFlushRequired (false);
-  ctx.SetThresholdTDynamic (0.3);
 
   ComputeWriteGate op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
@@ -315,7 +307,6 @@ TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
     SetupAccumulatorState (pctx, s, 0.8, 2.0, 3);
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-      ctx.SetThresholdTDynamic (0.3);
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     const auto &values = ctx.GetOperationTimings ();
@@ -330,7 +321,6 @@ TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
     ProcessorContext pctx;
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-    ctx.SetThresholdTDynamic (0.3);
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     const auto &values = ctx.GetOperationTimings ();
@@ -347,7 +337,6 @@ TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
     SetupAccumulatorState (pctx, s, 0.1, 0.2, 2);
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-    ctx.SetThresholdTDynamic (0.9);
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     const auto &values = ctx.GetOperationTimings ();
@@ -363,7 +352,6 @@ TEST_CASE ("ComputeWriteGate profiles every remaining exit class",
     SetupAccumulatorState (pctx, s, 0.1, 0.2, 2);
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-    ctx.SetThresholdTDynamic (0.9);
     op.Execute (ctx, cortext::testing::GetNullTransaction ());
 
     const auto &values = ctx.GetOperationTimings ();

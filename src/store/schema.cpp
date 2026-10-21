@@ -1194,6 +1194,23 @@ GetCoreMigrations ()
               "ALTER TABLE state DROP COLUMN last_mood_ts",
           },
       },
+      {
+          58,
+          "Drop the dynamic threshold controller state",
+          {
+              // No unit is stored or skipped by a score threshold, so the
+              // controller's threshold, hysteresis, homeostatic rate terms
+              // and the per-signal threshold snapshot are gone.
+              "ALTER TABLE state DROP COLUMN theta_dynamic",
+              "ALTER TABLE state DROP COLUMN theta_target",
+              "ALTER TABLE state DROP COLUMN hysteresis",
+              "ALTER TABLE state DROP COLUMN rate_target",
+              "ALTER TABLE state DROP COLUMN rho_hat_prev",
+              "ALTER TABLE state DROP COLUMN rate_ticks",
+              "ALTER TABLE state DROP COLUMN reliability",
+              "ALTER TABLE signals DROP COLUMN threshold_t",
+          },
+      },
   };
 }
 

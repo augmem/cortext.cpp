@@ -45,12 +45,9 @@ PersistSignalMetrics::Execute (OperationContext &context, Transaction &tx) const
   double valence = GetMetricValue (metrics, Metric::valence);
   double arousal = GetMetricValue (metrics, Metric::arousal);
 
-  // Get composite score and threshold
   auto composite_opt = context.GetCompositeScore ();
   double composite_score = composite_opt.has_value () ? *composite_opt : 0.0;
-  double threshold_t = context.GetThresholdTDynamic ();
 
-  // Write decision: 1 if composite_score > (T_dynamic - hysteresis)
   int write_decision = context.GetWriteDecision () ? 1 : 0;
 
   // Get structural metrics from context
@@ -78,12 +75,12 @@ PersistSignalMetrics::Execute (OperationContext &context, Transaction &tx) const
           "SET relevance = ?, mismatch = ?, surprise = ?, rarity = ?, "
           "    drift = ?, contradiction = ?, utility = ?, periphery = ?, "
           "    coverage = ?, salience = ?, valence = ?, arousal = ?, "
-          "    score = ?, threshold_t = ?, write_decision = ?, "
+          "    score = ?, write_decision = ?, "
           "    coherence = ?, focus_spread = ?, f_effective = ? "
           "WHERE source_id = ? AND timestamp = ? AND serial_position = ?",
           { relevance, mismatch, surprise, rarity, drift, contradiction, utility,
             periphery, coverage, salience, valence, arousal, composite_score,
-            threshold_t, write_decision, coherence, focus_spread, f_effective,
+            write_decision, coherence, focus_spread, f_effective,
             signal.source_id, static_cast<long long> (rec.timestamp),
             static_cast<long long> (rec.serial_position) });
     }

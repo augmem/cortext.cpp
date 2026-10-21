@@ -16,7 +16,7 @@ public:
 
 /// @brief Implements Algorithm 4: Sensitivity Dynamic Update per Signal.
 class UpdateSensitivity
-    : public Operation<Requires<>, Satisfies<tags::Arousal, tags::Valence, tags::EmotionIntensity, tags::EmotionProbabilities, tags::SensitivityThresholdDeltas> >
+    : public Operation<Requires<>, Satisfies<tags::Arousal, tags::Valence, tags::EmotionIntensity, tags::EmotionProbabilities> >
 {
 public:
   void Execute (OperationContext &context, Transaction &tx) const override;

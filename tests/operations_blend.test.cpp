@@ -1,14 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include "test_helpers.hpp"
 #include <cortext/operations/blend.hpp>
-#include <cortext/operations/threshold.hpp>
 #include <cortext/processor.hpp>
 #include <cortext/processor/operation_context.hpp>
 
 using namespace cortext;
 using cortext::operations::ComputeCompositeScore;
 using cortext::operations::FitMetricWeightsRLS;
-using cortext::operations::UpdateThreshold;
 
 namespace
 {
@@ -107,45 +105,6 @@ TEST_CASE ("Alg7 RLS increases relevance weight with consistent evidence",
   REQUIRE (std::abs (w1 - w0) > 1e-6);
   REQUIRE (w1 >= 0.0);
   REQUIRE (w1 <= 1.0);
-}
-
-TEST_CASE ("Alg7→Alg8 integration adjusts threshold with composite",
-           "[integration][blend][threshold]")
-{
-  Signal s;
-  s.embedding = Eigen::VectorXf::Zero (4);
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg;
-  cortext::testing::RequireEncoder (cfg);
-  cfg.focus = 0.5;
-  cfg.sensitivity = 0.5;
-  cfg.stability = 0.5;
-
-  OperationContext ctx (s, pctx, cfg);
-
-  FitMetricWeightsRLS fit;
-  ComputeCompositeScore compute;
-  UpdateThreshold update_T;
-
-  // Low composite case
-  SetMetricsOp low ({ { operations::Metric::relevance, 0.0 } });
-  low.Execute (ctx, cortext::testing::GetNullTransaction ());
-  compute.Execute (ctx, cortext::testing::GetNullTransaction ());
-  update_T.Execute (ctx, cortext::testing::GetNullTransaction ());
-  const double T1 = ctx.GetThresholdTDynamic ();
-
-  // High composite case
-  SetMetricsOp high ({ { operations::Metric::relevance, 1.0 } });
-  high.Execute (ctx, cortext::testing::GetNullTransaction ());
-  // Run a small loop to populate recent scores and allow a visible change.
-  for (int i = 0; i < 5; ++i)
-    {
-      fit.Execute (ctx, cortext::testing::GetNullTransaction ());
-      compute.Execute (ctx, cortext::testing::GetNullTransaction ());
-      update_T.Execute (ctx, cortext::testing::GetNullTransaction ());
-    }
-  const double T2 = ctx.GetThresholdTDynamic ();
-  REQUIRE (T1 != T2);
 }
 
 TEST_CASE ("Alg7 RLS resets covariance on ill-conditioning",

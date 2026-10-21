@@ -3,7 +3,6 @@
 #include "cortext/operations/constants.hpp"
 #include "cortext/processor/operation_context.hpp"
 #include "cortext/telemetry/telemetry.hpp"
-#include "../experimental_env.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -30,7 +29,6 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   const auto sensitivity_priors = core::SensitivityStatePriorsForKnobs (S_raw);
 
   // Priors per algorithms.md Algorithm 3
-  p_ctx.base_rate_prior = core::BaseRatePrior (config.sensitivity);
   p_ctx.weight_novelty_prior = sensitivity_priors.novelty_weight;
   p_ctx.weight_surprise_prior = sensitivity_priors.surprise_weight;
   p_ctx.weight_valence_prior = sensitivity_priors.valence_weight;
@@ -38,7 +36,6 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   p_ctx.weight_emotion_prior = sensitivity_priors.emotion_weight;
   p_ctx.emotion_gain_prior = sensitivity_priors.emotion_gain;
   p_ctx.score_gain_prior = sensitivity_priors.score_gain;
-  p_ctx.rate_target_prior = p_ctx.base_rate_prior;
   // Initialize dynamic values from priors
   p_ctx.weight_novelty = p_ctx.weight_novelty_prior;
   p_ctx.weight_surprise = p_ctx.weight_surprise_prior;
@@ -46,13 +43,11 @@ InitializeSensitivityPriors::Execute (OperationContext &context, Transaction &tx
   p_ctx.weight_arousal = p_ctx.weight_arousal_prior;
   p_ctx.emotion_gain = p_ctx.emotion_gain_prior;
   p_ctx.score_gain = p_ctx.score_gain_prior;
-  p_ctx.rate_target = p_ctx.rate_target_prior;
   p_ctx.sensitivity_priors_initialized = true;
 
   telemetry::LogDebug("cortext.initialize_sensitivity_priors", {
     telemetry::Attribute::Double("S", S_raw),
     telemetry::Attribute::Double("S_eff", S_eff),
-    telemetry::Attribute::Double("base_rate_prior", p_ctx.base_rate_prior),
     telemetry::Attribute::Double("weight_novelty_prior", p_ctx.weight_novelty_prior),
     telemetry::Attribute::Double("weight_surprise_prior", p_ctx.weight_surprise_prior)
   });
@@ -103,13 +98,6 @@ Entropy (const std::vector<double> &p)
     }
   return h;
 }
-
-inline bool
-AffectThresholdCascadeDisabled ()
-{
-  return internal::experimental_env::Flag (
-      "CORTEXT_DISABLE_EMOTION_MOOD_THRESHOLD_CASCADE");
-}
 } // namespace
 
 void
@@ -119,7 +107,6 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
   auto &p_ctx = context.GetProcessorContext ();
   const auto &cfg = context.GetConfig ();
   const double S_raw = cfg.sensitivity;
-  const double S_eff = core::SensitivityBias (S_raw);
   const auto emotion_policy = core::EmotionProjectionPolicyForKnobs (S_raw);
 
   // --- Emotion projections if centroids provided ---
@@ -209,7 +196,7 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
   p_ctx.valence_ewma = core::Ewma (p_ctx.valence_ewma, valence, alpha_emotion);
   p_ctx.arousal_ewma = core::Ewma (p_ctx.arousal_ewma, arousal, alpha_emotion);
 
-  // Set raw values for output (use smoothed values for threshold modulation)
+  // Set raw values for output
   context.SetEmotionIntensity (emotion_intensity);
   context.SetValence (valence);
   context.SetArousal (arousal);
@@ -223,73 +210,10 @@ UpdateSensitivity::Execute (OperationContext &context, Transaction &tx) const
       emo_hist.pop_front ();
     }
 
-  // --- ΔThreshold components ---
-  // ΔT_emo = − κ_emo × emotion_intensity × (0.5 + 0.5 × arousal)
-  const double kappa_emo = core::AffectThresholdGain (cfg.sensitivity);
-  const double delta_T_emo
-      = AffectThresholdCascadeDisabled ()
-            ? 0.0
-            : -kappa_emo * emotion_intensity
-                  * (constants::kOneHalf + constants::kOneHalf * arousal);
-  context.SetDeltaThresholdEmotion (delta_T_emo);
-
-  // Sensitivity-based threshold adjustment (knob-derived)
-
-  const int w = core::WScore (cfg.stability);
-  const int n = static_cast<int> (p_ctx.recent_scores.size ());
-  const int start = std::max (0, n - w);
-  int m = n - start;
-  double sigma_scores = 0.0;
-  if (m >= 2)
-    {
-      double sum = 0.0;
-      for (int i = start; i < n; ++i)
-        {
-          sum += core::Clamp (p_ctx.recent_scores[static_cast<size_t> (i)],
-                              constants::kNormalizedMin,
-                              constants::kNormalizedMax);
-        }
-      const double mean = sum / static_cast<double> (m);
-      double accum = 0.0;
-      for (int i = start; i < n; ++i)
-        {
-          const double v
-              = core::Clamp (p_ctx.recent_scores[static_cast<size_t> (i)],
-                             constants::kNormalizedMin,
-                             constants::kNormalizedMax);
-          const double d = v - mean;
-          accum += d * d;
-        }
-      const double var_scores = accum / static_cast<double> (m);
-      sigma_scores = std::sqrt (var_scores);
-    }
-
-  const double cap_sens
-      = core::CapSens (cfg.focus, cfg.sensitivity, cfg.stability,
-                       p_ctx.hysteresis);
-  const double kappa_sens
-      = core::KappaSens (cfg.focus, cfg.sensitivity, cfg.stability);
-  const double sigma_ref = core::SigmaRef (cfg.sensitivity, cfg.stability);
-  double delta_T_sens = core::Clamp (
-      -kappa_sens * S_eff * (sigma_scores - sigma_ref), -cap_sens, cap_sens);
-  context.SetDeltaThresholdSensitivity (delta_T_sens);
-
-  // rate_target is a knob-derived constant (base_rate(S))
-  if (p_ctx.rate_target == 0.0)
-    {
-      p_ctx.rate_target = p_ctx.rate_target_prior;
-    }
-
   telemetry::LogDebug("cortext.update_sensitivity", {
     telemetry::Attribute::Double("emotion_intensity", emotion_intensity),
     telemetry::Attribute::Double("valence", valence),
-    telemetry::Attribute::Double("arousal", arousal),
-    telemetry::Attribute::Double("delta_T_emo", delta_T_emo),
-    telemetry::Attribute::Double("sigma_scores", sigma_scores),
-    telemetry::Attribute::Double("cap_sens", cap_sens),
-    telemetry::Attribute::Double("delta_T_sens", delta_T_sens),
-    telemetry::Attribute::Double("rate_target", p_ctx.rate_target),
-    telemetry::Attribute::Double("hysteresis", p_ctx.hysteresis)
+    telemetry::Attribute::Double("arousal", arousal)
   });
 }
 

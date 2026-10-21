@@ -60,26 +60,3 @@ TEST_CASE ("Uncertainty weights respond to F and S", "[uncertainty]")
   REQUIRE (pctx.u_t > 0.0);
   REQUIRE (pctx.u_t <= 1.0);
 }
-
-
-
-TEST_CASE ("Alg4: ΔT_sensitivity is not clamped (Alg8 clamps later)",
-           "[sensitivity]")
-{
-  ProcessorContext pctx;
-  SignalProcessor::Config cfg{};
-  cortext::testing::RequireEncoder (cfg);
-  cfg.sensitivity = 0.9;
-  cfg.stability = 0.5;
-  Signal sig;
-  sig.timestamp = 10;
-  sig.embedding = Eigen::VectorXf::Ones (4);
-  OperationContext ctx (sig, pctx, cfg);
-
-  InitializeSensitivityPriors init;
-  init.Execute (ctx, cortext::testing::GetNullTransaction ());
-  UpdateSensitivity up;
-  up.Execute (ctx, cortext::testing::GetNullTransaction ());
-  // Ensure value is set (not necessarily clamped here)
-  REQUIRE (ctx.GetDeltaThresholdSensitivity ().has_value ());
-}

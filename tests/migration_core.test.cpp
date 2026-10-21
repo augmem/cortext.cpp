@@ -186,9 +186,9 @@ TEST_CASE("Migration 26 adds consolidation throughput initialization",
     REQUIRE(names.count("consolidation_rate_initialized") == 1);
 
     store->Execute(
-        "INSERT INTO state(id, rate_ticks, consolidation_rate_floor, "
+        "INSERT INTO state(id, consolidation_rate_floor, "
         "consolidation_rate_peak, consolidation_rate_initialized) "
-        "VALUES(1, 1, 0.0, 0.0, 1)");
+        "VALUES(1, 0.0, 0.0, 1)");
     const auto rows = store->Execute(
         "SELECT consolidation_rate_initialized FROM state WHERE id = 1");
     REQUIRE(std::any_cast<long long>(

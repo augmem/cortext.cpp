@@ -40,19 +40,12 @@ struct Arousal;
 struct Valence;
 struct EmotionIntensity;
 struct EmotionProbabilities;
-struct SensitivityThresholdDeltas;  ///< emotion / mood / sensitivity deltas
-
-// UpdatePrecisionDelta
-struct DeltaThresholdPrecision;
 
 // ComputeEffectiveFocus
 struct EffectiveFocus;
 
 // ComputeCompositeScore
 struct CompositeScore;
-
-// UpdateThreshold
-struct ThresholdState;  ///< T_dynamic + hysteresis
 
 // DetectBoundary (at-boundary, centroid, diagnostics, score, type)
 struct BoundaryDecision;

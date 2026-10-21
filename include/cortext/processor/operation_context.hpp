@@ -195,7 +195,7 @@ public:
   }
 
   // ======================================================================
-  // Threshold Modulation API (Algorithm 8 inputs/outputs)
+  // Composite Score API (Algorithm 7)
   // ======================================================================
   
   void
@@ -207,62 +207,6 @@ public:
   GetCompositeScore () const
   {
     return composite_score_;
-  }
-
-  void
-  SetDeltaThresholdSensitivity (std::optional<double> v)
-  {
-    delta_threshold_sensitivity_ = v;
-  }
-  std::optional<double>
-  GetDeltaThresholdSensitivity () const
-  {
-    return delta_threshold_sensitivity_;
-  }
-
-  void
-  SetDeltaThresholdPrecision (std::optional<double> v)
-  {
-    delta_threshold_precision_ = v;
-  }
-  std::optional<double>
-  GetDeltaThresholdPrecision () const
-  {
-    return delta_threshold_precision_;
-  }
-
-  void
-  SetDeltaThresholdEmotion (std::optional<double> v)
-  {
-    delta_threshold_emotion_ = v;
-  }
-  std::optional<double>
-  GetDeltaThresholdEmotion () const
-  {
-    return delta_threshold_emotion_;
-  }
-
-  // Outputs exposed by operations for downstream consumers/telemetry
-  void
-  SetThresholdTDynamic (double v)
-  {
-    threshold_T_dynamic_ = v;
-  }
-  double
-  GetThresholdTDynamic () const
-  {
-    return threshold_T_dynamic_;
-  }
-
-  void
-  SetThresholdHysteresis (double v)
-  {
-    threshold_hysteresis_ = v;
-  }
-  double
-  GetThresholdHysteresis () const
-  {
-    return threshold_hysteresis_;
   }
 
   // ======================================================================
@@ -708,7 +652,7 @@ public:
   }
 
   // ======================================================================
-  // Write Gate API (Algorithm 7+8: composite_score > T_dynamic - hysteresis)
+  // Write Gate API (every closed unit is stored)
   // ======================================================================
 
   void
@@ -950,11 +894,6 @@ private:
 
   // Typed scratch fields
   std::optional<double> composite_score_;
-  std::optional<double> delta_threshold_sensitivity_;
-  std::optional<double> delta_threshold_precision_;
-  std::optional<double> delta_threshold_emotion_;
-  double threshold_T_dynamic_ = 0.0;
-  double threshold_hysteresis_ = 0.0;
   double coherence_ = 0.0;
   std::optional<double> accumulator_eta_prev_;
   double emotion_intensity_ = 0.0;

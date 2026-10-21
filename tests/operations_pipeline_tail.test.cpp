@@ -123,7 +123,6 @@ TEST_CASE ("PersistSignalMetrics updates signal metric columns",
   ctx.SetAccumulatorWriteDecision (true);
   ctx.SetWriteDecision (true);
   ctx.SetCompositeScore (0.77);
-  ctx.SetThresholdTDynamic (0.55);
   ctx.SetCoherence (0.66);
   ctx.SetEffectiveFocus (0.44);
   ctx.SetMetric (Metric::relevance, 0.91);
@@ -136,7 +135,7 @@ TEST_CASE ("PersistSignalMetrics updates signal metric columns",
   tx->Commit ();
 
   auto rows = store->Execute (
-      "SELECT relevance, mismatch, score, threshold_t, write_decision, "
+      "SELECT relevance, mismatch, score, write_decision, "
       "coherence, focus_spread, f_effective FROM signals WHERE source_id = ?",
       { signal.source_id });
   REQUIRE (rows.size () == 1);
@@ -146,8 +145,6 @@ TEST_CASE ("PersistSignalMetrics updates signal metric columns",
            == Catch::Approx (0.12));
   REQUIRE (cortext::testing::GetDouble (rows[0], "score")
            == Catch::Approx (0.77));
-  REQUIRE (cortext::testing::GetDouble (rows[0], "threshold_t")
-           == Catch::Approx (0.55));
   REQUIRE (cortext::testing::GetInt64 (rows[0], "write_decision") == 1);
   REQUIRE (cortext::testing::GetDouble (rows[0], "coherence")
            == Catch::Approx (0.66));

@@ -40,8 +40,7 @@ add_executable(cortext_tests
   operations_uncertainty.test.cpp
   operations_focus.test.cpp
   operations_focus_spread.test.cpp
-  operations_stability.test.cpp
-  operations_threshold.test.cpp
+  operations_signal_history.test.cpp
   operations_blend.test.cpp
   operations_metrics.test.cpp
   operations_memory_usage_record.test.cpp
@@ -53,7 +52,6 @@ add_executable(cortext_tests
   operations_interrupt_gate.test.cpp
   operations_working_memory.test.cpp
   operations_embedding_prediction_error.test.cpp
-  operations_precision_modulation.test.cpp
 
   operations_graph_retrieval.test.cpp
   operations_reference_time.test.cpp

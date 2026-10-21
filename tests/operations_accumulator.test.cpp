@@ -374,7 +374,6 @@ TEST_CASE ("Write gate computes window score", "[accumulator][4.4.5]")
 
     OperationContext ctx (s, pctx, cfg);
     ctx.SetFlushRequired (true);
-    ctx.SetThresholdTDynamic (0.3);
 
     ComputeWriteGate op;
     op.Execute (ctx, cortext::testing::GetNullTransaction ());

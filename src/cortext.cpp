@@ -34,9 +34,8 @@
 
 #include "cortext/operations/embedding_prediction_error.hpp"
 #include "cortext/operations/centroids.hpp"
-#include "cortext/operations/precision.hpp"
 #include "cortext/operations/sensitivity.hpp"
-#include "cortext/operations/threshold.hpp"
+#include "cortext/operations/signal_history.hpp"
 #include "cortext/operations/uncertainty.hpp"
 #include "cortext/processor/operation.hpp"
 
@@ -71,7 +70,6 @@
 #include "cortext/operations/neuromodulators.hpp"
 #include "cortext/operations/recent_context.hpp"
 #include "cortext/operations/signal_metrics_persistence.hpp"
-#include "cortext/operations/stability.hpp"
 #include "cortext/operations/write_gate.hpp"
 #include "cortext/operations/memory_storage.hpp"
 #include "cortext/operations/working_memory.hpp"
@@ -2498,7 +2496,6 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::InitializeEmbeddedCentroids;
   using cortext::operations::InitializeFocusPriors;
   using cortext::operations::InitializeSensitivityPriors;
-  using cortext::operations::InitializeStabilityPriors;
   using cortext::operations::MemoryStorage;
   using cortext::operations::PersistSignalMetrics;
   using cortext::operations::ResetAccumulatorAfterFlush;
@@ -2510,11 +2507,10 @@ BuildRootOperationSet (bool probe_mode)
   using cortext::operations::UpdateFocus;
   using cortext::operations::RecordMemoryUsage;
   using cortext::operations::UpdateNeuromodulators;
-  using cortext::operations::UpdatePrecisionDelta;
   using cortext::operations::UpdateRateState;
   using cortext::operations::UpdateRecentContext;
   using cortext::operations::UpdateSensitivity;
-  using cortext::operations::UpdateThreshold;
+  using cortext::operations::UpdateSignalHistory;
   using cortext::operations::UpdateUncertainty;
   using cortext::operations::WorkingMemory;
 
@@ -2524,7 +2520,6 @@ BuildRootOperationSet (bool probe_mode)
       InitializeEmbeddedCentroids,
 
       InitializeFocusPriors, InitializeSensitivityPriors,
-      InitializeStabilityPriors,
 
       ComputeCoherence, UpdateAccumulator, UpdateDriftAccumulation,
       ComputeFocusSpread, UpdateEmbeddingPredictionError, UpdateUncertainty,
@@ -2534,7 +2529,7 @@ BuildRootOperationSet (bool probe_mode)
       ComputeEffectiveFocus, ComputeMetrics, UpdateNeuromodulators,
       FitMetricWeightsRLS, ComputeCompositeScore, UpdateAccumulatorScores,
 
-      UpdatePrecisionDelta, UpdateThreshold, UpdateRecentContext,
+      UpdateSignalHistory, UpdateRecentContext,
 
       DetectBoundary, CheckCapacityFlush, ComputeWriteGate>;
 
@@ -3034,7 +3029,6 @@ struct Cortext::Impl
 
     // Populate output metrics
     result.output.composite_score = out.composite_score;
-    result.output.threshold = out.threshold_T_dynamic;
     result.output.decision = out.write_decision;
     result.output.effective_focus = out.effective_focus;
     result.output.coherence = out.coherence;

@@ -1391,8 +1391,6 @@ AssembleOutputFields (const OperationContext &op_context,
   out.interrupt_aborted = op_context.GetInterruptAborted ();
   out.at_boundary = op_context.GetAtBoundary ();
   out.write_decision = op_context.GetWriteDecision ();
-  out.threshold_T_dynamic = op_context.GetThresholdTDynamic ();
-  out.threshold_hysteresis = op_context.GetThresholdHysteresis ();
   out.effective_focus = op_context.GetEffectiveFocus ();
   out.coherence = op_context.GetCoherence ();
   out.emotion_intensity = op_context.GetEmotionIntensity ();
@@ -1531,10 +1529,6 @@ void
 LogProcessTelemetry (const OperationContext &op_context,
                      const SignalProcessor::Output &out)
 {
-  telemetry::RecordHistogram ("cortext.threshold_T_dynamic",
-                              op_context.GetThresholdTDynamic ());
-  telemetry::RecordHistogram ("cortext.threshold_hysteresis",
-                              op_context.GetThresholdHysteresis ());
   telemetry::RecordHistogram ("cortext.effective_focus",
                               op_context.GetEffectiveFocus ());
   telemetry::RecordHistogram ("cortext.coherence", op_context.GetCoherence ());
@@ -1822,7 +1816,6 @@ SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
 {
   const double F = core::Clamp (config.focus, 0.0, 1.0);
   const double S = core::Clamp (config.sensitivity, 0.0, 1.0);
-  const double T = core::Clamp (config.stability, 0.0, 1.0);
   const auto focus_priors = core::FocusStatePriorsForKnobs (F);
   const auto sensitivity_priors = core::SensitivityStatePriorsForKnobs (S);
 
@@ -1837,7 +1830,6 @@ SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
   ctx.coverage_gain_floor = ctx.coverage_gain_floor_prior;
   ctx.mismatch_weight = ctx.mismatch_weight_prior;
 
-  ctx.base_rate_prior = core::BaseRatePrior (S);
   ctx.weight_novelty_prior = sensitivity_priors.novelty_weight;
   ctx.weight_surprise_prior = sensitivity_priors.surprise_weight;
   ctx.weight_valence_prior = sensitivity_priors.valence_weight;
@@ -1845,20 +1837,12 @@ SeedKnobDerivedStateDefaults (ProcessorContext &ctx,
   ctx.weight_emotion_prior = sensitivity_priors.emotion_weight;
   ctx.emotion_gain_prior = sensitivity_priors.emotion_gain;
   ctx.score_gain_prior = sensitivity_priors.score_gain;
-  ctx.rate_target_prior = ctx.base_rate_prior;
   ctx.weight_novelty = ctx.weight_novelty_prior;
   ctx.weight_surprise = ctx.weight_surprise_prior;
   ctx.weight_valence = ctx.weight_valence_prior;
   ctx.weight_arousal = ctx.weight_arousal_prior;
   ctx.emotion_gain = ctx.emotion_gain_prior;
   ctx.score_gain = ctx.score_gain_prior;
-  ctx.rate_target = ctx.rate_target_prior;
-
-  ctx.hysteresis_band_prior = core::BaseBandPrior (T);
-
-  ctx.T_dynamic = core::TPrior (F, S, T);
-  ctx.T_target = ctx.T_dynamic;
-  ctx.hysteresis = ctx.hysteresis_band_prior;
 }
 
 // --- State Loading Functions ---
@@ -1880,14 +1864,6 @@ LoadState (Store &store, ProcessorContext &ctx,
       // === Processor state fields ===
       ctx.signals_processed
           = static_cast<int> (ExtractInt64 (row, "signals_processed", 0));
-      const bool legacy_policy_defaults
-          = NearlyEqual (ExtractDouble (row, "theta_dynamic", 0.2), 0.2)
-            && NearlyEqual (ExtractDouble (row, "theta_target", 0.2), 0.2)
-            && NearlyEqual (ExtractDouble (row, "weight_relevance", 0.5), 0.5)
-            && NearlyEqual (ExtractDouble (row, "coverage_gain_floor", 0.65),
-                            0.65)
-            && NearlyEqual (ExtractDouble (row, "weight_novelty", 0.3), 0.3)
-            && NearlyEqual (ExtractDouble (row, "weight_surprise", 0.2), 0.2);
       ctx.u_t = ExtractDouble (row, "u_uncertainty", 0.0);
       ctx.neuromod_ach = ExtractDouble (row, "neuromod_ach", 0.0);
       ctx.weight_relevance = ExtractPolicyDouble (
@@ -1902,17 +1878,6 @@ LoadState (Store &store, ProcessorContext &ctx,
                                  true);
       ctx.mismatch_weight = ExtractPolicyDouble (
           row, "mismatch_weight", 0.5, ctx.mismatch_weight,
-          true);
-      ctx.T_dynamic = ExtractPolicyDouble (
-          row, "theta_dynamic", 0.2, ctx.T_dynamic,
-          true);
-      ctx.T_target = ExtractPolicyDouble (
-          row, "theta_target", 0.2, ctx.T_dynamic,
-          true);
-      ctx.hysteresis = ExtractPolicyDouble (
-          row, "hysteresis", 0.05, ctx.hysteresis, true);
-      ctx.rate_target = ExtractPolicyDouble (
-          row, "rate_target", 0.2, ctx.rate_target,
           true);
       ctx.last_signal_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_signal_timestamp", 0));
@@ -1957,7 +1922,7 @@ LoadState (Store &store, ProcessorContext &ctx,
       ctx.score_gain = ExtractPolicyDouble (
           row, "score_gain", 1.0, ctx.score_gain, true);
 
-      // Rate control (Algorithm 8)
+      // Signal history and write rate
       ctx.m_rate = ExtractDouble (row, "m_rate", 0.0);
       operations::consolidation_throughput_state_internal::Reset (
           ctx,
@@ -1965,13 +1930,9 @@ LoadState (Store &store, ProcessorContext &ctx,
             ExtractDouble (row, "consolidation_rate_peak", 0.0),
             ExtractInt64 (row, "consolidation_rate_initialized", 0) != 0,
             ExtractInt64 (row, "consolidation_rate_armed", 1) != 0 });
-      ctx.rho_hat_prev = ExtractDouble (row, "rho_hat_prev", 0.0);
-      ctx.rate_ticks = static_cast<int> (ExtractInt64 (row, "rate_ticks", 0));
       ctx.dt_ema = ExtractDouble (row, "dt_ema", 0.0);
       ctx.last_rate_timestamp
           = static_cast<uint64_t> (ExtractInt64 (row, "last_rate_timestamp", 0));
-      ctx.reliability = ExtractPolicyDouble (
-          row, "reliability", 1.0, 0.0, legacy_policy_defaults);
 
       // Restore write rate window timestamps if present.
       auto write_rate_it = row.find ("write_rate_timestamps");
@@ -2048,7 +2009,6 @@ LoadState (Store &store, ProcessorContext &ctx,
 
       ctx.focus_priors_initialized = true;
       ctx.sensitivity_priors_initialized = true;
-      ctx.stability_priors_initialized = true;
       return true;
     }
   catch (const std::exception &e)
@@ -3093,10 +3053,6 @@ SignalProcessor::Process (const Signal &signal)
       span.SetAttribute ("cortext.at_boundary", op_context.GetAtBoundary ());
       span.SetAttribute ("cortext.interrupt_allowed",
                          op_context.GetInterruptAllowed ());
-      span.SetAttribute ("cortext.threshold_T_dynamic",
-                         op_context.GetThresholdTDynamic ());
-      span.SetAttribute ("cortext.threshold_hysteresis",
-                         op_context.GetThresholdHysteresis ());
       span.SetAttribute ("cortext.effective_focus",
                          op_context.GetEffectiveFocus ());
 
@@ -3983,7 +3939,6 @@ SignalProcessor::CloseOpenUnits (
       close.mimetype = last->mime;
       OperationContext op (close, *context_, config_, store_.get (),
                            object_tx);
-      op.SetThresholdTDynamic (context_->T_dynamic);
       op.SetFlushRequired (true);
       op.SetAtBoundary (true);
       op.SetBoundaryScore (1.0);
@@ -4154,18 +4109,16 @@ SignalProcessor::PersistState (Transaction &tx)
   tx.Execute (
       "INSERT OR REPLACE INTO state "
       "(id, signals_processed, "
-      // Threshold state
-      "theta_dynamic, theta_target, hysteresis, "
       // Focus state
       "weight_relevance, attention_width, coverage_gain_floor, mismatch_weight, "
       // Sensitivity state
       "weight_novelty, weight_surprise, weight_valence, weight_arousal, "
-      "emotion_gain, score_gain, rate_target, "
+      "emotion_gain, score_gain, "
       // Emotion state
       "emotion_intensity, valence, arousal, "
       "flashbulb_rate, "
       // Rate control
-      "m_rate, rho_hat_prev, dt_ema, rate_ticks, last_rate_timestamp, reliability, "
+      "m_rate, dt_ema, last_rate_timestamp, "
       // Uncertainty
       "u_uncertainty, "
       "neuromod_ach, "
@@ -4186,11 +4139,10 @@ SignalProcessor::PersistState (Transaction &tx)
       // Blender matrices
       "blender_P_matrix) "
       "VALUES (1, ?, "
-      "?, ?, ?, "  // Threshold
       "?, ?, ?, ?, "  // Focus
-      "?, ?, ?, ?, ?, ?, ?, "  // Sensitivity
+      "?, ?, ?, ?, ?, ?, "  // Sensitivity
       "?, ?, ?, ?, "  // Emotion
-      "?, ?, ?, ?, ?, ?, "  // Rate control
+      "?, ?, ?, "  // Rate control
       "?, ?, "  // Uncertainty + modulators
       "?, ?, "  // Embedding prediction
       "?, ?, ?, ?, "  // Working memory
@@ -4201,23 +4153,19 @@ SignalProcessor::PersistState (Transaction &tx)
       "?)",  // Blender matrices
       {
         context_->signals_processed,
-        // Threshold state
-        context_->T_dynamic, context_->T_target, context_->hysteresis,
         // Focus state
         context_->weight_relevance, context_->attention_width,
         context_->coverage_gain_floor, context_->mismatch_weight,
         // Sensitivity state
         context_->weight_novelty, context_->weight_surprise,
         context_->weight_valence, context_->weight_arousal,
-        context_->emotion_gain, context_->score_gain, context_->rate_target,
+        context_->emotion_gain, context_->score_gain,
         // Emotion state
         context_->emotion_intensity_ewma, context_->valence_ewma,
         context_->arousal_ewma, context_->flashbulb_rate_ewma,
         // Rate control
-        context_->m_rate, context_->rho_hat_prev, context_->dt_ema,
-        context_->rate_ticks,
+        context_->m_rate, context_->dt_ema,
         static_cast<long long> (context_->last_rate_timestamp),
-        context_->reliability,
         // Uncertainty
         context_->u_t,
         context_->neuromod_ach,

@@ -72,7 +72,6 @@ public:
   struct ProcessorOutput
   {
     std::optional<double> composite_score;
-    std::optional<double> threshold;
     std::optional<bool> decision;
     double effective_focus = 0.0;
     double coherence = 0.0;

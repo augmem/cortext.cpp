@@ -1060,9 +1060,6 @@ context_to_json (const cortext::Cortext::Context &ctx,
       ctx.output.composite_score.has_value ()
           ? nlohmann::json (*ctx.output.composite_score)
           : nlohmann::json (nullptr) },
-    { "threshold",
-      ctx.output.threshold.has_value () ? nlohmann::json (*ctx.output.threshold)
-                                        : nlohmann::json (nullptr) },
     { "decision",
       ctx.output.decision.has_value () ? nlohmann::json (*ctx.output.decision)
                                        : nlohmann::json (nullptr) },

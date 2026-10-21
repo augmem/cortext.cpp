@@ -18,7 +18,7 @@ unit_at (int idx, int dim)
   return v;
 }
 #
-TEST_CASE ("UpdateSensitivity without centroids sets sane defaults and deltas",
+TEST_CASE ("UpdateSensitivity without centroids sets sane defaults",
            "[operations][sensitivity]")
 {
   Signal s;
@@ -31,9 +31,6 @@ TEST_CASE ("UpdateSensitivity without centroids sets sane defaults and deltas",
 
   OperationContext ctx (s, pctx, cfg);
 #
-  // Populate recent scores to create non-zero variance
-  pctx.recent_scores = { 0.1, 0.3, 0.9, 0.5, 0.7 };
-#
   UpdateSensitivity op;
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
@@ -41,10 +38,6 @@ TEST_CASE ("UpdateSensitivity without centroids sets sane defaults and deltas",
   REQUIRE (ctx.GetEmotionIntensity () == Catch::Approx (0.0));
   REQUIRE (ctx.GetValence () == Catch::Approx (0.5));
   REQUIRE (ctx.GetArousal () == Catch::Approx (0.0));
-#
-  // Deltas present
-  REQUIRE (ctx.GetDeltaThresholdEmotion ().has_value ());
-  REQUIRE (ctx.GetDeltaThresholdSensitivity ().has_value ());
 }
 #
 TEST_CASE (
@@ -77,81 +70,5 @@ TEST_CASE (
   op.Execute (ctx, cortext::testing::GetNullTransaction ());
 #
   REQUIRE (ctx.GetEmotionIntensity () > 0.0);
-  REQUIRE (ctx.GetDeltaThresholdEmotion ().has_value ());
-  // ΔT_emo should be non-positive (loosens thresholds)
-  REQUIRE (*ctx.GetDeltaThresholdEmotion () <= 0.0);
 }
 #
-TEST_CASE ("rate_target remains knob-derived constant", "[operations][sensitivity][rate]")
-{
-  // High-rate window: should not change rate_target
-  {
-    Signal s;
-    s.embedding = unit_at (0, 2);
-    s.timestamp = 1000;
-    ProcessorContext pctx;
-    SignalProcessor::Config cfg;
-    cortext::testing::RequireEncoder (cfg);
-    cfg.sensitivity = 0.6;
-    cfg.stability = 0.4;
-  
-    OperationContext ctx (s, pctx, cfg);
-    // Populate window with 1s intervals (ms timestamps)
-    uint64_t t = 900000;
-    for (int i = 0; i < 10; ++i)
-      {
-        pctx.write_rate_window_.Record (t);
-        t += 1000;
-      }
-    InitializeSensitivityPriors init;
-    init.Execute (ctx, cortext::testing::GetNullTransaction ());
-    UpdateSensitivity op;
-    op.Execute (ctx, cortext::testing::GetNullTransaction ());
-    REQUIRE (pctx.rate_target == Catch::Approx (pctx.base_rate_prior));
-  }
-  // Low-rate window: should still be the same
-  {
-    Signal s;
-    s.embedding = unit_at (0, 2);
-    s.timestamp = 2000;
-    ProcessorContext pctx;
-    SignalProcessor::Config cfg;
-    cortext::testing::RequireEncoder (cfg);
-    cfg.sensitivity = 0.6;
-    cfg.stability = 0.4;
-  
-    OperationContext ctx (s, pctx, cfg);
-    uint64_t t = 1800000;
-    for (int i = 0; i < 10; ++i)
-      {
-        pctx.write_rate_window_.Record (t);
-        t += 5000;
-      }
-    InitializeSensitivityPriors init;
-    init.Execute (ctx, cortext::testing::GetNullTransaction ());
-    UpdateSensitivity op;
-    op.Execute (ctx, cortext::testing::GetNullTransaction ());
-    REQUIRE (pctx.rate_target == Catch::Approx (pctx.base_rate_prior));
-  }
-  // Non-increasing timestamps should not matter
-  {
-    Signal s;
-    s.embedding = unit_at (0, 2);
-    s.timestamp = 3000;
-    ProcessorContext pctx;
-    SignalProcessor::Config cfg;
-    cortext::testing::RequireEncoder (cfg);
-    cfg.sensitivity = 0.5;
-    cfg.stability = 0.5;
-  
-    OperationContext ctx (s, pctx, cfg);
-    pctx.write_rate_window_.Record (100);
-    pctx.write_rate_window_.Record (100); // should be ignored
-    pctx.write_rate_window_.Record (101);
-    InitializeSensitivityPriors init;
-    init.Execute (ctx, cortext::testing::GetNullTransaction ());
-    UpdateSensitivity op;
-    op.Execute (ctx, cortext::testing::GetNullTransaction ());
-    REQUIRE (pctx.rate_target == Catch::Approx (pctx.base_rate_prior));
-  }
-}

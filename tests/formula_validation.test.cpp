@@ -157,105 +157,6 @@ TEST_CASE ("WRateSeconds follows spec: lerp(60, 300, T)",
 // 5.1.3 Learning Rate Functions (3 functions)
 // =============================================================================
 
-TEST_CASE ("AlphaT follows spec: α_min_T + (1−T)×α_span_T×u", "[formula][knobs][alpha]")
-{
-  // AlphaT = 0.02 + (1-T)*0.18*u_t
-
-  // At u_t=0, reduces to α_min_T
-  REQUIRE (AlphaT (0.0, 0.0) == Catch::Approx (0.02));
-  REQUIRE (AlphaT (1.0, 0.0) == Catch::Approx (0.02));
-
-  // At u_t=1, T=0: 0.02 + 1*0.18*1 = 0.20
-  REQUIRE (AlphaT (0.0, 1.0) == Catch::Approx (0.20));
-
-  // At u_t=1, T=1: 0.02
-  REQUIRE (AlphaT (1.0, 1.0) == Catch::Approx (0.02));
-
-  // Verify higher T (more stable) means lower alpha at high uncertainty
-  REQUIRE (AlphaT (0.2, 0.8) > AlphaT (0.8, 0.8));
-}
-
-TEST_CASE ("ComputeMaturity follows spec: 1 - exp(-count/TauM(T))",
-           "[formula][knobs][maturity]")
-{
-  // ComputeMaturity = 1 - exp(-count / TauM(T))
-
-  // At count=0, maturity should be 0
-  REQUIRE (ComputeMaturity (0, 0.0) == Catch::Approx (0.0));
-  REQUIRE (ComputeMaturity (0, 1.0) == Catch::Approx (0.0));
-
-  // At high count, maturity approaches 1
-  REQUIRE (ComputeMaturity (10000, 0.0) == Catch::Approx (1.0).epsilon (0.01));
-  REQUIRE (ComputeMaturity (10000, 1.0) == Catch::Approx (1.0).epsilon (0.01));
-
-  // With T=0 (TauM=10), count=10: 1 - exp(-1) ≈ 0.632
-  REQUIRE (ComputeMaturity (10, 0.0) == Catch::Approx (0.632).epsilon (0.01));
-
-  // With T=1 (TauM=200), count=200: 1 - exp(-1) ≈ 0.632
-  REQUIRE (ComputeMaturity (200, 1.0) == Catch::Approx (0.632).epsilon (0.01));
-}
-
-TEST_CASE ("TMin follows spec: lerp(0.01, 0.05, maturity)",
-           "[formula][knobs][maturity]")
-{
-  // TMin = lerp(0.01, 0.05, maturity)
-
-  // At low maturity, TMin is near 0.01
-  REQUIRE (TMin (0, 0.5) == Catch::Approx (0.01));
-
-  // At high maturity (count >> tau_m), TMin approaches 0.05
-  REQUIRE (TMin (10000, 0.5) == Catch::Approx (0.05).epsilon (0.01));
-
-  // Verify explicit formula
-  for (int count : { 1, 10, 100, 1000 })
-    {
-      double T = 0.5;
-      double maturity = ComputeMaturity (count, T);
-      double expected = 0.01 + (0.05 - 0.01) * maturity;
-      REQUIRE (TMin (count, T) == Catch::Approx (expected));
-    }
-}
-
-TEST_CASE ("TMax follows spec: lerp(0.99, 0.95, maturity)",
-           "[formula][knobs][maturity]")
-{
-  // TMax = lerp(0.99, 0.95, maturity)
-
-  // At low maturity, TMax is near 0.99
-  REQUIRE (TMax (0, 0.5) == Catch::Approx (0.99));
-
-  // At high maturity, TMax approaches 0.95
-  REQUIRE (TMax (10000, 0.5) == Catch::Approx (0.95).epsilon (0.01));
-
-  // TMin < TMax always
-  for (int count : { 0, 1, 10, 100, 1000, 10000 })
-    {
-      for (double T : { 0.0, 0.5, 1.0 })
-        {
-          REQUIRE (TMin (count, T) < TMax (count, T));
-        }
-    }
-}
-
-TEST_CASE ("MaxDeltaTPerMin follows spec: lerp(0.30, 0.10, maturity)",
-           "[formula][knobs][maturity]")
-{
-  // MaxDeltaTPerMin = lerp(0.30, 0.10, maturity)
-
-  // At low maturity, higher delta allowed (0.30)
-  REQUIRE (MaxDeltaTPerMin (0, 0.5) == Catch::Approx (0.30));
-
-  // At high maturity, lower delta allowed (0.10)
-  REQUIRE (MaxDeltaTPerMin (10000, 0.5) == Catch::Approx (0.10).epsilon (0.01));
-
-  // Monotonic in count: more mature = less delta
-  REQUIRE (MaxDeltaTPerMin (10, 0.5) > MaxDeltaTPerMin (1000, 0.5));
-}
-
-// =============================================================================
-// 5.1.5 Half-Life & Decay Functions (9 functions)
-// =============================================================================
-
 TEST_CASE ("Reinforcement edge-maintenance calibrations remain bounded",
            "[formula][knobs][reinforcement]")
 {
@@ -370,31 +271,6 @@ TEST_CASE ("WM eviction pressure derives from F/S/T",
 // 5.1.7 Clustering & Consolidation Functions (10 functions)
 // =============================================================================
 
-TEST_CASE ("BaseRatePrior follows spec: lerp(0.2, 5.0, S)",
-           "[formula][knobs][consolidation]")
-{
-  // BaseRatePrior = lerp(0.2, 5.0, S)
-  REQUIRE (BaseRatePrior (0.0) == Catch::Approx (0.2));
-  REQUIRE (BaseRatePrior (1.0) == Catch::Approx (5.0));
-  REQUIRE (BaseRatePrior (0.5)
-           == Catch::Approx (SensitivityExpected (0.2, 5.0, 0.5)));
-
-  // Monotonic
-  REQUIRE (BaseRatePrior (0.3) < BaseRatePrior (0.7));
-}
-
-TEST_CASE ("BaseBandPrior follows spec: lerp(0.02, 0.25, T)",
-           "[formula][knobs][consolidation]")
-{
-  // BaseBandPrior = lerp(0.02, 0.25, T)
-  REQUIRE (BaseBandPrior (0.0) == Catch::Approx (0.02));
-  REQUIRE (BaseBandPrior (1.0) == Catch::Approx (0.25));
-  REQUIRE (BaseBandPrior (0.5) == Catch::Approx (0.135));
-
-  // Monotonic
-  REQUIRE (BaseBandPrior (0.3) < BaseBandPrior (0.7));
-}
-
 TEST_CASE ("LabelFrequencyThreshold follows spec: lerp(5, 15, T)",
            "[formula][knobs][consolidation]")
 {
@@ -443,28 +319,6 @@ TEST_CASE ("MinEpisodesForConcept follows spec: lerp(2, 5, T)",
 // 5.1.12 Multi-Parameter Functions (5 functions)
 // =============================================================================
 
-TEST_CASE ("TPrior follows spec: lerp(0.10, 0.30, T) * (1 - 0.3 * S)",
-           "[formula][knobs][multi]")
-{
-  // TPrior = lerp(0.10, 0.30, T) * (1 - 0.3 * S)
-
-  // At T=0, S=0: 0.10 * 1 = 0.10
-  REQUIRE (TPrior (0.5, 0.0, 0.0) == Catch::Approx (0.10));
-
-  // At T=1, S=0: 0.30 * 1 = 0.30
-  REQUIRE (TPrior (0.5, 0.0, 1.0) == Catch::Approx (0.30));
-
-  // At T=0, S=1: 0.10 * 0.7 = 0.07
-  REQUIRE (TPrior (0.5, 1.0, 0.0) == Catch::Approx (0.07));
-
-  // At T=1, S=1: 0.30 * 0.7 = 0.21
-  REQUIRE (TPrior (0.5, 1.0, 1.0) == Catch::Approx (0.21));
-
-  REQUIRE (TPrior (0.5, 0.5, 0.5)
-           == Catch::Approx (Lerp (0.10, 0.30, 0.5)
-                             * (1.0 - 0.3 * SensitivityBias (0.5))));
-}
-
 TEST_CASE ("TargetPrecision follows spec: lerp(0.6, 0.9, T) * (0.5 + "
            "0.5*F)",
            "[formula][knobs][multi]")
@@ -491,18 +345,6 @@ TEST_CASE ("TargetPrecision follows spec: lerp(0.6, 0.9, T) * (0.5 + "
           REQUIRE (TargetPrecision (F, T) == Catch::Approx (expected));
         }
     }
-}
-
-TEST_CASE ("PriorMass follows spec: lerp(2, 32, T)",
-           "[formula][knobs][multi]")
-{
-  // PriorMass = round(lerp(2, 32, T))
-  REQUIRE (PriorMass (0.0) == 2);
-  REQUIRE (PriorMass (1.0) == 32);
-  REQUIRE (PriorMass (0.5) == 17);
-
-  // Monotonic
-  REQUIRE (PriorMass (0.3) < PriorMass (0.7));
 }
 
 TEST_CASE ("GraphDepth follows spec: lerp(3.0, 2.0, T)",
