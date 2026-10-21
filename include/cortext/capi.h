@@ -181,9 +181,6 @@ extern "C"
     double sensitivity;
     double stability;
     int affect_interrupt;
-    int affect_retrieval;
-    int reinforcement_enabled;
-    int sequential_edges_enabled;
     int signal_filter_audio_enabled;
     int signal_filter_image_enabled;
     int signal_filter_text_enabled;

@@ -80,7 +80,6 @@ RunReinforcementUpdate (double focus, double sensitivity, double stability,
   cfg.focus = focus;
   cfg.sensitivity = sensitivity;
   cfg.stability = stability;
-  cfg.reinforcement_enabled = true;
 
   auto signal = MakeSignal (10);
   OperationContext ctx (signal, pctx, cfg, store.get ());

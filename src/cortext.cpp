@@ -2893,9 +2893,6 @@ struct Cortext::Impl
     pcfg.sensitivity = cfg.sensitivity;
     pcfg.stability = cfg.stability;
     pcfg.affect_interrupt = cfg.affect_interrupt;
-    pcfg.affect_retrieval = cfg.affect_retrieval;
-    pcfg.reinforcement_enabled = cfg.reinforcement_enabled;
-    pcfg.sequential_edges_enabled = cfg.sequential_edges_enabled;
     pcfg.encoder = encoder.get ();
     pcfg.clock = clock;
     pcfg.late_interaction = late_interaction.get ();

@@ -102,8 +102,6 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
         cmd.append(f"--interleave={case['interleave']}")
     if case.get("affect_mode"):
         cmd.append(f"--affect-mode={case['affect_mode']}")
-    if case.get("reinforcement_mode"):
-        cmd.append(f"--reinforcement-mode={case['reinforcement_mode']}")
     if args.consolidate_cycles > 0:
         cmd.append("--consolidate")
         cmd.append(f"--consolidate-cycles={args.consolidate_cycles}")
@@ -151,7 +149,6 @@ def run_case(case: dict, args: argparse.Namespace, out_root: Path, summary_rows:
     row = {
         "name": case["name"],
         "affect_mode": case.get("affect_mode", "all"),
-        "reinforcement_mode": case.get("reinforcement_mode", "on"),
         "focus": case["focus"],
         "sensitivity": case["sensitivity"],
         "stability": case["stability"],
@@ -267,7 +264,6 @@ def main() -> int:
     parser.add_argument("--multi-total", type=int, default=800)
     parser.add_argument("--consolidate-cycles", type=int, default=2)
     parser.add_argument("--affect-mode", default="all")
-    parser.add_argument("--reinforcement-mode", default="on")
     parser.add_argument("--case-max-conversations", type=int, default=0)
     parser.add_argument("--case-max-turns", type=int, default=0)
     parser.add_argument("--case-max-total", type=int, default=0)
@@ -298,7 +294,6 @@ def main() -> int:
         "interleave": 1,
         "reuse": True,
         "affect_mode": args.affect_mode,
-        "reinforcement_mode": args.reinforcement_mode,
     }
     if not args.no_baseline:
         run_case(base_case, args, out_root, summary_rows)

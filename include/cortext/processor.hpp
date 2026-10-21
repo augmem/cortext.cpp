@@ -40,9 +40,6 @@ public:
     double sensitivity = 0.5;
     double stability = 0.5;
     bool affect_interrupt = true;
-    bool affect_retrieval = true;
-    bool reinforcement_enabled = true;
-    bool sequential_edges_enabled = true;
 
     Encoder *encoder = nullptr; // Required for embedding-based operations
     std::shared_ptr<Clock> clock;

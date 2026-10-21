@@ -82,9 +82,6 @@ config_from_c (const cortext_config *cfg)
   cpp_cfg.sensitivity = cfg->sensitivity;
   cpp_cfg.stability = cfg->stability;
   cpp_cfg.affect_interrupt = cfg->affect_interrupt != 0;
-  cpp_cfg.affect_retrieval = cfg->affect_retrieval != 0;
-  cpp_cfg.reinforcement_enabled = cfg->reinforcement_enabled != 0;
-  cpp_cfg.sequential_edges_enabled = cfg->sequential_edges_enabled != 0;
   if (cfg->struct_size
       >= offsetof (cortext_config, signal_filter_audio_enabled)
              + sizeof (cfg->signal_filter_audio_enabled))
@@ -1298,9 +1295,6 @@ extern "C"
     cfg->sensitivity = defaults.sensitivity;
     cfg->stability = defaults.stability;
     cfg->affect_interrupt = defaults.affect_interrupt ? 1 : 0;
-    cfg->affect_retrieval = defaults.affect_retrieval ? 1 : 0;
-    cfg->reinforcement_enabled = defaults.reinforcement_enabled ? 1 : 0;
-    cfg->sequential_edges_enabled = defaults.sequential_edges_enabled ? 1 : 0;
     if (field_fits (offsetof (cortext_config, signal_filter_audio_enabled),
                     sizeof (cfg->signal_filter_audio_enabled)))
       cfg->signal_filter_audio_enabled
