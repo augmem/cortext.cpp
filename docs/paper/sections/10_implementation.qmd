@@ -360,8 +360,8 @@ malformed, stale, duplicate, or over-capacity metadata invalidates the route.
 Graph and memory rows remain authoritative in SQLite.
 
 Sparse HNSW activation is candidate generation rather than an
-eligibility-complete seed surface. Routing nodes such as `ASSOCIATION` memories
-may consume activated slots and are then removed by the public long-term seed
+eligibility-complete seed surface. Routing nodes such as legacy `ASSOCIATION`
+memories in older stores may consume activated slots and are then removed by the public long-term seed
 predicate. If that filtering leaves fewer than the requested candidate limit,
 the operation discards the underfilled sparse proposal and executes the
 existing exact SQL seed path. Consequently the fixed sparse envelope is not
@@ -375,29 +375,10 @@ one persisted route (each seal commits to SQLite before its rows are replaced
 in memory) rather than acting as a second write path, and it contains no
 modality or source-id predicate.
 
-Emotional propagation uses the same first-source-wins semantics while avoiding
-duplicate downstream work. Its breadth-first kernel carries up to 64 source
-ordinals in one bit mask. For each reached embedding, the kernel records only
-the lowest source ordinal and that source's first (therefore shortest) positive
-depth; after all batches, it emits one winning pair per embedding in
-deterministic source/depth/identity order. Separate counters record all
-source--embedding reachability pairs and all physical adjacency visits, so
-winner collapse does not relabel unbounded traversal as bounded work. The
-optimization is independent of modality and source-id labels and does not
-change persistence or add a write path.
-
-The bounded-cascade experiment adds three independent F/S/T-derived limits
-around that exact winner rule. Its maintained source-priority snapshot holds
-at most the public routing budget $5C$; one cascade inspects no more than that
-snapshot and executes at most $B$ eligible sources. The shared traversal stops
-before physical adjacency visit $5C+1$, and the existing enqueue stage emits at
-most $A=2C+2B$ embedding updates. SQL fallback materializes at most the same
-$5C$ source prefix. Inspection, accepted-source, physical-edge, winning-pair,
-and update counts remain distinct, with their resolved limits recorded on each
-profiled event. The snapshot ordering depends only on timestamp and memory
-identity; no source-id or modality label participates. These limits remain
-private experiment hooks until the complete quality, plateau, restart, and
-knob-ablation contracts pass.
+Earlier builds also bounded the emotional cascade's breadth-first propagation
+with a first-source-wins winner collapse and three F/S/T-derived limits. The
+cascade was removed with emotional consolidation (@sec-negative), and these
+limits went with it; Appendix E keeps the measurements.
 
 The cycle auditor classifies retrieval independently from whole-engine process
 shape. It selects retrieval-active events from explicit route activity, queue,
@@ -552,7 +533,7 @@ unpublished build cannot publish until both ordered backfill and the journal are
 complete. Thus a busy active route or legacy-store migration cannot turn the
 sparse index into a second unbounded write path.
 
-Normal writes and reconsolidations append only their memory identities to the
+Normal writes append only their memory identities to the
 durable journal. A successful seal writes changed nodes and knob-bounded
 reciprocal neighbors, advances graph metadata, and clears only its staged root
 identities in the same SQLite transaction. A full neighbor list admits a
@@ -663,6 +644,7 @@ FeedbackStage:
   memory usage counters, working memory, accumulator reset
 ```
 
+<!-- PRUNE: update the CoreStage list above (metrics, neuromodulators, adaptive metric weights, mood, thresholding) to the final removal list. -->
 Probe mode intentionally runs only `CoreStage` and `RetrievalStage` so replay
 probes can inspect retrieval without mutating the durable store.
 
@@ -682,6 +664,10 @@ engine ablation, together with their private emotional-metadata cache, fixed
 point and topology footprint (@sec-emotional-consolidation).
 
 ## Retrieval Implementation
+
+@sec-retrieval and @sec-hydration specify the v5 retrieval and hydration
+algorithms. This section records implementation detail and stage
+measurements behind them.
 
 Read-only (ephemeral) text queries add a lexical seed channel to the vector
 seeds. Each stored long-term text memory is indexed in a contentless SQLite
@@ -731,14 +717,14 @@ mechanism, not a benchmark score.
 
 Queries rerank the head of the fused candidate pool with a learned
 late-interaction model over the frozen AIST encoder
-(`models/AIST-87M-GGUF/AIST-87M-LI.gguf`, 0.2M parameters,
+(`models/AIST-87M-GGUF/AIST-87M-LI.gguf`, 102,469 weights or 0.10M parameters,
 `src/models/aist_late_interaction.cpp`; training in `tools/reranker`). Every
 item, in any modality, becomes a set of unit vectors in one 64-d space. The
 first source is its AIST position features: text token hidden states and
 12x12 image patches, each tower with its own linear map. The second is its
 stored 256-d retrieval vector, through one map shared by all modalities. A
 stored signal keeps 16 spherical k-means codes of its positions as int8
-(table `memory_signal_li_codes`, schema migration 54, about 1.4 KB per stored
+(table `memory_signal_li_codes`, schema migration 54, a 1,028-byte blob per stored
 payload). A query keeps all of its positions, each with a learned gate weight.
 A member scores the gate-weighted mean over query vectors of the best cosine
 to its own vectors (MaxSim); a memory scores a soft maximum over its first
@@ -802,8 +788,8 @@ with the block). Query p95 at 100K / 1M / 10M stays within
 0.98 / 0.96 / 1.14 of the engine without the channel. A directive is stated once and must shape answers long after it
 falls out of query similarity: on BEAM the share of instruction-following
 gold turns (the instruction and its acknowledgement) in the 8k-token packet
-was 0.44 / 0.26 / 0.00 at 100K / 1M / 10M tokens before, and 0.88 / 0.79 /
-0.43 after;
+was 0.44 / 0.26 / 0.00 at 100K / 1M / 10M tokens before, and 0.86 / 0.81 /
+0.44 after (PR #28, standing block b5447e25 against the engine without it);
 gold-turn share in that packet rose by 0.070 / 0.075 / 0.053 overall, with no
 other category losing more than 0.01.
 
@@ -899,11 +885,12 @@ supersession predicates to that subset before evaluating vector distance, so
 signal-only historical embeddings do not enter the distance kernel. This is an
 execution-only index: it does not change the eligible set, distance expression,
 tie order, family collapse, or source and modality semantics.
-An internal execution sidecar, keyed by processor-context identity and not
-part of the public processor layout, now holds only the retrieval-inhibition
-active epoch described below. Its earlier supersession-target and
-emotional-metadata portions served supersession exclusion and the emotional
-cascade, both removed by the ablation study.
+An internal execution sidecar is keyed by processor-context identity and is
+not part of the public processor layout. Its earlier contents (the
+retrieval-inhibition active epoch, the supersession-target set and the
+emotional-metadata cache) served retrieval competition, supersession
+exclusion and the emotional cascade. All three were removed by the ablation
+study.
 The fallback executes a demand-driven sequence of ordered SQL pages
 over the current and historical vector surfaces. Each page joins memory
 metadata and applies kind and timestamp eligibility before
@@ -994,9 +981,10 @@ emitted.
 
 `Retention::Ephemeral` executes this read path inside a transaction, assembles
 the retrieval result, rolls back the transaction and object transaction, and
-restores the exact pre-query processor snapshot. Retrieval-time reconstruction,
-usage reinforcement, reconsolidation, and strength mutation are skipped for
-that retention policy, so querying cannot change durable rank state.
+restores the exact pre-query processor snapshot, so querying cannot change
+durable state. Earlier builds also had to skip retrieval-time reconstruction,
+usage reinforcement, reconsolidation and strength mutation for queries; those
+mechanisms no longer exist.
 
 Schema migrations 25--27 add `consolidation_rate_floor`,
 `consolidation_rate_peak`, initialization, and the armed latch to the singleton

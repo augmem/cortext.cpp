@@ -1,6 +1,6 @@
 # Late-interaction reranker (training and export)
 
-`models/AIST-87M-GGUF/AIST-87M-LI.gguf` is a 0.2M-parameter learned reranker over the frozen
+`models/AIST-87M-GGUF/AIST-87M-LI.gguf` is a learned reranker with 102,469 float32 weights (410 KB) over the frozen
 AIST-87M encoder. Queries use it to reorder the head of the candidate pool (top 64) before the
 packet is cut. The engine side is `src/models/aist_late_interaction.{hpp,cpp}`; the query step is
 `RerankLateInteraction` in `src/operations/graph_retrieval.cpp`.

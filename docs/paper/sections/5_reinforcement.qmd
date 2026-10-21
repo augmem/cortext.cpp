@@ -1,4 +1,11 @@
-# Reinforcement and Decay Dynamics {#sec-reinforcement}
+# Reinforcement, Decay and Feedback (Removed) {#sec-reinforcement}
+
+This section is a removal record. Earlier versions of the architecture
+reinforced retrieved memories, decayed and evicted weak ones, and fed
+retrieval outcomes back into the knob-derived controls. The 2026-10 ablation
+removed all of it (@sec-negative). What remains is a usage counter that
+backs public fields. Nothing in this section ranks, gates or deletes memories
+in the current engine.
 
 ## Memory Strength and Eviction (Removed) {#sec-memory-strength}
 
@@ -10,7 +17,8 @@ The engine ablation study (2026-10) removed the traces, the reinforcement and de
 
 ## Contextual Gain (Definitions)
 
-Contextual gain is a per-retrieval signal used by multiple feedback loops:
+Contextual gain was the per-retrieval signal of the removed feedback loops below. Usage detection still computes it, but no operation reads it:
+<!-- PRUNE: contextual_gain is computed in DetectMemoryUsage with no reader; drop this subsection if chore/prune-write-only removes it. -->
 
 ```
 contextual_gain_t(m) ← cos(μ_acc, m.embedding)    # if m was retrieved and used (range [−1, 1])

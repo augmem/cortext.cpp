@@ -1,0 +1,133 @@
+# System Overview {#sec-overview}
+
+Cortext turns a stream of signals (text turns, audio chunks, images) into a
+SQLite store, and turns a later query into a small, budgeted packet of
+evidence. No language model runs on either path. The only learned components
+are the frozen AIST-87M multimodal encoder and a 0.1M-parameter
+late-interaction reranker over the encoder's per-position features. This
+section gives the whole pipeline in one place. The sections after it specify
+each stage.
+
+## Write Path
+
+```text
+signal (any modality)
+  -> AIST embedding (256-d shared space) + per-position features
+  -> per-source accumulator: running centroid, drift, coherence, surprisal
+  -> online boundary segmentation (Bayesian change-point posterior)
+  -> on a boundary: store the closed unit
+       memories row (representative embedding e_rep)
+       signals rows + object-store payloads (BLAKE3 content ids)
+       memory_signal_vectors: one shared-space vector per stored payload
+       memory_signal_li_codes: up to 16 int8 late-interaction codes per text or image payload
+       memory_text_fts: FTS5 keyword index over long-term text
+       standing_signals: lasting directives
+       supersedes edges to similar older memories
+  -> working-memory admission (bounded slot set)
+```
+
+1. **Segmentation decides what a memory is** (@sec-thresholding). Each source
+   stream keeps an open unit. A calibrated boundary posterior over surprisal,
+   drift, within-unit coherence, topic shift and inter-arrival gaps closes the
+   unit at a natural event boundary. A capacity ceiling, a pressure ratio, a
+   salience spike, an inactivity boost or an explicit `Flush()` can also close
+   it.
+2. **Every closed unit is stored.** The write rule is
+   `write_memory = force_write ∨ should_flush`. An earlier score threshold
+   discarded finished units and cost 7–11% of gold evidence turns
+   (@sec-write-pacing). Retention policies choose who closes units: `Natural`
+   leaves it to the segmenter, `Durable` closes one per call, `Boundary`
+   forces the edge only, and `Ephemeral` stores nothing.
+3. **A stored unit is indexed at three granularities.** The unit has one
+   pooled vector. Each of its member signals keeps its own shared-space
+   vector. Each member payload also keeps late-interaction codes. Its text
+   enters the keyword index.
+
+## Read Path
+
+```text
+Ephemeral query (any modality; optional reference time T, as_of)
+  -> dense unit seeds        (sparse route or exact; family collapse)
+  -> member seeds            (best member cosine, max with unit cosine)
+  -> keyword seeds           (FTS5 BM25, text queries)
+  -> cross-modal seeds       (per-modality z-gated lists)
+  -> temporal seeds          (nearest to T, when T is set)
+  -> reciprocal-rank fusion  (k = 60)
+  -> neighbour deferral
+  -> late-interaction MaxSim rerank of the top 64
+  -> cut to the output size (11 at neutral knobs)
+  -> hydration: contiguity, superseded predecessors, superseding successors,
+                standing block, per-blob timestamps
+  -> evidence fitting to the caller's byte budget
+```
+
+Retrieval (@sec-retrieval) is multi-granularity and hybrid. Dense seeds score
+whole units. Member seeds rescue a unit whose pooled vector sits between its
+members. BM25 catches rare names and numbers. Cross-modal lists correct for
+the modality gap, and the temporal channel answers "around then" queries.
+Hydration (@sec-hydration) then rebuilds what a person would recall around
+each hit: the adjacent turns, the earlier version of an updated fact, the
+newer restatement, and the standing directives. Finally it fits the packet to
+the reader's budget.
+
+## Where the Three Knobs Still Act
+
+Focus, Sensitivity and Stability (F, S, T) began as the core of the
+architecture. Every rate, threshold and decay was derived from them, and a
+homeostatic threshold controller gated persistence. In v5 they are a
+macro-control surface over a calibrated default profile. The defaults
+(F = S = T = 0.5) are the evaluated operating point. The knobs still change
+behavior through closed-form maps:
+
+| Stage | Knob-derived quantities |
+|---|---|
+| segmentation | boundary hazard, change-point threshold `b_thresh(F,S)`, capacity ceiling `max_signals(F,S,T)`, pressure ratio, inactivity policy |
+| spike bypass | margin over θ_dynamic; θ_dynamic itself comes from the composite-score controller (@sec-core-adaptation, @sec-structural-metrics) |
+| working memory | capacity 15–27 slots (21 at neutral), admission weights, chunk budget |
+| retrieval breadth | seed count (37 at neutral), seed search breadth (345), output size (11) |
+| supersession | similarity band, duplicate threshold, edge cap |
+| streaming gate | pacing thresholds and interrupt-gate thresholds (@sec-interrupt) |
+| sparse route | capacities $C$, $B$, $A$ (@sec-optimization) |
+| maintenance hints | throughput trough fraction and escalation (@sec-consolidation) |
+
+The v5 recall machinery is not knob-derived. Its constants were set by
+ablation and hill-climbing on long-horizon evaluations:
+
+* RRF k = 60 and the channel limits;
+* the late-interaction depth of 64;
+* the contiguity, supersession and standing budgets;
+* the 480-byte media charge.
+
+A reader should not expect turning a knob to retune them.
+
+The composite-score stack (12 metrics, recursive-least-squares blending,
+emotion and mood deltas, the homeostatic controller) still runs per signal.
+Its outputs now have three consumers: the spike-bypass threshold, the window
+score that ranks units for working-memory admission, and the score variance
+inside the uncertainty estimate. None of them gates whether a unit is stored.
+
+## What Was Removed
+
+The 2026-10 leave-one-out ablation (@sec-negative) removed the bio-inspired
+lifecycle mechanisms that earlier versions of this paper presented as the
+architecture's core:
+
+* multi-timescale strength traces, decay and strength-based eviction;
+* reconsolidation drift and retrieval-time reconstruction;
+* retrieval-induced forgetting (lateral inhibition);
+* clustering consolidation into `ASSOCIATION` centroids, and graph expansion;
+* synaptic tagging and capture;
+* emotional consolidation and the emotional cascade;
+* the NE-like and DA-like neuromodulators, effect scales and the
+  encode/retrieve oscillator;
+* meta-learned knob priors;
+* predictive pre-activation;
+* pattern-separation sparse keys and the procedural lane;
+* Soft Anchors;
+* serial-position effects;
+* the focus, sensitivity, stability and influence feedback loops.
+
+Each was either inert at the default knobs, leaving packets byte-identical, or
+measurably harmful once made to fire. Later sections keep a short record of
+each removed mechanism where it used to live, so a reader can see what was
+tried. None of them describes current behavior.

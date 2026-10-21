@@ -1,5 +1,14 @@
 # Structural Metrics and Composite Scoring {#sec-structural-metrics}
 
+Two groups of signals are defined here. The embedding-derived signals
+(structural coherence, focus spread, instantaneous drift and EMA prediction
+error) feed boundary segmentation (@sec-thresholding) and the streaming gate
+(@sec-interrupt). The composite score built from the 12 metrics below has
+the narrower consumers listed in @sec-core-adaptation: the spike-bypass
+threshold, working-memory admission and the uncertainty estimate. It no
+longer gates storage.
+<!-- PRUNE: chore/prune-write-only may remove the RLS blender and some CoreStage metrics; the composite-score part of this section is the spot to cut. -->
+
 Context definitions (used throughout Table 1 and structural metrics):
 ```
 recent_context ← tail(signal_stream, n_ctx(T))  # signal_stream stores μ_acc
@@ -25,7 +34,7 @@ else:
 
 High structural coherence (low variance in similarities) indicates the current accumulator centroid fits consistently with context. The effective Focus is modulated: F_eff = F × (0.5 + 0.5 × coherence_struct_t).
 
-**Effective Focus usage:** F_eff is a diagnostic modulation of Focus. Unless a formula explicitly references F_eff, the specification uses the midpoint‑biased knobs F̃ and S̃ (see Section 1) for all knob‑derived controls and Table 1 metric formulas.
+**Effective Focus usage:** F_eff is a diagnostic modulation of Focus. Unless a formula explicitly references F_eff, the specification uses the midpoint‑biased knobs F̃ and S̃ (see @sec-math) for all knob‑derived controls and Table 1 metric formulas.
 
 ### Focus Spread {#sec-focus-spread}
 

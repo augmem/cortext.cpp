@@ -1,174 +1,20 @@
-# Dynamic Thresholding and Homeostatic Control {#sec-thresholding}
+# Online Segmentation and the Write Path {#sec-thresholding}
 
-The write gate compares composite scores against an adaptive threshold θ_dynamic (written as theta_dynamic when referring to the recorded variable). This section details the threshold evolution algorithm incorporating Bayesian prior-evidence blending and homeostatic rate control.
+The write path decides what a memory is. Each source stream keeps one open
+unit. A calibrated change-point posterior closes the unit at a natural event
+boundary, and every closed unit is stored. No language model segments,
+summarizes or filters the stream. The inputs are embedding statistics
+defined in @sec-structural-metrics: surprisal against an EMA predictor,
+instantaneous drift, within-unit coherence, topic shift against the temporal
+context, and inter-arrival gaps.
 
-**Knob note:** F and S here refer to midpoint‑biased values (F̃, S̃) from Section 1.
+The section first specifies segmentation and the write commit. It then
+specifies the dynamic threshold θ_dynamic, which no longer gates persistence:
+its only remaining consumer is the spike-bypass margin.
 
-## Prior-Evidence Blending
+**Knob note:** F and S here refer to midpoint‑biased values (F̃, S̃) from @sec-math.
 
-The threshold prior derives from knob settings:
-
-```
-θ_prior(F, S, T) = lerp(0.10, 0.30, T) × (1 − 0.3S)
-```
-
-Observed evidence comes from the 90th percentile of recent scores:
-
-```
-score_history_cap(T) = round(lerp(512, 1536, T))
-score_stream ← tail(score_stream, max(win_score(T), score_history_cap(T)))
-recent_scores ← tail(score_stream, win_score(T))
-if |recent_scores| == 0:
-    observed_p90 ← θ_prior  # no evidence yet
-else:
-    observed_p90 ← percentile(recent_scores, 90)
-```
-
-Prior and evidence masses weight the blend:
-
-```
-ρ_prior ← prior_mass(T) = round(lerp(2, 32, T))
-ρ_obs ← u(t) × |recent_scores|
-```
-
-The target threshold blends prior and evidence:
-
-```
-θ_target ← (ρ_prior × θ_prior + ρ_obs × observed_p90) /
-            max(ε, ρ_prior + ρ_obs)
-```
-
-High Stability increases prior mass, making the system more resistant to observed deviations. High uncertainty increases evidence mass, allowing faster adaptation to volatile conditions.
-
-## Homeostatic Rate Control
-
-The controller maintains write rates near the target setpoint through continuous-time estimation with effective sample size (ESS) reliability weighting.
-
-### Rate Estimation
-
-```
-Δt ← now_s() − to_s(last_rate_timestamp)
-dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
-Δt ← max(Δt, dt_min(T))
-τ_dt(T) = lerp(0.5, 2.0, T)
-α_dt ← 1 − exp(−Δt / τ_dt(T))
-dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
-dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
-dt_base ← max(dt_ema, dt_floor(T))
-```
-
-The rate time constant scales with Stability:
-
-```
-rate_tau_exponent(T) = 3T
-τ_rate ← max(2^rate_tau_exponent(T) × dt_base, dt_floor(T))
-α ← 1 − exp(−Δt / τ_rate)
-```
-
-Instantaneous rate estimation with bias correction. Δwrites is the binary indicator (0 or 1) of whether a write occurred during the current timestep:
-
-```
-Δwrites ← 1 if write_memory else 0  # binary write event
-```
-Normative note (MUST): Δwrites is computed from the current step's write_memory decision. Rate state updates occur after the write decision and affect subsequent timesteps.
-```
-ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
-m_rate_t ← (1 − α) × m_rate + α × ρ_inst
-denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
-ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
-m_rate ← m_rate_t
-rho_hat_prev ← ρ_hat_t
-rate_ticks ← rate_ticks + 1
-last_rate_timestamp ← now_ms()  # update after rate computation
-```
-
-### Effective Sample Size
-
-ESS estimates the effective number of independent samples in the EMA, using a heuristic inspired by @liu1998sequential:
-
-```
-β ← max(0, 1 − α)
-ESS_cap(T) = lerp(30, 120, T)
-ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
-reliability ← 1 − exp(−ESS × (1 − T))
-```
-
-High Stability dampens reliability, preventing aggressive corrections in conservative regimes.
-
-### Homeostatic Correction
-
-The rate error drives threshold adjustment. The κ_* gains are derived from the knobs to avoid fixed behavioral constants:
-
-Normative note (MUST): rho_hat_prev is stored state entering the timestep. After the write decision, the rate-state update computes ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step (see Appendix D).
-
-```
-rate_error ← tanh((rho_hat_prev − rate_target) /
-                  max(rate_target, ε))
-κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
-cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
-Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
-                  (1 − maturity(t)) × rate_error,
-                  −cap_homeo(F,S,T), +cap_homeo(F,S,T))
-```
-
-The correction scales with reliability and is attenuated by both Stability and maturity, ensuring conservative, mature systems make minimal homeostatic adjustments.
-
-### Sensitivity-Based Threshold Adjustment
-
-Sensitivity modulates threshold based on recent score volatility:
-
-```
-recent_scores ← tail(score_stream, win_score(T))
-if |recent_scores| < 2:
-    σ_scores ← 0
-else:
-    σ_scores ← std(recent_scores)
-κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
-cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
-σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
-Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
-                −cap_sens(F,S,T), +cap_sens(F,S,T))
-```
-
-High score variance with high Sensitivity lowers threshold, capturing more volatile signals.
-
-### Precision-Based Threshold Adjustment
-
-Focus-driven precision tightens threshold when structural coherence is high:
-
-```
-κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
-cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
-Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
-                −cap_prec(F,S,T), +cap_prec(F,S,T))
-```
-
-High structural coherence with high Focus raises threshold, enforcing stricter relevance filtering.
-
-## Threshold Integration
-
-All threshold deltas combine and pass through safety limiting. The emotion and mood deltas from @sec-emotional-threshold and @sec-mood are denoted Δθ_emo = ΔThreshold_emotion_t and Δθ_mood = ΔThreshold_mood_t:
-
-```
-Δθ_total ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
-cap_total ← max_ΔT_per_min(t) × (Δt / 60.0)
-Δθ_limited ← clamp(Δθ_total, −cap_total, +cap_total)
-θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
-                        α = α_T(t)) + Δθ_limited,
-                    T_min(t), T_max(t))
-theta_dynamic ← θ_dynamic_t
-```
-
-Hysteresis evolves toward the stability-derived base:
-
-```
-hysteresis_t ← clamp(EWMA(hysteresis,
-                     base_band(T), α = α_T(t)),
-                band_min, band_max)
-hysteresis ← hysteresis_t
-```
-
-## Write Pacing and Memory Accumulation {#sec-write-pacing}
+## Memory Accumulation and Event Segmentation {#sec-write-pacing}
 
 The write gate operates per step, but coherent "thoughts" often span multiple
 signals. Composite scoring is computed on the current accumulator centroid
@@ -397,7 +243,7 @@ where signal_gap_s = now_s() − to_s(last_signal_ts) is computed at the start o
 
 ### Spike Bypass (Flashbulb Flush)
 
-High-salience signals bypass accumulation and flush immediately, capturing preceding context as a coherent memory unit:
+High-salience signals bypass accumulation and flush immediately, capturing preceding context as a coherent memory unit. The margin is measured above θ_dynamic (@sec-spike-threshold):
 
 ```
 spike_margin(S,T) = lerp(0.2, 0.5, T) × lerp(1.2, 0.8, S)  # above θ_dynamic
@@ -497,4 +343,182 @@ if |μ_acc| = 0: e_rep ← e_peak
 if |e_peak| = 0 OR dim(e_peak) ≠ dim(μ_acc): e_rep ← μ_acc
 ```
 
+<!-- PRUNE: migration 56 on chore/prune-write-only stops persisting c_t; the emotion metadata below may also be dropped. -->
 On write: store e_rep with metadata {n, s_max, s_avg, drift_acc, mem_elapsed, s_emotion_max=emo_max, s_arousal_avg=arousal_sum / max(n, 1), boundary_score}. Store `c_t` as the temporal context for the memory. Append e_rep to memory_stream and l2_normalize(μ_acc) to recent_memory_centroids. Reset accumulator for next unit.
+
+
+## Spike-Bypass Threshold θ_dynamic {#sec-spike-threshold}
+
+Earlier builds compared the closed unit's window score with an adaptive
+threshold θ_dynamic, and discarded units below it. That comparison is gone
+(@sec-write-pacing). θ_dynamic is still maintained per signal from the
+composite score (@sec-structural-metrics), and its only consumer is the
+spike-bypass margin of @sec-write-pacing: a signal whose composite score
+exceeds θ_dynamic by the knob-derived margin closes its unit immediately. The
+controller below is therefore a macro-control detail. It changes where
+salience spikes split units. It does not change whether a unit is stored.
+<!-- PRUNE: chore/prune-write-only may remove the threshold controller; if it does, replace this subsection with a removal record and restate the spike-bypass margin against its replacement. -->
+
+### Prior-Evidence Blending
+
+The threshold prior derives from knob settings:
+
+```
+θ_prior(F, S, T) = lerp(0.10, 0.30, T) × (1 − 0.3S)
+```
+
+Observed evidence comes from the 90th percentile of recent scores:
+
+```
+score_history_cap(T) = round(lerp(512, 1536, T))
+score_stream ← tail(score_stream, max(win_score(T), score_history_cap(T)))
+recent_scores ← tail(score_stream, win_score(T))
+if |recent_scores| == 0:
+    observed_p90 ← θ_prior  # no evidence yet
+else:
+    observed_p90 ← percentile(recent_scores, 90)
+```
+
+Prior and evidence masses weight the blend:
+
+```
+ρ_prior ← prior_mass(T) = round(lerp(2, 32, T))
+ρ_obs ← u(t) × |recent_scores|
+```
+
+The target threshold blends prior and evidence:
+
+```
+θ_target ← (ρ_prior × θ_prior + ρ_obs × observed_p90) /
+            max(ε, ρ_prior + ρ_obs)
+```
+
+High Stability increases prior mass, making the system more resistant to observed deviations. High uncertainty increases evidence mass, allowing faster adaptation to volatile conditions.
+
+### Homeostatic Rate Control
+
+The controller maintains write rates near the target setpoint through continuous-time estimation with effective sample size (ESS) reliability weighting.
+
+#### Rate Estimation
+
+```
+Δt ← now_s() − to_s(last_rate_timestamp)
+dt_min(T) = 10^(−4 + 2T)  # stability-derived minimum Δt (seconds)
+Δt ← max(Δt, dt_min(T))
+τ_dt(T) = lerp(0.5, 2.0, T)
+α_dt ← 1 − exp(−Δt / τ_dt(T))
+dt_ema ← (1 − α_dt) × dt_ema + α_dt × Δt
+dt_floor(T) = lerp(0.1, 0.5, T)  # stability-derived minimum cadence
+dt_base ← max(dt_ema, dt_floor(T))
+```
+
+The rate time constant scales with Stability:
+
+```
+rate_tau_exponent(T) = 3T
+τ_rate ← max(2^rate_tau_exponent(T) × dt_base, dt_floor(T))
+α ← 1 − exp(−Δt / τ_rate)
+```
+
+Instantaneous rate estimation with bias correction. Δwrites is the binary indicator (0 or 1) of whether a write occurred during the current timestep:
+
+```
+Δwrites ← 1 if write_memory else 0  # binary write event
+```
+Normative note (MUST): Δwrites is computed from the current step's write_memory decision. Rate state updates occur after the write decision and affect subsequent timesteps.
+```
+ρ_inst ← (Δwrites / Δt) × 60  # writes per minute
+m_rate_t ← (1 − α) × m_rate + α × ρ_inst
+denom ← max(1 − (1 − α)^(rate_ticks + 1), ε)
+ρ_hat_t ← m_rate_t / denom  # bias-corrected estimate for next step
+m_rate ← m_rate_t
+rho_hat_prev ← ρ_hat_t
+rate_ticks ← rate_ticks + 1
+last_rate_timestamp ← now_ms()  # update after rate computation
+```
+
+#### Effective Sample Size
+
+ESS estimates the effective number of independent samples in the EMA, using a heuristic inspired by @liu1998sequential:
+
+```
+β ← max(0, 1 − α)
+ESS_cap(T) = lerp(30, 120, T)
+ESS ← min((1 + β) / max(1 − β, ε), ESS_cap(T))
+reliability ← 1 − exp(−ESS × (1 − T))
+```
+
+High Stability dampens reliability, preventing aggressive corrections in conservative regimes.
+
+#### Homeostatic Correction
+
+The rate error drives threshold adjustment. The κ_* gains are derived from the knobs to avoid fixed behavioral constants:
+
+Normative note (MUST): rho_hat_prev is stored state entering the timestep. After the write decision, the rate-state update computes ρ_hat_t; the assignment rho_hat_prev ← ρ_hat_t occurs at end of step (see Appendix D).
+
+```
+rate_error ← tanh((rho_hat_prev − rate_target) /
+                  max(rate_target, ε))
+κ_r(F,S,T) = lerp(0.06, 0.14, S) × lerp(1.1, 0.9, T)
+cap_homeo(F,S,T) = lerp(0.35, 0.15, T) × lerp(0.8, 1.2, S) × hysteresis
+Δθ_homeo ← clamp(reliability × κ_r(F,S,T) × (1 − T) ×
+                  (1 − maturity(t)) × rate_error,
+                  −cap_homeo(F,S,T), +cap_homeo(F,S,T))
+```
+
+The correction scales with reliability and is attenuated by both Stability and maturity, ensuring conservative, mature systems make minimal homeostatic adjustments.
+
+#### Sensitivity-Based Threshold Adjustment
+
+Sensitivity modulates threshold based on recent score volatility:
+
+```
+recent_scores ← tail(score_stream, win_score(T))
+if |recent_scores| < 2:
+    σ_scores ← 0
+else:
+    σ_scores ← std(recent_scores)
+κ_sens(F,S,T) = lerp(0.04, 0.12, S) × lerp(1.1, 0.9, T)
+cap_sens(F,S,T) = lerp(0.30, 0.10, T) × lerp(0.9, 1.1, S) × hysteresis
+σ_ref(S,T) = lerp(0.08, 0.14, S) × lerp(1.1, 0.9, T)
+Δθ_sens ← clamp(−κ_sens(F,S,T) × S × (σ_scores − σ_ref(S,T)),
+                −cap_sens(F,S,T), +cap_sens(F,S,T))
+```
+
+High score variance with high Sensitivity lowers threshold, capturing more volatile signals.
+
+#### Precision-Based Threshold Adjustment
+
+Focus-driven precision tightens threshold when structural coherence is high:
+
+```
+κ_prec(F,S,T) = lerp(0.04, 0.10, F) × lerp(1.1, 0.9, T)
+cap_prec(F,S,T) = lerp(0.25, 0.08, T) × lerp(0.9, 1.1, F) × hysteresis
+Δθ_prec ← clamp(κ_prec(F,S,T) × F × (coherence_struct_t − 0.5),
+                −cap_prec(F,S,T), +cap_prec(F,S,T))
+```
+
+High structural coherence with high Focus raises threshold, enforcing stricter relevance filtering.
+
+### Threshold Integration
+
+All threshold deltas combine and pass through safety limiting. The emotion and mood deltas from @sec-emotional-threshold and @sec-mood are denoted Δθ_emo = ΔThreshold_emotion_t and Δθ_mood = ΔThreshold_mood_t:
+
+```
+Δθ_total ← Δθ_sens + Δθ_homeo + Δθ_prec + Δθ_emo + Δθ_mood
+cap_total ← max_ΔT_per_min(t) × (Δt / 60.0)
+Δθ_limited ← clamp(Δθ_total, −cap_total, +cap_total)
+θ_dynamic_t ← clamp(EWMA(θ_dynamic_{t−1}, θ_target,
+                        α = α_T(t)) + Δθ_limited,
+                    T_min(t), T_max(t))
+theta_dynamic ← θ_dynamic_t
+```
+
+Hysteresis evolves toward the stability-derived base:
+
+```
+hysteresis_t ← clamp(EWMA(hysteresis,
+                     base_band(T), α = α_T(t)),
+                band_min, band_max)
+hysteresis ← hysteresis_t
+```

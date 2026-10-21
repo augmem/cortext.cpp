@@ -620,21 +620,24 @@ These competitor numbers are the vendors' or papers' own, each with its own
 answer model, judge and protocol. They were not re-run here, so treat the gaps
 as directional.
 
-| Benchmark | Cortext | Published |
-| --- | ---: | --- |
-| LongMemEval-S (500 q) | **93.8%** | Mem0 94.4, Hindsight 91.4, EmergenceMem 86.0, Supermemory 85.2, Zep 71.2 |
-| LoCoMo (1,540 q) | 86.2% (87.9% on corrected keys) | Mem0 92.5, Honcho 89.9, Hindsight 89.6, Zep 75.1 |
-| BEAM 100K / 1M / 10M, ExaBase protocol | 83.8 / 80.0 / 70.8 | past.dev 92.1 / 90.7 / 85.0; Exabase M-1 76.9 / 75.0 / 68.0 |
-| BEAM 100K / 1M / 10M, AMB protocol | 72.2 / 70.4 / 53.6 | Hindsight 73.4 / 73.9 / 64.1; Honcho 63.0 / 63.1 / 40.6; Mem0 – / 64.1 / 48.6 |
-| DolphinBench (600 tests, agent with memory tools) | **87.0%** | Mem0 + Hermes 70.7, Hindsight + Hermes 69.5, Honcho + Hermes 68.5 |
-| MemLens agent subset (195 q, 32k, images) | **72.3%** | Mem0 43.2 (text captions), MemOS 36.5, MemAgent-7B 32.8 |
-| LongMemEval-M (100 q) | 78.0% | — |
+| Benchmark | Cortext | Reranker training | Published |
+| --- | ---: | --- | --- |
+| LoCoMo (1,540 q) | 86.2% (87.9% on corrected keys) | zero-shot | Mem0 92.5, Honcho 89.9, Hindsight 89.6, Zep 75.1 |
+| BEAM 100K / 1M / 10M, ExaBase protocol | 83.8 / 80.0 / 70.8 | 100K, 10M zero-shot; 1M overlaps | past.dev 92.1 / 90.7 / 85.0; Exabase M-1 76.9 / 75.0 / 68.0 |
+| BEAM 100K / 1M / 10M, AMB protocol | 72.2 / 70.4 / 53.6 | 100K, 10M zero-shot; 1M overlaps | Hindsight 73.4 / 73.9 / 64.1; Honcho 63.0 / 63.1 / 40.6; Mem0 – / 64.1 / 48.6 |
+| LongMemEval-S (500 q) | **93.8%** | overlaps | Mem0 94.4, Hindsight 91.4, EmergenceMem 86.0, Supermemory 85.2, Zep 71.2 |
+| LongMemEval-M (100 q) | 78.0% | overlaps | — |
+| DolphinBench (600 tests, agent with memory tools) | **87.0%** | overlaps | Mem0 + Hermes 70.7, Hindsight + Hermes 69.5, Honcho + Hermes 68.5 |
+| MemLens agent subset (195 q, 32k, images) | **72.3%** | overlaps | Mem0 43.2 (text captions), MemOS 36.5, MemAgent-7B 32.8 |
 
 Caveats:
-- **Unseen questions:** the late-interaction reranker was trained partly on
-  LongMemEval, MemLens and DolphinBench. On the questions it never saw,
-  Cortext scores 96.5% (LongMemEval-S, 115 q) and 78.6% (MemLens, 56 q).
-  LoCoMo is excluded from its training.
+- **Reranker training overlap:** the late-interaction reranker was trained
+  partly on LongMemEval, MemLens, DolphinBench and the BEAM 1M train
+  conversations, with held-out splits (20% of LongMemEval and MemLens
+  questions, 30% of BEAM 1M conversations, one DolphinBench persona). Rows
+  marked "overlaps" are therefore not zero-shot. LoCoMo and BEAM 100K and 10M
+  were never trained on. On the questions it never saw, Cortext scores 96.5%
+  (LongMemEval-S, 115 q) and 78.6% (MemLens, 56 q).
 - **Agent models:** DolphinBench ran with a `gpt-6.1-sol` agent; the published
   rows used `gpt-5.6-luna`.
 

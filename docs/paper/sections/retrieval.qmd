@@ -1,0 +1,339 @@
+# Multi-Granularity Hybrid Retrieval {#sec-retrieval}
+
+A query is an `Ephemeral` signal of any modality. It is embedded like any
+other signal, runs inside a transaction that is rolled back, and leaves no
+trace in the store. This section specifies how its candidate pool is built,
+fused and reranked. @sec-hydration specifies what is attached to the selected
+memories afterwards.
+
+Ingest-time retrieval, which feeds the streaming interrupt gate
+(@sec-interrupt), uses only the dense unit channel. Lexical seeds were
+measured at ingest too: they cost per-turn time without improving recall.
+
+## Notation
+
+* $q$: the query, with unit embedding $e_q \in \mathbb{R}^{256}$, modality
+  $\mu_q$, text payload (if any), and optional reference time $T_q$ with flag
+  `as_of`.
+* $\mathcal{M}$: the long-term memories. Memory $m$ has a pooled
+  representative $e_m$ (@sec-rep-embedding), a time span
+  $[\mathrm{start}_m, \mathrm{end}_m]$, and member signals $s \in m$.
+* Member $s$ has a stored shared-space vector $v_s$ (`memory_signal_vectors`,
+  migration 50, keyed by the payload's content id) and a late-interaction
+  code set $Z_s$ (`memory_signal_li_codes`, migration 54).
+* $\tau_x$: the exclusion time. It is the start of the query's still-open
+  write unit, so a query never retrieves itself. With `as_of` set,
+  $\tau_x \leftarrow \min(\tau_x, T_q + 1)$ on every channel.
+* $\operatorname{map01}(c) = (c + 1)/2$.
+
+A memory is *seed-eligible* when it is `LONG_TERM`, has a vector surface and
+started before $\tau_x$. Every channel resolves its hits through the same
+eligibility test.
+
+## Dense Unit Seeds
+
+The base channel ranks memories by
+$\operatorname{map01}(\cos(e_q, e_m))$ over the current long-term surface.
+Above a knob-derived population, candidates come from the sparse route, and
+the exact SQL path runs whenever the route cannot certify a full seed set
+(@sec-optimization).
+
+Before the seed cap, near-duplicate embedding families collapse to one
+representative. The sound block-norm screens of @sec-optimization keep this
+from costing quadratic work. Superseded memories stay eligible: excluding
+them was measured as harmful (@sec-negative).
+
+The seed count is $\operatorname{round}(\operatorname{lerp}(96, 8, f))$, where
+$f$ is the retrieval Focus bias, and the seed search breadth expands it
+further. At neutral knobs the engine seeds 37 memories from a search breadth
+of 345 and returns 11.
+
+## Member Seeds
+
+A unit grouped from several signals has one pooled vector. That vector sits
+between its members and is close to none of them. A query about one member
+therefore ranks the unit far below where that member alone would rank. The
+member channel scores each multi-signal memory by its best member:
+
+$$
+\mathrm{seed}(m) = \max\Big(\operatorname{map01}(\cos(e_q, e_m)),\;
+                       \max_{s \in m} \operatorname{map01}(\cos(e_q, v_s))\Big).
+$$
+
+The 20 memories with the best members join the seed set, or raise the seed
+score of a memory already in it. The seed list is then re-sorted. Member
+vectors stay resident as int8 codes with one scale per vector
+(dimension + 4 bytes per member). Single-signal memories are never held,
+because their member vector is their memory vector. Each hit is resolved to
+its current memory through the store before use.
+
+Member scoring was measured as the third of three stages against the
+Natural baseline. The first was query focus, which keeps a grouped memory's
+query-nearest members and was the precursor of evidence fitting
+(@sec-hydration). The second was the per-signal standing set. On BEAM, the
+three stages together raised the gold-turn share of the 8,000-token packet
+from 0.385 / 0.195 / 0.125 to 0.617 / 0.420 / 0.272 at 100K / 1M / 10M. The
+past.dev-protocol score, answered and judged by gpt-5.6-luna, rose from
+0.793 / 0.750 / 0.651 to 0.847 / 0.813 / 0.718 (+0.054 [0.019, 0.095],
++0.062 [0.044, 0.081], +0.067 [0.029, 0.100]). Measured on its own, member scoring
+moved the score by +0.018 [+0.002, +0.034] at 100K and +0.013 [−0.003, +0.032]
+at 1M, and raised 1M gold share by +0.036 [+0.022, +0.050] (hill-climb
+record; @sec-implementation).
+
+## Keyword Seeds: FTS5 BM25
+
+Every stored long-term text memory is indexed in a contentless SQLite FTS5
+table, `memory_text_fts` (migration 49). Its rowid is the memory id, its tokens
+are porter-stemmed `unicode61`, and the text itself stays in the object store.
+The index row is written in the savepoint that writes the memory, so it
+commits, rolls back and is deleted with it.
+
+A text query ORs at most 16 of its non-stopword words, each as a quoted FTS5
+string. It drops any word whose index term occurs in more than
+$\max(64, 0.05N)$ of the $N$ memories. Such terms carry little BM25 weight,
+and their posting lists dominated query time. The 20 best eligible hits by
+`bm25()` [@robertson2009probabilistic] form the keyword list, collected
+without sorting every match (@sec-optimization).
+
+The channel targets turns that share a query's rare words (names, numbers)
+but sit far down the vector ranking. The shipped channel (FTS5 with the
+document-frequency cut, commit ec30c69f) was measured against the pruned
+vector-only engine (47c18ec9), with Haiku judging (rubric v2):
+
+* Eval 1, 250 cases: packet gold-turn recall rose from 0.597 to 0.787 (70
+  cases better, 6 worse). Judged sufficiency rose by +0.132 ± 0.065 (train)
+  and +0.222 ± 0.060 (test).
+* LongMemEval-M, 48 haystacks of about 4.9k turns: packet recall rose from
+  0.407 to 0.667, and judged sufficiency from 0.530 to 0.821
+  (+0.292 ± 0.112). Query p95 and ingest time stayed within 2%.
+
+PR #28 reports the larger v2-against-47c18ec9 comparison (Eval 1 recall
+0.597 → 0.809, sufficiency +0.149 ± 0.063 / +0.218 ± 0.059). That
+comparison includes the other v2 changes as well as the keyword channel.
+
+## Cross-Modal Seeds
+
+AIST maps text, audio and images into one space, but cosines across
+modalities sit far below cosines within one. A matching image scores about as
+high as unrelated text. Raw cosine would therefore never let an image answer
+a text query. The cross-modal channel ranks each stored modality $\mu \ne
+\mu_q$ in its own list and gap-corrects it with a per-query z-score over that
+modality's whole long-term population $P_\mu$ of signal vectors:
+
+$$
+z_s = \big(\cos(e_q, v_s) - \bar{c}_\mu\big) / \sigma_\mu,
+$$
+
+where $\bar{c}_\mu$ and $\sigma_\mu$ are the mean and standard deviation of
+$\cos(e_q, v_s)$ over $s \in P_\mu$. A memory takes its best member's $z$. It is kept when $z \ge 1.5$ and
+$|P_\mu| \ge 3$, and each modality contributes at most 3 memories. Same-modality
+recall stays with the dense channel. Populations stay resident per modality
+and advance incrementally (@sec-optimization).
+
+This channel shipped with the other multimodal changes: per-stream signal
+filtering, mixed-modality memories that keep every payload, and a vectorized
+image tower. Together they raised MemLens image-evidence recall from 0.558 to
+0.744 against an oracle ceiling of 0.867, and lowered the misleading rate from
+0.028 to 0.009, with text packets unchanged (PR #28).
+
+## Temporal Seeds
+
+A query may carry a reference time $T_q$, in the past or the future
+(`Cortext::RetrievalTime`). The engine treats it as signal metadata compared
+with stored times, never as text, so it works the same for every modality.
+The temporal channel returns the $K = 10$ eligible memories nearest $T_q$ by
+interval distance:
+
+$$
+d(m, T_q) = \max\big(0,\; \mathrm{start}_m - T_q,\; T_q - \mathrm{end}_m\big),
+$$
+
+which is 0 when $T_q$ falls inside $[\mathrm{start}_m, \mathrm{end}_m]$ and
+otherwise the distance to the nearer edge.
+
+One statement with three range scans, over partial indexes on long-term
+`start_ts` and `end_ts` (migration 55), each limited to $2K + 4$ rows, finds
+them in $O(\log N + K)$. A test asserts the query plan has no `SCAN
+memories`. The channel only adds candidates and rank mass, with weight 0.5,
+so a memory found only by time scores $0.5/61$ at best. That ranks it
+after every dense seed while the dense list has at most 62 entries
+($1/(60 + r) > 0.5/61$ for $r \le 62$). The dense seed cap can reach 96 at
+low Focus, and the late-interaction rerank after fusion can still promote
+such a memory. With `as_of`, the cutoff $\tau_x \le T_q + 1$ also applies
+to attached later turns and restatements. Unset, retrieval is byte-identical to the engine without the
+channel (LoCoMo clock replay, 497 queries).
+
+An oracle probe set $T_q$ to each LoCoMo question's earliest gold turn. Packet
+evidence hits rose from 1,767 to 1,783 of 1,979 questions (17 gained, 1 lost),
+and to 0.906 at weight 1.0. Query p50 rose by 0.07 to 0.17 ms (PR #31). This
+bounds the mechanism; it is not a benchmark score.
+
+Earlier builds also added an event-time recency tie-break to the dense score.
+The round-3 ablation left every packet byte-identical without it, so it was
+removed (@sec-math).
+
+## Reciprocal-Rank Fusion
+
+When any of the lexical, cross-modal or temporal channels returns hits, the
+pool is ordered by reciprocal-rank fusion [@cormack2009reciprocal]:
+
+$$
+\mathrm{RRF}(m) = \sum_{\ell} w_\ell \,/\, \big(k + r_\ell(m)\big), \qquad k = 60,
+$$
+
+where $r_\ell(m)$ is $m$'s 1-based rank in list $\ell$. The dense seed list
+(after member re-sorting) counts once with $w = 1$. The keyword list and each
+per-modality cross-modal list count with $w = 1$, and the temporal list with
+$w = 0.5$. Ties fall back to the semantic score and then to memory id. Only
+the order changes; every candidate keeps its semantic score. $k = 60$ is the
+constant of @cormack2009reciprocal; experiment-hook builds can override it,
+release builds cannot. Without any auxiliary hits, the pool stays in dense
+order.
+
+## Neighbour Deferral
+
+Hydration attaches each anchor's adjacent turns (@sec-hydration). A candidate
+that is such a neighbour of a higher-ranked pick would spend an anchor slot on
+content the packet already carries. Examples are a reply next to its
+question, or the other half of an exchange. Within the output size, such
+candidates are moved behind the picks, in order, so a short list still fills.
+This costs one primary-key range lookup per pick.
+
+## Late-Interaction MaxSim Rerank
+
+After deferral, the head of the pool is reranked by a learned late-interaction
+model [@khattab2020colbert] over the frozen AIST encoder
+(`AIST-87M-LI.gguf`, `src/models/aist_late_interaction.cpp`). The constants
+below are read from the shipped model file.
+
+**Representation.** Every item becomes a set of unit vectors in one
+$D = 64$-dimensional space. Items here are queries and stored members, in any
+modality. The set has two sources.
+
+* *Position features* through a per-tower linear map: text token hidden states
+  (384-d, at most 256 positions) and image patch features (12 × 12 × 960-d).
+  Audio has no trained map yet.
+* The item's 256-d shared-space vector through one map shared by every
+  modality.
+
+**Memory side.** A stored payload's raw encoder positions (384-d text,
+960-d image) are clustered into $K = 16$ spherical k-means centroids (8
+Lloyd iterations, deterministic linspace initialization). Only then are the
+centroids mapped into the 64-d space, normalized and quantized to int8. A
+payload with 16 or fewer positions keeps all of its rows, so a blob holds up
+to 16 codes: at most 1,028 bytes, a 4-byte header plus $16 \times 64$
+codes. Codes are per member, computed at write time; there
+is no shared codebook. Its stored global vector is mapped and int8-rounded at
+query time the same way.
+
+**Query side.** The query keeps every mapped position, plus its mapped global
+vector. Text queries are capped at 128 positions; image queries keep all 144
+patches. Each vector $q_r$ gets a softmax gate weight $w_r$ from
+a learned linear gate.
+
+**Scoring.** For member $s$ with vector set $V_s = Z_s \cup \{g_s\}$,
+
+$$
+\sigma(s) = \sum_r w_r \max_{v \in V_s} \langle q_r, v \rangle .
+$$
+
+Memory $m$ at first-stage pool position $\rho_m$ (0-based) scores a soft
+maximum over its first 8 members plus a rank prior:
+
+$$
+\mathrm{LI}(m) = \alpha \cdot \tau \log \sum_{s \in m}
+               e^{\sigma(s)/\tau}
+             + \beta \cdot \log(1 + \rho_m) / \log 101.
+$$
+
+The shipped constants are $\alpha = 20.46$, $\tau = e^{-3.456} \approx
+0.032$ and $\beta = -0.308$. The rank prior is how the rerank blends with the
+first stage. At position 63 it subtracts 0.28, which is worth about 0.014 of
+MaxSim similarity after the $\alpha$ scale: a small learned preference for
+the fused order, not a veto.
+
+**Depth and slots.** The rerank covers the top 64 candidates. Depth 64 keeps
+its cost at 0.4 to 3 ms per query. A memory none of whose members has codes
+keeps its slot, and the coded memories reorder among the remaining slots.
+Uncoded memories come from towers without a trained map (audio) and from
+signals stored before migration 54. One global vector cannot compete with a
+code set, so moving these memories would bias against their modality. A query
+without position vectors keeps the engine order.
+
+The rerank runs after neighbour deferral on purpose. Deferring the
+neighbours of the reranked picks instead lowered Eval 1 packet recall from
+0.938 to 0.892.
+
+**Training.** The model has 102,469 float32 weights (410 KB). It is
+distilled from the `ms-marco-MiniLM-L6-v2` cross-encoder with listwise KL at
+temperature 2, plus a multi-positive listwise loss on gold memories. Image
+members get soft labels through their BLIP captions and hard labels through
+MemLens gold. Training pools come from LongMemEval-S, the LongMemEval
+conversations of Eval 1, DolphinBench, MemLens and the BEAM 1M train
+conversations. Held-out splits are 30% of Eval 1 and BEAM 1M conversations,
+one DolphinBench persona, 20% of LongMemEval and MemLens questions, and the
+whole 108-question MemLens image evaluation set. LoCoMo is never trained on.
+@sec-experimental separates trained-on and zero-shot benchmarks accordingly.
+
+**Effect.** Packet gold-turn recall rose on every set (PR #28, @sec-implementation):
+
+* Eval 1: 0.846 to 0.938, and 0.878 to 0.955 on its conversations held out
+  from training.
+* LongMemEval-S: 0.808 to 0.992 (14 unseen questions 0.857 to 1.000).
+* LongMemEval-M: 0.770 to 0.894.
+* MemLens: text gold 0.415 to 0.575, image gold 0.344 to 0.396.
+* BEAM at a 34,800-byte budget: 0.615 / 0.413 / 0.274 to 0.696 / 0.518 /
+  0.369 at 100K / 1M / 10M. 100K and 10M were never trained on.
+
+End-to-end BEAM scores (gpt-6.1-sol low answer and judge) rose from
+0.816 / 0.778 / 0.667 to 0.843 / 0.799 / 0.699 (+0.027 [+0.006, +0.049],
++0.021 [+0.005, +0.036], +0.033 [+0.003, +0.063]). Query p95 stayed within
+×1.00 to ×1.14 of the engine without the rerank, from 10k to 443k memories.
+The codes added 11% to Eval 1 store size.
+
+## Standing Memories
+
+Some statements must shape answers long after they leave query similarity:
+"Always include version numbers when I ask about libraries", "From now on,
+answer in French". The engine keeps them in a small set ranked on its own.
+
+* **Membership.** Membership belongs to the stored signal, not its memory
+  (`standing_signals`, migration 53, replacing the memory-level set of
+  migration 51). Under Natural retention a directive is one turn of a grouped
+  memory several kilobytes long, which a memory-level check never admits.
+* **Detector.** A pattern check over the signal's text, at most 480 bytes:
+  a clause opening with *always*, *never*, *from now on*, *going forward*,
+  *whenever I*, *I prefer* and similar, optionally after *please*. This is
+  today's only detector.
+* **Capacity.** The set keeps the newest 256 members.
+* **Query.** Every query ranks the members written before $\tau_x$ by RRF
+  ($k = 60$) of two lists. One is the cosine of $e_q$ to the member's own
+  stored vector. The other is BM25 ($k_1 = 1.2$, $b = 0.75$) over the member's
+  6-byte word stems, with document frequencies from the set itself.
+  Store-wide frequencies would discount the topic words that tell directives
+  apart.
+* **Block.** The best 5, within 2 KiB, form a standing block
+  (`Context::standing_memory`) ahead of the retrieved memories. Each entry
+  holds only the directive signals of one memory.
+
+The block takes no retrieved slot. A consumer that cuts the retrieved list at
+$k$ keeps the same $k$ retrieved memories. When standing items took ranked
+slots instead, LongMemEval-M gold recall at $k = 11$ fell by 0.087.
+
+On BEAM, PR #28 reports the share of instruction-following gold turns (the
+instruction and its acknowledgement) for the standing block (b5447e25)
+against the engine without it. The share rose from 0.44 / 0.26 / 0.00 to
+0.86 / 0.81 / 0.44 at 100K / 1M / 10M. @sec-implementation reports, for the
+same channel, an overall gold-turn share gain of 0.070 / 0.075 / 0.053, no
+other category losing more than 0.01, and query p95 within 0.98 / 0.96 /
+1.14 of the engine without it.
+
+## Ranking Invariants
+
+* `source_id` and modality are never ranking inputs. Modality selects only
+  which tower map and which cross-modal populations apply.
+* Only the open write unit, and with `as_of` everything that starts after
+  $T_q$, is excluded. `as_of` does not filter working memory, or the content
+  of a retrieved memory that spans $T_q$ (PR #31).
+* Every auxiliary channel adds candidates and rank mass and removes none.
+* Every stage ends in a deterministic tie order (score, then memory id).
