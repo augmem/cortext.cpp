@@ -1,5 +1,10 @@
-// Schema migrations 0..58, in id order. Each store runs the ones its
-// ledger (cortext_schema_migrations) has not recorded.
+// Legacy schema migrations 0..kBaselineVersion.
+//
+// Fresh stores get the baseline schema in schema.cpp instead of running
+// these. They stay so a store created before the baseline upgrades in place
+// from whatever version it holds. Do not add new migrations here; add them
+// to PostBaselineMigrations in schema.cpp. tests/schema_baseline.test.cpp
+// proves this chain and the baseline produce the same schema.
 
 #include "schema_internal.hpp"
 
