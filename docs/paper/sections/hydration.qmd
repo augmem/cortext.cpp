@@ -1,0 +1,170 @@
+# Hydration and Evidence Fitting {#sec-hydration}
+
+Retrieval (@sec-retrieval) selects a ranked set of memories, 11 at neutral
+knobs. Hydration then turns each selection into evidence. It loads the
+memory's payloads and attaches the context a person would recall around the
+hit. Finally it fits the whole packet to the caller's budget. Hydration never
+changes the ranking, the pool, or the number of retrieved memories, and it
+runs only after selection, so its cost follows the packet rather than the
+store.
+
+## Packet Structure
+
+A query's `Context` carries three blocks:
+
+* `standing_memory`: the standing block (@sec-retrieval). It holds at most 5
+  directive signals within 2 KiB and is not counted in the retrieved top-k.
+* `retrieved_memory`: the ranked memories. Each has its own payloads plus attached
+  blobs (adjacent turns, superseded predecessors, superseding successors).
+* `working_memory`: the active slots in insertion order (@sec-advanced).
+
+Every retrieved memory exposes `content` (one entry per blob),
+`content_mimetypes` and `content_timestamps`, index-aligned. A memory that
+holds signals of several modalities has modality `"mixed"` and returns every
+payload with its own MIME type. Earlier builds took a majority vote, which
+dropped minority-modality payloads.
+
+## Contiguity Hydration
+
+Recalling one moment of a conversation brings back what was said around it.
+This is the temporal-contiguity effect of episodic recall, and it fades with
+distance. A retrieved turn is rarely self-contained: a question's answer, the
+statement an acknowledgement refers to, or the user message a reply was
+written for usually sits one or two turns away. For each of the top 11
+anchors, the engine attaches adjacent turns as extra blobs of the anchor:
+
+```text
+neighbours(anchor) = adjacent LONG_TERM rows in write order
+                     within 16 ids and 30 minutes of the anchor,
+                     same source stream, any modality,
+                     not hidden by a correction from the same stretch
+pass 1 (lag 1): for anchors in rank order: successor, then predecessor
+pass 2 (lag 2): with what budget is left, the turns two steps away
+charge: text clipped to 480 B; other media 480 B each
+budget: 12 KiB per context
+```
+
+Forward association is stronger than backward, so the successor (usually the
+reply) is attached first.
+
+* **Clip window.** Text is clipped on a UTF-8 boundary. The first 64 bytes
+  (the turn header: time, speaker) stay, followed by the 480-byte window that
+  covers the most distinct query terms.
+* **Cost.** All lag-1 probes run in one statement and all lag-2 probes in
+  another. Each probe is a primary-key range lookup plus one indexed
+  supersession check.
+* **Interaction with retrieval.** Neighbour deferral (@sec-retrieval) keeps
+  retrieval from spending anchor slots on turns this step will attach anyway.
+
+**Effect.** Contiguity is the largest single hydration effect in the
+ablation record. Switching it off costs 0.06 to 0.09 packet gold-turn recall
+(@sec-experimental). The round-3 ablation found the earlier 6 KiB budget and
+lag-2 cap (top 6 anchors) binding. Raising the budget to 12 KiB and giving
+every anchor lag-2 turns raised packet recall from 0.642 to 0.691 on
+LongMemEval-S and from 0.597 to 0.629 on Eval 1, with 13 cases better and
+none worse. Haiku-judged sufficiency rose by +0.048 ± 0.056 and
++0.037 ± 0.019, for +2.2 KB per Eval 1 packet. Budgets of 16 and 24 KiB gave
+packets identical to 12 KiB. Clipping neighbours to 240 bytes raised a
+clipped-text recall proxy but not judged sufficiency, so the clip stays at
+480 bytes.
+
+## Superseded-Predecessor and Superseding-Successor Hydration
+
+At write time each new memory gets directed `supersedes` edges to the few
+older memories whose embeddings fall in a knob-derived similarity band, and
+the edge weight grows with similarity (@sec-advanced). These edges are
+topical, not only corrections. Retrieval does not demote either endpoint.
+Hydration uses the edges in both directions:
+
+* **Predecessors.** For each of the top 11 anchors, the at most 2 older
+  memories it supersedes (strongest edges first) are attached *before* the
+  anchor's own content. Each is clipped to 512 bytes, under 4 KiB per packet.
+  People do not lose the earlier version of a fact when they learn the newer
+  one. Recalling the update brings back the episode it updated, and in these
+  conversations the "obsolete" turn is often exactly what the question asks
+  about.
+* **Successors.** For each of the top 11 anchors, the newest memory that
+  supersedes it is attached *after* its content. It is clipped to 512 bytes,
+  under 4 KiB per packet, with one indexed lookup on the edge target for all
+  anchors. A question phrased like a fact's first statement retrieves that
+  older version, while the latest restatement ranks below it.
+
+With both attachments, each anchor's evidence reads oldest to newest.
+
+**Effect.** Switching off supersession edges and predecessor hydration
+together changed 47/48 LongMemEval-S and 249/250 Eval 1 packets and cost
+0.037, 0.025 and 0.015 packet recall (S, Eval 1, BEAM). Haiku-judged
+sufficiency moved −0.036 ± 0.052 (S) and −0.016 ± 0.013 (Eval 1)
+(@sec-experimental). Predecessor hydration used to skip a target from the
+anchor's own source stream within 30 minutes. Removing that skip raised
+BEAM-10M conversation 7 recall from 0.103 to 0.118 for 0.5 KB more packet
+(@sec-advanced). Successor hydration added 0.005 gold-turn share at each BEAM
+scale and +0.023 [0.010, 0.036] to the Haiku-answered 10M score
+(@sec-implementation).
+
+With `as_of`, both attachments and contiguity skip memories that start after
+$T_q$.
+
+## Per-Blob Content Timestamps
+
+Attached blobs can come from weeks earlier (predecessors), from later
+(successors), or from adjacent turns. The anchor's single `timestamp` does not
+date them. Every retrieved memory therefore carries one stored signal time per
+content blob, in content order, with 0 meaning unknown (PR #30).
+
+* **Invariant.** Whenever `content` is non-empty,
+  `content_timestamps.size() == content.size()`.
+* **Coverage.** Every path that builds or reshapes content carries the source
+  signal's time: signal and memory blob hydration, working-memory hydration,
+  contiguity, predecessor and successor attachment, standing joins, and
+  evidence fitting.
+* **Modality.** Time stays signal metadata, never content.
+
+**Known limit.** A multi-signal blob, such as a Natural unit's joined text,
+reports the time of its first signal.
+
+**Parity.** No ranking, selection, hydration choice or budget changed. Full
+LoCoMo (1,986 queries) returned byte-identical text with 80,422 parts, none
+with timestamp 0.
+
+## Evidence Budget
+
+The engine cannot know a reader's context budget, so the caller may pass one
+per query in bytes (`EvidenceBudget`, on every `Process*` call and in the C
+API). Text is charged by its bytes and every other payload by
+`kMediaEvidenceBytes` = 480. Unset, memories come back whole. Earlier builds
+applied a fixed 3 KiB cap per memory, which cost judged Eval 1 sufficiency
+−0.016 ± 0.016 when the reader could see the whole packet.
+
+Set, the fit runs once the packet is complete. It covers the standing block,
+the retrieved memories and their attachments:
+
+```text
+budget' = budget - bytes(standing block)
+for m in retrieved, in rank order:
+    floor(m) = for a grouped memory whose members all have stored vectors:
+                 its best member per modality by cos(e_q, v_s);
+               otherwise: the whole memory
+    join m at floor(m) with its attached blobs if they fit,
+    else at floor(m) alone, else leave m out
+member_cap = largest c (binary search) such that the packet fits when
+             every grouped memory keeps its floor plus its other members,
+             best first, while their bytes stay within c
+kept members return in their original order, between the attachments
+```
+
+The best member is chosen per modality because cosines are not comparable
+across modalities: a text query sits closer to every text member than to any
+image. The fit keeps more distinct memories trimmed before it drops
+lower-ranked ones. It costs one indexed signal read plus member payload reads,
+and only for packets over budget.
+
+**Effect.** Under Natural retention with one source per conversation, BEAM
+stores units of three to five turns, about 10 KB each with attachments. An
+8,000-token budget then held three or four whole memories. With the BEAM
+reader's budget passed (34,800 bytes), the gold-turn share of its context
+matched the old 3 KiB cap (−0.002 / +0.001 / +0.002 at 100K / 1M / 10M). The
+end-to-end score was 0.842 / 0.806 / 0.715 against 0.844 / 0.811 / 0.695.
+Unset, the whole memories overflow that reader, and gold share falls by
+0.144 / 0.115 / 0.093 (@sec-implementation). Every v5 benchmark in
+@sec-experimental runs at the 34,800-byte budget.

@@ -1,0 +1,233 @@
+# Negative Results: Bio-Inspired Lifecycle Mechanisms Under Long-Horizon Ablation {#sec-negative}
+
+Earlier versions of this paper presented these memory-lifecycle mechanisms
+as the architecture's core:
+
+* forgetting through strength decay and eviction;
+* reconsolidation;
+* consolidation into abstractions;
+* retrieval-induced forgetting;
+* synaptic tagging;
+* NE- and DA-like neuromodulation;
+* emotional consolidation.
+
+Each is well motivated by the memory literature. In October 2026 we tested
+every one of them by leave-one-out on long evaluations, and none survived. This section reports that result. We think it is the paper's most
+transferable finding: on long-horizon conversational recall, the
+lifecycle mechanisms either never fired at their calibrated defaults, or hurt
+recall once they did.
+
+## Protocol
+
+The study switched off one engine subsystem at a time, using a build with
+experiment hooks. The hooks are not part of the release.
+
+* **Evaluations.**
+  * Eval 1: 250 cases over LoCoMo and LongMemEval conversations.
+  * LongMemEval-S: 48 cases.
+  * LongMemEval-M: every second episode (24), or an eight-episode subset of
+    39k turns.
+  * BEAM-10M: full-length conversations of 19k to 24k turns each.
+  * A 111,527-turn chain of five BEAM-10M conversations, for scale effects.
+* **Tier-1 metrics, judge-free.**
+  * Gold-turn recall in the packet and in the seed set.
+  * Query p95 and ingest time per turn.
+  * Instructions retired, peak RSS and store size.
+* **Tier-2 metrics.** A Haiku judge (rubric v2) scored only packets that
+  changed, with a 95% interval on each "switched off minus on" delta.
+* **Decision rule.** A subsystem was removed when switching it off measurably
+  helped quality, or when it left every packet byte-identical with no cost
+  benefit.
+* **Recheck.** Each removal landed as its own commit. That commit had to
+  build, pass the full test suite, and give byte-identical packets against
+  its parent on LongMemEval-S, Eval 1 and BEAM-10M conversation 7.
+
+The full tables are in @sec-experimental. The headline effects follow.
+
+## Forgetting Was Inert, Then Catastrophic
+
+Multi-timescale strength traces decayed against half-lives of minutes to
+hours, and memories below `PeripheryCutoff(T)` were evicted
+(@sec-reinforcement). Eviction waited for two gates: a consolidation
+watermark and a 500 MB storage floor. At the default knobs the watermark was
+never set, so eviction never ran, and ablating the strength update changed
+0/250, 0/48 and 0/40 packets.
+
+A fix that made consolidation fire also opened the eviction gate. With the
+storage floor at 0, eviction then deleted:
+
+| Store | Memories evicted | Packet gold-turn recall |
+|---|---:|---:|
+| LongMemEval-S | 94% (22,390 of 23,868) | 0.630 → 0.086 |
+| Eval 1 | 92% | 0.587 → 0.084 |
+| BEAM-10M conversation 7 (22.6k turns) | 99.7% | 0.103 → 0 |
+
+The cause is a mismatch of time scales. Conversation timestamps span weeks to
+months, and a half-life of minutes makes almost every memory look weak once
+the gate opens. The engine now has no forgetting policy and its store grows
+without bound. A bounded store needs a forgetting policy that is measured
+against recall first.
+
+## Consolidation Into Abstractions Never Fired, and Did Not Help When Forced
+
+Clustering consolidation scored weak memories, clustered them into
+`ASSOCIATION` centroids with `derived_from` edges, and built typed edges
+(`co_occurs`, `similar_to`, `causes`, `implies`). At the default knobs it was
+inert: per-memory stability started at 1.0 and never fell, so the score's
+$T \cdot \text{stability} = 0.5$ term alone exceeded the 0.115 candidate
+floor. Scoring kept 0 of about 1,234 inputs per pass over 85k BEAM turns.
+
+A stability fix made it fire. On LongMemEval-S it ran 112 passes, wrote 112
+`ASSOCIATION` nodes, clustered 1,703 memories and wrote 11.1k typed edges.
+On BEAM-10M conversation 7 it clustered 490 memories into 12.8k edges. It
+still did not earn its keep:
+
+* Packet recall moved −0.012 (S), −0.010 (Eval 1) and 0 (BEAM).
+* Judged sufficiency moved +0.012 ± 0.023 and −0.009 ± 0.023.
+* Instructions retired rose 1–2%.
+* Firing opened the eviction gate above.
+
+Clustering, graph expansion (whose only traversable edges it wrote) and
+linked-source hydration were removed together (@sec-consolidation).
+
+## Reconsolidation Was Neutral to Harmful
+
+Reconsolidation drifted a retrieved memory's embedding toward the current
+context during a lability window, and retrieval re-encoded its top candidates
+toward the query (@sec-advanced). Switching both off together:
+
+| Evaluation | Packet recall (on → off) | Judged sufficiency delta |
+|---|---:|---:|
+| LongMemEval-S | 0.642 → 0.642 | 0.000 |
+| Eval 1 | 0.597 → 0.611 (6 better, 1 worse) | +0.010 ± 0.016 |
+| BEAM-10M conversation 7 | 0.103 → 0.110 | +0.014 ± 0.027 |
+| LongMemEval-M subset (39k turns) | 0.462 → 0.462 | 0.000 |
+
+Instructions fell 5–11% and stores shrank 12–23%. Each movement source alone
+was also neutral. An earlier phase-1 arm had measured harm from removing
+"embedding movement". That arm had also switched off the reconstruction
+representation, so its delta came from the representation change rather than
+from movement.
+
+## Retrieval-Induced Forgetting Never Reached a Packet
+
+Lateral inhibition suppressed retrieval losers in `memories.strength`
+[@anderson1994remembering]. No retrieval, hydration or gating step reads
+strength for long-term memories, so suppression changed 0/48 and 0/250
+packets. Its only effect was operational: its active-epoch bound was the sole
+source of `Required` consolidation hints, which the engine now derives from
+sparse-route growth instead (@sec-optimization). On the 111,527-turn chain,
+the build without it recalled 0.082 of gold turns against 0.062 (13 cases
+better, 4 worse), judged +0.008 ± 0.040, with 13.5% fewer instructions.
+
+## Filtering Out "Obsolete" Memories Hurt
+
+Belief revision used to remove superseded memories from the seed set.
+Removing that exclusion helped:
+
+* Packet recall rose by +0.025 (S), +0.018 (Eval 1) and +0.066 (BEAM-10M
+  conversation 7).
+* The share of gold turns among the seeds rose by +0.136, +0.158 and +0.081.
+
+In long conversations an earlier version of a fact is often what a question
+asks about. The `supersedes` edges stayed, and now drive predecessor and
+successor hydration instead (@sec-hydration).
+
+The same pattern held for the write gate. A score threshold that discarded
+finished units dropped 7–11% of gold evidence turns under Natural ingest.
+Storing every closed unit raised retrieved-only packet recall by +0.086
+(LongMemEval-S) and +0.054 (Eval 1) for 6% more store bytes
+(@sec-write-pacing).
+
+## Most Mechanisms Were Inert at the Defaults
+
+These subsystems left every packet byte-identical when switched off (Eval 1
+0/250, LongMemEval-S 0/48, BEAM-10M 0/40 or 0/20, and for the oscillator MSC
+0/39). Each was removed (@sec-experimental):
+
+* meta-learned knob priors;
+* predictive pre-activation;
+* influence, focus, sensitivity and stability feedback;
+* serial-position effects;
+* synaptic tagging, whose only consumer was the consolidation score;
+* emotional consolidation and the emotional cascade;
+* the DA-like modulator and reward prediction error;
+* the encode/retrieve oscillator;
+* the temporal tie-break in scoring;
+* Soft Anchors;
+* the pattern-separation sparse index and procedural value table.
+
+The NE-like modulator and its effect scales changed a few packets
+(5/48, 32/250, 7/20), with recall within one case and judged deltas of
+0.000, −0.001 ± 0.006 and +0.028 ± 0.054. Working-memory rehearsal reordered
+working-memory slots in 12/48 and 33/250 packets, with recall unchanged. Both
+were removed.
+
+## Lesson: Re-Measure on the Shipped Engine, and Diff Packets Before Judging
+
+The October results overturn several earlier research-branch verdicts. Those
+verdicts came from blind-judge screens over short corpora
+(@sec-experimental), and they failed for two different reasons.
+
+| Mechanism | Earlier verdict | October result | Why they differ |
+|---|---|---|---|
+| encode/retrieve oscillator | removal hurts: −0.49 sufficiency (July, 3 reps) | same MSC protocol rerun: all 39 probe packets byte-identical without it, under Durable and Natural | judge variance |
+| synaptic tagging | removal hurts: −0.20 (July, 3 reps) | 0/40 packets changed | July branch had live consolidation, the tag's only consumer |
+| graph expansion | unresolved, leaning negative (long-horizon sweep) | 0/40 packets changed | only non-traversable `supersedes` edges existed on the current engine |
+| daily consolidation | retained by default (long-horizon sweep) | inert at defaults; −0.012 / −0.010 recall when forced | the current engine never fired it |
+
+A sufficiency delta cannot come from identical packets. The July oscillator
+delta was therefore judge variance, which the July confirmation itself put at
+up to 0.32 between repetitions. The other rows were measured on a
+research-branch engine whose mechanisms interacted differently.
+
+We now apply two rules:
+
+1. Ablate on the engine that ships.
+2. Before spending judge budget on an arm, diff its packets against the
+   control. Judge only the cases that changed, and report how many changed.
+
+## What Survived
+
+| Mechanism | Evidence for keeping it |
+|---|---|
+| boundary segmentation, store every closed unit | write-gate removal above |
+| contiguity hydration | off: −0.06 to −0.09 packet recall |
+| `supersedes` edges and predecessor hydration | off: −0.037 / −0.025 / −0.015 recall; judged −0.036 ± 0.052 (S) |
+| working memory | off: −0.012 / −0.015 recall; MemLens image evidence −0.036 ± 0.029 |
+| SQLite sparse route | off at 111k turns: +26% instructions, ingest 95 → 170 ms/turn |
+| usage counters | feed the public `retrieved_count` / `used_count` fields |
+
+After all round-3 removals, measured against the merged pruned engine:
+
+| | LongMemEval-S | Eval 1 | BEAM-10M conv 7 |
+|---|---:|---:|---:|
+| packet gold-turn recall | 0.642 → 0.691 | 0.597 → 0.644 | 0.103 → 0.118 |
+| judged sufficiency delta | +0.060 ± 0.057 | +0.039 ± 0.021 | +0.014 ± 0.048 |
+| instructions retired | −12% | −12% | −24% |
+| peak RSS | −14% | −3% | −17% |
+
+Engine source (`src/` and `include/`) shrank by a net 7,075 lines (PR #28).
+The v5 recall mechanisms of @sec-retrieval and @sec-hydration were then
+hill-climbed on this pruned base.
+
+## Scope of the Claim
+
+These are ablations of one engine on conversational long-horizon recall, at
+its calibrated default knobs. They do not show that forgetting,
+consolidation or reconsolidation are useless in general. They show three
+narrower things:
+
+* The specific forms implemented here never fired at the defaults.
+* When made to fire, they cost recall or cost nothing.
+* Short-horizon judged screens were not able to tell.
+
+A bounded store still needs a forgetting policy. Any future one should be
+gated on packet recall over month-scale timestamps before it ships.
+
+Two per-signal pieces of the original affect and neuromodulation design
+remain in the scoring stack. They are the ACh-like encode/retrieve bias,
+which paces streaming retrieval checks, and the emotion and mood threshold
+deltas, which move the spike-bypass threshold (@sec-core-adaptation). This
+study did not remove them. Neither gates storage or ranks recall.
+<!-- PRUNE: chore/prune-write-only may remove mood and the threshold controller; adjust this paragraph to the final removal list. -->
